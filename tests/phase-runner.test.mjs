@@ -283,19 +283,17 @@ test('runner telemetry exceptions remain bounded diagnostics without changing su
   assert.ok(!JSON.stringify(ready).includes('secret raw storage error'));
 });
 
-test('a stopped dispatch names its real reason, not a routing mismatch', async t => {
+test('a stopped investigation names its real reason and can be asked again', async t => {
   const { runner } = await fixture(t);
   await runner.explore({ purpose: 'Buscar el issue 389.' }, runtime);
-  const ready = runner.status(runtime.sessionID);
-  await runner.before(call, ready.task);
-  assert.deepEqual(runner.pending(runtime.sessionID, 'mdd-explore').call, { sessionID: runtime.sessionID, callID: call.callID });
-  runner.block(runtime.sessionID, 'A native child tool failed or was interrupted.');
-  assert.throws(() => runner.pending(runtime.sessionID, 'mdd-explore'), error =>
-    /stopped accepting tool calls/.test(error.message) && /failed or was interrupted/.test(error.message)
-    && !/no matching active phase dispatch/.test(error.message));
-  // An unknown parent or a wrong phase is still a genuine routing mismatch.
-  assert.throws(() => runner.pending('otro-parent', 'mdd-explore'), /no matching active phase dispatch/);
-  assert.throws(() => runner.pending(runtime.sessionID, 'mdd-plan'), /no matching active phase dispatch/);
+  await runner.before(call, runner.status(runtime.sessionID).task);
+  runner.block(runtime.sessionID, 'A tool in the delegated phase failed or was interrupted.');
+  // A stopped investigation is finished, not in flight: it must not make the parent look busy.
+  const stopped = runner.status(runtime.sessionID);
+  assert.equal(stopped.state, 'not-started');
+  assert.match(stopped.contextualReason, /failed or was interrupted/);
+  await runner.explore({ purpose: 'Preguntar otra cosa.' }, runtime);
+  assert.equal(runner.status(runtime.sessionID).task.subagent_type, 'mdd-explore');
 });
 
 test('the adapter-owned trace section cannot be written by the actor', async t => {

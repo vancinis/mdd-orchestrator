@@ -3,7 +3,7 @@ import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { assetText, MDD_ASSETS, PACKAGE_ROOT } from './project-assets.js';
-import { scopedPath, fileDigest } from './phase-policy.js';
+import { scopedPath, fileDigest } from './safe-paths.js';
 import { LocalFiles } from './local-files.js';
 
 export const LOADER_PATH = 'plugins/mdd.ts';

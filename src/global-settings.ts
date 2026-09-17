@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import { installationPaths } from './installation-paths.js';
 import type { InstallationEnvironment } from './installation-paths.js';
-import { scopedPath } from './phase-policy.js';
+import { scopedPath } from './safe-paths.js';
 import { defaultSettings, loadSettings, parseSettings, saveSettings } from './settings.js';
 import type { Settings } from './settings.js';
 

@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { scopedPath } from './phase-policy.js';
+import { scopedPath } from './safe-paths.js';
 import { MODEL_ROLES } from './settings.js';
 
 export const PACKAGE_ROOT = fileURLToPath(new URL('../', import.meta.url));

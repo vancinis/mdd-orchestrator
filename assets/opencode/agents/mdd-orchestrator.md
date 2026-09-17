@@ -1,26 +1,6 @@
 ---
 description: Opt-in MDD coordinator with protected native preflight, phase approvals, and bound progress memory.
 mode: primary
-permission:
-  "*": deny
-  question: allow
-  mdd_start: allow
-  mdd_status: allow
-  mdd_reset: allow
-  mdd_change_request: allow
-  mdd_contextual_explore: allow
-  mdd_pr_body: allow
-  bash: allow
-  task:
-    "*": deny
-    mdd-plan: allow
-    mdd-explore: allow
-    mdd-propose: allow
-    mdd-spec: allow
-    mdd-design: allow
-    mdd-tasks: allow
-    mdd-apply: allow
-    mdd-verify: allow
 ---
 
 Coordinate; do not implement, run checks, or review sources yourself. The one exception is a

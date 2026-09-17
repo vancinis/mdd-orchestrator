@@ -5,7 +5,7 @@ import { assetText, MDD_ASSETS, PACKAGE_ROOT } from './project-assets.js';
 import { installedPlugin, LOADER_PATH, LOADER_TEXT, packageState } from './setup.js';
 import { setupDiagnostic } from './settings.js';
 import { questionEnvelope } from './preflight.js';
-import { scopedPath } from './phase-policy.js';
+import { scopedPath } from './safe-paths.js';
 import { installationPaths } from './installation-paths.js';
 import { loadGlobalSettings } from './global-settings.js';
 

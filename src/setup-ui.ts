@@ -11,7 +11,7 @@ import { doctor } from './doctor.js';
 import { initProject, OWNED_PACKAGE, packageState, planProject, projectRoot } from './setup.js';
 import { PACKAGE_ROOT } from './project-assets.js';
 import { detectEngram, engramOffer, installEngram } from './engram-install.js';
-import { fileDigest, scopedPath } from './phase-policy.js';
+import { fileDigest, scopedPath } from './safe-paths.js';
 import { ValidationError } from './validation.js';
 
 export function installLocalPackage(root: string, execute = execFileSync): void {

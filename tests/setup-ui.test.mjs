@@ -45,7 +45,7 @@ const noMemory = { detect: () => ({ status: 'not-found' }), installMemory: () =>
 
 test('installer sources, packaged assets and setup docs are normalized UTF-8', () => {
   for (const name of [...MDD_ASSETS, 'README.md', 'docs/setup.md', 'AGENTS.md', 'package.json',
-    ...['setup', 'setup-ui', 'engram-install', 'project-assets', 'phase-policy', 'pr-body', 'doctor', 'settings', 'settings-cli', 'config-ui', 'tui', 'model-catalog', 'cli', 'local-files'].map(name => `src/${name}.ts`),
+    ...['setup', 'setup-ui', 'engram-install', 'project-assets', 'safe-paths', 'pr-body', 'doctor', 'settings', 'settings-cli', 'config-ui', 'tui', 'model-catalog', 'cli', 'local-files'].map(name => `src/${name}.ts`),
     'scripts/setup.mjs', 'scripts/extract-engram.ps1', 'tests/setup-ui.test.mjs']) {
     const bytes = fs.readFileSync(name); const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
     assert.notEqual(bytes.subarray(0, 3).toString('hex'), 'efbbbf', name);
@@ -103,7 +103,7 @@ test('wizard preserves global endpoint opt-in without contacting the memory serv
 test('package reuse checks runtime modules, not only an unchanged plugin entrypoint', async t => {
   const root = fixture(t);
   assert.equal(packageState(root).state, 'matching');
-  fs.appendFileSync(join(root, 'mdd/node_modules/my-driven-development/dist/phase-policy.js'), '\n// stale runtime\n');
+  fs.appendFileSync(join(root, 'mdd/node_modules/my-driven-development/dist/safe-paths.js'), '\n// stale runtime\n');
   const state = packageState(root);
   assert.equal(state.state, 'outdated');
   assert.notEqual(state.installed.digest, state.source.digest);
@@ -122,7 +122,7 @@ test('mdd update reviews, reconciles and reinstalls an outdated owned package wi
   const settings = defaultSettings(); settings.engram = { endpoint: 'http://127.0.0.1:12345', project: 'keep' };
   saveSettings(root, settings);
   const config = fs.readFileSync(join(owned, 'mdd.config.json'), 'utf8');
-  fs.appendFileSync(join(owned, 'node_modules/my-driven-development/dist/phase-policy.js'), '\n// stale runtime\n');
+  fs.appendFileSync(join(owned, 'node_modules/my-driven-development/dist/safe-paths.js'), '\n// stale runtime\n');
   const io = ui(['apply']);
   let installs = 0;
   assert.equal(await runSetupUI(root, io, { ...noMemory, installPackage: target => { assert.equal(target, root); installs++; seedPackage(root); } }, { mode: 'update' }), 'ready');
@@ -158,7 +158,7 @@ test('reconcile removes only the owned package and its dependency entry', async 
   const owned = join(root, 'mdd');
   fs.writeFileSync(join(owned, 'package.json'), JSON.stringify({ private: true, devDependencies: { 'my-driven-development': 'file:packages/x.tgz', other: '1.0.0' } }));
   assert.throws(() => reconcileOwnedPackage(root), /outdated/);
-  fs.appendFileSync(join(owned, 'node_modules/my-driven-development/dist/phase-policy.js'), '\n// stale runtime\n');
+  fs.appendFileSync(join(owned, 'node_modules/my-driven-development/dist/safe-paths.js'), '\n// stale runtime\n');
   reconcileOwnedPackage(root);
   assert.equal(fs.existsSync(join(owned, 'node_modules/my-driven-development')), false);
   assert.deepEqual(JSON.parse(fs.readFileSync(join(owned, 'package.json'), 'utf8')), { private: true, devDependencies: { other: '1.0.0' } });

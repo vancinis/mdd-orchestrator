@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { delimiter, isAbsolute, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { PACKAGE_ROOT } from './project-assets.js';
-import { scopedPath } from './phase-policy.js';
+import { scopedPath } from './safe-paths.js';
 
 export const ENGRAM_VERSION = '1.20.0';
 const RELEASE = `https://github.com/Gentleman-Programming/engram/releases/download/v${ENGRAM_VERSION}/`;

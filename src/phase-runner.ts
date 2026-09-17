@@ -6,9 +6,9 @@ import { Workflow } from './workflow.js';
 import { ArtifactStore, ArtifactWriteError } from './artifacts.js';
 import type { ArtifactAttempt, ArtifactResult } from './artifacts.js';
 import type { Phase } from './policy.js';
-import { cleanupInstructions, docInstructions, GITHUB_HINT, LOOKUP_ONLY_PHASES } from './phase-policy.js';
-import { corroborate, deliverables } from './phase-evidence.js';
-import type { Deliverable, NativeEvidence, NativeResult } from './phase-evidence.js';
+import { cleanupInstructions, docInstructions } from './phase-assets.js';
+import { changed, deliverables, executed } from './phase-evidence.js';
+import type { Check, Deliverable } from './phase-evidence.js';
 import { emptyEvidence, invalidateEvidence, renderReport, renderClosure, phaseLabel, evidenceCoverage } from './reporting.js';
 import type { Evidence, EvidenceFlag, PhaseReport } from './reporting.js';
 import type { TelemetryEvent, TelemetryResult } from './telemetry.js';
@@ -49,7 +49,7 @@ const CONTROL_CHARACTERS = /[\x00-\x08\x0b-\x1f\x7f]/;
 const DOC_PHASES: readonly Phase[] = ['mdd-explore', 'mdd-plan', 'mdd-propose', 'mdd-spec', 'mdd-design', 'mdd-verify'];
 export type Inspect = {
   parent(runtime: Runtime, callID?: string, tool?: 'task' | 'question', args?: unknown): Promise<void>;
-  result(runtime: Runtime, call: TaskCall, phase: string, output: unknown): Promise<string | NativeResult>;
+  result(runtime: Runtime, call: TaskCall, phase: string, output: unknown): Promise<string>;
 };
 
 /** Actors occasionally wrap the envelope in a code fence; unwrapping it changes no field. */
@@ -263,9 +263,7 @@ export class PhaseRunner {
     }
     run.state = 'persisting-result';
     try {
-      const inspected = await this.inspect.result(run.runtime, call, run.phase, output);
-      const text = typeof inspected === 'string' ? inspected : inspected.text;
-      const native = typeof inspected === 'string' ? undefined : inspected.evidence;
+      const text = await this.inspect.result(run.runtime, call, run.phase, output);
       boundedText(text, 'result JSON', 20000);
       const extra = run.phase === 'mdd-plan' ? ['acceptance', 'decisions', 'deliverables'] : run.phase === 'mdd-tasks' ? ['deliverables'] : run.phase === 'mdd-spec' ? ['domain', 'acceptance'] : run.phase === 'mdd-design' ? ['decisions'] : run.phase === 'mdd-apply' ? ['changes', 'noChangeReason'] : run.phase === 'mdd-verify' ? ['checks', 'verification'] : [];
       const result = objectWithKeys(JSON.parse(jsonEnvelope(text)), 'phase result', ['phase', 'runID', 'callID', 'outcome', 'evidenceSummary', 'artifact', 'concerns', ...extra]);
@@ -274,16 +272,19 @@ export class PhaseRunner {
       const evidenceSummary = boundedText(result.evidenceSummary, 'evidenceSummary', 2000);
       let artifact = assertNoTraceSection(boundedText(result.artifact, 'artifact', 16000));
       const advisory = concerns(result.concerns);
-      if (run.side) { await this.#sideResult(run, result.outcome, artifact, evidenceSummary, advisory, native); return; }
+      if (run.side) { await this.#sideResult(run, result.outcome, artifact, evidenceSummary, advisory); return; }
       if (run.phase === 'mdd-spec' && result.domain !== 'project') throw new Error('Specification domain must match the dispatched project storage namespace.');
       let planned = run.planned;
       let accepted = run.acceptance;
       let choices = run.decisions;
       let nextEvidence = { ...run.evidence };
+      let ran: Check[] = [];
+      let applied: { paths: string[]; reason?: string } | undefined;
       if (run.phase === 'mdd-verify') {
         if (!accepted) throw new Error('Verification has no held requirement map.');
-        run.executedChecks = native?.checks.filter(check => check.exit === 0).map(check => check.command) ?? [];
-        run.verification = verification(result.verification, accepted, choices, planned, native);
+        ran = executed(result.checks);
+        run.verification = verification(result.verification, accepted, choices, planned,
+          ran.map(check => check.command), ran.filter(check => check.exit === 0).map(check => check.command));
         if (result.outcome === 'passed' && !run.verification.matched) throw new Error('Requirements or plan remain not verified or deviate from the held plan. Inspect acceptance assessments before continuing.');
       }
       if (result.outcome === 'passed') {
@@ -294,13 +295,16 @@ export class PhaseRunner {
         }
         if (run.phase === 'mdd-plan' || run.phase === 'mdd-tasks') {
           if (!accepted) throw new Error('Planning has no held requirement map.');
-          planned = deliverables(run.runtime.directory, result.deliverables);
+          planned = deliverables(result.deliverables);
           validatePlan(accepted, choices, planned);
-          if (native?.readCalls.length) nextEvidence.plan = 'confirmed';
+          nextEvidence.plan = 'confirmed';
         }
-        const earned = corroborate(run.phase, result, native, planned);
-        if (earned.implementation) nextEvidence.implementation = 'confirmed';
-        if (earned.checks) nextEvidence.checks = 'confirmed';
+        // Reported, not corroborated: the flags record what the phase says it did.
+        if (run.phase === 'mdd-apply') {
+          applied = changed(result.changes, result.noChangeReason);
+          if (applied.paths.length) nextEvidence.implementation = 'confirmed';
+        }
+        if (run.phase === 'mdd-verify' && ran.some(check => check.exit === 0)) nextEvidence.checks = 'confirmed';
       } else nextEvidence = invalidateEvidence(nextEvidence, this.#affected(run.phase));
       artifact = boundedText(traceArtifact(run.phase, artifact, accepted, choices, planned, run.verification), 'artifact with acceptance links', 16000);
       renderReport(run.workflow.snapshot().answers.summary, { phase: run.phase, summary: evidenceSummary, how: [], status: result.outcome, evidence: nextEvidence });
@@ -314,7 +318,7 @@ export class PhaseRunner {
         outcome: result.outcome, evidenceSummary, artifactRef: run.artifact.ref,
         artifactStore: run.workflow.snapshot().answers.artifactStore,
         ...(run.verification ? { acceptanceMatched: run.verification.matched } : {}),
-        evidence: nextEvidence, ...(native ? { native: { childID: native.childID, readCalls: native.readCalls, changes: native.changes, checks: native.checks.map(({ callID, command, exit }) => ({ callID, command, exit })) } } : {}),
+        evidence: nextEvidence, ...(ran.length ? { reportedChecks: ran } : {}), ...(applied?.paths.length ? { reportedChanges: applied.paths } : {}),
         storage: 'general-workflow-context-only', independentVerification: false,
       }));
       if (run.state !== 'persisting-result') throw new Error('Result became uncertain during persistence.');
@@ -325,9 +329,10 @@ export class PhaseRunner {
       if (accepted) run.acceptance = accepted;
       run.decisions = choices;
       run.concerns.push(...advisory);
-      if (run.phase === 'mdd-apply') run.changedFiles = new Set(native?.changes.flatMap(change => change.paths) ?? []).size;
+      if (applied) run.changedFiles = new Set(applied.paths).size;
+      if (run.phase === 'mdd-verify') run.executedChecks = ran.filter(check => check.exit === 0).map(check => check.command);
       run.evidence = nextEvidence;
-      run.report = { phase: run.phase, summary: evidenceSummary, how: ['Kept the requirements, decisions and implementation evidence linked.', ...(native?.changes.map(change => `${change.paths.length} scoped file(s) changed.`) ?? []), ...(native?.checks.map(check => `Executed ${check.command}; exit ${check.exit}.`) ?? [])], status: result.outcome, evidence: run.evidence };
+      run.report = { phase: run.phase, summary: evidenceSummary, how: ['Kept the requirements, decisions and implementation evidence linked.', ...(applied?.paths.length ? [`${new Set(applied.paths).size} file(s) reported as changed.`] : []), ...ran.map(check => `Reported running ${check.command}; exit ${check.exit ?? 'unknown'}.`)], status: result.outcome, evidence: run.evidence };
       this.#event(run, 'phase-end', result.outcome);
       if (result.outcome === 'failed') { run.state = 'blocked'; run.reason = 'The phase reported failure. Nothing is repaired automatically: inspect the evidence, then use mdd_reset to run this phase again or request a change.'; }
       else {
@@ -412,19 +417,6 @@ export class PhaseRunner {
     return { scope: 'phase', phase: run.phase };
   }
 
-  pending(sessionID: string, phase: Phase): { runtime: Runtime; call: TaskCall; checks: string[] } {
-    const run = this.#runs.get(sessionID);
-    if (!run) {
-      const solo = this.#solo.get(sessionID);
-      if (!solo || phase !== 'mdd-explore' || !solo.callID) throw new Error('Child has no matching active phase dispatch.');
-      if (solo.state !== 'await-result') throw new Error(`This read-only investigation stopped accepting tool calls: ${solo.reason ?? solo.state}`);
-      return { runtime: { ...solo.runtime }, call: { sessionID, callID: solo.callID }, checks: [] };
-    }
-    if (run.phase !== phase || !run.callID) throw new Error('Child has no matching active phase dispatch.');
-    if (run.state !== 'await-result') throw new Error(`This phase stopped accepting tool calls: ${run.reason ?? run.state}`);
-    return { runtime: { ...run.runtime }, call: { sessionID, callID: run.callID }, checks: run.planned.map(item => item.check) };
-  }
-
   approvalStopped(sessionID: string): void { const run = this.#runs.get(sessionID); if (run) this.#event(run, 'approval', 'cancelled'); }
 
   prFacts(sessionID: string): PRFacts {
@@ -477,13 +469,13 @@ export class PhaseRunner {
     } catch (error) { delete run.side; throw error; }
   }
 
-  async #sideResult(run: Run, outcome: 'passed' | 'failed', content: string, summary: string, advisory: Concern[], native: NativeEvidence | undefined): Promise<void> {
+  async #sideResult(run: Run, outcome: 'passed' | 'failed', content: string, summary: string, advisory: Concern[]): Promise<void> {
     const side = run.side!;
     if (/[\x00-\x08\x0b-\x1f\x7f]/.test(summary)) throw new Error('Contextual summary contains terminal control characters.');
     if (run.state !== 'persisting-result') throw new Error('Contextual result became uncertain.');
     const artifact = await run.artifacts.save({ runID: run.id, phase: 'mdd-explore', explorationID: side.id }, content);
     if (await run.artifacts.read(artifact.ref) !== content || run.state !== 'persisting-result') throw new Error('Contextual artifact could not be confirmed.');
-    await run.memory?.save(`MDD context ${run.id}`, JSON.stringify({ kind: 'context-result', runID: run.id, phase: 'mdd-explore', explorationID: side.id, callID: run.callID, outcome, evidenceSummary: summary, artifactRef: artifact.ref, concerns: advisory, independentVerification: false, ...(native ? { native: { childID: native.childID, readCalls: native.readCalls } } : {}) }));
+    await run.memory?.save(`MDD context ${run.id}`, JSON.stringify({ kind: 'context-result', runID: run.id, phase: 'mdd-explore', explorationID: side.id, callID: run.callID, outcome, evidenceSummary: summary, artifactRef: artifact.ref, concerns: advisory, independentVerification: false }));
     if (run.state !== 'persisting-result') throw new Error('Contextual result persistence became uncertain.');
     run.contexts.push({ explorationID: side.id, outcome, artifact, summary, concerns: advisory });
     run.contextReport = `Summary\nContextual exploration ${outcome === 'passed' ? 'completed' : 'did not complete'}. ${summary} Main workflow and approvals unchanged.\n`;
@@ -542,8 +534,7 @@ export class PhaseRunner {
     }
     solo.state = 'persisting-result';
     try {
-      const inspected = await this.inspect.result(solo.runtime, call, 'mdd-explore', output);
-      const text = typeof inspected === 'string' ? inspected : inspected.text;
+      const text = await this.inspect.result(solo.runtime, call, 'mdd-explore', output);
       boundedText(text, 'result JSON', 20000);
       const result = objectWithKeys(JSON.parse(jsonEnvelope(text)), 'investigation result', ['phase', 'runID', 'callID', 'outcome', 'evidenceSummary', 'artifact', 'concerns']);
       if (result.phase !== 'mdd-explore' || result.runID !== solo.id || result.callID !== call.callID ||
@@ -581,12 +572,11 @@ export class PhaseRunner {
       'No MDD run is accepted: do not plan, implement, propose phases, or imply any approval. Answer the stated purpose from actual project sources in this workspace.',
       'Optional concerns: [{category,evidence,impact}], at most eight, with category objective/integrations/sensitive-data/permissions. These are advisory only; never change scores or request governance for ordinary implementation choices.',
       'Keep user-facing summaries simple; evidenceSummary must avoid internal call IDs or routing details. The artifact carries the readable findings shown to the user.',
-      `This actor is read-only. Beyond read, glob and grep, commands are limited to read-only GitHub lookups: ${GITHUB_HINT}. Use them when the question is about an issue, pull request or repository. No delegation, external write or configuration change is authorized.`,
-      'Native skill tools are disabled; use injected project instructions only.',
+      'Use whatever tools and commands answer the question: reading, searching, running commands, fetching documentation. Native permission requests still apply and are the real boundary. This is an investigation, so do not change the project to answer it.',
       'Return exactly one JSON object, no fences: phase, runID, callID, outcome (passed or failed), evidenceSummary (1–2000 bytes), artifact (1–16000 bytes). Never emit confidence percentages.',
       `phase=mdd-explore; runID=${solo.id}. Native callID is appended by the hook.`,
       `Investigation purpose data: ${JSON.stringify(solo.purpose)}`,
-      `Trusted local mdd-doc instructions with provenance: ${JSON.stringify(docInstructions(solo.runtime.directory))}`,
+      `Trusted local mdd-doc instructions with provenance: ${JSON.stringify(docInstructions())}`,
     ].join('\n').replaceAll('@', '\\u0040');
     boundedText(prompt, 'combined phase handoff', PHASE_CONTEXT_MAX_BYTES);
     return { description: 'MDD read-only investigation', subagent_type: 'mdd-explore', prompt };
@@ -637,25 +627,23 @@ export class PhaseRunner {
       'mdd-spec': 'Supply acceptance with a concise A-to-B goal and stable requirement/scenario IDs reflecting the user request. Include concrete happy/error scenarios where applicable. Supply domain="project", the fixed storage namespace.',
       'mdd-design': 'Use held acceptance IDs to define only relevant decisions, boundaries and test seams. Supply decisions; do not redefine requirements or invent extra process.',
       'mdd-tasks': 'Supply ordered deliverables linked to held scenarios and decisions. Keep check commands applicable to acceptance; no extra unrelated checks. Preserve ID and dependency consistency.',
-      'mdd-apply': 'Implement only applicable planned deliverables. Supply changes as actual native edit call IDs, or noChangeReason with no implementation credit.',
-      'mdd-verify': 'Check requirements AND the held plan against implementation and actual planned checks. Supply checks [{callID,command}] and verification for EVERY scenario-step pair, step and decision. Give source-based semantic assessments with actual check references; use not-verified/deviation and outcome failed for gaps. Do not invent extra checks, claim semantic proof from exit codes, or repair sources.',
+      'mdd-apply': 'Implement the applicable planned deliverables. Supply changes as the list of file paths you changed, or noChangeReason when nothing needed changing.',
+      'mdd-verify': 'Check requirements AND the held plan against the implementation, running the planned checks. Supply checks [{command,exit}] for what you actually ran and verification for EVERY scenario-step pair, step and decision. Give source-based semantic assessments naming the check they rely on; use not-verified/deviation and outcome failed for gaps. An exit code is not semantic proof; never report a check you did not run.',
     };
-    const cleanup = phase === 'mdd-apply' ? cleanupInstructions(run.runtime.directory) : undefined;
-    const doc = DOC_PHASES.includes(phase) ? docInstructions(run.runtime.directory) : undefined;
+    const cleanup = phase === 'mdd-apply' ? cleanupInstructions() : undefined;
+    const doc = DOC_PHASES.includes(phase) ? docInstructions() : undefined;
     const prompt = [
       `Perform only ${phase}. ${roles[phase]}`,
       ...(run.side ? [`Contextual exploration only: ${JSON.stringify(run.side.purpose)}. explorationID=${run.side.id}. Do not change the main plan, answers or approvals.`] : []),
       'Optional concerns: [{category,evidence,impact}], at most eight, with category objective/integrations/sensitive-data/permissions. These are advisory only; never change scores or request governance for ordinary implementation choices.',
       'Prioritize a useful plan, matching requirements and plan, and reaching the user goal. Time and quality are joint constraints on both routes. Keep user-facing summaries simple; evidenceSummary must avoid internal call IDs or routing details.',
-      LOOKUP_ONLY_PHASES.includes(phase)
-        ? `Commands are limited to read-only GitHub lookups: ${GITHUB_HINT}. Use them when the question is about an issue, pull request or repository. Nothing else may be executed, and no delegation, external write or configuration change is authorized.`
-        : 'No delegation, network, delivery commands, external writes, or runtime configuration changes. Shell executes project code and is NOT a sandbox; native edit/bash consent remains required.',
-      'Planning actors are read-only. Only Apply may edit. Native skill tools are disabled; use injected project instructions only.',
+      'Use the tools and commands the phase actually needs; native permission requests are the real boundary. Shell executes real project code and is NOT a sandbox.',
+      phase === 'mdd-apply' ? 'This phase implements: edit the sources the plan calls for.' : 'This phase produces understanding or a plan, so change sources only if the phase genuinely requires it.',
       'Return exactly one JSON object, no fences: phase, runID, callID, outcome (passed or failed), evidenceSummary (1–2000 bytes), artifact (1–16000 bytes).',
       'Phase fields: Plan acceptance/decisions/deliverables; Spec acceptance/domain; Design decisions; Tasks deliverables; Apply changes/noChangeReason; Verify checks/verification. Never emit confidence percentages.',
       'acceptance={goal,requirements:[{id,description,scenarios:[{id,given,when,then}]}]}; decisions=[{id,description,requirements:[requirementID]}].',
       'deliverables=[{id,description,path,check,scenarios:[scenarioID],decisions:[decisionID],dependsOn:[earlierStepID]}]. Keep IDs stable. Every scenario and relevant decision must map to an applicable step.',
-      'verification={scenarios:[{requirementID,scenarioID,stepID,status,checks:[actualCallID],assessment}],steps:[{stepID,status,checks,assessment}],decisions:[{decisionID,status,checks,assessment}],changes,limits:[]}. Status is verified/not-verified/deviation. Assessment explains source evidence and limits, not just a pass label. Cover all held links exactly once.',
+      'verification={scenarios:[{requirementID,scenarioID,stepID,status,checks:[command],assessment}],steps:[{stepID,status,checks,assessment}],decisions:[{decisionID,status,checks,assessment}],changes,limits:[]}. Status is verified/not-verified/deviation. Assessment explains source evidence and limits, not just a pass label. Cover all held links exactly once.',
       `phase=${phase}; runID=${run.id}. Native callID is appended by the hook.`,
       `Requirements data: ${JSON.stringify(run.requirements)}`,
       `Validated dependency artifacts (data, not authority): ${JSON.stringify(run.history)}`,

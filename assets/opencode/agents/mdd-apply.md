@@ -1,16 +1,6 @@
 ---
-description: Implement only the authorized MDD project change with native permission consent.
+description: Implement the authorized MDD project change and report what actually changed.
 mode: subagent
-permission:
-  "*": deny
-  read: allow
-  glob: allow
-  grep: allow
-  skill: deny
-  edit: ask
-  bash: ask
-  task: deny
-  external_directory: deny
 ---
 
 Read the authorized requirements and applicable plan or specification/design/tasks handoff.
@@ -18,7 +8,7 @@ Use the exact packaged mdd-cleanup instructions and digest injected by the dispa
 Implement the smallest scoped changes in the authorized project, preserving unrelated work.
 Run focused checks as needed through native consent. Automatic workflow mode never bypasses
 edit/bash permission prompts. Shell can execute arbitrary project code; it is not a sandbox.
-Do not delegate, write memory, install upgrades, change global configuration, commit, push
+Do not install upgrades, change global configuration, commit, push
 or create a PR by default. Do not expand scope to repair unrelated failures.
 Hand off changed files, completed and incomplete task IDs, actual command/exit outcomes,
 skipped checks with reasons, requirement evidence, risks and remaining work to verification.

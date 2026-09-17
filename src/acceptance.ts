@@ -1,5 +1,5 @@
 import { objectWithKeys } from './validation.js';
-import type { Deliverable, NativeEvidence } from './phase-evidence.js';
+import type { Deliverable } from './phase-evidence.js';
 import type { Phase } from './policy.js';
 
 export type Acceptance = { goal: string; requirements: { id: string; description: string; scenarios: { id: string; given: string; when: string; then: string }[] }[] };
@@ -69,14 +69,17 @@ export function validatePlan(accepted: Acceptance, choices: Decision[], steps: D
   if (scenarios.some(scenario => !steps.some(step => step.scenarios.includes(scenario.id)))) throw new Error('Plan omits an accepted scenario.');
   if (choices.some(decision => decision.requirements.some(required => !steps.some(step => step.decisions.includes(decision.id) && step.scenarios.some(key => scenarios.find(item => item.id === key)?.requirement === required))))) throw new Error('Plan omits a relevant decision requirement.');
 }
-export function verification(value: unknown, accepted: Acceptance, choices: Decision[], planned: Deliverable[], native: NativeEvidence | undefined): Verification {
+export function verification(value: unknown, accepted: Acceptance, choices: Decision[], planned: Deliverable[], reported: string[] = [], passed: string[] = reported): Verification {
   const input = objectWithKeys(value, 'verification', ['scenarios', 'steps', 'decisions', 'changes', 'limits']);
-  const assess = (entry: Record<string, unknown>, commands: string[]): Assessment => {
+  const assess = (entry: Record<string, unknown>): Assessment => {
     if (!['verified', 'not-verified', 'deviation'].includes(String(entry.status))) throw new Error('Unknown acceptance assessment status.');
-    const checks = items(entry.checks, 'assessment checks', true).map(value => shortText(value, 'native check reference', 256));
+    const checks = items(entry.checks, 'assessment checks', true).map(value => shortText(value, 'check reference', 500));
     if (new Set(checks).size !== checks.length) throw new Error('Duplicate assessment check reference.');
-    if (entry.status === 'verified' && !checks.length) throw new Error('Verified acceptance requires actual check references.');
-    if (checks.some(key => !native?.checks.some(check => check.callID === key && commands.includes(check.command) && check.exit === 0))) throw new Error('Acceptance evidence is not an actual applicable planned check.');
+    if (entry.status === 'verified' && !checks.length) throw new Error('A verified assessment must name the check it relies on.');
+    // The report must be internally consistent: an assessment cannot lean on a check the same
+    // phase never reported running. MDD does not re-run it, so this is the honesty it can offer.
+    if (checks.some(command => !reported.includes(command))) throw new Error('An assessment cites a check this phase did not report running.');
+    if (entry.status === 'verified' && checks.some(command => !passed.includes(command))) throw new Error('A verified assessment cannot rest on a check that did not pass.');
     return { status: entry.status as Assessment['status'], checks, assessment: shortText(entry.assessment, 'source-based assessment') };
   };
   const expected = planned.flatMap(step => step.scenarios.map(scenarioID => ({ step, scenarioID, requirementID: accepted.requirements.find(item => item.scenarios.some(scenario => scenario.id === scenarioID))!.id })));
@@ -84,19 +87,19 @@ export function verification(value: unknown, accepted: Acceptance, choices: Deci
     const entry = objectWithKeys(value, 'scenario coverage', ['requirementID', 'scenarioID', 'stepID', 'status', 'checks', 'assessment']);
     const link = expected.find(item => item.requirementID === entry.requirementID && item.scenarioID === entry.scenarioID && item.step.id === entry.stepID);
     if (!link) throw new Error('Verification invents a requirement/scenario/step link.');
-    return { requirementID: link.requirementID, scenarioID: link.scenarioID, stepID: link.step.id, ...assess(entry, [link.step.check]) };
+    return { requirementID: link.requirementID, scenarioID: link.scenarioID, stepID: link.step.id, ...assess(entry) };
   });
   if (scenarios.length !== expected.length || new Set(scenarios.map(item => `${item.scenarioID}/${item.stepID}`)).size !== expected.length) throw new Error('Verification has missing or duplicate scenario coverage.');
   const steps = items(input.steps, 'step coverage').map(value => {
     const entry = objectWithKeys(value, 'step coverage', ['stepID', 'status', 'checks', 'assessment']);
     const step = planned.find(item => item.id === entry.stepID);
     if (!step) throw new Error('Verification invents a planned step.');
-    return { stepID: step.id, ...assess(entry, [step.check]) };
+    return { stepID: step.id, ...assess(entry) };
   });
   const decisionCoverage = items(input.decisions, 'decision coverage', true).map(value => {
     const entry = objectWithKeys(value, 'decision coverage', ['decisionID', 'status', 'checks', 'assessment']);
     if (!choices.some(item => item.id === entry.decisionID)) throw new Error('Verification invents a plan decision.');
-    return { decisionID: id(entry.decisionID), ...assess(entry, planned.filter(step => step.decisions.includes(String(entry.decisionID))).map(step => step.check)) };
+    return { decisionID: id(entry.decisionID), ...assess(entry) };
   });
   if (steps.length !== planned.length || new Set(steps.map(item => item.stepID)).size !== planned.length || decisionCoverage.length !== choices.length || new Set(decisionCoverage.map(item => item.decisionID)).size !== choices.length) throw new Error('Verification has missing or duplicate plan coverage.');
   const limits = items(input.limits, 'remaining limits', true).map(value => shortText(value, 'remaining limit', 250));

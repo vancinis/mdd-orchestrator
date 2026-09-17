@@ -211,119 +211,37 @@ function questionOutput(args, answers) {
     output: `User has answered your questions: ${args.questions.map((q, i) => `"${q.question}"="${answers[i].join(', ')}"`).join(', ')}. You can now continue with the user's answers in mind.` };
 }
 
-test('OpenCode SDK contract: nested v1 reads bind actual parent, child, assistant and wrapper', async () => {
+test('OpenCode SDK contract: a completed delegated task yields exactly the actor text', async () => {
   const f = sdkFixture();
   const inspector = createInspector(f.input);
   await inspector.parent(runtime, call.callID);
-  assert.equal((await inspector.result(runtime, call, f.phase, f.output)).text, '{}');
-  assert.equal(f.calls.length, 4);
-  for (const options of f.calls) {
-    assert.equal(options.query.directory, runtime.directory);
-    assert.ok(options.path.id);
-    assert.equal(options.throwOnError, true);
-    assert.ok(options.signal instanceof AbortSignal);
-  }
+  assert.equal(await inspector.result(runtime, call, f.phase, f.output), '{}');
 });
 
 for (const [name, change] of Object.entries({
-  'child parent': f => { f.child.parentID = 'other'; },
-  'child workspace': f => { f.child.directory = 'other'; },
-  'child project': f => { f.child.projectID = 'other'; },
-  'child agent': f => { f.child.agent = 'mdd-apply'; },
-  'child permission widened': f => { f.child.permission = [...f.child.permission, { permission: 'bash', pattern: '*', action: 'allow' }]; },
-  'agent permission widened': f => { f.input.client.app.agents = async () => ({ data: [{ name: 'mdd-plan', mode: 'subagent', permission: [] }] }); },
-  'metadata parent': f => { f.output.metadata.parentSessionId = 'other'; },
-  'metadata model missing': f => { delete f.output.metadata.model; },
-  'metadata model mismatch': f => { f.output.metadata.model = { providerID: 'other', modelID: 'other' }; },
-  'assistant model missing': f => { delete f.childMessages[0].info.modelID; },
-  'assistant model mismatch': f => { f.childMessages[0].info.modelID = 'other'; },
-  'earlier assistant model mismatch': f => { f.childMessages.unshift({ info: { ...f.childMessages[0].info, modelID: 'other' }, parts: [] }); },
-  background: f => { f.output.metadata.background = true; },
-  'wrapper mismatch': f => { f.output.output = 'task completed'; },
-  'empty history': f => { f.childMessages.length = 0; },
-  'not assistant': f => { f.childMessages[0].info.role = 'user'; },
-  'wrong assistant agent': f => { f.childMessages[0].info.agent = 'general'; },
-  'wrong assistant workspace': f => { f.childMessages[0].info.path.root = 'other'; },
-  'wrong assistant session': f => { f.childMessages[0].info.sessionID = 'other'; },
-  'assistant failure': f => { f.childMessages[0].info.error = { name: 'UnknownError' }; },
-  'incomplete assistant': f => { delete f.childMessages[0].info.time.completed; },
-  'unknown finish': f => { f.childMessages[0].info.finish = 'unknown'; },
-  'missing parts': f => { f.childMessages[0].parts = []; },
-  'empty text': f => { f.childMessages[0].parts[0].text = ''; },
-  'wrong text message': f => { f.childMessages[0].parts[0].messageID = 'other'; },
-  'synthetic text': f => { f.childMessages[0].parts[0].synthetic = true; },
-  'failed tool': f => { f.childMessages[0].parts.push({ type: 'tool', sessionID: 'ses_child', messageID: 'msg_child', state: { status: 'error' } }); },
-  'unknown response': f => { f.input.client.session.get = async () => ({ data: null }); },
-  'unknown part': f => { f.childMessages[0].parts.push({ type: 'mystery', sessionID: 'ses_child', messageID: 'msg_child' }); },
-  'earlier failed tool': f => { f.childMessages.unshift({ info: { sessionID: 'ses_child', role: 'assistant', agent: 'mdd-plan' }, parts: [{ type: 'tool', tool: 'read', state: { status: 'error' } }] }); },
+  'an unfinished task': f => { f.output.output = '<task id="ses_child" state="running">\\n<task_result>\\n{}\\n</task_result>\\n</task>'; },
+  'a wrapper mismatch': f => { f.output.output = 'task completed'; },
+  'a missing result': f => { delete f.output.output; },
+  'an empty result': f => { f.output.output = '<task id="ses_child" state="completed">\\n<task_result>\\n\\n</task_result>\\n</task>'; },
 })) {
   test(`OpenCode SDK contract: reject ${name}`, async () => {
     const f = sdkFixture();
-    const inspector = createInspector(f.input);
-    await inspector.parent(runtime, call.callID);
     change(f);
-    await assert.rejects(inspector.result(runtime, call, f.phase, f.output));
+    await assert.rejects(createInspector(f.input).result(runtime, call, f.phase, f.output));
   });
 }
 
+// Capability, models and child history are the user's native concern now. MDD only confirms
+// who is running it, so an unrelated agent or a nested session cannot drive someone else's run.
 for (const [name, change] of Object.entries({
   'wrong parent agent': f => { f.parent.agent = 'build'; },
   'nested parent': f => { f.parent.parentID = 'other'; },
   'wrong parent workspace': f => { f.parent.directory = 'other'; },
-  'wrong native call': f => { f.parentMessages[0].parts[0].callID = 'other'; },
-  'wrong invoking agent': f => { f.parentMessages[0].info.agent = 'build'; },
-  'missing parent model': f => { delete f.parentMessages[0].info.providerID; },
+  'wrong parent project': f => { f.parent.projectID = 'other'; },
 })) {
   test(`OpenCode SDK contract: reject ${name}`, async () => {
     const f = sdkFixture(); change(f);
     await assert.rejects(createInspector(f.input).parent(runtime, call.callID));
-  });
-}
-
-// Regression: a real installation resolved 127 agents and 140-239 permission rules each,
-// which the former shared 100-entry history cap rejected before any MDD work could start.
-function crowdedFixture(agentCount = 127, noiseRules = 140) {
-  const f = sdkFixture();
-  const noise = Array.from({ length: noiseRules }, (_, index) =>
-    ({ permission: 'external_directory', pattern: `${runtime.directory}/skills/s${index}/*`, action: 'allow' }));
-  const permission = [...noise, { permission: '*', pattern: '*', action: 'deny' },
-    ...['read', 'glob', 'grep'].map(name => ({ permission: name, pattern: '*', action: 'allow' })),
-    { permission: 'task', pattern: '*', action: 'deny' }];
-  const mdd = MODEL_ROLES.map(role => ({ name: role === 'orchestrator' ? 'mdd-orchestrator' : role, mode: role === 'orchestrator' ? 'primary' : 'subagent', permission }));
-  const others = Array.from({ length: Math.max(0, agentCount - mdd.length) }, (_, index) =>
-    ({ name: `unrelated-agent-${index}`, mode: 'subagent', permission }));
-  f.input.client.app.agents = async () => ({ data: [...mdd, ...others] });
-  f.child.permission = permission;
-  return f;
-}
-
-test('crowded real installations pass inspection: many agents and large resolved rulesets', async () => {
-  const f = crowdedFixture();
-  const agents = (await f.input.client.app.agents()).data;
-  assert.equal(agents.length, 127);
-  assert.ok(agents[0].permission.length > 100);
-  const inspector = createInspector(f.input);
-  await inspector.parent(runtime, call.callID);
-  assert.equal((await inspector.result(runtime, call, f.phase, f.output)).text, '{}');
-});
-
-test('an absent child session permission overlay is no overlay, not an unknown structure', async () => {
-  const f = crowdedFixture();
-  delete f.child.permission;
-  const inspector = createInspector(f.input);
-  await inspector.parent(runtime, call.callID);
-  assert.equal((await inspector.result(runtime, call, f.phase, f.output)).text, '{}');
-});
-
-for (const [name, build] of Object.entries({
-  'agent registry': () => crowdedFixture(AGENTS_MAX + 1, 4),
-  'permission rules': () => crowdedFixture(12, PERMISSION_MAX + 1),
-})) {
-  test(`oversized ${name} still fails closed and names its own subject`, async () => {
-    const f = build();
-    const inspector = createInspector(f.input);
-    await assert.rejects(inspector.parent(runtime, call.callID), error =>
-      /inspection limit/.test(error.message) && !/history/.test(error.message));
   });
 }
 
@@ -332,27 +250,6 @@ test('OpenCode SDK contract: bounded callback even if injected client ignores ab
   f.input.client.session.get = () => new Promise(() => {});
   await assert.rejects(createInspector(f.input, 20).parent(runtime), /timed out/);
 });
-
-test('OpenCode SDK contract: native tool-output read exception does not enable other directories', async () => {
-  const f = sdkFixture();
-  const rule = { permission: 'external_directory', pattern: `${runtime.directory}/tool-output/*`, action: 'allow' };
-  f.child.permission.unshift(rule);
-  f.child.permission.push(rule);
-  const inspector = createInspector(f.input);
-  await inspector.parent(runtime, call.callID);
-  await inspector.result(runtime, call, f.phase, f.output);
-  f.child.permission.push({ ...rule, pattern: '*' });
-  await assert.rejects(inspector.result(runtime, call, f.phase, f.output), /read-only/);
-});
-
-test('OpenCode SDK contract: child session deny overlay combines with resolved agent permissions', async () => {
-  const f = sdkFixture();
-  f.child.permission = [{ permission: 'task', pattern: '*', action: 'deny' }];
-  const inspector = createInspector(f.input);
-  await inspector.parent(runtime, call.callID);
-  assert.equal((await inspector.result(runtime, call, f.phase, f.output)).text, '{}');
-});
-
 test('plugin contract: scoped tools, in-place native args, result gating, no native override', async t => {
   const f = await pluginFixture(t);
   const { hooks, context, writes } = f;
@@ -471,14 +368,16 @@ for (const [name, mutate] of Object.entries({
   });
 }
 
-test('plugin contract: read-only child hook denies network resource tools even if they ask for read permission', async () => {
+// Actors are no longer policed tool by tool: their capability is the user's native decision.
+// MDD only refuses to let an unregistered session drive one of its own phases.
+test('plugin contract: ordinary tools pass through untouched; only stray MDD phases are refused', async () => {
   const hooks = await plugin(sdkFixture().input);
-  await hooks['chat.message']({ sessionID: 'ses_child' }, { message: { agent: 'mdd-plan' }, parts: [] });
-  for (const tool of ['bash', 'edit', 'task', 'webfetch', 'list_mcp_resources', 'read_mcp_resource', 'mdd_start']) {
-    await assert.rejects(hooks['tool.execute.before']({ tool, sessionID: 'ses_child', callID: 'child-call' }, { args: {} }), /read-only|matching active/);
+  for (const tool of ['bash', 'edit', 'read', 'webfetch', 'list_mcp_resources', 'read_mcp_resource']) {
+    await hooks['tool.execute.before']({ tool, sessionID: 'ses_child', callID: `${tool}-call` }, { args: {} });
   }
-  await assert.rejects(hooks['tool.execute.before']({ tool: 'read', sessionID: 'ses_child', callID: 'read-call' }, { args: {} }), /matching active/);
-  await hooks['tool.execute.before']({ tool: 'webfetch', sessionID: 'unrelated', callID: 'other' }, { args: {} });
+  await hooks['tool.execute.before']({ tool: 'task', sessionID: 'ses_child', callID: 'general' }, { args: { subagent_type: 'general' } });
+  await assert.rejects(hooks['tool.execute.before']({ tool: 'task', sessionID: 'ses_child', callID: 'phase' },
+    { args: { subagent_type: 'mdd-apply' } }), /registered parent run/);
 });
 
 test('plugin config contract: settings frozen at startup; only explicit model overrides applied', async t => {

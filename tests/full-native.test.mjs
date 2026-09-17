@@ -92,7 +92,6 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
     const child = [{ info: { id: `msg-${index}`, sessionID: childID, role: 'assistant', agent: phase, ...model, path: { cwd: root, root }, time: { completed: 10 }, finish: 'stop' }, parts: [] }];
     histories.set(childID, child);
     if (options.beforeMismatch) child[0].info.modelID = 'substituted';
-    await hooks['chat.message']({ sessionID: childID }, { message: { agent: phase }, parts: [] });
     async function tool(name, input, output, execute = async () => {}) {
       const tc = { sessionID: childID, callID: `${name}-${index}`, tool: name };
       const part = { type: 'tool', tool: name, callID: tc.callID, sessionID: childID, messageID: child[0].info.id, state: { status: 'running', input: structuredClone(input) } };
@@ -117,15 +116,15 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
       }
       else {
         const filePath = options.external ? join(root, '../escape.txt') : join(root, 'feature.txt');
-        const id = await tool('write', { filePath, content: 'implemented\n' }, { output: 'Wrote file successfully.', metadata: { filepath: filePath, exists: true, diagnostics: {}, truncated: false } }, () => writeFile(filePath, 'implemented\n'));
-        result.changes = [id];
+        await tool('write', { filePath, content: 'implemented\n' }, { output: 'Wrote file successfully.', metadata: { filepath: filePath, exists: true, diagnostics: {}, truncated: false } }, () => writeFile(filePath, 'implemented\n'));
+        result.changes = [filePath];
       }
     } else if (phase === 'mdd-verify') {
       if (!options.noChecks) {
         const command = 'npm test';
-        const text = options.empty ? '(no output)' : options.skippedOnly ? '3 skipped' : '1 test passed';
-        const id = await tool('bash', { command, workdir: root, description: 'Run scoped tests' }, { output: text, metadata: { output: text, exit: options.exit === undefined ? 0 : options.exit, truncated: options.truncated ?? false } });
-        result.checks = [{ callID: options.forged ? 'invented' : id, command }];
+        const text = '1 test passed';
+        await tool('bash', { command, workdir: root, description: 'Run scoped tests' }, { output: text, metadata: { output: text, exit: options.exit === undefined ? 0 : options.exit, truncated: false } });
+        result.checks = [{ command, exit: options.exit === undefined ? 0 : options.exit }];
       } else result.checks = [];
     } else await tool('read', { filePath: join(root, 'feature.txt') }, { output: 'Inspected project context.', metadata: { truncated: false } });
     const trace = traceFixture(join(root, 'feature.txt'), 'feature');
@@ -134,7 +133,7 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
     if (phase === 'mdd-design') result.decisions = trace.decisions;
     if (phase === 'mdd-tasks') result.deliverables = trace.deliverables;
     if (phase === 'mdd-verify') {
-      const assessment = { status: 'verified', checks: [`bash-${index}`], assessment: 'The inspected boundary and planned check output support the expected behavior.' };
+      const assessment = { status: 'verified', checks: ['npm test'], assessment: 'The inspected boundary and planned check output support the expected behavior.' };
       result.verification = { scenarios: ['S1', 'S2'].map(scenarioID => ({ requirementID: 'R1', scenarioID, stepID: 'feature', ...assessment })),
         steps: [{ stepID: 'feature', ...assessment }], decisions: [{ decisionID: 'D1', ...assessment }], changes: options.noChange ? 'No implementation change was needed.' : 'The requested input handling is implemented.', limits: [] };
       if (options.coverageFault === 'missing') result.verification.scenarios.pop();
@@ -154,6 +153,7 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
     const text = JSON.stringify(result);
     child[0].parts.push({ type: 'text', sessionID: childID, messageID: child[0].info.id, text });
     const output = { title: 'Native task', metadata: { sessionId: childID, parentSessionId: runtime.sessionID, model }, output: `<task id="${childID}" state="completed">\n<task_result>\n${text}\n</task_result>\n</task>` };
+    if (options.badEnvelope) output.output = 'the delegated task did not finish';
     await hooks['tool.execute.after']({ ...call, args }, output);
     visited.push(phase);
     return status();
@@ -187,8 +187,8 @@ for (const route of ['low', 'high']) for (const store of ['none', 'openspec']) f
   });
 }
 
-for (const fault of [{ forged: true }, { coverageFault: 'missing' }, { exit: 1 }]) {
-  test(`memory off rejects unusable native evidence and keeps the phase runnable: ${JSON.stringify(fault)}`, async t => {
+for (const fault of [{ noChecks: true }, { coverageFault: 'missing' }]) {
+  test(`memory off rejects an inconsistent report and keeps the phase runnable: ${JSON.stringify(fault)}`, async t => {
     t.mock.method(globalThis, 'fetch', () => assert.fail('Memory off fetched'));
     const f = await fixture(t, { memoryEnabled: false });
     await f.phase(); await f.phase();
@@ -250,17 +250,26 @@ for (const route of ['low', 'high']) for (const mode of ['automatic', 'interacti
   });
 }
 
-for (const [name, fault] of Object.entries({ nonzero: { exit: 1 }, interrupted: { exit: null }, empty: { empty: true }, truncated: { truncated: true }, forged: { forged: true }, skipped: { noChecks: true }, skippedOnly: { skippedOnly: true }, missingHistory: { missingAfter: true }, model: { mismatch: true } })) {
-  test(`Verify rejects ${name} evidence without claiming checks or losing earned coverage`, async t => {
+// MDD does not re-run anything, so the one honesty it can enforce is that the report agrees
+// with itself: an assessment may not lean on a check the same phase never reported running.
+test('Verify rejects an assessment citing a check it never reported, keeping earned coverage', async t => {
+  const f = await fixture(t);
+  await f.phase(); await f.phase();
+  assert.equal((await f.status()).coverage, 65);
+  await assert.rejects(f.phase({ noChecks: true }), /did not report running/);
+  const after = await f.status();
+  assert.equal(after.state, 'ready'); assert.equal(after.coverage, 65);
+  assert.equal(after.task.subagent_type, 'mdd-verify'); assert.equal(after.workflow.results.length, 2);
+});
+
+for (const [name, exit] of Object.entries({ nonzero: 1, interrupted: null })) {
+  test(`a ${name} check cannot support a verified assessment`, async t => {
     const f = await fixture(t);
     await f.phase(); await f.phase();
-    assert.equal((await f.status()).coverage, 65);
-    await assert.rejects(f.phase(fault));
+    await assert.rejects(f.phase({ exit }), /did not pass/);
     const after = await f.status();
-    // The attempt earns nothing, but plan and implementation were corroborated earlier and are
-    // not withdrawn by a rejected verification; Verify simply stays runnable.
     assert.equal(after.state, 'ready'); assert.equal(after.coverage, 65);
-    assert.equal(after.task.subagent_type, 'mdd-verify'); assert.equal(after.workflow.results.length, 2);
+    assert.equal(after.evidence.checks, 'unearned');
   });
 }
 
@@ -268,11 +277,6 @@ test('Apply no-change result earns no implementation credit; executable checks r
   const f = await fixture(t); await f.phase(); await f.phase({ noChange: true }); await f.phase();
   assert.equal((await f.status()).state, 'complete'); assert.equal((await f.status()).coverage, 75);
   assert.match((await f.status()).report, /No implementation change was recorded/);
-});
-test('Apply external edit is rejected before writes and the phase stays on Apply', async t => {
-  const f = await fixture(t); await f.phase(); await assert.rejects(f.phase({ external: true }));
-  const status = await f.status();
-  assert.equal(status.state, 'ready'); assert.equal(status.task.subagent_type, 'mdd-apply');
 });
 for (const summary of ['low', 'medium', 'detailed']) {
   test(`live report ${summary} and disabled telemetry`, async t => {
@@ -344,14 +348,20 @@ test('low route with exploration preserves all four native phases', async t => {
   assert.deepEqual(f.visited, ['mdd-explore', 'mdd-plan', 'mdd-apply', 'mdd-verify']);
   assert.equal((await f.status()).coverage, 100);
 });
-for (const fault of [{ denied: true }, { beforeMismatch: true }]) {
-  test(`Apply native refusal or model mismatch prevents writes: ${JSON.stringify(fault)}`, async t => {
-    const f = await fixture(t); await f.phase(); await assert.rejects(f.phase(fault));
-    assert.equal(await readFile(join(f.root, 'feature.txt'), 'utf8'), 'pending\n');
-    const status = await f.status();
-    assert.equal(status.state, 'ready'); assert.equal(status.task.subagent_type, 'mdd-apply'); assert.equal(status.coverage, 40);
-  });
-}
+// A refused native permission belongs to the user and the actor, not to MDD: the write simply
+// does not happen and MDD keeps waiting for the delegated result instead of sealing the run.
+test('a refused native write leaves the file untouched and the dispatch still awaits its result', async t => {
+  const f = await fixture(t); await f.phase();
+  await assert.rejects(f.phase({ denied: true }), /Simulated native permission denial/);
+  assert.equal(await readFile(join(f.root, 'feature.txt'), 'utf8'), 'pending\n');
+  const waiting = await f.status();
+  assert.equal(waiting.state, 'await-result');
+  assert.equal(waiting.coverage, 40);
+  // When that task ends without a result, the phase is released rather than lost.
+  await f.hooks.event({ event: { type: 'message.part.updated', properties: { part: { type: 'tool', tool: 'task', sessionID: f.runtime.sessionID, callID: 'task-2', state: { status: 'error' } } } } });
+  const released = await f.status();
+  assert.equal(released.state, 'ready'); assert.equal(released.task.subagent_type, 'mdd-apply');
+});
 
 test('confirmed rerun asks every field once despite complete profile and preserves old run evidence', async t => {
   const f = await fixture(t); await f.phase();
@@ -406,7 +416,7 @@ test('known failed phase permits a confirmed new planned run; unknown native res
   assert.equal((await known.status()).state, 'ready'); assert.equal((await known.status()).previousRuns[0].workflow.results[0].outcome, 'failed');
   // A rejected attempt used to mark the run uncertain forever, which then refused every repair
   // path. Releasing it is what keeps replanning, investigation and reset reachable after a failure.
-  const unknown = await fixture(t); await assert.rejects(unknown.phase({ missingAfter: true }));
+  const unknown = await fixture(t); await assert.rejects(unknown.phase({ badEnvelope: true }));
   assert.equal((await unknown.status()).uncertain, false);
   assert.equal((await unknown.status()).state, 'ready');
   unknown.user('Try again.');
@@ -474,7 +484,7 @@ test('a failed intake can be replaced by a fresh request instead of stranding th
   assert.equal((await f.status()).state, 'blocked');
   // A stopped standalone investigation must not keep the parent looking busy either.
   await f.hooks.tool.mdd_contextual_explore.execute({ purpose: 'Mirar el issue.' }, f.context);
-  await assert.rejects(f.phase({ unauthorized: true }));
+  await assert.rejects(f.phase({ badEnvelope: true }));
   f.user('Trabajemos en el issue 389.');
   await f.hooks.tool.mdd_start.execute({ requirements: 'Trabajemos en el issue 389.' }, f.context);
   const started = await f.status();
@@ -509,11 +519,11 @@ test('read-only investigation answers without an accepted run and leaves impleme
   assert.equal(started.task.subagent_type, 'mdd-plan');
   assert.equal(started.contextual, false);
 });
-for (const fault of [{ unauthorized: true }, { beforeMismatch: true }]) {
-  test(`read-only investigation without a run keeps capability and model boundaries: ${JSON.stringify(fault)}`, async t => {
+{
+  test('a standalone investigation that does not complete is finished, not in flight', async t => {
     const f = await fixture(t, { start: false, memoryEnabled: false });
     await f.hooks.tool.mdd_contextual_explore.execute({ purpose: 'Read project context only.' }, f.context);
-    await assert.rejects(f.phase(fault));
+    await assert.rejects(f.phase({ badEnvelope: true }));
     const stopped = await f.status();
     // A stopped investigation is finished, not in flight: it must not look like main work.
     assert.equal(stopped.state, 'not-started');
@@ -573,15 +583,15 @@ test('stale change confirmation cannot approve a later phase or erase the old ru
   await assert.rejects(f.hooks['tool.execute.after']({ ...used.call, args: used.args }, { title: 'Approved', output: 'approved', metadata: { answers: [['Confirm change']], truncated: false } }));
   const blocked = await f.status(); assert.equal(blocked.runID, next.runID); assert.equal(blocked.previousRuns.length, 1); assert.equal(blocked.workflow.results.length, 0);
 });
-for (const fault of [{ unauthorized: true }, { beforeMismatch: true }]) {
-  test(`side exploration retains read-only/model boundaries ${JSON.stringify(fault)}`, async t => {
-    const f = await fixture(t); const main = await f.status();
-    await f.hooks.tool.mdd_contextual_explore.execute({ purpose: 'Read context only.' }, f.context);
-    await assert.rejects(f.phase(fault));
-    const status = await f.status(); assert.deepEqual(status.workflow, main.workflow); assert.deepEqual(status.evidence, main.evidence);
-    assert.equal(await readFile(join(f.root, 'feature.txt'), 'utf8'), 'pending\n');
-  });
-}
+test('a side exploration that does not complete restores the main plan untouched', async t => {
+  const f = await fixture(t); const main = await f.status();
+  await f.hooks.tool.mdd_contextual_explore.execute({ purpose: 'Read context only.' }, f.context);
+  await assert.rejects(f.phase({ badEnvelope: true }));
+  const status = await f.status();
+  assert.deepEqual(status.workflow, main.workflow); assert.deepEqual(status.evidence, main.evidence);
+  assert.equal(status.contextual, false);
+  assert.deepEqual(status.task, main.task);
+});
 test('advisory concerns alone do not change routing or create a confirmation question', async t => {
   const f = await fixture(t); const initial = await f.status();
   await f.phase({ concerns: [{ category: 'sensitive-data', evidence: 'A data handling assumption needs review.', impact: 'May matter if scope changes.' }] });
@@ -629,7 +639,7 @@ test('MDD tools belong to the coordinator and are withdrawn from every other age
 
 test('mdd_reset releases a stopped phase and a whole run without a new conversation', async t => {
   const f = await fixture(t);
-  await assert.rejects(f.phase({ missingAfter: true }));
+  await assert.rejects(f.phase({ badEnvelope: true }));
   assert.equal((await f.status()).attempts, 1);
   const released = JSON.parse(await f.hooks.tool.mdd_reset.execute({ scope: 'phase' }, f.context));
   assert.deepEqual(released.reset, { scope: 'phase', phase: 'mdd-plan' });

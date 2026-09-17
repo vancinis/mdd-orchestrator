@@ -7,7 +7,7 @@ import test from 'node:test';
 import { installationPaths } from '../dist/installation-paths.js';
 import { loadGlobalSettings, saveGlobalSettings } from '../dist/global-settings.js';
 import { defaultSettings, freezeProfile } from '../dist/settings.js';
-import { toolTargets } from '../dist/phase-policy.js';
+import { scopedPath } from '../dist/safe-paths.js';
 
 function fixture(t) {
   const parent = tmpdir();
@@ -123,12 +123,14 @@ test('global-settings reject linked owned roots and hardlinked settings without 
   assert.equal(fs.readFileSync(target, 'utf8'), bytes);
 });
 
-test('global-path resolution does not expand project edit or shell scope', t => {
+// MDD's own installation stays outside whatever workspace it is running in: its file helpers
+// refuse to resolve global paths through a project root.
+test('global paths are not reachable through a workspace-scoped MDD path', t => {
   const { root, options, paths } = fixture(t);
   const workspace = join(root, 'workspace');
   fs.mkdirSync(workspace);
   saveGlobalSettings(defaultSettings(), options);
-  assert.throws(() => toolTargets(workspace, 'mdd-apply', 'write', { filePath: paths.settingsPath }), /outside/);
-  assert.throws(() => toolTargets(workspace, 'mdd-apply', 'bash', { command: 'npm test', workdir: paths.ownedRoot }), /outside/);
+  assert.throws(() => scopedPath(workspace, paths.settingsPath), /outside/);
+  assert.throws(() => scopedPath(workspace, paths.ownedRoot, true), /outside/);
   assert.deepEqual(fs.readdirSync(workspace), []);
 });

@@ -3,18 +3,12 @@ import type { Plugin, PluginInput } from '@opencode-ai/plugin';
 import { isDeepStrictEqual } from 'node:util';
 import { boundedText, PhaseRunner } from './phase-runner.js';
 import type { Inspect, Runtime } from './phase-runner.js';
-import { defaultSettings, freezeProfile, setupDiagnostic } from './settings.js';
+import { freezeProfile, setupDiagnostic } from './settings.js';
 import { loadGlobalSettings } from './global-settings.js';
 import { installationPaths } from './installation-paths.js';
-import type { StartupProfile } from './settings.js';
-import { applyModelOverrides, nativeModel, NativeModels } from './native-models.js';
+import { applyModelOverrides } from './native-models.js';
 import { NativeIntake } from './native-intake.js';
 import type { IntakeInspect } from './native-intake.js';
-import { phaseName, phasePermissions, allowedTool, assertGithubLookup, READ_TOOLS } from './phase-policy.js';
-import { NativeTools } from './native-tools.js';
-import { MODEL_ROLES } from './settings.js';
-import type { Phase } from './policy.js';
-import type { TaskCall } from './phase-runner.js';
 import { recordTelemetry } from './telemetry.js';
 import { ProgressGuard } from './progress.js';
 import { renderPRBody } from './pr-body.js';
@@ -62,16 +56,6 @@ function list(value: unknown, subject: string, max: number): Record<string, unkn
   return value.map(record);
 }
 
-/** An absent session-level overlay means no extra rules; agent rules are still checked. */
-function overlay(value: unknown, subject: string): Record<string, unknown>[] {
-  return value === undefined || value === null ? [] : list(value, subject, PERMISSION_MAX);
-}
-
-type ChildInspect = {
-  beforeChild(call: TaskCall, phase: Phase, tool: string, args: unknown, pending: (parent: string, phase: Phase) => { runtime: Runtime; call: TaskCall; checks: string[] }): Promise<void>;
-  afterChild(call: TaskCall, tool: string, args: unknown, output: unknown): void;
-};
-
 async function readSdk<T>(operation: (signal: AbortSignal) => Promise<T>, timeout: number): Promise<T> {
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -85,10 +69,8 @@ async function readSdk<T>(operation: (signal: AbortSignal) => Promise<T>, timeou
   } finally { controller.abort(); clearTimeout(timer); }
 }
 
-export function createInspector(input: PluginInput, timeout = 5000, profile: StartupProfile = freezeProfile(defaultSettings())): Inspect & IntakeInspect & ChildInspect {
+export function createInspector(input: PluginInput, timeout = 5000): Inspect & IntakeInspect {
   if (!Number.isInteger(timeout) || timeout < 1 || timeout > 5000) throw new Error('Invalid inspection timeout.');
-  const models = new NativeModels(profile);
-  const nativeTools = new NativeTools();
   const session = async (id: string, directory: string) => {
     const response = await readSdk(signal => input.client.session.get({
       path: { id }, query: { directory }, signal, throwOnError: true,
@@ -108,19 +90,7 @@ export function createInspector(input: PluginInput, timeout = 5000, profile: Sta
       throw new Error('Runtime workspace differs from the project plugin instance.');
     }
   };
-  const checkAgents = async () => {
-    const response = await readSdk(signal => input.client.app.agents({
-      query: { directory: input.directory }, signal, throwOnError: true,
-    }), timeout);
-    const agents = list(response.data, 'agent registry', AGENTS_MAX);
-    for (const name of MODEL_ROLES.filter(role => role !== 'orchestrator')) {
-      const agent = agents.find(item => item.name === name);
-      if (!agent || agent.mode !== 'subagent') throw new Error('MDD read-only agent is missing or has changed mode.');
-      phasePermissions(name, list(agent.permission, `${name} permission rules`, PERMISSION_MAX));
-    }
-    return agents;
-  };
-  const inspector: Inspect & IntakeInspect & ChildInspect = {
+  const inspector: Inspect & IntakeInspect = {
     async setupPending(runtime, selected, messageID) {
       await inspector.parent(runtime);
       const history = await messages(runtime.sessionID, runtime.directory);
@@ -181,64 +151,28 @@ export function createInspector(input: PluginInput, timeout = 5000, profile: Sta
       if (candidates.size) throw new Error('Setup recovery needs the original objective: select the exact native setup-failed requirements; history is ambiguous.');
       return undefined;
     },
-    async beforeChild(call, phase, tool, args, pending) {
-      const child = await session(call.sessionID, input.directory);
-      const parentID = boundedText(child.parentID, 'native child parent', 256);
-      const bound = pending(parentID, phase);
-      if (!allowedTool(phase, tool)) throw new Error('MDD read-only or phase capability denies this tool.');
-      if (phase === 'mdd-verify' && tool === 'bash' && !bound.checks.includes(String(record(args).command))) throw new Error('Verify may execute only exact applicable planned commands.');
-      checkWorkspace(bound.runtime);
-      if (child.id !== call.sessionID || child.agent !== phase || child.directory !== input.directory || child.projectID !== input.project.id) throw new Error('Child tool session binding mismatch.');
-      const agents = await checkAgents();
-      models.check(parentID, agents);
-      phasePermissions(phase, [...list(agents.find(agent => agent.name === phase)?.permission, `${phase} permission rules`, PERMISSION_MAX), ...overlay(child.permission, 'child session permission rules')]);
-      const history = await messages(parentID, input.directory);
-      const matches = history.flatMap(message => list(message.parts, 'message parts', PARTS_MAX)).filter(part => part.type === 'tool' && part.tool === 'task' && part.callID === bound.call.callID);
-      if (matches.length !== 1 || record(matches[0]!.state).status !== 'running' || record(record(matches[0]!.state).metadata).sessionId !== call.sessionID) throw new Error('Child tool is not bound to the live parent native task metadata.');
-      const taskMetadata = record(record(matches[0]!.state).metadata);
-      if (taskMetadata.parentSessionId !== parentID || taskMetadata.background !== undefined || taskMetadata.jobId !== undefined || nativeModel(taskMetadata.model) !== models.expected(parentID, phase)) throw new Error('Child task metadata is not the expected foreground/model binding.');
-      const childHistory = await messages(call.sessionID, input.directory);
-      const callers = childHistory.filter(message => list(message.parts, 'message parts', PARTS_MAX).some(part => part.type === 'tool' && part.callID === call.callID));
-      if (callers.length !== 1) throw new Error('Native child invocation is not uniquely readable.');
-      const caller = record(callers[0]!.info);
-      const location = record(caller.path);
-      const parts = list(callers[0]!.parts, 'message parts', PARTS_MAX).filter(part => part.type === 'tool' && part.callID === call.callID);
-      if (parts.length !== 1 || caller.role !== 'assistant' || caller.sessionID !== call.sessionID || caller.agent !== phase || caller.error != null ||
-          nativeModel(caller) !== models.expected(parentID, phase) || location.cwd !== input.directory || location.root !== input.worktree) throw new Error('Native child caller identity/model/workspace mismatch.');
-      const part = parts[0]!;
-      const state = record(part.state);
-      if (part.tool !== tool || part.sessionID !== call.sessionID || part.messageID !== caller.id || state.status !== 'running' || !isDeepStrictEqual(state.input, args)) throw new Error('Child native invocation input mismatch.');
-      nativeTools.before(call.sessionID, call.callID, input.directory, phase, tool, record(args));
-    },
-    afterChild(call, tool, args, output) { nativeTools.after(call.sessionID, call.callID, tool, args, record(output)); },
+    /**
+     * Confirms who is running MDD and, for a native question, that the pending call is the exact
+     * one the user is answering. Consent still needs correlation; ordinary work does not.
+     */
     async parent(runtime, callID, tool = 'task', args) {
       checkWorkspace(runtime);
-      const agents = await checkAgents();
       const parent = await session(runtime.sessionID, runtime.directory);
       if (parent.id !== runtime.sessionID || parent.parentID != null || parent.directory !== runtime.directory ||
-          parent.projectID !== input.project.id || parent.agent !== 'mdd-orchestrator') {
-        throw new Error('Actual OpenCode parent session is not the designated project orchestrator.');
+          parent.projectID !== input.project.id || parent.agent !== COORDINATOR) {
+        throw new Error(`MDD runs in a top-level ${COORDINATOR} conversation in this workspace.`);
       }
+      if (tool !== 'question' || callID === undefined) return;
       const history = await messages(runtime.sessionID, runtime.directory);
-      const matches = callID === undefined
-        ? history.filter(message => record(message.info).role === 'assistant').slice(-1)
-        : history.filter(message => list(message.parts, 'message parts', PARTS_MAX).some(part => part.type === 'tool' && part.callID === callID && part.tool === tool));
-      if (matches.length !== 1) throw new Error('Native parent task call is not uniquely readable.');
-      const info = record(matches[0]!.info);
-      const path = record(info.path);
-      if (info.role !== 'assistant' || info.sessionID !== runtime.sessionID || info.agent !== 'mdd-orchestrator' ||
-          path.cwd !== runtime.directory || path.root !== runtime.worktree || info.error != null) {
-        throw new Error('Native caller identity or workspace mismatch.');
-      }
-      models.bind(runtime.sessionID, agents, info);
-      if (tool === 'question') {
-        const parts = list(matches[0]!.parts, 'message parts', PARTS_MAX).filter(part => part.type === 'tool' && part.callID === callID && part.tool === tool);
-        if (parts.length !== 1) throw new Error('Native question call is not unique.');
-        const part = parts[0]!;
-        const state = record(part.state);
-        if (part.sessionID !== runtime.sessionID || part.messageID !== info.id || state.status !== 'running' || !isDeepStrictEqual(state.input, args)) {
-          throw new Error('Native question history differs from the exact running call.');
-        }
+      const parts = history.flatMap(message => list(message.parts, 'message parts', PARTS_MAX)
+        .filter(part => part.type === 'tool' && part.tool === tool && part.callID === callID)
+        .map(part => ({ part, info: record(message.info) })));
+      if (parts.length !== 1) throw new Error('The native question call is not uniquely readable.');
+      const { part, info } = parts[0]!;
+      const state = record(part.state);
+      if (part.sessionID !== runtime.sessionID || part.messageID !== info.id || info.role !== 'assistant' ||
+          state.status !== 'running' || !isDeepStrictEqual(state.input, args)) {
+        throw new Error('The native question history differs from the exact running call.');
       }
     },
     async intake(runtime, requirements, messageID) {
@@ -261,56 +195,16 @@ export function createInspector(input: PluginInput, timeout = 5000, profile: Sta
       if (call.sessionID !== runtime.sessionID) throw new Error('Native question parent mismatch.');
       await inspector.parent(runtime, call.callID, 'question', args);
     },
-    async result(runtime, call, phase, raw) {
-      checkWorkspace(runtime);
-      const agents = await checkAgents();
-      models.check(runtime.sessionID, agents);
-      const expectedModel = models.expected(runtime.sessionID, phase);
+    /**
+     * Returns what the delegated phase actually answered. The result is the actor's report, not
+     * a corroborated record: MDD reads the completed task envelope and nothing else.
+     */
+    async result(_runtime, _call, _phase, raw) {
       const output = record(raw);
-      const metadata = record(output.metadata);
-      if (nativeModel(metadata.model) !== expectedModel) throw new Error('Native task metadata model mismatch.');
-      const childID = boundedText(metadata.sessionId, 'child session ID', 256);
-      if (metadata.parentSessionId !== call.sessionID || metadata.background !== undefined || metadata.jobId !== undefined) {
-        throw new Error('Native task metadata is not a correlated foreground result.');
-      }
-      const child = await session(childID, runtime.directory);
-      if (child.id !== childID || child.parentID !== runtime.sessionID || child.directory !== runtime.directory ||
-          child.projectID !== input.project.id || child.agent !== phase) throw new Error('Child session binding mismatch.');
-      phasePermissions(phaseName(phase), [...list(agents.find(agent => agent.name === phase)?.permission, `${phase} permission rules`, PERMISSION_MAX), ...overlay(child.permission, 'child session permission rules')]);
-      const history = await messages(childID, runtime.directory);
-      for (const message of history) {
-        const info = record(message.info);
-        if (info.sessionID !== childID || (info.role !== 'user' && info.role !== 'assistant') ||
-            (info.role === 'assistant' && (info.error != null || info.agent !== phase || nativeModel(info) !== expectedModel)) ||
-            list(message.parts, 'message parts', PARTS_MAX).some(part => part.type === 'tool' &&
-              (!allowedTool(phaseName(phase), String(part.tool)) || record(part.state).status !== 'completed'))) {
-          throw new Error('Child history contains failed, unauthorized, or unknown execution evidence.');
-        }
-        if (info.role === 'assistant') {
-          const location = record(info.path);
-          if (location.cwd !== runtime.directory || location.root !== runtime.worktree) throw new Error('Child assistant workspace changed.');
-        }
-        if (list(message.parts, 'message parts', PARTS_MAX).some(part => part.type === 'tool' && (part.sessionID !== childID || part.messageID !== info.id))) throw new Error('Child tool part ownership mismatch.');
-      }
-      const last = history.at(-1);
-      if (!last) throw new Error('Child history is empty.');
-      const info = record(last.info);
-      const path = record(info.path);
-      const time = record(info.time);
-      if (info.role !== 'assistant' || info.sessionID !== childID || info.agent !== phase || info.error != null ||
-          info.finish !== 'stop' || typeof time.completed !== 'number' || !Number.isFinite(time.completed) ||
-          path.cwd !== runtime.directory || path.root !== runtime.worktree) throw new Error('Child has no successful final assistant response.');
-      const parts = list(last.parts, 'message parts', PARTS_MAX);
-      if (parts.some(part => !['text', 'reasoning', 'step-start', 'step-finish', 'tool'].includes(String(part.type)) ||
-          part.sessionID !== childID || part.messageID !== info.id ||
-          (part.type === 'tool' && record(part.state).status !== 'completed'))) throw new Error('Child result contains failed or unknown parts.');
-      const textPart = parts.findLast(part => part.type === 'text');
-      if (!textPart || textPart.synthetic === true || textPart.ignored === true) throw new Error('Missing actual assistant text.');
-      const text = boundedText(textPart.text, 'child result', 20000);
-      const expected = `<task id="${childID}" state="completed">\n<task_result>\n${text}\n</task_result>\n</task>`;
-      if (output.output !== expected) throw new Error('Native task output differs from the actual child response.');
-      const tools = history.flatMap(message => list(message.parts, 'message parts', PARTS_MAX)).filter(part => part.type === 'tool');
-      return { text, evidence: nativeTools.evidence(childID, tools) };
+      const envelope = typeof output.output === 'string' ? output.output : '';
+      const match = /^<task id="[^"]*" state="completed">\r?\n<task_result>\r?\n([\s\S]*)\r?\n<\/task_result>\r?\n<\/task>$/.exec(envelope);
+      if (!match) throw new Error('The delegated phase did not return a completed task result.');
+      return boundedText(match[1], 'delegated phase result', 20000);
     },
   };
   return inspector;
@@ -319,20 +213,11 @@ export function createInspector(input: PluginInput, timeout = 5000, profile: Sta
 const plugin: Plugin = async input => {
   const settings = (() => { try { return loadGlobalSettings(); } catch { throw new Error(setupDiagnostic(installationPaths().ownedRoot).action); } })();
   const profile = freezeProfile(settings);
-  const inspector = createInspector(input, 5000, profile);
+  const inspector = createInspector(input);
   const runner = new PhaseRunner(inspector, { telemetry: recordTelemetry, progress: new ProgressGuard(input.directory) });
   const intake = new NativeIntake(runner, inspector, settings);
-  const childSessions = new Map<string, Phase>();
-  const childParents = new Map<string, string>();
-  const coordinatorSessions = new Set<string>();
-  // The tool hooks shadow the plugin input, so the workspace root is captured here.
-  const workspace = input.directory;
   return {
     config: async config => { applyModelOverrides(config, profile); restrictTools(config as Parameters<typeof restrictTools>[0]); },
-    'chat.message': async (input, output) => {
-      if (MODEL_ROLES.includes(output.message.agent as Phase) && output.message.agent !== 'orchestrator') childSessions.set(input.sessionID, phaseName(output.message.agent));
-      if (output.message.agent === 'mdd-orchestrator') coordinatorSessions.add(input.sessionID);
-    },
     tool: {
       mdd_pr_body: tool({
         description: 'Draft only a PR body using the exact local skill/template and recorded current-run evidence. Never commits, pushes or publishes. Optional notes must quote whole lines of the actual latest user text; unknown facts remain unverified.',
@@ -406,35 +291,16 @@ const plugin: Plugin = async input => {
         },
       }),
     },
+    // Actors work with their own tools under native permissions. MDD only observes the two calls
+    // that carry its own state: the phase task and the consent question.
     'tool.execute.before': async (input, output) => {
-      const phase = childSessions.get(input.sessionID);
-      if (phase) {
-        try {
-          await inspector.beforeChild(input, phase, input.tool, output.args, (parent, phase) => { childParents.set(input.sessionID, parent); return runner.pending(parent, phase); });
-        } catch (error) {
-          const parent = childParents.get(input.sessionID);
-          if (parent) runner.attemptRejected(parent, 'A capability or invocation in the delegated phase was rejected.');
-          throw error;
-        }
-        return;
-      }
       if (input.tool === 'question') return intake.beforeQuestion(input, output.args);
-      // The coordinator session never reaches beforeChild, so its only command capability is
-      // gated here. Unrelated sessions stay untouched.
-      if (input.tool === 'bash' && coordinatorSessions.has(input.sessionID)) {
-        return assertGithubLookup(workspace, record(output.args));
-      }
       if (input.tool !== 'task') return;
       intake.guardTask(input.sessionID);
       const args = await runner.before(input, output.args);
       if (args) Object.assign(output.args, args);
     },
     'tool.execute.after': async (input, output) => {
-      if (childSessions.has(input.sessionID)) {
-        try { inspector.afterChild(input, input.tool, input.args, output); }
-        catch (error) { const parent = childParents.get(input.sessionID); if (parent) runner.attemptRejected(parent, 'Evidence returned by the delegated phase was rejected.'); throw error; }
-        return;
-      }
       if (input.tool === 'question') await intake.afterQuestion(input, input.args, output);
       if (input.tool === 'task') {
         await runner.after(input, input.args, output);
@@ -445,13 +311,6 @@ const plugin: Plugin = async input => {
       if (event.type === 'server.instance.disposed' && event.properties.directory === input.directory) { await intake.close(); return; }
       if (event.type !== 'message.part.updated') return;
       const part = event.properties.part;
-      // A refused or failed read yields no evidence and cannot mutate the workspace, so the
-      // actor may simply try another path. Only tools that can have side effects, or whose
-      // partial execution is unknowable, invalidate the dispatch.
-      if (part.type === 'tool' && part.state.status === 'error' && !READ_TOOLS.includes(String(part.tool))) {
-        const parent = childParents.get(part.sessionID);
-        if (parent) runner.attemptRejected(parent, 'A tool in the delegated phase failed or was interrupted.');
-      }
       if (part.type === 'tool' && part.tool === 'task' && part.state.status === 'error') {
         runner.nativeError(part.sessionID, part.callID);
       }

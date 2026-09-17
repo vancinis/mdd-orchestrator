@@ -2,26 +2,19 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { test } from 'node:test';
 
-for (const role of ['propose', 'spec', 'design', 'tasks', 'apply', 'verify']) {
-  test(`assets: ${role} uses native least-privilege frontmatter and strict handoff`, () => {
+// Capability is the user's native decision, not MDD's. No packaged agent may ship its own
+// permission map: a phase that cannot act is exactly what made the workflow unusable.
+for (const role of ['explore', 'propose', 'spec', 'design', 'tasks', 'apply', 'verify']) {
+  test(`assets: ${role} ships no permission map and keeps a strict handoff`, () => {
     const text = fs.readFileSync(`assets/opencode/agents/mdd-${role}.md`, 'utf8');
     const front = text.split('---')[1];
     assert.match(front, /\nmode: subagent\n/);
-    const rules = Object.fromEntries([...front.matchAll(/^  ("\*"|\w+): (allow|ask|deny)$/gm)].map(m => [m[1].replaceAll('"', ''), m[2]]));
-    assert.deepEqual(rules, {
-      '*': 'deny', read: 'allow', glob: 'allow', grep: 'allow', skill: 'deny',
-      ...(role === 'apply' ? { edit: 'ask', bash: 'ask', task: 'deny' } : {}),
-      ...(role === 'verify' ? { edit: 'deny', bash: 'ask', task: 'deny' } : {}),
-      external_directory: 'deny',
-    });
-    assert.match(text, /provider-generated strict result schema/);
+    assert.doesNotMatch(front, /permission|model:|tools:/);
+    assert.deepEqual(Object.keys(Object.fromEntries([...front.matchAll(/^\s*("\*"|\w+): (allow|ask|deny)$/gm)].map(m => [m[1], m[2]]))), []);
     assert.match(text, /phase, runID and native callID/);
     assert.match(text, /outcome failed/);
-    assert.match(text, /No unsolicited prose/);
-    assert.doesNotMatch(front, /model:|tools:/);
     if (['apply', 'verify'].includes(role)) {
       assert.match(text, /not a sandbox/);
-      assert.match(text, /[Aa]utomatic/);
       assert.match(text, /commit/);
     }
   });
@@ -42,22 +35,16 @@ for (const name of ['mdd-pr-body', 'mdd-cleanup', 'mdd-doc']) {
   });
 }
 
-test('assets: exploration gains only lookup capability and the coordinator only the gate', () => {
+test('assets: exploration investigates freely and the coordinator is not a caged role', () => {
   const explore = fs.readFileSync('assets/opencode/agents/mdd-explore.md', 'utf8');
-  const front = explore.split('---')[1];
-  assert.deepEqual(Object.fromEntries([...front.matchAll(/^  ("\*"|\w+): (allow|ask|deny)$/gm)].map(m => [m[1].replaceAll('"', ''), m[2]])),
-    { '*': 'deny', read: 'allow', glob: 'allow', grep: 'allow', skill: 'deny', bash: 'allow', task: 'deny', external_directory: 'deny' });
-  assert.match(explore, /gh issue view\|list/);
-  assert.match(explore, /refuses anything else, including gh writes/);
+  assert.match(explore, /Use whatever helps/);
   assert.match(explore, /returns nothing is a finding, not a failure/);
+  assert.match(explore, /do not change the project to answer it/);
   const orchestrator = fs.readFileSync('assets/opencode/agents/mdd-orchestrator.md', 'utf8');
-  assert.match(orchestrator, /^  bash: allow$/m);
-  // Dispatching a phase is not a native decision point; MDD owns preflight and approvals.
-  assert.doesNotMatch(orchestrator, /^    mdd-\w+: ask$/m);
-  assert.match(orchestrator, /^    mdd-apply: allow$/m);
-  assert.match(orchestrator, /^    "\*": deny$/m);
-  assert.match(orchestrator, /refuses every other command, including gh writes/);
-  assert.match(orchestrator, /reading sources still goes through a task/);
+  const front = orchestrator.split('---')[1];
+  assert.match(front, /\nmode: primary\n/);
+  assert.doesNotMatch(front, /permission|tools:/);
+  assert.match(orchestrator, /mdd_reset/);
 });
 
 test('assets: mdd-doc shapes prose only and never widens a read-only phase', () => {
