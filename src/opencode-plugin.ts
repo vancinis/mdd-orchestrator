@@ -19,7 +19,7 @@ function record(value: unknown): Record<string, unknown> {
 }
 
 /** MDD tools belong to the MDD coordinator. Other agents share the registry but not this state. */
-export const MDD_TOOLS = ['mdd_start', 'mdd_status', 'mdd_reset', 'mdd_change_request', 'mdd_contextual_explore', 'mdd_pr_body'] as const;
+export const MDD_TOOLS = ['mdd_start', 'mdd_status', 'mdd_phase_result', 'mdd_reset', 'mdd_change_request', 'mdd_contextual_explore', 'mdd_pr_body'] as const;
 export const COORDINATOR = 'mdd-orchestrator';
 function coordinatorOnly(agent: string, tool: string): void {
   if (agent !== COORDINATOR) {
@@ -271,6 +271,15 @@ const plugin: Plugin = async input => {
           coordinatorOnly(context.agent, 'mdd_change_request');
           if (context.abort.aborted) throw new Error('Change request was aborted.');
           return JSON.stringify(await intake.changeRequest(args, context, context.messageID));
+        },
+      }),
+      mdd_phase_result: tool({
+        description: 'Report a phase you carried out yourself, instead of delegating it. Same result object a delegated phase returns, without a callID. Use it when delegation failed or when doing the work directly is simply the better route.',
+        args: { result: tool.schema.unknown().describe('The phase result object, or its exact JSON text: phase, runID, outcome, evidenceSummary, artifact and the fields this phase requires.') },
+        async execute(args, context) {
+          coordinatorOnly(context.agent, 'mdd_phase_result');
+          if (context.abort.aborted) throw new Error('The phase report was aborted.');
+          return JSON.stringify(await intake.submit(args, context));
         },
       }),
       mdd_reset: tool({

@@ -253,7 +253,7 @@ test('OpenCode SDK contract: bounded callback even if injected client ignores ab
 test('plugin contract: scoped tools, in-place native args, result gating, no native override', async t => {
   const f = await pluginFixture(t);
   const { hooks, context, writes } = f;
-  assert.deepEqual(Object.keys(hooks.tool).sort(), ['mdd_change_request', 'mdd_contextual_explore', 'mdd_pr_body', 'mdd_reset', 'mdd_start', 'mdd_status']);
+  assert.deepEqual(Object.keys(hooks.tool).sort(), ['mdd_change_request', 'mdd_contextual_explore', 'mdd_phase_result', 'mdd_pr_body', 'mdd_reset', 'mdd_start', 'mdd_status']);
   assert.deepEqual(Object.keys(hooks.tool.mdd_start.args), ['requirements']);
   const ready = JSON.parse(await hooks.tool.mdd_start.execute({ requirements: f.requirements }, context));
   const nativeArgs = ready.task;
@@ -394,7 +394,7 @@ test('plugin config contract: settings frozen at startup; only explicit model ov
   await hooks.config(config);
   // Every agent but the coordinator loses the MDD tools: they are registered app-wide but are
   // meaningless, and misleading, anywhere else.
-  const denied = { mdd_start: false, mdd_status: false, mdd_reset: false, mdd_change_request: false, mdd_contextual_explore: false, mdd_pr_body: false, 'mdd_*': false };
+  const denied = { mdd_start: false, mdd_status: false, mdd_phase_result: false, mdd_reset: false, mdd_change_request: false, mdd_contextual_explore: false, mdd_pr_body: false, 'mdd_*': false };
   assert.deepEqual(config, {
     default_agent: 'build', permission: { bash: 'ask' },
     agent: {

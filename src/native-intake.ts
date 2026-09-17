@@ -16,7 +16,7 @@ export type IntakeInspect = {
   intake(runtime: Runtime, requirements: string, messageID: string): Promise<void | string>;
   question(runtime: Runtime, call: TaskCall, args: QuestionEnvelope): Promise<void>;
 };
-type Runner = Pick<PhaseRunner, 'start' | 'status' | 'approveNative' | 'block'> & Partial<Pick<PhaseRunner, 'approvalStopped' | 'assertChangeable' | 'assertFreshStart' | 'explore' | 'reset'>>;
+type Runner = Pick<PhaseRunner, 'start' | 'status' | 'approveNative' | 'block'> & Partial<Pick<PhaseRunner, 'approvalStopped' | 'assertChangeable' | 'assertFreshStart' | 'explore' | 'reset' | 'submit'>>;
 type Slot = { kind: 'preflight' | 'approval' | 'change'; args: QuestionEnvelope; phase?: Phase; callID?: string; requirements?: string };
 type Intake = {
   runtime: Runtime; requirements: string;
@@ -163,6 +163,16 @@ export class NativeIntake {
     }
     await this.runner.explore(value, runtime);
     return this.status(runtime.sessionID);
+  }
+
+  /** The coordinator reports a phase it carried out itself instead of delegating it. */
+  async submit(value: unknown, runtime: Runtime): Promise<unknown> {
+    if (runtime.agent !== 'mdd-orchestrator' || !this.runner.submit) throw new Error('Only the coordinator may report a phase result.');
+    const entry = this.#sessions.get(runtime.sessionID);
+    if (entry && entry.state !== 'active') throw new Error('A phase cannot be reported before accepted preflight or its exact phase approval.');
+    const status = await this.runner.submit(value, runtime);
+    this.phaseRecorded(runtime.sessionID);
+    return entry ? this.status(runtime.sessionID) : status;
   }
 
   /**

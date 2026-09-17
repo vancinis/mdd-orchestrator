@@ -623,11 +623,54 @@ test('context accumulation is bounded without truncating results or advancing th
   assert.ok(final.contexts.every(context => Buffer.byteLength(context.artifact.content) === 16000));
 });
 
+// Delegation is the default route, never the only one: a subagent that cannot finish the work
+// must not be able to stop the user. The phase comes back to the coordinator instead.
+test('a failed delegation hands the phase to the coordinator, which finishes it inline', async t => {
+  const f = await fixture(t);
+  const initial = await f.status();
+  assert.equal(initial.mode, 'delegate');
+  assert.ok(initial.task, 'delegation is offered first');
+  await assert.rejects(f.phase({ badEnvelope: true }), /now yours/);
+  const handed = await f.status();
+  assert.equal(handed.state, 'ready');
+  assert.equal(handed.mode, 'inline');
+  assert.equal(handed.attempts, 1);
+  assert.match(handed.brief, /carrying this phase out yourself/);
+  assert.match(handed.brief, /Perform only mdd-plan/);
+  assert.match(handed.brief, /Requirements data/);
+  assert.ok(handed.task, 'delegating again stays allowed');
+  const done = JSON.parse(await f.hooks.tool.mdd_phase_result.execute({ result: {
+    phase: 'mdd-plan', runID: handed.runID, outcome: 'passed',
+    evidenceSummary: 'The coordinator planned the work directly after the subagent failed.',
+    artifact: 'Plan: implement the scoped feature and check it.',
+    ...traceFixture(join(f.root, 'feature.txt'), 'feature'),
+  } }, f.context));
+  assert.equal(done.workflow.results.length, 1);
+  assert.equal(done.workflow.results[0].phase, 'mdd-plan');
+  assert.equal(done.evidence.plan, 'confirmed');
+  assert.equal(done.task.subagent_type, 'mdd-apply');
+  assert.equal(done.mode, 'delegate', 'the next phase starts from delegation again');
+  assert.equal(JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context)).artifacts.length, 1);
+});
+
+test('an inline report is refused when no phase is waiting for one', async t => {
+  const f = await fixture(t, { start: false, memoryEnabled: false });
+  await assert.rejects(f.hooks.tool.mdd_phase_result.execute({ result: { phase: 'mdd-plan', runID: 'invented', outcome: 'passed', evidenceSummary: 'x', artifact: 'y' } }, f.context),
+    /No MDD run is waiting/);
+  f.user(f.requirements);
+  await f.hooks.tool.mdd_start.execute({ requirements: f.requirements }, f.context);
+  const ready = await f.status();
+  await assert.rejects(f.hooks.tool.mdd_phase_result.execute({ result: { phase: 'mdd-apply', runID: ready.runID, outcome: 'passed', evidenceSummary: 'x', artifact: 'y' } }, f.context),
+    /binding or outcome/);
+  // A rejected report is an attempt like any other: the phase stays runnable.
+  assert.equal((await f.status()).state, 'ready');
+});
+
 test('MDD tools belong to the coordinator and are withdrawn from every other agent', async t => {
   const f = await fixture(t, { start: false });
   const foreign = { ...f.context, agent: 'gentle-ai' };
   const args = { requirements: 'x', userText: 'x', purpose: 'x', kind: 'rerun', scope: 'run' };
-  for (const name of ['mdd_status', 'mdd_start', 'mdd_reset', 'mdd_change_request', 'mdd_contextual_explore', 'mdd_pr_body']) {
+  for (const name of ['mdd_status', 'mdd_start', 'mdd_phase_result', 'mdd_reset', 'mdd_change_request', 'mdd_contextual_explore', 'mdd_pr_body']) {
     await assert.rejects(f.hooks.tool[name].execute(args, foreign), /mdd-orchestrator/, `${name} answered a foreign agent`);
   }
   const config = { agent: { 'gentle-ai': {}, 'mdd-orchestrator': {} } };

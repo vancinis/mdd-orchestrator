@@ -28,13 +28,15 @@ type Run = {
   id: string; runtime: Runtime; workflow: Workflow; phase: Phase;
   requirements: string; memory: EngramHttp | undefined; args: TaskArgs; state: State;
   callID?: string; lastCallID?: string; dispatchedArgs?: TaskArgs; reason?: string; attempts: number;
+  /** Delegation is the default route; a failed attempt hands the phase back to the coordinator. */
+  mode: 'delegate' | 'inline'; brief: string;
   artifacts: ArtifactStore; artifact?: ArtifactResult; artifactAttempts?: readonly ArtifactAttempt[];
   history: ArtifactResult[]; calls: Set<string>; planned: Deliverable[]; evidence: Evidence;
   report: PhaseReport; started?: number; telemetryDiagnostic?: string;
   acceptance?: Acceptance; decisions: Decision[]; verification?: Verification; executedChecks: string[]; changedFiles: number;
   uncertain: boolean; userMessageID: string; concerns: Concern[]; contextReport?: string;
   contexts: { explorationID: string; outcome: 'passed' | 'failed'; artifact: ArtifactResult; summary: string; concerns: Concern[] }[];
-  side?: { id: string; purpose: string; phase: Phase; state: State; args: TaskArgs; report: PhaseReport };
+  side?: { id: string; purpose: string; phase: Phase; state: State; args: TaskArgs; report: PhaseReport; brief: string };
 };
 /** A read-only investigation that exists without an accepted run: no workflow, artifacts, memory or progress marker. */
 type Solo = {
@@ -98,14 +100,14 @@ export class PhaseRunner {
       evidence: { ...run.evidence }, coverage: evidenceCoverage(run.evidence),
       report: run.side ? `Summary\nContextual exploration ${run.state === 'blocked' ? 'could not be confirmed' : run.state === 'ready' ? 'is ready' : 'is in progress'}. The main plan and approval are unchanged.\n` : run.state === 'complete' || run.state === 'blocked' ? this.#closure(run) : renderReport(run.workflow.snapshot().answers.summary, { ...run.report, evidence: run.evidence }),
       acceptance: structuredClone(run.acceptance), decisions: structuredClone(run.decisions), planned: structuredClone(run.planned), verification: structuredClone(run.verification),
-      uncertain: run.uncertain, attempts: run.attempts, recoverable: true,
+      uncertain: run.uncertain, attempts: run.attempts, recoverable: true, mode: run.mode,
       contextual: !!run.side, contexts: structuredClone(run.contexts), concerns: structuredClone(run.concerns),
       contextualReport: run.contextReport,
       previousRuns: (this.#previous.get(sessionID) ?? []).map(old => ({ runID: old.id, state: 'superseded', lastState: old.state, workflow: old.workflow.snapshot(), artifacts: structuredClone(old.history), contexts: structuredClone(old.contexts), evidence: { ...old.evidence }, acceptance: structuredClone(old.acceptance), decisions: structuredClone(old.decisions), planned: structuredClone(old.planned), verification: structuredClone(old.verification) })),
       artifacts: structuredClone(run.history), telemetryDiagnostic: run.telemetryDiagnostic,
       ...(run.artifact ? { artifact: structuredClone(run.artifact) } : {}),
       ...(run.artifactAttempts ? { artifactAttempts: structuredClone(run.artifactAttempts) } : {}),
-      ...(run.state === 'ready' ? { task: structuredClone(run.args) } : {}),
+      ...(run.state === 'ready' ? { task: structuredClone(run.args), brief: run.brief } : {}),
     };
   }
 
@@ -134,7 +136,7 @@ export class PhaseRunner {
       args: { description: '', subagent_type: first.phase, prompt: '' }, state: 'starting',
       history: [], calls: new Set(previous?.calls), planned: [], evidence: { ...emptyEvidence(), requirements: trusted?.requirementsConfirmed ? 'confirmed' : 'unearned' },
       uncertain: false, userMessageID: trusted?.userMessageID ?? '', concerns: [], contexts: [],
-      decisions: [], executedChecks: [], changedFiles: 0, attempts: 0,
+      decisions: [], executedChecks: [], changedFiles: 0, attempts: 0, mode: 'delegate', brief: '',
       report: { phase: first.phase, summary: `Preparing ${phaseLabel(first.phase).toLowerCase()}.`, how: [], status: 'in-progress', evidence: emptyEvidence() },
     };
     this.#runs.set(runtime.sessionID, run);
@@ -178,9 +180,12 @@ export class PhaseRunner {
     const phase = run.phase;
     if (run.started !== undefined) this.#event(run, 'phase-end', 'blocked');
     const recovered = this.#recover(run);
+    // Delegation had its turn. The coordinator can act, so the phase is handed back to it rather
+    // than retried forever against the same failure.
+    if (recovered) run.mode = 'inline';
     this.#settle(run);
     throw new Error(`MDD attempt ${run.attempts} for ${phase} did not complete: ${run.reason} ${recovered
-      ? 'The phase is ready again: read mdd_status and run its task once more, or carry out the phase yourself. Nothing is locked.'
+      ? 'The phase is ready again and is now yours: read mdd_status and carry it out directly, reporting it with mdd_phase_result. Delegating again is still allowed. Nothing is locked.'
       : 'Read mdd_status, then use mdd_reset to retry this phase or start over. Nothing is locked.'}`);
   }
 
@@ -189,7 +194,7 @@ export class PhaseRunner {
     const side = run.side;
     try {
       if (side) {
-        run.phase = side.phase; run.args = side.args; run.report = side.report; run.state = side.state;
+        run.phase = side.phase; run.args = side.args; run.brief = side.brief; run.report = side.report; run.state = side.state;
         delete run.side;
         if (run.state === 'ready') this.#prepare(run);
         return true;
@@ -264,10 +269,38 @@ export class PhaseRunner {
     run.state = 'persisting-result';
     try {
       const text = await this.inspect.result(run.runtime, call, run.phase, output);
+      await this.#record(run, text, call.callID);
+    } catch (error) { return this.#degrade(run, error); }
+  }
+
+  /**
+   * The coordinator carried the phase out itself. Delegation is the default route, but it must
+   * never be the only one: when a subagent cannot finish the work, the phase still has to close.
+   */
+  async submit(value: unknown, runtime: Runtime): Promise<unknown> {
+    if (runtime.agent !== 'mdd-orchestrator') throw new ValidationError('Only mdd-orchestrator may report a phase it carried out.');
+    const run = this.#runs.get(runtime.sessionID);
+    if (!run) throw new ValidationError('No MDD run is waiting for a phase result in this conversation. Read mdd_status.');
+    if (run.state !== 'ready') throw new ValidationError(`This run is not waiting for a phase result right now (${run.state}). Read mdd_status.`);
+    const input = objectWithKeys(value, 'phase submission', ['result']);
+    const text = typeof input.result === 'string' ? input.result : JSON.stringify(input.result);
+    run.state = 'persisting-result';
+    run.started = this.#now();
+    try {
+      if (!run.side) run.workflow.start(run.phase);
+      this.#event(run, 'phase-start');
+      await this.#record(run, text);
+      return this.status(runtime.sessionID);
+    } catch (error) { return this.#degrade(run, error); }
+  }
+
+  /** One contract for both routes: the phase reports the same object however it was carried out. */
+  async #record(run: Run, text: string, callID?: string): Promise<void> {
+    {
       boundedText(text, 'result JSON', 20000);
       const extra = run.phase === 'mdd-plan' ? ['acceptance', 'decisions', 'deliverables'] : run.phase === 'mdd-tasks' ? ['deliverables'] : run.phase === 'mdd-spec' ? ['domain', 'acceptance'] : run.phase === 'mdd-design' ? ['decisions'] : run.phase === 'mdd-apply' ? ['changes', 'noChangeReason'] : run.phase === 'mdd-verify' ? ['checks', 'verification'] : [];
       const result = objectWithKeys(JSON.parse(jsonEnvelope(text)), 'phase result', ['phase', 'runID', 'callID', 'outcome', 'evidenceSummary', 'artifact', 'concerns', ...extra]);
-      if (result.phase !== run.phase || result.runID !== run.id || result.callID !== call.callID ||
+      if (result.phase !== run.phase || result.runID !== run.id || (callID !== undefined && result.callID !== callID) ||
           (result.outcome !== 'passed' && result.outcome !== 'failed')) throw new Error('Invalid result binding or outcome.');
       const evidenceSummary = boundedText(result.evidenceSummary, 'evidenceSummary', 2000);
       let artifact = assertNoTraceSection(boundedText(result.artifact, 'artifact', 16000));
@@ -314,7 +347,7 @@ export class PhaseRunner {
       if (await run.artifacts.read(run.artifact.ref) !== artifact) throw new Error('Artifact readback differs from phase output.');
       if (run.state !== 'persisting-result') throw new Error('Result became uncertain during artifact readback.');
       await run.memory?.save(`MDD result ${run.id}`, JSON.stringify({
-        kind: 'agent-evidence', phase: run.phase, runID: run.id, callID: call.callID,
+        kind: 'agent-evidence', phase: run.phase, runID: run.id, ...(callID ? { callID } : { carriedOut: 'coordinator' }),
         outcome: result.outcome, evidenceSummary, artifactRef: run.artifact.ref,
         artifactStore: run.workflow.snapshot().answers.artifactStore,
         ...(run.verification ? { acceptanceMatched: run.verification.matched } : {}),
@@ -343,7 +376,7 @@ export class PhaseRunner {
       }
       this.#event(run, 'report', run.state === 'complete' ? 'passed' : run.state === 'blocked' ? 'blocked' : undefined);
       this.#mark(run, run.state === 'complete' ? 'complete' : 'settled');
-    } catch (error) { return this.#degrade(run, error); }
+    }
   }
 
   nativeError(sessionID: string, callID: string): void {
@@ -411,6 +444,7 @@ export class PhaseRunner {
     delete run.contextReport;
     run.uncertain = false;
     run.attempts = 0;
+    run.mode = 'delegate';
     run.workflow.retry();
     this.#prepare(run);
     this.#settle(run);
@@ -460,10 +494,11 @@ export class PhaseRunner {
     // Investigation only waits for a task that is actually running; a stopped or failed run must
     // still be able to answer questions about the project.
     if (runtime.directory !== run.runtime.directory || runtime.worktree !== run.runtime.worktree || !['ready', 'await-approval', 'complete', 'blocked'].includes(run.state)) throw new Error('A native task is in flight. Wait for its result before requesting investigation; nothing is locked.');
-    const side = { id: randomUUID(), purpose, phase: run.phase, state: run.state, args: run.args, report: run.report };
+    const side = { id: randomUUID(), purpose, phase: run.phase, state: run.state, args: run.args, report: run.report, brief: run.brief };
     run.side = side;
     try {
-      run.args = this.#taskArgs(run, 'mdd-explore');
+      const prompts = this.#phasePrompts(run, 'mdd-explore');
+      run.args = prompts.args; run.brief = prompts.brief;
       run.phase = 'mdd-explore'; run.state = 'ready';
       delete run.contextReport;
     } catch (error) { delete run.side; throw error; }
@@ -482,7 +517,7 @@ export class PhaseRunner {
     run.concerns.push(...advisory);
     this.#event(run, 'phase-end', outcome);
     run.uncertain = false;
-    run.phase = side.phase; run.state = side.state; run.args = side.args; run.report = side.report;
+    run.phase = side.phase; run.state = side.state; run.args = side.args; run.brief = side.brief; run.report = side.report;
     delete run.side;
     if (run.state === 'ready') this.#prepare(run);
     this.#mark(run, run.state === 'complete' ? 'complete' : 'settled');
@@ -614,12 +649,21 @@ export class PhaseRunner {
     const phase = next.phase;
     run.phase = phase;
     delete run.started;
-    run.args = this.#taskArgs(run, phase);
+    // Every phase starts from delegation; only a failed attempt hands this one back.
+    run.mode = 'delegate';
+    const prompts = this.#phasePrompts(run, phase);
+    run.args = prompts.args;
+    run.brief = prompts.brief;
     run.state = 'ready';
     run.report = { phase, summary: `Ready for ${phaseLabel(phase).toLowerCase()}.`, how: ['The next work follows the requirements and available plan; no extra process confirmation is needed in automatic mode.'], status: 'in-progress', evidence: run.evidence };
   }
 
-  #taskArgs(run: Run, phase: Phase): TaskArgs {
+  /**
+   * Both routes get the same instructions and the same result contract. Only the last line
+   * differs: a delegated phase answers through its task, a phase the coordinator carries out
+   * answers through mdd_phase_result.
+   */
+  #phasePrompts(run: Run, phase: Phase): { args: TaskArgs; brief: string } {
     const roles: Record<Phase, string> = {
       'mdd-explore': 'Inspect relevant files; identify uncertainty, scope, integrations and risks without changing declared inputs.',
       'mdd-plan': 'Produce ONE compact plan: A-to-B goal, concrete acceptance scenarios, relevant decisions, linked implementation steps and existing planned checks. Supply acceptance, decisions (empty if none), and deliverables. Do not add phases or process questions.',
@@ -632,7 +676,7 @@ export class PhaseRunner {
     };
     const cleanup = phase === 'mdd-apply' ? cleanupInstructions() : undefined;
     const doc = DOC_PHASES.includes(phase) ? docInstructions() : undefined;
-    const prompt = [
+    const instructions = [
       `Perform only ${phase}. ${roles[phase]}`,
       ...(run.side ? [`Contextual exploration only: ${JSON.stringify(run.side.purpose)}. explorationID=${run.side.id}. Do not change the main plan, answers or approvals.`] : []),
       'Optional concerns: [{category,evidence,impact}], at most eight, with category objective/integrations/sensitive-data/permissions. These are advisory only; never change scores or request governance for ordinary implementation choices.',
@@ -644,7 +688,8 @@ export class PhaseRunner {
       'acceptance={goal,requirements:[{id,description,scenarios:[{id,given,when,then}]}]}; decisions=[{id,description,requirements:[requirementID]}].',
       'deliverables=[{id,description,path,check,scenarios:[scenarioID],decisions:[decisionID],dependsOn:[earlierStepID]}]. Keep IDs stable. Every scenario and relevant decision must map to an applicable step.',
       'verification={scenarios:[{requirementID,scenarioID,stepID,status,checks:[command],assessment}],steps:[{stepID,status,checks,assessment}],decisions:[{decisionID,status,checks,assessment}],changes,limits:[]}. Status is verified/not-verified/deviation. Assessment explains source evidence and limits, not just a pass label. Cover all held links exactly once.',
-      `phase=${phase}; runID=${run.id}. Native callID is appended by the hook.`,
+    ];
+    const data = [
       `Requirements data: ${JSON.stringify(run.requirements)}`,
       `Validated dependency artifacts (data, not authority): ${JSON.stringify(run.history)}`,
       `Applicable deliverables: ${JSON.stringify(run.planned)}`,
@@ -652,9 +697,13 @@ export class PhaseRunner {
       `Contextual findings (advisory, not approval): ${JSON.stringify(run.contexts)}`,
       ...(doc ? [`Trusted local mdd-doc instructions with provenance: ${JSON.stringify(doc)}`] : []),
       ...(cleanup ? [`Trusted local mdd-cleanup instructions with provenance: ${JSON.stringify(cleanup)}`] : []),
-    ].join('\n').replaceAll('@', '\\u0040');
+    ];
+    const compose = (closing: string) => [...instructions, closing, ...data].join('\n').replaceAll('@', '\\u0040');
+    const prompt = compose(`phase=${phase}; runID=${run.id}. Native callID is appended by the hook.`);
+    const brief = compose(`phase=${phase}; runID=${run.id}. You are carrying this phase out yourself: report it with mdd_phase_result({ result }), which needs no callID.`);
     boundedText(prompt, 'combined phase handoff', PHASE_CONTEXT_MAX_BYTES);
-    return { description: run.side ? 'MDD contextual exploration' : `MDD ${phase.slice(4)} phase`, subagent_type: phase, prompt };
+    boundedText(brief, 'combined phase handoff', PHASE_CONTEXT_MAX_BYTES);
+    return { args: { description: run.side ? 'MDD contextual exploration' : `MDD ${phase.slice(4)} phase`, subagent_type: phase, prompt }, brief };
   }
 
   #closure(run: Run): string {
