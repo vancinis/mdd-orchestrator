@@ -1,0 +1,31 @@
+{
+  "name": "my-driven-development",
+  "version": "0.1.0",
+  "private": true,
+  "description": "OpenCode-first planned development with native consent and grounded verification",
+  "type": "module",
+  "bin": { "mdd": "dist/cli.js" },
+  "exports": { ".": "./dist/kernel.js", "./opencode-plugin": "./dist/opencode-plugin.js" },
+  "files": [
+    "dist/*.js", "dist/*.d.ts", "scripts/setup.mjs", "scripts/extract-engram.ps1", "assets/opencode",
+    "README.md", "docs/*.md", "docs/mdd-config.schema.json"
+  ],
+  "engines": {
+    "node": ">=24.6.0 <25"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc",
+    "test": "npm run build && node --import ./tests/isolate-home.mjs --test tests/*.test.mjs",
+    "proof": "node dist/cli.js",
+    "mdd": "node scripts/setup.mjs",
+    "setup": "node scripts/setup.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.4",
+    "typescript": "7.0.2"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "1.18.31"
+  }
+}

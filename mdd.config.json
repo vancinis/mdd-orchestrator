@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "activeProfile": "default",
+  "profiles": {
+    "default": {
+      "models": {},
+      "answers": {}
+    }
+  },
+  "telemetry": {
+    "enabled": true
+  }
+}

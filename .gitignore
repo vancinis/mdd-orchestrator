@@ -1,0 +1,14 @@
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+.codegraph/
+.atl/
+.mdd/telemetry.jsonl
+.mdd/telemetry.jsonl.*.tmp
+.mdd/telemetry.jsonl.lock
+.mdd/progress-*.json
+.mdd/progress-*.json.*.tmp
+.mdd/progress-*.json.lock
+mdd.config.json.*.tmp
+mdd.config.json.lock

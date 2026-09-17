@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MDD global settings version 1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "activeProfile", "profiles"],
+  "properties": {
+    "version": { "const": 1 },
+    "activeProfile": { "$ref": "#/$defs/name" },
+    "profiles": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 64,
+      "propertyNames": { "$ref": "#/$defs/name" },
+      "additionalProperties": { "$ref": "#/$defs/profile" }
+    },
+    "engram": {
+      "description": "Optional memory backend. Omission means off. mdd setup offers detection/reuse or explicit-consent installation; the runtime never installs or upgrades.",
+      "oneOf": [{
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["endpoint"],
+      "properties": {
+        "endpoint": {
+          "type": "string",
+          "pattern": "^http://127\\.0\\.0\\.1:[1-9][0-9]{0,4}/?$",
+          "description": "Runtime additionally checks that the explicit port is at most 65535."
+        },
+        "project": { "$ref": "#/$defs/name", "deprecated": true, "description": "Legacy field ignored by native runtime with a migration notice. The provider resolves each actual workspace independently." }
+      }
+      }, {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["mode", "binary", "dataDirectory"],
+        "properties": {
+          "mode": { "const": "local" },
+          "binary": { "type": "string", "minLength": 1, "description": "Absolute path to an already installed, approved Engram executable. Runtime validates absolute paths." },
+          "dataDirectory": { "type": "string", "minLength": 1, "description": "Absolute managed memory directory, normally the global OpenCode mdd/memory directory; records are bound to provider-resolved workspace identities." }
+        }
+      }]
+    },
+    "telemetry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": { "enabled": { "type": "boolean" } }
+    }
+  },
+  "$defs": {
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]*$",
+      "description": "Runtime also rejects prototype names and case-insensitive Windows device names. Active profile must exist."
+    },
+    "model": {
+      "type": "string",
+      "maxLength": 256,
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*(/[a-zA-Z0-9][a-zA-Z0-9_.:-]*)+$"
+    },
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "models": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "orchestrator": { "$ref": "#/$defs/model" },
+            "mdd-explore": { "$ref": "#/$defs/model" },
+            "mdd-plan": { "$ref": "#/$defs/model" },
+            "mdd-propose": { "$ref": "#/$defs/model" },
+            "mdd-spec": { "$ref": "#/$defs/model" },
+            "mdd-design": { "$ref": "#/$defs/model" },
+            "mdd-tasks": { "$ref": "#/$defs/model" },
+            "mdd-apply": { "$ref": "#/$defs/model" },
+            "mdd-verify": { "$ref": "#/$defs/model" }
+          }
+        },
+        "answers": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "certainty": { "enum": ["very-sure", "somewhat-sure", "not-sure"] },
+            "artifactStore": { "enum": ["engram", "openspec", "both", "none"] },
+            "mode": { "enum": ["interactive", "automatic"] },
+            "summary": { "enum": ["detailed", "medium", "low"] },
+            "complexity": { "enum": ["very-complex", "somewhat-complex", "not-complex"] }
+          }
+        }
+      }
+    }
+  }
+}

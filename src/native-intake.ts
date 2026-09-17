@@ -1,0 +1,302 @@
+import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
+import { EngramHttp } from './engram-http.js';
+import { boundedText } from './phase-runner.js';
+import type { PhaseRunner, Runtime, TaskCall } from './phase-runner.js';
+import { answersFromLabels, questionEnvelope } from './preflight.js';
+import type { QuestionEnvelope } from './preflight.js';
+import type { Answers, Phase } from './policy.js';
+import { freezeProfile, parseSettings } from './settings.js';
+import { ManagedMemory } from './managed-memory.js';
+import { objectWithKeys } from './validation.js';
+import { concerns } from './concerns.js';
+
+export type IntakeInspect = {
+  setupPending?(runtime: Runtime, requirements?: string, messageID?: string): Promise<{ requirements: string; userMessageID: string } | undefined>;
+  intake(runtime: Runtime, requirements: string, messageID: string): Promise<void | string>;
+  question(runtime: Runtime, call: TaskCall, args: QuestionEnvelope): Promise<void>;
+};
+type Runner = Pick<PhaseRunner, 'start' | 'status' | 'approveNative' | 'block'> & Partial<Pick<PhaseRunner, 'approvalStopped' | 'assertChangeable' | 'assertFreshStart' | 'explore'>>;
+type Slot = { kind: 'preflight' | 'approval' | 'change'; args: QuestionEnvelope; phase?: Phase; callID?: string; requirements?: string };
+type Intake = {
+  runtime: Runtime; requirements: string;
+  state: 'starting' | 'question-ready' | 'await-answer' | 'accepting' | 'active' | 'blocked' | 'stopped';
+  slot?: Slot; reason?: string;
+  provenance?: { requirements: 'native-user'; preflight: 'startup-profile' | 'native-question'; profile: string };
+  receipts: { kind: Slot['kind']; phase?: Phase; callID: string; answers: string[][]; cancelled?: true }[];
+  known: Partial<Answers>; userMessageID?: string; usedMessages: Set<string>; proposed: Set<string>; replacing?: true; notice?: string;
+  restore?: { state: Intake['state']; slot?: Slot; requirements: string; known: Partial<Answers>; userMessageID?: string };
+  memory?: { endpoint: string; project: string };
+};
+
+export function approvalEnvelope(runID: string, phase: Phase): QuestionEnvelope {
+  return { questions: [{ header: 'Approval', question: `Proceed with ${phase} for MDD run ${runID}? This authorizes only this phase; native permission requests still apply.`, multiple: false,
+    options: [{ label: 'Proceed', description: 'Authorize this phase only.' }, { label: 'Stop', description: 'Stop without authorizing this phase.' }] }] };
+}
+
+export function nativeQuestionAnswers(args: QuestionEnvelope, raw: unknown): string[][] {
+  const result = objectWithKeys(raw, 'native question output', ['title', 'output', 'metadata', 'attachments']);
+  const metadata = objectWithKeys(result.metadata, 'native question metadata', ['answers', 'truncated']);
+  if (metadata.truncated !== false || (result.attachments !== undefined && (!Array.isArray(result.attachments) || result.attachments.length))) {
+    throw new Error('Unknown or truncated native question result.');
+  }
+  const answers = metadata.answers;
+  if (!Array.isArray(answers) || answers.length !== args.questions.length) throw new Error('Native question answer count mismatch.');
+  const selections = args.questions.map((question, index) => {
+    const selected: unknown = answers[index];
+    if (!Array.isArray(selected) || selected.length !== 1 || typeof selected[0] !== 'string' ||
+        !question.options.some(option => option.label === selected[0])) throw new Error('Invalid native question answer label.');
+    return [selected[0]];
+  });
+  const formatted = args.questions.map((q, i) => `"${q.question}"="${selections[i]!.join(', ')}"`).join(', ');
+  if (result.title !== `Asked ${args.questions.length} question${args.questions.length > 1 ? 's' : ''}` ||
+      result.output !== `User has answered your questions: ${formatted}. You can now continue with the user's answers in mind.`) {
+    throw new Error('Native question output does not match its answer metadata.');
+  }
+  return selections;
+}
+
+export class NativeIntake {
+  readonly #sessions = new Map<string, Intake>();
+  readonly #questionOwners = new Map<QuestionEnvelope, string>();
+  readonly #settings;
+  readonly #profile;
+  readonly #managed;
+  constructor(readonly runner: Runner, readonly inspect: IntakeInspect, settings: unknown) {
+    this.#settings = parseSettings(settings);
+    this.#profile = freezeProfile(this.#settings);
+    this.#managed = this.#settings.engram && 'mode' in this.#settings.engram ? new ManagedMemory(this.#settings.engram) : undefined;
+  }
+
+  async close(): Promise<void> { await this.#managed?.close(); }
+
+  async start(value: unknown, runtime: Runtime, messageID: string): Promise<unknown> {
+    if (runtime.agent !== 'mdd-orchestrator') throw new Error('Only mdd-orchestrator may start MDD.');
+    this.runner.assertFreshStart?.(runtime.sessionID);
+    const previous = this.#sessions.get(runtime.sessionID);
+    if (previous) {
+      // An intake that never reached a run has nothing to protect. Refusing it would strand the
+      // conversation: change requests need a run, so a failed intake could never be replaced.
+      const state = this.runner.status(runtime.sessionID).state;
+      const replaceable = state === 'complete' ||
+        (state === 'not-started' && ['blocked', 'stopped'].includes(previous.state));
+      if (!replaceable) throw new Error('This parent already has an MDD intake; use mdd_status or request a confirmed change.');
+    }
+    const input = objectWithKeys(value, 'start', ['requirements']);
+    const requirements = boundedText(input.requirements, 'requirements', 12000);
+    const engram = this.#settings.engram;
+    const pending = !previous && this.runner.status?.(runtime.sessionID).state !== 'complete' ? await this.inspect.setupPending?.(runtime, requirements, boundedText(messageID, 'native messageID', 256)) : undefined;
+    if (pending && pending.requirements !== requirements) throw new Error('The original objective is pending. Resubmit its exact pendingStart arguments, not continuation text. For a different objective, use a fresh parent.');
+    if (this.#sessions.get(runtime.sessionID) !== previous) throw new Error('Intake changed during setup inspection; read mdd_status.');
+    const entry: Intake = { runtime: { ...runtime }, requirements, state: 'starting', receipts: previous?.receipts ?? [], known: { ...this.#profile.answers }, usedMessages: new Set(previous?.usedMessages), proposed: new Set(previous?.proposed), ...(previous ? { replacing: true } : {}) };
+    if (previous) entry.restore = { state: previous.state, requirements: previous.requirements, known: previous.known, ...(previous.slot ? { slot: previous.slot } : {}), ...(previous.userMessageID ? { userMessageID: previous.userMessageID } : {}) };
+    this.#sessions.set(runtime.sessionID, entry);
+    try {
+      const userID = pending?.userMessageID ?? await this.inspect.intake(entry.runtime, requirements, boundedText(messageID, 'native messageID', 256));
+      if (typeof userID === 'string') {
+        if (entry.usedMessages.has(userID)) throw new Error('This user message was already used; wait for an actual new request.');
+        entry.userMessageID = userID; entry.usedMessages.add(userID);
+        this.runner.assertFreshStart?.(runtime.sessionID, userID);
+      } else if (previous) throw new Error('A fresh native user identity is required for another run.');
+      if (!engram && ['engram', 'both'].includes(entry.known.artifactStore ?? '')) {
+        delete entry.known.artifactStore;
+        entry.notice = 'The saved artifact choice requires optional Engram memory, which is off. Choose a compatible artifact store for this run; the saved profile is unchanged.';
+      }
+      if (engram) {
+        const endpoint = 'endpoint' in engram ? engram.endpoint : await this.#managed!.endpoint();
+        const client = new EngramHttp(endpoint, { id: runtime.sessionID, project: '', directory: runtime.directory });
+        await client.bootstrap();
+        if ('project' in engram && engram.project) entry.notice = 'The deprecated Engram project setting is ignored. Memory is bound to the provider-resolved active workspace; remove project from global settings using mdd config.';
+        entry.memory = { endpoint, project: client.project };
+      }
+      if (entry.state !== 'starting') throw new Error('Intake became uncertain during initialization.');
+      const args = questionEnvelope(entry.known, !!engram);
+      if (args.questions.length) {
+        const id = randomUUID();
+        for (const q of args.questions) q.question += ` [MDD intake ${id}]`;
+        this.#slot(entry, { kind: 'preflight', args });
+      } else await this.#startRunner(entry, [], 'startup-profile');
+      return this.status(runtime.sessionID);
+    } catch (error) {
+      if (previous) { this.#sessions.set(runtime.sessionID, previous); throw error; }
+      return this.#fail(entry, error);
+    }
+  }
+
+  async changeRequest(value: unknown, runtime: Runtime, messageID: string): Promise<unknown> {
+    const input = objectWithKeys(value, 'change request', ['kind', 'userText', 'requirements', 'concerns']);
+    if (runtime.agent !== 'mdd-orchestrator' || !['rerun', 'material'].includes(String(input.kind))) throw new Error('Only the coordinator may request a rerun or material change.');
+    const entry = this.#sessions.get(runtime.sessionID);
+    if (!entry || entry.restore || !['active', 'question-ready', 'stopped', 'blocked'].includes(entry.state) ||
+        (entry.state === 'question-ready' && entry.slot?.kind !== 'approval') ||
+        (entry.state === 'blocked' && entry.slot?.callID && !entry.receipts.some(item => item.callID === entry.slot!.callID))) throw new Error('Finish or dismiss the current native interaction before requesting a change.');
+    if (this.runner.status(runtime.sessionID).state !== 'not-started') this.runner.assertChangeable?.(runtime.sessionID);
+    const userText = boundedText(input.userText, 'actual user request', 12000);
+    const advisory = concerns(input.concerns);
+    const requirements = input.kind === 'rerun' ? entry.requirements : boundedText(input.requirements, 'proposed requirements', 12000);
+    if (input.kind === 'rerun' && (input.requirements !== undefined || advisory.length)) throw new Error('A preflight rerun retains requirements; use material change for a new objective.');
+    if (input.kind === 'material' && (!advisory.length || requirements.trim() === entry.requirements.trim())) throw new Error('Material change requires changed requirements and explicit advisory evidence. Ordinary plan choices do not require this path.');
+    const saved = { state: entry.state, requirements: entry.requirements, known: entry.known, ...(entry.slot ? { slot: entry.slot } : {}), ...(entry.userMessageID ? { userMessageID: entry.userMessageID } : {}) };
+    entry.state = 'accepting';
+    try {
+      const userID = await this.inspect.intake(runtime, userText, boundedText(messageID, 'native messageID', 256));
+      const status = this.runner.status(runtime.sessionID);
+      const backedConcern = input.kind === 'material' && 'concerns' in status && advisory.every(item => status.concerns.some(known => isDeepStrictEqual(known, item)));
+      if (!userID || (entry.usedMessages.has(userID) && !backedConcern)) throw new Error('Change requests require a fresh actual user message or a recorded material concern, not a model approval claim.');
+      const proposal = JSON.stringify([userID, input.kind, requirements.trim(), advisory.map(item => JSON.stringify(item)).sort()]);
+      if (entry.proposed.has(proposal)) throw new Error('This change proposal was already presented. Do not repeat it without a new user request.');
+      if (entry.state !== 'accepting') throw new Error('Change validation was interrupted.');
+      entry.proposed.add(proposal); entry.usedMessages.add(userID); entry.userMessageID = userID; entry.restore = saved;
+      const question = `${input.kind === 'rerun' ? 'Rerun all five preflight questions for a new planned run?' : 'Confirm this material scope change and new planned run?'} Current artifacts and memory will be retained. Proposed requirements: ${requirements}${advisory.length ? ` Advisory evidence: ${JSON.stringify(advisory)}` : ''} [MDD change ${randomUUID()}]`;
+      this.#slot(entry, { kind: 'change', requirements, args: { questions: [{ header: 'Change', question, multiple: false, options: [{ label: 'Confirm change', description: 'Answer preflight once, then start a new planned run.' }, { label: 'Keep current plan', description: 'Do not change the current run, answers, or approval.' }] }] } });
+      return this.status(runtime.sessionID);
+    } catch (error) { entry.state = saved.state; throw error; }
+  }
+
+  /** Read-only investigation needs no accepted run; it only waits for a pending native interaction. */
+  async explore(value: unknown, runtime: Runtime): Promise<unknown> {
+    if (runtime.agent !== 'mdd-orchestrator' || !this.runner.explore) throw new Error('Only the coordinator may request read-only investigation.');
+    const entry = this.#sessions.get(runtime.sessionID);
+    if (entry && (entry.restore || ['starting', 'accepting', 'await-answer'].includes(entry.state) ||
+        (entry.state === 'question-ready' && entry.slot?.kind !== 'approval'))) {
+      throw new Error('A native question is pending. Let the user answer it before requesting investigation.');
+    }
+    await this.runner.explore(value, runtime);
+    return this.status(runtime.sessionID);
+  }
+
+  status(sessionID: string) {
+    const entry = this.#sessions.get(sessionID);
+    const status = this.runner.status?.(sessionID) ?? { state: 'not-started' };
+    const memory = this.#settings.engram ? 'enabled' : 'off';
+    if (!entry) return { ...status, memory, question: undefined, provenance: undefined, questionReceipts: [] };
+    const side = 'contextual' in status && status.contextual;
+    const state = entry.state === 'active' || side ? status.state : entry.state;
+    return { ...status, state, memory, ...(entry.reason ? { reason: entry.reason } : {}),
+      task: (entry.state === 'active' || side) && 'task' in status ? status.task : undefined,
+      ...(entry.state !== 'active' && !side ? { next: { kind: entry.state === 'question-ready' ? 'question' : 'wait', ...(entry.slot?.phase ? { phase: entry.slot.phase } : {}) } } : {}),
+      question: entry.state === 'question-ready' && !side ? structuredClone(entry.slot!.args) : undefined,
+      notice: entry.notice,
+      provenance: entry.provenance ? { ...entry.provenance } : undefined,
+      questionReceipts: structuredClone(entry.receipts),
+      ...(entry.state === 'await-answer' ? { reason: 'Native question is pending or uncertain. Do not repeat it or dispatch a task.' } : {}),
+    };
+  }
+
+  async beforeQuestion(call: TaskCall, args: unknown): Promise<void> {
+    const entry = this.#entry(call, args);
+    if (!entry) return;
+    const status = this.runner.status(call.sessionID);
+    if ('contextual' in status && status.contextual) throw new Error('Wait for the contextual exploration before answering the main approval.');
+    if (entry.state === 'question-ready' && !isDeepStrictEqual(args, entry.slot?.args)) throw new Error('Question arguments differ from the pending question; no answer was accepted.');
+    if (entry.state !== 'question-ready') return this.#fail(entry, new Error('Unexpected, duplicate, or changed native question.'));
+    entry.state = 'accepting';
+    try {
+      entry.slot!.callID = boundedText(call.callID, 'native question callID', 256);
+      if (entry.receipts.some(receipt => receipt.callID === call.callID)) throw new Error('Native question call ID was already consumed.');
+      await this.inspect.question(entry.runtime, call, entry.slot!.args);
+      if (entry.state !== 'accepting') throw new Error('Question became uncertain before execution.');
+      entry.state = 'await-answer';
+    } catch (error) { this.#fail(entry, error); }
+  }
+
+  async afterQuestion(call: TaskCall, args: unknown, output: unknown): Promise<void> {
+    const entry = this.#entry(call, args);
+    if (!entry) return;
+    const slot = entry.slot;
+    if (entry.state !== 'await-answer' || !slot || slot.callID !== call.callID || !isDeepStrictEqual(args, slot.args)) {
+      return this.#fail(entry, new Error('Native answer does not match the pending parent, call, and question.'));
+    }
+    entry.state = 'accepting';
+    try {
+      await this.inspect.question(entry.runtime, call, slot.args);
+      if (entry.state !== 'accepting') throw new Error('Question became uncertain during result inspection.');
+      const selections = nativeQuestionAnswers(slot.args, output);
+      if (slot.kind === 'change') {
+        if (selections[0]![0] === 'Keep current plan') this.#restore(entry, 'Kept the current plan, answers and approval unchanged.');
+        else {
+          entry.requirements = slot.requirements!; entry.known = {}; entry.replacing = true;
+          const args = questionEnvelope({}, !!this.#settings.engram);
+          for (const question of args.questions) question.question += ` [MDD re-preflight ${randomUUID()}]`;
+          this.#slot(entry, { kind: 'preflight', args });
+        }
+      } else if (slot.kind === 'preflight') await this.#startRunner(entry, selections, 'native-question');
+      else if (selections[0]![0] === 'Stop') {
+        entry.state = 'stopped';
+        entry.reason = 'The user stopped at the phase approval boundary. No phase was authorized.';
+        this.runner.approvalStopped?.(call.sessionID);
+        this.runner.block(call.sessionID, entry.reason);
+      } else {
+        this.runner.approveNative(call.sessionID, slot.phase!);
+        entry.state = 'active';
+      }
+      entry.receipts.push({ kind: slot.kind, ...(slot.phase ? { phase: slot.phase } : {}), callID: call.callID, answers: selections });
+    } catch (error) { this.#fail(entry, error); }
+  }
+
+  phaseRecorded(sessionID: string): void {
+    const entry = this.#sessions.get(sessionID);
+    if (!entry || entry.state !== 'active') return;
+    const status = this.runner.status(sessionID);
+    if (!('workflow' in status) || status.state === 'blocked') return;
+    const next = status.workflow.nextAction;
+    if (next.kind === 'approve') this.#slot(entry, { kind: 'approval', phase: next.phase, args: approvalEnvelope(status.runID, next.phase) });
+  }
+
+  guardTask(sessionID: string): void {
+    const entry = this.#sessions.get(sessionID);
+    const status = this.runner.status(sessionID);
+    if ('contextual' in status && status.contextual) return;
+    if (entry && entry.state !== 'active') throw new Error('A task cannot execute before accepted preflight or its exact phase approval.');
+  }
+
+  nativeError(call: TaskCall): void {
+    const entry = this.#sessions.get(call.sessionID);
+    if (!entry || entry.slot?.callID !== call.callID || !['accepting', 'await-answer'].includes(entry.state)) return;
+    entry.receipts.push({ kind: entry.slot.kind, callID: call.callID, answers: [], cancelled: true });
+    if (entry.restore) { this.#restore(entry, 'Change cancelled; the current plan and approval are unchanged.'); return; }
+    entry.state = 'stopped';
+    entry.reason = 'The native question failed or was dismissed. No approval was recorded; do not repeat or dispatch.';
+    this.runner.block(call.sessionID, entry.reason);
+  }
+
+  #entry(call: TaskCall, args: unknown): Intake | undefined {
+    const owner = [...this.#questionOwners].find(([question]) => isDeepStrictEqual(question, args))?.[1];
+    if (owner !== undefined && owner !== call.sessionID) throw new Error('MDD question belongs to another parent.');
+    return this.#sessions.get(call.sessionID);
+  }
+
+  #slot(entry: Intake, slot: Slot): void {
+    entry.slot = structuredClone(slot);
+    entry.state = 'question-ready';
+    this.#questionOwners.set(entry.slot.args, entry.runtime.sessionID);
+  }
+
+  async #startRunner(entry: Intake, selections: unknown, source: 'startup-profile' | 'native-question'): Promise<void> {
+    const expectedState = entry.state;
+    const engram = entry.memory;
+    await this.runner.start({ requirements: entry.requirements, preflight: { answers: answersFromLabels(entry.known, selections) },
+      ...(engram ? { engramEndpoint: engram.endpoint, project: engram.project } : {}) }, entry.runtime, { requirementsConfirmed: true, ...(entry.replacing ? { replace: true } : {}), ...(entry.userMessageID ? { userMessageID: entry.userMessageID } : {}) });
+    if (entry.state !== expectedState) throw new Error('Intake became uncertain during runner initialization.');
+    entry.provenance = { requirements: 'native-user', preflight: source, profile: this.#profile.name };
+    entry.state = 'active';
+    delete entry.restore; delete entry.replacing; delete entry.reason;
+    entry.notice = 'The planned run is ready. Previous run evidence is retained.';
+  }
+
+  #restore(entry: Intake, notice: string): void {
+    const saved = entry.restore;
+    if (!saved) throw new Error('No unchanged run is available to restore.');
+    delete entry.slot; delete entry.userMessageID;
+    Object.assign(entry, saved);
+    delete entry.restore; delete entry.replacing; delete entry.reason;
+    entry.notice = notice;
+  }
+
+  #fail(entry: Intake, error: unknown): never {
+    entry.state = 'blocked';
+    entry.reason = error instanceof Error ? error.message : 'Unknown native intake outcome.';
+    this.runner.block(entry.runtime.sessionID, entry.reason);
+    throw new Error(`MDD intake blocked: ${entry.reason} No automatic retry is available.`);
+  }
+}
