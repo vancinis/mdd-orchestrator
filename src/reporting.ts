@@ -36,7 +36,7 @@ function parseEvidence(value: unknown): Evidence {
   return result;
 }
 
-/** The adapter, not model output, must corroborate confirmations and affected flags. */
+/** The adapter, not model output, decides which flags a phase earned and which it withdrew. */
 export function invalidateEvidence(value: Evidence, affected: readonly EvidenceFlag[]): Evidence {
   const result = parseEvidence(value);
   if (!Array.isArray(affected) || affected.length === 0) throw new ValidationError('Name the evidence affected by the failure.');

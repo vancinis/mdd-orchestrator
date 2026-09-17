@@ -45,7 +45,7 @@ const noMemory = { detect: () => ({ status: 'not-found' }), installMemory: () =>
 
 test('installer sources, packaged assets and setup docs are normalized UTF-8', () => {
   for (const name of [...MDD_ASSETS, 'README.md', 'docs/setup.md', 'AGENTS.md', 'package.json',
-    ...['setup', 'setup-ui', 'engram-install', 'project-assets', 'safe-paths', 'pr-body', 'doctor', 'settings', 'settings-cli', 'config-ui', 'tui', 'model-catalog', 'cli', 'local-files'].map(name => `src/${name}.ts`),
+    ...['setup', 'setup-ui', 'engram-install', 'project-assets', 'safe-paths', 'command-link', 'pr-body', 'doctor', 'settings', 'settings-cli', 'config-ui', 'tui', 'model-catalog', 'cli', 'local-files'].map(name => `src/${name}.ts`),
     'scripts/setup.mjs', 'scripts/extract-engram.ps1', 'tests/setup-ui.test.mjs']) {
     const bytes = fs.readFileSync(name); const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
     assert.notEqual(bytes.subarray(0, 3).toString('hex'), 'efbbbf', name);

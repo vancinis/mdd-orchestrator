@@ -41,8 +41,8 @@ export async function prepareSource(directory, io, execute = spawnSync, npmPath 
 
 if (process.argv[1] && resolveEntry(process.argv[1]) === fileURLToPath(import.meta.url)) {
 try {
-  const forwarded = args.length && ['config', 'profile', 'telemetry', 'doctor', 'init', 'setup', 'update', '--help', '--answers', '--profile'].includes(args[0]) ? args : ['setup', ...args];
-  if (['setup', 'update', 'init', 'doctor'].includes(forwarded[0]) && forwarded.length > 1) throw new Error(`Usage: mdd ${forwarded[0]}. Target directories are retired; installation is global.`);
+  const forwarded = args.length && ['config', 'profile', 'telemetry', 'doctor', 'init', 'setup', 'update', 'link', '--help', '--answers', '--profile'].includes(args[0]) ? args : ['setup', ...args];
+  if (['setup', 'update', 'init', 'doctor', 'link'].includes(forwarded[0]) && forwarded.length > 1) throw new Error(`Usage: mdd ${forwarded[0]}. Target directories are retired; installation is global.`);
   if (args.includes('--help') && !fs.existsSync(cli)) {
     console.log('MDD setup: npm run setup\nInstalación global interactiva y con consentimiento explícito. La preparación del código fuente se aprueba por separado. Engram es opcional. --help no hace ningún cambio.');
   } else {

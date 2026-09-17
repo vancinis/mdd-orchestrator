@@ -94,7 +94,7 @@ export class PhaseRunner {
       runID: run.id, sessionID, phase: run.phase, state: run.state,
       reason: run.reason ?? (run.state === 'await-result'
         ? 'The dispatched task has not reported yet. Wait for it rather than redispatching; if it fails, this phase returns to ready on its own.'
-        : run.state === 'complete' ? 'Final Verify checks corroborated. Evidence coverage is not correctness probability.' : ''),
+        : run.state === 'complete' ? 'Final Verify reported its checks. Evidence coverage records what each phase reported; it is not correctness probability.' : ''),
       workflow: run.workflow.snapshot(),
       next: run.workflow.nextAction(),
       evidence: { ...run.evidence }, coverage: evidenceCoverage(run.evidence),
