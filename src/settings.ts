@@ -31,8 +31,8 @@ export function profileName(value: unknown): string {
 
 export function parseModel(value: unknown): string {
   if (typeof value !== 'string' || value.length > 256 ||
-      !/^[a-zA-Z0-9][a-zA-Z0-9_.:-]*(\/[a-zA-Z0-9][a-zA-Z0-9_.:-]*)+$/.test(value)) {
-    throw new ValidationError('Model must be provider/model, optionally with a nested model path; blank means inherit in the editor.');
+      !/^[a-zA-Z0-9][a-zA-Z0-9_.:-]*(\/[a-zA-Z0-9][a-zA-Z0-9_.:-]*)+(#[a-zA-Z0-9][a-zA-Z0-9_.-]*)?$/.test(value)) {
+    throw new ValidationError('Model must be provider/model, optionally with a nested model path and a #variant reasoning-effort suffix; blank means inherit in the editor.');
   }
   return value;
 }

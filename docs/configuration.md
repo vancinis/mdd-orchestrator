@@ -35,11 +35,17 @@ The top-level entries are **Perfiles**, **Modelos**, **Respuestas de preflight**
 **Memoria (Engram)**, **Telemetría**, **Guardar y salir** and **Cancelar**.
 
 Option labels are display-only Spanish; the preflight answer tokens stored in
-`mdd.config.json` and exchanged with the native question tool are unchanged. Models and the
-Engram endpoint stay free text, where Enter keeps the value and `-` clears it. Preflight
-answers include an explicit **Sin responder** entry. Use `mdd setup` for automatic binary
-detection and managed local memory. `:cancel`, Esc, EOF, or Ctrl+C discards the entire draft.
-No writes occur before Save.
+`mdd.config.json` and exchanged with the native question tool are unchanged. When the
+installed OpenCode catalog is reachable, **Modelos** walks each of the nine roles through
+**proveedor → modelo → esfuerzo**: pick a provider, pick one of its models, then optionally
+pick a reasoning-effort variant declared for that exact model (`Por defecto del modelo` keeps
+none). Effort is always optional and per-model; models without declared variants skip that
+step. A chosen effort is stored as a `provider/model#variant` selector. If the catalog (or one
+provider's variant list) is unavailable, models fall back to free text, where Enter keeps the
+value and `-` clears it; the same `#variant` suffix can still be typed by hand. The Engram
+endpoint is always free text. Preflight answers include an explicit **Sin responder** entry.
+Use `mdd setup` for automatic binary detection and managed local memory. `:cancel`, Esc, EOF,
+or Ctrl+C discards the entire draft. No writes occur before Save.
 Non-TTY input fails immediately instead of waiting. Profile `create` creates an empty
 profile and makes it active; it never copies another profile's answers.
 
@@ -85,7 +91,7 @@ no Engram setup, and telemetry enabled. Reading never creates a settings file.
 |---|---|
 | `version`, `activeProfile`, `profiles` | Required. Version exactly 1; active name must exist; 1–64 profiles. Unknown keys rejected at every level. |
 | Names | 1–64 ASCII letters/digits/underscores/hyphens, starting alphanumeric; prototype/device names rejected. |
-| Profile `models` | Optional `orchestrator` and all eight exact phase mappings. `provider/model`, nested model paths allowed, at most 256 characters. No whitespace/traversal. Omitted role inherits native selection, not the orchestrator override. |
+| Profile `models` | Optional `orchestrator` and all eight exact phase mappings. `provider/model`, nested model paths allowed, an optional trailing `#variant` reasoning-effort suffix, at most 256 characters. No whitespace/traversal. Omitted role inherits native selection, not the orchestrator override. |
 | Profile `answers` | Optional partial/complete original five-field canonical answers. Missing fields remain missing. |
 | `engram` | Omitted means memory off. `{ endpoint }` opts into an explicit loopback service; `{ mode: 'local', binary, dataDirectory }` opts into a managed installed binary. Legacy `project` is deprecated and ignored with a runtime notice. No secrets or session IDs in settings. |
 | `telemetry` | Optional `{ "enabled": boolean }`, default enabled. No external destination. |

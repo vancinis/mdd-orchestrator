@@ -6,8 +6,8 @@ import type { Settings } from './settings.js';
 import { ValidationError } from './validation.js';
 import { ask, Cancelled, choose, createTerminalIO, heading, note, rows } from './tui.js';
 import type { Choice, ConfigIO } from './tui.js';
-import { listModels, providersOf } from './model-catalog.js';
-import type { ModelCatalog } from './model-catalog.js';
+import { listModels, listVariants, providersOf } from './model-catalog.js';
+import type { ModelCatalog, VariantCatalog } from './model-catalog.js';
 
 export type { Choice, ConfigIO } from './tui.js';
 
@@ -79,8 +79,16 @@ function overview(draft: Settings): string {
 
 const KEEP = '\u0000keep';
 const INHERIT = '\u0000inherit';
+const DEFAULT_EFFORT = '\u0000default-effort';
 
-async function editModels(io: ConfigIO, profile: Settings['profiles'][string], catalog: () => ModelCatalog): Promise<void> {
+/** `model#variant` split; a bare model has no reasoning-effort override. */
+function splitVariant(model: string | undefined): readonly [string | undefined, string | undefined] {
+  if (!model) return [undefined, undefined];
+  const index = model.indexOf('#');
+  return index < 0 ? [model, undefined] : [model.slice(0, index), model.slice(index + 1)];
+}
+
+async function editModels(io: ConfigIO, profile: Settings['profiles'][string], catalog: () => ModelCatalog, variantsOf: (provider: string) => VariantCatalog): Promise<void> {
   io.write(`${heading('Modelos por agente')}${rows(MODEL_ROLES.map(role =>
     [role, profile.models[role] ?? 'hereda el modelo nativo'] as const))}`);
   io.write(note('Consultando los modelos instalados en OpenCode\u2026'));
@@ -90,19 +98,26 @@ async function editModels(io: ConfigIO, profile: Settings['profiles'][string], c
     io.write(`${note(available.reason)}${note('Vas a escribirlos a mano y no se pueden verificar. Un modelo inexistente hace que OpenCode descarte el agente al arrancar.')}`);
     for (const role of MODEL_ROLES) {
       const value = await ask(io, `Modelo para ${role}`,
-        `actual: ${models[role] ?? 'hereda el nativo'}  \u00b7  formato proveedor/modelo  \u00b7  Enter mantiene  \u00b7  «-» lo borra`);
+        `actual: ${models[role] ?? 'hereda el nativo'}  \u00b7  formato proveedor/modelo[#esfuerzo]  \u00b7  Enter mantiene  \u00b7  «-» lo borra`);
       if (value === '-') delete models[role];
       else if (value) models[role] = parseModel(value);
     }
     profile.models = models;
     return;
   }
-  const unknown = MODEL_ROLES.filter(role => models[role] && !available.models.includes(models[role]!));
+  const unknown = MODEL_ROLES.filter(role => models[role] && !available.models.includes(splitVariant(models[role])[0]!));
   io.write(note(`${available.models.length} modelos disponibles en ${providersOf(available.models).length} proveedores.`));
   if (unknown.length) io.write(note(`Atención: ${unknown.map(role => `${role}=${models[role]}`).join(', ')} no está entre los modelos instalados; OpenCode descartaría ese agente al arrancar.`));
   const providers = providersOf(available.models);
+  // The verbose catalog is one call per provider; fetched at most once each, only when used.
+  const variantCache = new Map<string, VariantCatalog>();
+  const variantsFor = (provider: string): VariantCatalog => {
+    if (!variantCache.has(provider)) variantCache.set(provider, variantsOf(provider));
+    return variantCache.get(provider)!;
+  };
   for (const role of MODEL_ROLES) {
     const current = models[role];
+    const [currentModel, currentVariant] = splitVariant(current);
     const choice = await choose(io, `Modelo para ${role}`, [
       { value: KEEP, label: 'Mantener lo actual', hint: current ?? 'hereda el modelo nativo' },
       ...(current ? [{ value: INHERIT, label: 'Heredar el modelo nativo', hint: 'quita el override de este agente' }] : []),
@@ -113,9 +128,21 @@ async function editModels(io: ConfigIO, profile: Settings['profiles'][string], c
     if (choice === INHERIT) { delete models[role]; continue; }
     const options = available.models.filter(model => model.startsWith(`${choice}/`));
     const selected = await choose(io, `Modelo de ${choice} para ${role}`,
-      options.map(model => ({ value: model, label: model.slice(choice.length + 1), hint: current === model ? 'actual' : '' })),
-      { initial: Math.max(options.indexOf(current ?? ''), 0) });
-    models[role] = parseModel(selected);
+      options.map(model => ({ value: model, label: model.slice(choice.length + 1), hint: currentModel === model ? 'actual' : '' })),
+      { initial: Math.max(options.indexOf(currentModel ?? ''), 0) });
+    const variantResult = variantsFor(choice);
+    const variantIds = variantResult.status === 'ok' ? (variantResult.variants[selected] ?? []) : [];
+    let effort: string | undefined;
+    if (variantIds.length) {
+      const effortChoice = await choose(io, `Esfuerzo (opcional) para ${selected}`, [
+        { value: DEFAULT_EFFORT, label: 'Por defecto del modelo', hint: 'sin nivel de esfuerzo fijo' },
+        ...variantIds.map(id => ({ value: id, label: id, hint: currentModel === selected && currentVariant === id ? 'actual' : '' })),
+      ], { initial: currentModel === selected ? variantIds.indexOf(currentVariant ?? '') + 1 : 0 });
+      if (effortChoice !== DEFAULT_EFFORT) effort = effortChoice;
+    } else if (variantResult.status === 'unavailable') {
+      io.write(note(`No se pudieron consultar los niveles de esfuerzo de ${choice}: ${variantResult.reason}`));
+    }
+    models[role] = parseModel(effort ? `${selected}#${effort}` : selected);
   }
   profile.models = models;
 }
@@ -138,9 +165,10 @@ async function editAnswers(io: ConfigIO, profile: Settings['profiles'][string]):
 }
 
 /** Injected line input and catalog allow deterministic tests; all edits remain drafts until Save. */
-export async function runConfigUI(root: string, io: ConfigIO, dependencies: { models?: () => ModelCatalog } = {}): Promise<'saved' | 'cancelled'> {
-  // The catalog is read lazily, only when the models menu is opened.
+export async function runConfigUI(root: string, io: ConfigIO, dependencies: { models?: () => ModelCatalog; variants?: (provider: string) => VariantCatalog } = {}): Promise<'saved' | 'cancelled'> {
+  // The catalog and its variants are read lazily, only when the models menu is opened.
   const catalog = dependencies.models ?? (() => listModels());
+  const variantsOf = dependencies.variants ?? ((provider: string) => listVariants(provider));
   if (!io.isTTY) {
     throw new ValidationError('mdd config necesita una terminal interactiva. Usá los comandos mdd profile list/create/use, o editá el archivo global mdd/mdd.config.json y validalo con mdd profile list.');
   }
@@ -165,7 +193,7 @@ export async function runConfigUI(root: string, io: ConfigIO, dependencies: { mo
               names.map(name => ({ value: name, label: name, hint: name === draft.activeProfile ? 'activo ahora' : '' })),
               { initial: Math.max(names.indexOf(draft.activeProfile), 0) });
           }
-        } else if (action === 'modelos') await editModels(io, profile, catalog);
+        } else if (action === 'modelos') await editModels(io, profile, catalog, variantsOf);
         else if (action === 'preflight') await editAnswers(io, profile);
         else if (action === 'memoria') {
           const sub = await choose(io, `Memoria (Engram)  \u00b7  ahora: ${memoryLabel(draft)}`, MEMORY_MENU);

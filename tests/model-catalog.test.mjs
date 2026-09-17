@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { listModels, opencodeBinary, providersOf, MODEL_LIMIT } from '../dist/model-catalog.js';
+import { listModels, listVariants, opencodeBinary, providersOf, MODEL_LIMIT } from '../dist/model-catalog.js';
 
 function pathWith(t, name) {
   const root = mkdtempSync(join(tmpdir(), 'mdd-catalog-'));
@@ -66,6 +66,64 @@ for (const [name, execute] of Object.entries({
 
 test('a missing launcher never executes anything', () => {
   const result = listModels(() => assert.fail('must not execute'), { PATH: '' }, 'linux');
+  assert.equal(result.status, 'unavailable');
+  assert.match(result.reason, /PATH/);
+});
+
+const VERBOSE_SAMPLE = [
+  'anthropic/claude-sonnet-4-5',
+  '{',
+  '  "id": "claude-sonnet-4-5",',
+  '  "providerID": "anthropic",',
+  '  "variants": {',
+  '    "high": { "effort": "high" },',
+  '    "low": { "effort": "low" }',
+  '  }',
+  '}',
+  'anthropic/claude-haiku-4-5',
+  '{',
+  '  "id": "claude-haiku-4-5",',
+  '  "providerID": "anthropic",',
+  '  "variants": {}',
+  '}',
+].join('\n');
+
+test('variants are parsed per model, sorted, from the verbose catalog of one provider', t => {
+  const { env, root } = pathWith(t, 'opencode');
+  const calls = [];
+  const execute = (binary, args, options) => { calls.push({ binary, args, options }); return VERBOSE_SAMPLE; };
+  const result = listVariants('anthropic', execute, env, 'linux');
+  assert.deepEqual(result, {
+    status: 'ok',
+    variants: { 'anthropic/claude-sonnet-4-5': ['high', 'low'], 'anthropic/claude-haiku-4-5': [] },
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].binary, join(root, 'opencode'));
+  assert.deepEqual(calls[0].args, ['models', 'anthropic', '--verbose']);
+  assert.equal(calls[0].options.timeout, 30000);
+});
+
+test('an unknown provider token never executes anything', () => {
+  const result = listVariants('../bad', () => assert.fail('must not execute'), { PATH: '' }, 'linux');
+  assert.equal(result.status, 'unavailable');
+  assert.match(result.reason, /Proveedor/);
+});
+
+for (const [name, execute] of Object.entries({
+  'a failing launcher': () => { throw new Error('exit 1'); },
+  'empty output': () => '',
+  'output with an unparsable block': () => 'zai/glm-1\n{\n  "variants": [\n}\n',
+})) {
+  test(`variants tolerate ${name} without throwing`, t => {
+    const { env } = pathWith(t, 'opencode');
+    const result = listVariants('zai', execute, env, 'linux');
+    if (name === 'a failing launcher') { assert.equal(result.status, 'unavailable'); assert.ok(result.reason.length > 0); }
+    else assert.deepEqual(result, { status: 'ok', variants: {} });
+  });
+}
+
+test('a missing launcher never executes anything for variants either', () => {
+  const result = listVariants('openai', () => assert.fail('must not execute'), { PATH: '' }, 'linux');
   assert.equal(result.status, 'unavailable');
   assert.match(result.reason, /PATH/);
 });

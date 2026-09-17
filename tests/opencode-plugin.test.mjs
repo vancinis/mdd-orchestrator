@@ -406,6 +406,23 @@ test('plugin config contract: settings frozen at startup; only explicit model ov
   });
 });
 
+test('plugin config contract: a stored reasoning effort is applied as a native variant, never as part of the model', async t => {
+  isolateHome(t);
+  const root = await mkdtemp(join(tmpdir(), 'mdd-plugin-variant-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const settings = defaultSettings();
+  settings.profiles.default.models = { orchestrator: 'anthropic/claude-opus-5#medium', 'mdd-plan': 'openai/gpt-5.6-sol' };
+  saveGlobalSettings(settings);
+  const hooks = await plugin({ ...sdkFixture().input, directory: root, worktree: root });
+  const config = { agent: { 'mdd-plan': { variant: 'xhigh' } } };
+  await hooks.config(config);
+  assert.equal(config.agent['mdd-orchestrator'].model, 'anthropic/claude-opus-5');
+  assert.equal(config.agent['mdd-orchestrator'].variant, 'medium');
+  // An effort left over from the user's own selection must not survive an MDD model override.
+  assert.equal(config.agent['mdd-plan'].model, 'openai/gpt-5.6-sol');
+  assert.equal('variant' in config.agent['mdd-plan'], false);
+});
+
 test('global plugin profiles match in two private targets; conflicting legacy settings are ignored and preserved', async t => {
   isolateHome(t);
   const a = await mkdtemp(join(tmpdir(), 'mdd-global-a-'));

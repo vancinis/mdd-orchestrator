@@ -22,8 +22,9 @@ function scripted(lines, isTTY = true) {
   return { prompts, output, io: { isTTY, write: text => output.push(text), read: async prompt => { prompts.push(prompt); return lines.shift(); } } };
 }
 // The models menu reads the user's installed catalog; tests inject it for determinism.
-const noCatalog = { models: () => ({ status: 'unavailable', reason: 'catálogo no disponible en el test' }) };
-const catalog = models => ({ models: () => ({ status: 'ok', models }) });
+const noVariants = () => ({ status: 'unavailable', reason: 'variantes no disponibles en el test' });
+const noCatalog = { models: () => ({ status: 'unavailable', reason: 'catálogo no disponible en el test' }), variants: noVariants };
+const catalog = (models, variants = {}) => ({ models: () => ({ status: 'ok', models }), variants: provider => ({ status: 'ok', variants }) });
 const sample = ['openai/gpt-a', 'openai/gpt-b', 'zai/glm-1'];
 
 function invoke(root, ...args) {
@@ -110,6 +111,50 @@ test('an existing override can be kept or inherited, and an unknown one is flagg
   assert.deepEqual(loadSettings(root).profiles.default.models, {});
 });
 
+test('effort is optional: a model with variants offers a default plus each variant, appended as #variant', async t => {
+  const root = fixture(t);
+  const withEffort = catalog(sample, { 'openai/gpt-a': ['high', 'low'] });
+  // modelos -> orchestrator: openai -> gpt-a -> effort 'high' (2nd variant option, after the default entry).
+  const script = scripted(['2', '2', '1', '2', ...MODEL_ROLES.slice(1).map(() => ''), '6']);
+  assert.equal(await runConfigUI(root, script.io, withEffort), 'saved');
+  assert.equal(loadSettings(root).profiles.default.models.orchestrator, 'openai/gpt-a#high');
+  assert.match(script.output.join(''), /Esfuerzo \(opcional\) para openai\/gpt-a/);
+  assert.match(script.output.join(''), /Por defecto del modelo/);
+});
+
+test('effort can be left at the model default, and a model without variants skips the step', async t => {
+  const withEffort = catalog(sample, { 'openai/gpt-a': ['high', 'low'] });
+  const rootDefault = fixture(t);
+  const skipEffort = scripted(['2', '2', '1', '1', ...MODEL_ROLES.slice(1).map(() => ''), '6']);
+  assert.equal(await runConfigUI(rootDefault, skipEffort.io, withEffort), 'saved');
+  assert.equal(loadSettings(rootDefault).profiles.default.models.orchestrator, 'openai/gpt-a');
+  const rootNoVariant = fixture(t);
+  const noEffortModel = scripted(['2', '2', '2', ...MODEL_ROLES.slice(1).map(() => ''), '6']);
+  assert.equal(await runConfigUI(rootNoVariant, noEffortModel.io, withEffort), 'saved');
+  assert.equal(loadSettings(rootNoVariant).profiles.default.models.orchestrator, 'openai/gpt-b');
+  assert.doesNotMatch(noEffortModel.output.join(''), /Esfuerzo/);
+});
+
+test('an existing #variant override is preread as current model and effort, and stays marked actual', async t => {
+  const root = fixture(t);
+  const withEffort = catalog(sample, { 'openai/gpt-a': ['high', 'low'] });
+  await runConfigUI(root, scripted(['2', '2', '1', '2', ...MODEL_ROLES.slice(1).map(() => ''), '6']).io, withEffort);
+  assert.equal(loadSettings(root).profiles.default.models.orchestrator, 'openai/gpt-a#high');
+  const reopen = scripted(['2', ...MODEL_ROLES.map(() => ''), '6']);
+  await runConfigUI(root, reopen.io, withEffort);
+  assert.equal(loadSettings(root).profiles.default.models.orchestrator, 'openai/gpt-a#high');
+  assert.match(reopen.output.join(''), /❯ 1 {2}Mantener lo actual\s+openai\/gpt-a#high/);
+});
+
+test('a provider whose variant catalog is unavailable still saves the bare model, with a warning', async t => {
+  const root = fixture(t);
+  const brokenVariants = { models: () => ({ status: 'ok', models: sample }), variants: () => ({ status: 'unavailable', reason: 'sin red en el test' }) };
+  const script = scripted(['2', '2', '1', ...MODEL_ROLES.slice(1).map(() => ''), '6']);
+  assert.equal(await runConfigUI(root, script.io, brokenVariants), 'saved');
+  assert.equal(loadSettings(root).profiles.default.models.orchestrator, 'openai/gpt-a');
+  assert.match(script.output.join(''), /No se pudieron consultar los niveles de esfuerzo de openai: sin red en el test/);
+});
+
 test('an unavailable catalog falls back to free text and says the value is unverified', async t => {
   const root = fixture(t);
   const script = scripted(['2', 'openai/gpt-a', ...MODEL_ROLES.slice(1).map(() => ''), '6']);
@@ -117,6 +162,14 @@ test('an unavailable catalog falls back to free text and says the value is unver
   assert.equal(loadSettings(root).profiles.default.models.orchestrator, 'openai/gpt-a');
   assert.match(script.output.join(''), /no se pueden verificar/);
   assert.match(script.output.join(''), /descarte el agente al arrancar/);
+  assert.match(script.output.join(''), /formato proveedor\/modelo\[#esfuerzo\]/);
+});
+
+test('the free-text fallback accepts a typed #variant suffix directly', async t => {
+  const root = fixture(t);
+  const script = scripted(['2', 'openai/gpt-a#high', ...MODEL_ROLES.slice(1).map(() => ''), '6']);
+  assert.equal(await runConfigUI(root, script.io, noCatalog), 'saved');
+  assert.equal(loadSettings(root).profiles.default.models.orchestrator, 'openai/gpt-a#high');
 });
 
 test('nonTTY terminal and CLI reject immediately without reading input or writing settings', async t => {

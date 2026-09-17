@@ -57,7 +57,8 @@
     "model": {
       "type": "string",
       "maxLength": 256,
-      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*(/[a-zA-Z0-9][a-zA-Z0-9_.:-]*)+$"
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*(/[a-zA-Z0-9][a-zA-Z0-9_.:-]*)+(#[a-zA-Z0-9][a-zA-Z0-9_.-]*)?$",
+      "description": "provider/model, optionally with a nested model path and a trailing #variant reasoning-effort suffix (e.g. provider/model#high)."
     },
     "profile": {
       "type": "object",

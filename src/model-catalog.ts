@@ -49,3 +49,44 @@ export function listModels(execute = execFileSync, env: NodeJS.ProcessEnv = proc
 export function providersOf(models: readonly string[]): string[] {
   return [...new Set(models.map(model => model.slice(0, model.indexOf('/'))))].sort();
 }
+
+export type VariantCatalog =
+  | { status: 'ok'; variants: Record<string, string[]> }
+  | { status: 'unavailable'; reason: string };
+
+const PROVIDER_PATTERN = /^[A-Za-z0-9][\w.-]*$/;
+
+/**
+ * Reads the reasoning-effort variants declared per model, for one provider, from the same
+ * verbose catalog OpenCode itself resolves selectors against. Variants are optional per
+ * model; an empty map is a normal outcome, not an error.
+ */
+export function listVariants(provider: string, execute = execFileSync, env: NodeJS.ProcessEnv = process.env, platform = process.platform): VariantCatalog {
+  if (!PROVIDER_PATTERN.test(provider)) return { status: 'unavailable', reason: 'Proveedor inválido.' };
+  const binary = opencodeBinary(env, platform);
+  if (!binary) return { status: 'unavailable', reason: 'No se encontró el ejecutable de OpenCode en el PATH.' };
+  let output: string;
+  try {
+    output = String(execute(binary, ['models', provider, '--verbose'], {
+      encoding: 'utf8', timeout: 30000, maxBuffer: 4 * 1024 * 1024, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'],
+    }));
+  } catch { return { status: 'unavailable', reason: 'OpenCode no pudo listar los niveles de esfuerzo.' }; }
+  const lines = output.replaceAll(/\x1b\[[0-9;]*m/g, '').split(/\r?\n/);
+  const variants: Record<string, string[]> = {};
+  // Each model is printed as a header line, then a pretty-printed JSON object whose own
+  // closing brace sits at column 0 like the header, which is what bounds one block here.
+  for (let index = 0; index < lines.length; index++) {
+    const header = lines[index]!.trim();
+    if (!MODEL_PATTERN.test(header) || lines[index + 1] !== '{') continue;
+    let end = index + 1;
+    while (end < lines.length && lines[end] !== '}') end++;
+    if (end >= lines.length) break;
+    try {
+      const parsed: unknown = JSON.parse(lines.slice(index + 1, end + 1).join('\n'));
+      const declared = parsed && typeof parsed === 'object' ? (parsed as { variants?: unknown }).variants : undefined;
+      variants[header] = declared && typeof declared === 'object' ? Object.keys(declared).sort() : [];
+    } catch { /* Skip a block this build cannot parse; other models stay usable. */ }
+    index = end;
+  }
+  return { status: 'ok', variants };
+}
