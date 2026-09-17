@@ -1,6 +1,6 @@
 # my-driven-development (MDD)
 
-**Status: complete main low/high route execution is implemented and contract-tested in the opt-in OpenCode adapter. Model-backed end-to-end validation is still pending.** The original proof flags remain a dry run. Native runs use protected preflight/approval, phase capability gates, bound Engram receipts, artifact handoff, and corroborated Verify checks. See [OpenCode setup and limits](docs/opencode-adapter.md).
+**Status: complete main low/high route execution is implemented and contract-tested in the opt-in OpenCode adapter. Model-backed end-to-end validation is still pending.** The original proof flags remain a dry run. Native runs use protected preflight/approval, delegation with an inline fallback, bound Engram receipts, artifact handoff, and reported Verify checks. See [OpenCode setup and limits](docs/opencode-adapter.md).
 
 Installation, named-profile commands, the explicit-save editor and doctor now use one global
 OpenCode installation. **The native plugin reads global settings only; telemetry preference is
@@ -120,11 +120,11 @@ Preflight reuse and state inspection work only within the live controller. New r
 | Kernel | Pure validated evaluation; no clocks, randomness, model inference, I/O, or confidence reporting. |
 | CLI/setup | One consent-driven setup TUI, source bootstrap, trusted local package installation, optional pinned Windows memory installer, owned-asset updates, read-only doctor and advanced editor; proof flags unchanged. |
 | Foundations | Frozen models/profile/Engram settings, phase-specific coverage reports, and allowlisted local runtime telemetry. |
-| Lifecycle | Private in-memory state, isolated snapshots, exact phase/result/approval boundaries; no dispatch. |
-| OpenCode adapter | Requirements-only native intake; exact questions/approvals; all eight phase dispatches; bounded dependency handoff; scoped edits; native check evidence; selected artifact storage and general receipts. |
+| Lifecycle | Private in-memory state, isolated snapshots, exact phase/result/approval boundaries; no dispatch. No state is terminal: a failed attempt returns its phase to ready and `mdd_reset` always has an exit. |
+| OpenCode adapter | Requirements-only native intake; exact questions/approvals; all eight phases by delegation or carried out inline by the coordinator; bounded dependency handoff; reported change/check evidence; selected artifact storage and general receipts. |
 | Tests | Native Node tests, CLI subprocesses, real loopback HTTP transport, and explicitly mocked SDK contract tests. No paid agent E2E execution. |
 | Changes and context | Native-confirmed re-preflight creates a new planned run without erasing old evidence; idle contextual exploration leaves the main workflow/approval unchanged. |
-| PR body | Read-only coordinator tool uses the exact packaged skill/template and current recorded facts. Unknowns remain unverified; no branch/commit/push/PR creation authority. |
+| PR body | A coordinator tool uses the exact packaged skill/template and current recorded facts. Unknowns remain unverified; no branch/commit/push/PR creation authority. |
 | Validation boundary | Contract suites and model-free startup checks do not prove real model output quality or permission UI behavior. User-authorized model-backed E2E/final review remains pending. |
 | Deliberately unsupported | Automatic crash recovery/exactly-once guarantees, delivery/publication automation, and non-OpenCode provider adapters. |
 
@@ -134,8 +134,8 @@ Native validation and local progress protection still run. Every
 phase writes dedicated artifacts only to the selected backend; `openspec` or `both`
 explicitly creates the documented OpenSpec paths. `none` retains full artifact text only
 in live state. General receipts contain a bounded summary and artifact reference, not the
-full artifact. Only final successful Verify with corroborated executed checks reaches
-`complete`. Coverage can fall when failures invalidate evidence; it is not correctness probability.
+full artifact. Only a final successful Verify reaches `complete`. Evidence flags describe what
+each phase reported, not independent proof, and coverage is not correctness probability.
 
 Opted-in memory automatically resolves the project and registers the actual native parent.
 Endpoint-only settings are supported; the deprecated project field is ignored with a notice,

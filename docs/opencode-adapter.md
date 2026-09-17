@@ -122,9 +122,9 @@ pending; no automated recovery is attempted. Unrelated sessions remain unaffecte
 | Boundary | Behavior |
 |---|---|
 | Dispatch | One live run per actual parent. Synchronous reservation precedes asynchronous persistence. A task that arrives while one is already running is refused without touching it; any other unexpected task ends the attempt and returns the phase to `ready`. |
-| Capabilities | Planning actors admit only `read`, `glob`, `grep`; Apply additionally admits native-ask edits/bash, Verify native-ask planned checks. Tool-name gates block MCP aliases. Native tool-output directory read exceptions remain recognized. |
-| Correlation | Checks parent/call, native child metadata, child parent/project/directory/agent, final assistant completion/path/error, exact wrapper text, and strict JSON run/call/phase bindings. Unknown or failed child execution evidence is rejected. |
-| Models | Captures resolved model mappings and actual parent selection. Checks all nine actor identities/modes, explicit overrides, native task metadata model, and every child assistant model. Missing, changed, or substituted models fail closed. |
+| Capabilities | Not MDD's concern. Packaged agents ship no permission map; the user's native permissions decide what any actor may do. |
+| Correlation | Confirms the conversation is a top-level `mdd-orchestrator` session in this workspace, and that a native question is the exact running call being answered. Phase results are bound by phase, runID and, when delegated, callID. |
+| Models | Configured per role through the startup profile and applied to the agent config. Runtime model identity is not policed. |
 | Consent | Complete startup profile or exact correlated native preflight answers; later interactive Proceed/Stop applies only to the currently waiting phase. No repeat preflight or implicit approval. |
 | Persistence | HTTP only to a literal IPv4 loopback origin, no credentials/path/query/redirects, no retries. Each HTTP/SDK read has a maximum five-second timeout. HTTP responses are bounded to 128 KiB. |
 | Failure | Infrastructure failures do not fabricate failed phase results. A rejected dispatch, result, capability or persistence ends that attempt: the phase returns to `ready`, the attempt counter increases, and the run stops being uncertain, so delegating again, taking the phase over directly, replanning or resetting all stay available. A missing after-hook leaves `await-result` until a matching native error releases it. `mdd_status` never grants approval or dispatches by itself. |
@@ -216,64 +216,39 @@ The total serialized prompt budget is **96,000 UTF-8 bytes**; exceeding it block
 instead of truncating dependencies. Artifacts are saved/read back before result recording;
 held verified content supplies subsequent handoffs, including `none`.
 
-| Actor | Native capabilities |
+| Actor | Capability |
 |---|---|
-| Plan, Propose, Spec, Design, Tasks | `read`, `glob`, `grep` only. |
-| Explore | Reads plus `bash: ask` limited to read-only GitHub lookups; no project code runs. |
-| Apply | Reads plus `edit`, `write`, `apply_patch` under native `edit: ask`, and `bash: ask`. |
-| Verify | Reads plus `bash: ask`; no direct edits. Only exact applicable planned commands execute. |
-| Coordinator | Its MDD tools, `question`, `task` for MDD actors, and the same read-only GitHub lookups. |
+| Every phase actor | Whatever the phase needs. Packaged agents ship no permission map, so the user's own OpenCode permissions decide. |
+| Coordinator | The same, plus its MDD tools and `question`. It may delegate a phase or carry it out itself. |
 
-Dispatching an MDD actor and running a lookup are `allow`, not `ask`: MDD owns its own consent
-through preflight and phase approvals, and a lookup is already restricted by the adapter, so a
-second native prompt asked nothing the user had not already decided. Every capability that can
-change something still asks natively: Apply's `edit` and Apply/Verify's `bash` remain `ask`.
-For lookup-only actors the adapter is therefore the sole gate on command content.
+MDD no longer polices tools, commands or paths. It used to: an allowlist per phase, a command
+denylist, root-scoped path checks and resolved-permission validation of every agent. That
+stopped unsafe work only in theory, while in practice it stopped ordinary work, and each
+check was one more way for a run to die with no way back. Capability is a native decision,
+and the permission prompt is where the user makes it.
 
-### Read-only GitHub lookups
+**Shell executes real project code, not a sandbox.** A project script can have side effects;
+the native permission request is the moment to assess that. Indirect behaviour is never
+semantically certified by MDD.
 
-Exploration and the coordinator may answer questions about issues, pull requests and
-repositories. The allowlist is by subcommand: `gh issue view|list`, `gh pr view|list|diff`,
-`gh repo view`, `gh search issues|prs`. Everything else is refused, including `gh api`,
-`gh auth`, every write subcommand, and any `-X`, `--method`, `-F`, `--field`, `-f`,
-`--raw-field`, `--input` or `--template` flag that could turn a query into a mutation or
-submit a body. The shared command hygiene still applies: one plain command, contained working
-directory, no composition, expansion, redirection or path traversal.
-
-Exploration runs lookups **only**; project code, package managers and Git stay out of its
-reach, and a lookup that exits nonzero is reported as a finding rather than treated as
-corrupted evidence. The coordinator session never reaches the child inspector, so its lookups
-are gated separately in the tool hook against the same allowlist; unrelated sessions are
-untouched. Native `bash: ask` consent is still requested for every invocation, and the
-lookups read with the user's existing `gh` credentials: they can reach any repository that
-user can already read.
-
-Resolved agent and child-session permission overlays are checked. MCP/network/delegation
-tools are denied by tool name even when they reuse a read permission. Native tool-output
-read exceptions remain supported. Native skill loading is denied to prevent global-name
-shadowing: packaged skill text, path and digest are injected before dispatch instead. Apply
-receives `mdd-cleanup/SKILL.md`. Explore, Plan, Propose, Spec, Design and Verify receive
+Native skill loading still yields to packaged instructions: skill text, path and digest are
+injected before dispatch so a same-named global skill cannot shadow them. Apply receives
+`mdd-cleanup/SKILL.md`. Explore, Plan, Propose, Spec, Design and Verify receive
 `mdd-doc/SKILL.md`, which shapes only the readable `artifact` prose and costs about 3.9% of
 the phase context budget; Tasks and Apply carry structure rather than narrative and do not
-pay for it. Standalone read-only investigation receives it too. A same-named global skill
-cannot replace either file: the injected content is read from the packaged path and
-digested, never resolved by name. The coordinator's read-only `mdd_pr_body` tool reads the fixed
+pay for it. Standalone investigation receives it too. The `mdd_pr_body` tool reads the fixed
 packaged PR skill/template with path/digest provenance; no name-based skill lookup occurs.
 
-Edit targets are checked before invocation: all targets and patch move destinations must
-stay inside the approved root without symlinks/junctions, hardlinks, device paths, or streams.
-Runtime control files (`.git`, `.mdd`, `.opencode`, `mdd.config.json`) are excluded. Change
-evidence uses actual before/after file digests, bounded to 1 MiB per file. Native tool-result
-evidence is bounded to 200,000 bytes. Post-execution evidence failure can leave real edits; no
-rollback or retry is implied. Ancestor-renaming attacks by hostile local processes are not
-portably sandboxed by these checks.
+### Delegation and the inline route
 
-Bash accepts one plain command with a contained existing working directory. Composition,
-expansion, redirection, shell wrappers, package acquisition, direct network/delivery commands, and path traversal
-are rejected, except for the allowlisted read-only GitHub lookups described above. Direct Git
-is limited to status/diff/log/show/ls-files. **Shell still executes
-user-approved project code, not a sandbox.** A project script can have side effects; users
-must assess native permission requests. Indirect behavior is not semantically certified.
+Delegation is the default: `mdd_status` returns the exact `task` for the phase actor, and
+`mode` is `delegate`. It is a preference, not a cage. When an attempt does not complete, the
+phase returns to `ready` with `mode: "inline"` and a `brief` holding the same instructions.
+The coordinator then carries the phase out with its own tools and reports it through
+`mdd_phase_result({ result })`, which takes the same result object without a `callID`.
+Both routes share one contract and one recording path, so artifacts, memory, evidence and the
+workflow do not depend on which one produced the result. The next phase starts from
+delegation again, and delegating a handed-back phase a second time stays allowed.
 
 Strict result JSON retains phase/runID/callID/outcome/evidenceSummary/artifact and permits
 these phase-specific fields:
@@ -287,20 +262,19 @@ these phase-specific fields:
   when omitted. Every held scenario and relevant decision requirement must map to a step.
   Dependencies refer to earlier steps. Paths and commands retain existing scope checks.
 - Spec: `domain: "project"`, matching the dispatched storage namespace.
-- Apply: `changes`, matching actual changed native tool call IDs. Alternatively an inspected
-  no-change result supplies `noChangeReason` and earns no implementation points.
-- Verify: `checks: [{ callID, command }]`, matching every actual completed native check and
-  covering every applicable planned command. Exit must be numeric zero with nonempty,
-  nontruncated output. Unknown/null/nonzero exits, empty output, missing history, fabricated
-  references, or skipped-only checks block. Recognizable skip/no-tests summaries are rejected
-  unless they also show positive passing-check counts; arbitrary program output is not a
-  semantic certificate. Structural-only verification is not implemented.
+- Apply: `changes`, the file paths the phase changed. Alternatively `noChangeReason`, which
+  earns no implementation points.
+- Verify: `checks: [{ command, exit }]`, the commands the phase reports having run. `exit` is
+  an integer, or `null` when the command did not finish. MDD records the claim as a claim: it
+  never re-runs the command and an exit code is not a semantic certificate.
 
 Verify also requires `verification: { scenarios, steps, decisions, changes, limits }`:
 - Scenario rows name `requirementID`, `scenarioID`, `stepID`; step rows name `stepID`;
   decision rows name `decisionID`. Every held link/step/decision appears exactly once.
-- Each row has `status: verified | not-verified | deviation`, `checks: [actualCallID]`, and
-  a concise source-based `assessment`. Verified rows require an applicable actual check.
+- Each row has `status: verified | not-verified | deviation`, `checks: [command]`, and a
+  concise source-based `assessment`. The report must agree with itself: a row may only cite a
+  command the same phase reported running, and a `verified` row may not rest on a check that
+  did not pass. That consistency is the honesty MDD can offer without re-running anything.
 - `changes` is a plain-language interpretation; `limits` contains up to four material notes.
   A passed outcome with missing coverage or any not-verified/deviation row blocks; an explicit
   failed outcome with complete partial coverage remains failed and visible. No extra check
@@ -316,9 +290,10 @@ of semantic correctness. Code checks reference integrity and native execution ev
 requires the native execution, persistence and other existing safety checks to pass.
 
 Coverage is **20** accepted native requirements/profile intake + **20** validated Plan/Tasks
-deliverables with inspected project context + **25** actual scoped implementation changes +
-**35** corroborated executed Verify checks. Other phases earn no automatic points. Failures
-withdraw affected evidence; Verify failure also invalidates implementation completion.
+deliverables + **25** reported implementation changes + **35** reported Verify checks that
+passed. The flags describe what each phase reported, not independent proof. Other phases earn
+no automatic points. A recorded failure withdraws affected evidence; an attempt that never
+completed withdraws nothing, because it claimed nothing.
 Reports honor low/medium/detailed settings and never take a model-selected percentage.
 Telemetry supports off/delete and retains 30 days locally. Diagnostics are bounded, and
 telemetry failure does not alter phase outcomes. Status reads do not append telemetry.

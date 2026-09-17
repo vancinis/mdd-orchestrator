@@ -117,14 +117,13 @@ fsync/power-loss durability is not guaranteed. Use a trusted project filesystem.
 
 ## Native assets and permissions
 
-The six `assets/opencode/agents/mdd-{propose,spec,design,tasks,apply,verify}.md` package assets require
-the provider-generated strict result schema and exact phase/runID/native callID bindings.
-Planning actors permit read/glob/grep only. Apply uses native
-`edit: ask` and `bash: ask`; verify uses `edit: deny` and `bash: ask`. Wildcard deny blocks
-network/memory/delegation; external directories are denied. The original plan/explore
-assets retain read-only policy. Native skill loading is denied for all phase actors;
-Apply instead receives exact packaged cleanup instructions and a digest injected in
-its prompt. This avoids granting capabilities through globally shadowed skill names.
+The `assets/opencode/agents/mdd-*.md` package assets require the provider-generated strict
+result schema and exact phase/runID/native callID bindings. None of them ships a permission
+map: what an actor may do is the user's native decision, expressed once in their OpenCode
+permissions instead of being re-decided by MDD for every phase. Role discipline lives in the
+prose, where it belongs: a planning phase is told to plan rather than forbidden to act.
+Packaged skill text, path and digest are injected in the prompt so a globally shadowed skill
+name cannot replace them.
 
 Shell executes arbitrary project code: these instructions are not a shell sandbox.
 Automatic workflow mode never removes native permission consent. Verify does not silently
@@ -135,7 +134,7 @@ Explicitly load exported project skills `mdd-pr-body` for user PR requests and
 The PR skill retains Summary/Changes/Environment variables/Follow-ups/Blockers/Deployment,
 using `Not applicable.` consistently for absent information. Drafting grants no publication
 authority. Apply receives the local cleanup instructions; the coordinator invokes the
-read-only `mdd_pr_body` renderer when the user asks for a body. No publication is performed.
+`mdd_pr_body` renderer when the user asks for a body. No publication is performed.
 Quit and restart OpenCode to discover changed agent/skill configuration.
 
 ## Completion boundary

@@ -188,7 +188,7 @@ OpenSpec is used only when requested; no automatic folders are authorized. The u
 | Medium | Summary, How |
 | Low | Completed-work summary only |
 
-Reports evolve with evidence rather than phase counts. **Implemented:** coverage is 20 points for accepted native requirements/profile intake, 20 for validated planning deliverables with inspected context, 25 for actual scoped edits, and 35 for corroborated native Verify checks. Coverage is not correctness probability. Failed or invalidated evidence loses its points. An inspected no-change Apply earns no implementation points. No confidence is fabricated in the kernel.
+Reports evolve with evidence rather than phase counts. **Implemented:** coverage is 20 points for accepted native requirements/profile intake, 20 for validated planning deliverables, 25 for reported implementation changes, and 35 for reported Verify checks that passed. The flags describe what each phase reported; MDD records the claim as a claim and never re-runs a command, so coverage is not correctness probability. A recorded failure loses its points; an attempt that never completed loses nothing because it claimed nothing. A no-change Apply earns no implementation points. No confidence is fabricated in the kernel.
 
 ### Configuration, telemetry, and contextual skills
 
