@@ -8,16 +8,18 @@ const usage = `MDD global setup and routing proof
 Proof flags are a dry run; no phases are executed by the CLI.
 
 Usage:
+  mdd-ai                      open the install/update wizard
+  mdd-ai link                 put mdd-ai on your user PATH
+  mdd-ai config | doctor | init | update
+  mdd-ai profile list | create <name> | use <name>
+  mdd-ai telemetry status | on | off | clear
   node dist/cli.js --answers <file.json> [--config <file.json>] [--explore]
   node dist/cli.js --profile <file.json> [--config <file.json>] [--explore]
   node dist/cli.js --help
-  node dist/cli.js config
-  mdd setup
-  mdd update
-  mdd init
-  mdd doctor
-  node dist/cli.js profile list | create <name> | use <name>
-  node dist/cli.js telemetry status | on | off | clear
+
+The global command is installed as mdd-ai; the same commands work through
+node dist/cli.js from a source checkout. Setup offers to add its folder to
+your user PATH, and never edits the machine PATH.
 
 Setup: one interactive install/configure/check flow; optional Engram; explicit Apply.
 Update: replaces an outdated owned package and its assets after the same explicit Apply.

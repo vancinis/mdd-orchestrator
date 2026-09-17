@@ -30,14 +30,17 @@ dependencies/build with separate consent, then one wizard in Spanish with four n
 global destination, optional memory, review, apply/check. Its lists take the arrow keys plus
 Enter or a direct option number. It installs into `$XDG_CONFIG_HOME/opencode/mdd`, or
 `~/.config/opencode/mdd` when XDG is unset, never into the active workspace.
-After installation, use `node "<OpenCode root>/mdd/node_modules/my-driven-development/dist/cli.js" setup`
-from any directory (or `mdd setup` if that executable is already on your PATH; setup does not edit PATH).
+Installing also writes an `mdd-ai` launcher into MDD's own `bin` folder. Installing never edits
+your environment: run **`node "<OpenCode root>/mdd/node_modules/my-driven-development/dist/cli.js" link`**
+once to append only that folder to your **user** PATH, and afterwards **`mdd-ai`** opens the same
+install/update wizard from any directory. Without `link`, every command still works through its
+absolute path.
 Fresh memory defaults off; compatible Engram is reused only if selected, never reinstalled.
-To deploy later changes, build and run **`mdd update`** from the source checkout: it reviews the
+To deploy later changes, build and run **`mdd-ai update`** from the source checkout: it reviews the
 outdated owned package and replaces it under the same explicit Apply, without touching settings,
 memory or unrelated agents. See [setup and installer safety](docs/setup.md). No model,
-default-agent change or publication is implied. Advanced `mdd config` and read-only `mdd doctor`
-remain optional controls.
+default-agent change or publication is implied. Advanced `mdd-ai config` and read-only
+`mdd-ai doctor` remain optional controls.
 
 ## Run the proof (development)
 

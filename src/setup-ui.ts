@@ -11,6 +11,7 @@ import { doctor } from './doctor.js';
 import { initProject, OWNED_PACKAGE, packageState, planProject, projectRoot } from './setup.js';
 import { PACKAGE_ROOT } from './project-assets.js';
 import { detectEngram, engramOffer, installEngram } from './engram-install.js';
+import { COMMAND, commandPlan, registerPath, writeLaunchers } from './command-link.js';
 import { fileDigest, scopedPath } from './safe-paths.js';
 import { ValidationError } from './validation.js';
 
@@ -89,8 +90,9 @@ export function pruneOwnedPackages(root: string, keep = KEPT_PACKAGES): string[]
 type Dependencies = {
   detect: typeof detectEngram; installMemory: typeof installEngram;
   installPackage: typeof installLocalPackage; check: typeof doctor;
+  commandPlan: typeof commandPlan; writeLaunchers: typeof writeLaunchers; registerPath: typeof registerPath;
 };
-const defaults: Dependencies = { detect: detectEngram, installMemory: installEngram, installPackage: installLocalPackage, check: doctor };
+const defaults: Dependencies = { detect: detectEngram, installMemory: installEngram, installPackage: installLocalPackage, check: doctor, commandPlan, writeLaunchers, registerPath };
 const DETECTION_TEXT: Record<string, string> = {
   compatible: 'encontrado y compatible', incompatible: 'encontrado con versión no soportada',
   broken: 'encontrado pero no respondió la prueba de versión', 'not-found': 'no encontrado',
@@ -160,10 +162,13 @@ export async function runSetupUI(cwd: string, io: ConfigIO, dependencies: Partia
       }
       if (draft.engram && 'mode' in draft.engram) io.write(`${rows([['Datos de memoria', draft.engram.dataDirectory]])}${note('La instalación nunca arranca el servicio de memoria ni crea una sesión.')}`);
     }
+    const command = deps.commandPlan();
     const review = mode === 'update' ? 2 : 3;
     io.write(`${step(mode, review)}${rows([...changes.map(file => [file.action, file.name] as const),
       ['record', 'mdd/setup-assets.json'],
+      ...command.files.map(file => [file.action, file.path] as const),
       [before !== JSON.stringify(draft) || !fs.existsSync(paths.settingsPath) ? 'save' : 'keep', paths.settingsPath]])}`);
+    io.write(note(`El comando ${COMMAND} queda en ${command.binRoot} y abre esta misma instalación desde cualquier carpeta.`));
     if (state.state === 'absent') io.write(`\n${note(`Instalar MDD local y confiable desde ${PACKAGE_ROOT} en ${paths.ownedRoot}`)}${note('Guarda un tarball local direccionado por contenido en mdd/packages, actualiza solo package.json/package-lock.json y node_modules de la carpeta propia, y puede descargar dependencias fijadas vía npm. Los scripts de ciclo de vida quedan desactivados (--ignore-scripts). Los archivos raíz de OpenCode no se tocan.')}`);
     if (state.state === 'outdated') io.write(`\n${note(`Actualizar el paquete MDD instalado usando ${PACKAGE_ROOT}`)}${note(`Quita ${OWNED_PACKAGE} y su entrada de dependencias en la carpeta propia, y reinstala desde un tarball local direccionado por contenido. Puede descargar dependencias fijadas vía npm; los scripts de ciclo de vida quedan desactivados (--ignore-scripts).`)}${note(`No se tocan mdd.config.json, la carpeta memory, los artefactos ni otros agentes. Se conservan los ${KEPT_PACKAGES} tarballs más recientes y el referenciado en mdd/packages; el resto se borra.`)}`);
     if (install) io.write(`\n${note('Instalar Engram v1.20.0 del proveedor Gentleman-Programming')}${rows([['Descarga', offer!.url], ['Destino', offer!.binary]])}${note('Se verifican el SHA-256 fijado y checksums.txt antes de extraer.')}${note('No se reemplaza ningún Engram existente ni se cambia el PATH global.')}`);
@@ -181,6 +186,9 @@ export async function runSetupUI(cwd: string, io: ConfigIO, dependencies: Partia
     if (state.state !== 'matching') deps.installPackage(root);
     if (install) await deps.installMemory(paths.ownedRoot);
     initProject(root, true);
+    // The launcher lives in MDD's own folder, so the approved install covers it. The PATH is the
+    // user's environment: it changes only through the explicit link command, never as a side effect.
+    deps.writeLaunchers(paths);
     if (before !== JSON.stringify(draft) || !fs.existsSync(paths.settingsPath)) saveGlobalSettings(draft);
     const pruned = state.state === 'matching' ? [] : pruneOwnedPackages(root);
     if (pruned.length) io.write(rows([['Tarballs borrados', String(pruned.length)]]));
@@ -193,9 +201,13 @@ export async function runSetupUI(cwd: string, io: ConfigIO, dependencies: Partia
       io.write(`\n  Quedan cosas por resolver:\n${rows(report.checks.filter(item => item.status === 'action').map(item => [item.check, item.message] as const))}${note('Los cambios ya aplicados quedan en la instalación global de MDD. La instalación no arrancó OpenCode ni ningún modelo.')}`);
       return 'issues';
     }
+    const reachable = deps.commandPlan().onPath;
     io.write(`\n  Listo: las verificaciones de la instalación global pasaron.\n${note('Cerrá y reiniciá OpenCode para que cargue los assets.')}${note('La integración con los ajustes nativos globales y la aceptación de modelos todavía no están verificadas.')}${rows([
-      ['Configuración', `node "${paths.cliPath}" config`],
-      ['Verificación', `node "${paths.cliPath}" doctor`]])}${note('Las instalaciones antiguas por proyecto quedan intactas; reconciliá sus assets propios explícitamente antes de usarlas.')}`);
+      ['Instalar o actualizar', reachable ? COMMAND : `node "${paths.cliPath}"`],
+      ['Configuración', reachable ? `${COMMAND} config` : `node "${paths.cliPath}" config`],
+      ['Verificación', reachable ? `${COMMAND} doctor` : `node "${paths.cliPath}" doctor`]])}${
+      reachable ? note(`${COMMAND} ya está en tu PATH.`)
+        : note(`Para ejecutar ${COMMAND} desde cualquier carpeta: node "${paths.cliPath}" link`)}${note('Las instalaciones antiguas por proyecto quedan intactas; reconciliá sus assets propios explícitamente antes de usarlas.')}`);
     return 'ready';
   } catch (error) {
     if (!(error instanceof Cancelled)) throw error;

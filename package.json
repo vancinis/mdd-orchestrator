@@ -4,7 +4,7 @@
   "private": true,
   "description": "OpenCode-first planned development with native consent and grounded verification",
   "type": "module",
-  "bin": { "mdd": "dist/cli.js" },
+  "bin": { "mdd": "dist/cli.js", "mdd-ai": "dist/cli.js" },
   "exports": { ".": "./dist/kernel.js", "./opencode-plugin": "./dist/opencode-plugin.js" },
   "files": [
     "dist/*.js", "dist/*.d.ts", "scripts/setup.mjs", "scripts/extract-engram.ps1", "assets/opencode",

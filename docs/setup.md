@@ -29,18 +29,42 @@ The destination is `<XDG_CONFIG_HOME>/opencode`, or `<home>/.config/opencode` wh
 `OPENCODE_CONFIG_DIR` is not an installation-root override. Setup displays the resolved absolute
 OpenCode root and owned `mdd` prefix. There is no target-workspace question or target argument.
 
-After installation, the wizard prints runnable absolute commands. For example, with XDG unset:
+## The `mdd-ai` command
+
+Installing also writes a launcher into MDD's own folder, `<owned root>/bin/mdd-ai` and
+`mdd-ai.cmd`. It resolves the CLI relative to itself and takes Node from your PATH, so it keeps
+working if the installation moves and does not pin the interpreter that happened to run setup.
+
+Installing never edits your environment. Putting the command within reach is a separate,
+explicit step:
 
 ```powershell
-node "$HOME/.config/opencode/mdd/node_modules/my-driven-development/dist/cli.js" setup
-node "$HOME/.config/opencode/mdd/node_modules/my-driven-development/dist/cli.js" doctor
-node "$HOME/.config/opencode/mdd/node_modules/my-driven-development/dist/cli.js" config
-node "$HOME/.config/opencode/mdd/node_modules/my-driven-development/dist/cli.js" profile list
+node "$HOME/.config/opencode/mdd/node_modules/my-driven-development/dist/cli.js" link
 ```
 
-Use the displayed XDG path instead when configured. `mdd setup`, `mdd doctor`, `mdd config`
-and `mdd profile` are equivalent if the installed executable is already on PATH; setup does
-not edit PATH. No project dependency, project `npx`, or public npm release is required.
+On Windows that appends **only** its own folder to your **user** PATH, never the machine PATH
+and never replacing what is already there; open a new terminal afterwards. On other systems the
+environment belongs to your shell profile, so `link` prints the exact `export` line instead of
+editing it. Running `link` again when the folder is already listed reports that and changes
+nothing.
+
+Afterwards, from any directory:
+
+```powershell
+mdd-ai            # install or update through the same wizard
+mdd-ai doctor     # read-only diagnostics
+mdd-ai config     # advanced settings editor
+mdd-ai profile list
+```
+
+Without `link`, every command works the same way through its absolute path:
+
+```powershell
+node "$HOME/.config/opencode/mdd/node_modules/my-driven-development/dist/cli.js" doctor
+```
+
+Use the displayed XDG path instead when configured. No project dependency, project `npx`, or
+public npm release is required.
 
 ## Review, then Apply
 

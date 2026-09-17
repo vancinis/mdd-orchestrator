@@ -6,6 +6,7 @@ import { doctor } from './doctor.js';
 import { runTerminalSetup } from './setup-ui.js';
 import { loadGlobalSettings, saveGlobalSettings } from './global-settings.js';
 import { installationPaths } from './installation-paths.js';
+import { COMMAND, commandPlan, registerPath, writeLaunchers } from './command-link.js';
 
 /** Returns false for the existing proof-flag parser to handle. */
 export async function settingsCommand(args: string[], root: string, write: (text: string) => void): Promise<boolean> {
@@ -18,6 +19,22 @@ export async function settingsCommand(args: string[], root: string, write: (text
   if (command === 'update') {
     if (args.length > 1) throw new ValidationError('Usage: mdd update. Run it from the source checkout whose build should replace the installed package.');
     await runTerminalSetup(root, 'update');
+    return true;
+  }
+  if (command === 'link') {
+    if (args.length > 1) throw new ValidationError(`Usage: mdd link. It installs the ${COMMAND} launcher and adds only its own folder to your user PATH.`);
+    const paths = installationPaths();
+    writeLaunchers(paths);
+    const plan = commandPlan();
+    if (plan.onPath) {
+      write(`${COMMAND} is already on your PATH: ${plan.binRoot}\n`);
+      return true;
+    }
+    if (registerPath(plan.binRoot) === 'registered') {
+      write(`Added to your user PATH: ${plan.binRoot}\nOpen a new terminal, then run ${COMMAND}.\nYour machine PATH was not touched.\n`);
+    } else {
+      write(`Launcher installed in ${plan.binRoot}\nAdd it to your shell profile to use ${COMMAND} anywhere:\n  ${plan.manual}\n`);
+    }
     return true;
   }
   if (command === 'init' || command === 'doctor') {
