@@ -16,7 +16,7 @@ export type IntakeInspect = {
   intake(runtime: Runtime, requirements: string, messageID: string): Promise<void | string>;
   question(runtime: Runtime, call: TaskCall, args: QuestionEnvelope): Promise<void>;
 };
-type Runner = Pick<PhaseRunner, 'start' | 'status' | 'approveNative' | 'block'> & Partial<Pick<PhaseRunner, 'approvalStopped' | 'assertChangeable' | 'assertFreshStart' | 'explore'>>;
+type Runner = Pick<PhaseRunner, 'start' | 'status' | 'approveNative' | 'block'> & Partial<Pick<PhaseRunner, 'approvalStopped' | 'assertChangeable' | 'assertFreshStart' | 'explore' | 'reset'>>;
 type Slot = { kind: 'preflight' | 'approval' | 'change'; args: QuestionEnvelope; phase?: Phase; callID?: string; requirements?: string };
 type Intake = {
   runtime: Runtime; requirements: string;
@@ -165,6 +165,23 @@ export class NativeIntake {
     return this.status(runtime.sessionID);
   }
 
+  /**
+   * Explicit recovery for the conversation. Phase scope releases the current attempt; run scope
+   * forgets the run and its intake so a new objective can start here without a new conversation.
+   */
+  reset(runtime: Runtime, scope: 'phase' | 'run'): unknown {
+    if (runtime.agent !== 'mdd-orchestrator') throw new Error('Only the coordinator may reset MDD state.');
+    const entry = this.#sessions.get(runtime.sessionID);
+    const applied = this.runner.reset?.(runtime.sessionID, scope) ?? { scope: 'run' as const };
+    if (applied.scope === 'run') this.#sessions.delete(runtime.sessionID);
+    else if (entry) {
+      delete entry.slot; delete entry.reason; delete entry.restore; delete entry.replacing;
+      entry.state = 'active';
+      entry.notice = `The ${applied.phase ?? 'current'} phase was released and is ready to run again. Previous evidence is retained.`;
+    }
+    return { ...this.status(runtime.sessionID), reset: applied };
+  }
+
   status(sessionID: string) {
     const entry = this.#sessions.get(sessionID);
     const status = this.runner.status?.(sessionID) ?? { state: 'not-started' };
@@ -297,6 +314,6 @@ export class NativeIntake {
     entry.state = 'blocked';
     entry.reason = error instanceof Error ? error.message : 'Unknown native intake outcome.';
     this.runner.block(entry.runtime.sessionID, entry.reason);
-    throw new Error(`MDD intake blocked: ${entry.reason} No automatic retry is available.`);
+    throw new Error(`MDD intake stopped: ${entry.reason} Nothing is locked: read mdd_status, then use mdd_reset to start over, or send a fresh request.`);
   }
 }

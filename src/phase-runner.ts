@@ -27,7 +27,7 @@ type State = 'starting' | 'ready' | 'persisting-intent' | 'await-result' | 'pers
 type Run = {
   id: string; runtime: Runtime; workflow: Workflow; phase: Phase;
   requirements: string; memory: EngramHttp | undefined; args: TaskArgs; state: State;
-  callID?: string; dispatchedArgs?: TaskArgs; reason?: string;
+  callID?: string; lastCallID?: string; dispatchedArgs?: TaskArgs; reason?: string; attempts: number;
   artifacts: ArtifactStore; artifact?: ArtifactResult; artifactAttempts?: readonly ArtifactAttempt[];
   history: ArtifactResult[]; calls: Set<string>; planned: Deliverable[]; evidence: Evidence;
   report: PhaseReport; started?: number; telemetryDiagnostic?: string;
@@ -81,22 +81,25 @@ export class PhaseRunner {
       const investigation = solo ? { contextual: false, contextualReport: solo.report, contexts: structuredClone(solo.findings),
         ...(solo.state === 'blocked' && solo.reason ? { contextualReason: solo.reason } : {}) } : {};
       try {
+        // Only an attempt that never reported an outcome needs care. Work that ended, whether it
+        // passed or failed, leaves the conversation free to start something new.
         const marker = this.options.progress?.read(sessionID);
-        if (marker && marker.state !== 'complete') return { state: 'recovery-blocked', sessionID, ...investigation, reason: 'Previous work in this conversation cannot be resumed safely after restart. Its evidence was preserved. Inspect it and use a new conversation for new work. Read-only investigation remains available.' };
-      } catch (error) { return { state: 'recovery-blocked', sessionID, ...investigation, reason: error instanceof Error ? error.message : 'Progress is unavailable.' }; }
+        if (marker && marker.state === 'pending') return { state: 'recovery-blocked', sessionID, ...investigation, recoverable: true, reason: 'A previous attempt in this conversation never reported an outcome, so it is not resumed automatically. Its evidence was preserved. Use mdd_reset to release it and start new work here, or open a new conversation. Read-only investigation remains available.' };
+      } catch (error) { return { state: 'recovery-blocked', sessionID, ...investigation, recoverable: true, reason: `${error instanceof Error ? error.message : 'Progress is unavailable.'} Use mdd_reset to clear the local marker.` }; }
       return { state: 'not-started', sessionID, ...investigation };
     }
     return {
       runID: run.id, sessionID, phase: run.phase, state: run.state,
       reason: run.reason ?? (run.state === 'await-result'
-        ? 'Native task outcome pending or uncertain. Never redispatch; consult this status after an error.'
+        ? 'The dispatched task has not reported yet. Wait for it rather than redispatching; if it fails, this phase returns to ready on its own.'
         : run.state === 'complete' ? 'Final Verify checks corroborated. Evidence coverage is not correctness probability.' : ''),
       workflow: run.workflow.snapshot(),
       next: run.workflow.nextAction(),
       evidence: { ...run.evidence }, coverage: evidenceCoverage(run.evidence),
       report: run.side ? `Summary\nContextual exploration ${run.state === 'blocked' ? 'could not be confirmed' : run.state === 'ready' ? 'is ready' : 'is in progress'}. The main plan and approval are unchanged.\n` : run.state === 'complete' || run.state === 'blocked' ? this.#closure(run) : renderReport(run.workflow.snapshot().answers.summary, { ...run.report, evidence: run.evidence }),
       acceptance: structuredClone(run.acceptance), decisions: structuredClone(run.decisions), planned: structuredClone(run.planned), verification: structuredClone(run.verification),
-      uncertain: run.uncertain, contextual: !!run.side, contexts: structuredClone(run.contexts), concerns: structuredClone(run.concerns),
+      uncertain: run.uncertain, attempts: run.attempts, recoverable: true,
+      contextual: !!run.side, contexts: structuredClone(run.contexts), concerns: structuredClone(run.concerns),
       contextualReport: run.contextReport,
       previousRuns: (this.#previous.get(sessionID) ?? []).map(old => ({ runID: old.id, state: 'superseded', lastState: old.state, workflow: old.workflow.snapshot(), artifacts: structuredClone(old.history), contexts: structuredClone(old.contexts), evidence: { ...old.evidence }, acceptance: structuredClone(old.acceptance), decisions: structuredClone(old.decisions), planned: structuredClone(old.planned), verification: structuredClone(old.verification) })),
       artifacts: structuredClone(run.history), telemetryDiagnostic: run.telemetryDiagnostic,
@@ -131,7 +134,7 @@ export class PhaseRunner {
       args: { description: '', subagent_type: first.phase, prompt: '' }, state: 'starting',
       history: [], calls: new Set(previous?.calls), planned: [], evidence: { ...emptyEvidence(), requirements: trusted?.requirementsConfirmed ? 'confirmed' : 'unearned' },
       uncertain: false, userMessageID: trusted?.userMessageID ?? '', concerns: [], contexts: [],
-      decisions: [], executedChecks: [], changedFiles: 0,
+      decisions: [], executedChecks: [], changedFiles: 0, attempts: 0,
       report: { phase: first.phase, summary: `Preparing ${phaseLabel(first.phase).toLowerCase()}.`, how: [], status: 'in-progress', evidence: emptyEvidence() },
     };
     this.#runs.set(runtime.sessionID, run);
@@ -145,22 +148,80 @@ export class PhaseRunner {
       return this.status(runtime.sessionID);
     } catch (error) {
       if (previous) { this.#runs.set(runtime.sessionID, previous); throw error; }
-      return this.#fail(run, error);
+      return this.#stop(run, error);
     }
   }
 
-  #fail(run: Run, error: unknown): never {
-    this.block(run.runtime.sessionID, 'Infrastructure or native evidence could not be confirmed.');
+  /**
+   * A run that cannot start, or whose route can no longer advance, stops without claiming
+   * progress. Stopping is never sealed: uncertainty is cleared and mdd_reset stays reachable.
+   */
+  #stop(run: Run, error: unknown): never {
     if (error instanceof ArtifactWriteError) run.artifactAttempts = error.attempts;
-    run.reason = error instanceof Error ? error.message : 'Unknown infrastructure outcome.';
-    throw new Error(`MDD blocked: ${run.reason} No retry or reset is available for this parent.`);
+    const detail = error instanceof Error ? error.message : 'Unknown infrastructure outcome.';
+    this.block(run.runtime.sessionID, detail);
+    throw new Error(`MDD stopped this run: ${detail} Nothing is locked: read mdd_status, then use mdd_reset to retry the phase or start over.`);
+  }
+
+  /**
+   * A failed dispatch, result or persistence ends one attempt, not the run. The phase returns to
+   * ready so the same work can be delegated again or carried out directly, and uncertainty is
+   * cleared so change requests, investigation and reset all stay reachable.
+   */
+  #degrade(run: Run, error: unknown): never {
+    if (error instanceof ArtifactWriteError) run.artifactAttempts = error.attempts;
+    run.reason = error instanceof Error ? error.message : 'Unknown attempt outcome.';
+    run.attempts += 1;
+    run.uncertain = false;
+    delete run.callID;
+    delete run.dispatchedArgs;
+    const phase = run.phase;
+    if (run.started !== undefined) this.#event(run, 'phase-end', 'blocked');
+    const recovered = this.#recover(run);
+    this.#settle(run);
+    throw new Error(`MDD attempt ${run.attempts} for ${phase} did not complete: ${run.reason} ${recovered
+      ? 'The phase is ready again: read mdd_status and run its task once more, or carry out the phase yourself. Nothing is locked.'
+      : 'Read mdd_status, then use mdd_reset to retry this phase or start over. Nothing is locked.'}`);
+  }
+
+  /** Puts the route back on a runnable step. Contextual work restores the main plan it paused. */
+  #recover(run: Run): boolean {
+    const side = run.side;
+    try {
+      if (side) {
+        run.phase = side.phase; run.args = side.args; run.report = side.report; run.state = side.state;
+        delete run.side;
+        if (run.state === 'ready') this.#prepare(run);
+        return true;
+      }
+      run.workflow.retry();
+      this.#prepare(run);
+      return true;
+    } catch {
+      // The route itself cannot continue, so the current phase claims nothing.
+      run.state = 'blocked';
+      run.evidence = invalidateEvidence(run.evidence, this.#affected(run.phase));
+      run.report = { phase: run.phase, summary: 'The attempt stopped and this route needs attention.', how: [], status: 'blocked', evidence: run.evidence };
+      return false;
+    }
+  }
+
+  /** A stopped attempt is recorded as settled, never left pending, so a restart is not locked. */
+  #settle(run: Run): void {
+    try { this.#mark(run, run.state === 'complete' ? 'complete' : 'settled'); }
+    catch { /* A progress write failure must not re-lock work that already stopped. */ }
   }
 
   async before(call: TaskCall, args: unknown): Promise<TaskArgs | undefined> {
     const run = this.#runs.get(call.sessionID);
     if (!run) return this.#soloBefore(call, args);
     if (run.state !== 'ready') {
-      return this.#fail(run, new Error('Unexpected, duplicate, concurrent, or unsupported native task.'));
+      // A task that arrives while one is already running is a duplicate, not a failure: refusing
+      // it changes nothing, so the running attempt keeps its slot and can still report a result.
+      if (run.state === 'await-result') {
+        throw new ValidationError('This phase already has a task in flight. Read mdd_status and wait for its result; nothing was started and nothing is locked.');
+      }
+      return this.#degrade(run, new Error('A task arrived while the run was not ready to dispatch one.'));
     }
     if (!isDeepStrictEqual(args, run.args)) {
       throw new ValidationError('Task arguments differ from the ready task. Read mdd_status and pass its exact task object, copying description, subagent_type and prompt verbatim; do not compose your own. No execution was started.');
@@ -171,6 +232,7 @@ export class PhaseRunner {
     if (!run.side) delete run.contextReport;
     try {
       run.callID = boundedText(call.callID, 'native callID', 256);
+      run.lastCallID = run.callID;
       if (run.calls.has(call.callID)) throw new Error('Native task call ID was already consumed.');
       run.calls.add(call.callID);
       run.dispatchedArgs = { ...run.args, prompt: `${run.args.prompt}\nNative callID=${JSON.stringify(call.callID)}` };
@@ -190,14 +252,14 @@ export class PhaseRunner {
       run.started = this.#now();
       this.#event(run, 'phase-start');
       return { ...run.dispatchedArgs };
-    } catch (error) { return this.#fail(run, error); }
+    } catch (error) { return this.#degrade(run, error); }
   }
 
   async after(call: TaskCall, args: unknown, output: unknown): Promise<void> {
     const run = this.#runs.get(call.sessionID);
     if (!run) return this.#soloAfter(call, args, output);
     if (run.state !== 'await-result' || run.callID !== call.callID || !isDeepStrictEqual(args, run.dispatchedArgs)) {
-      return this.#fail(run, new Error('Native result does not match the pending parent and call.'));
+      return this.#degrade(run, new Error('This result does not match the task this phase dispatched, so it was discarded.'));
     }
     run.state = 'persisting-result';
     try {
@@ -267,7 +329,7 @@ export class PhaseRunner {
       run.evidence = nextEvidence;
       run.report = { phase: run.phase, summary: evidenceSummary, how: ['Kept the requirements, decisions and implementation evidence linked.', ...(native?.changes.map(change => `${change.paths.length} scoped file(s) changed.`) ?? []), ...(native?.checks.map(check => `Executed ${check.command}; exit ${check.exit}.`) ?? [])], status: result.outcome, evidence: run.evidence };
       this.#event(run, 'phase-end', result.outcome);
-      if (result.outcome === 'failed') { run.state = 'blocked'; run.reason = 'The phase reported failure; no automatic repair or retry.'; }
+      if (result.outcome === 'failed') { run.state = 'blocked'; run.reason = 'The phase reported failure. Nothing is repaired automatically: inspect the evidence, then use mdd_reset to run this phase again or request a change.'; }
       else {
         const next = run.workflow.nextAction();
         if (next.kind === 'finished') run.state = 'complete';
@@ -276,14 +338,25 @@ export class PhaseRunner {
       }
       this.#event(run, 'report', run.state === 'complete' ? 'passed' : run.state === 'blocked' ? 'blocked' : undefined);
       this.#mark(run, run.state === 'complete' ? 'complete' : 'settled');
-    } catch (error) { return this.#fail(run, error); }
+    } catch (error) { return this.#degrade(run, error); }
   }
 
   nativeError(sessionID: string, callID: string): void {
     const run = this.#runs.get(sessionID);
     const pending = run ?? this.#solo.get(sessionID);
     if (pending?.callID !== callID || !['await-result', 'persisting-result'].includes(pending.state)) return;
-    this.block(sessionID, 'The matching native task failed or was interrupted. Outcome is uncertain; never redispatch.');
+    this.attemptRejected(sessionID, 'The dispatched task failed or was interrupted before reporting a result.');
+  }
+
+  /**
+   * Evidence rejected in a child, or a task that failed natively, ends that attempt. The phase
+   * becomes runnable again so the same work can be delegated once more or carried out directly.
+   */
+  attemptRejected(sessionID: string, reason: string): void {
+    const run = this.#runs.get(sessionID);
+    if (!run) { this.block(sessionID, reason); return; }
+    try { this.#degrade(run, new Error(reason)); }
+    catch { /* The caller reports its own failure to the actor; the run is already released. */ }
   }
 
   approveNative(sessionID: string, phase: Phase): void {
@@ -291,7 +364,7 @@ export class PhaseRunner {
     if (!run || run.state !== 'await-approval') throw new Error('No recorded phase is awaiting native approval.');
     run.workflow.approve(phase);
     try { this.#prepare(run); this.#event(run, 'approval', 'passed'); }
-    catch (error) { this.#fail(run, error); }
+    catch (error) { this.#stop(run, error); }
   }
 
   block(sessionID: string, reason: string): void {
@@ -302,10 +375,41 @@ export class PhaseRunner {
       return;
     }
     if (!run.side) run.evidence = invalidateEvidence(run.evidence, this.#affected(run.phase));
-    run.report = { phase: run.phase, summary: 'Execution blocked; affected evidence was withdrawn.', how: [], status: 'blocked', evidence: run.evidence };
+    run.report = { phase: run.phase, summary: 'Execution stopped; affected evidence was withdrawn.', how: [], status: 'blocked', evidence: run.evidence };
     if (run.state !== 'blocked') this.#event(run, 'phase-end', 'blocked');
     run.state = 'blocked';
     run.reason = reason;
+    // Stopped work is not in flight. Releasing the dispatch slot and the uncertainty flag is what
+    // keeps change requests, read-only investigation and reset reachable after a failure.
+    run.uncertain = false;
+    delete run.callID;
+    delete run.dispatchedArgs;
+    this.#settle(run);
+  }
+
+  /**
+   * Explicit recovery. Phase scope releases the current attempt and makes the same phase runnable
+   * again; run scope discards the run, its investigation and the local marker so new work can start.
+   */
+  reset(sessionID: string, scope: 'phase' | 'run'): { scope: 'phase' | 'run'; phase?: Phase } {
+    const run = this.#runs.get(sessionID);
+    if (scope === 'run' || !run) {
+      this.#runs.delete(sessionID);
+      this.#solo.delete(sessionID);
+      this.options.progress?.clear(sessionID);
+      return { scope: 'run' };
+    }
+    delete run.side;
+    delete run.callID;
+    delete run.dispatchedArgs;
+    delete run.reason;
+    delete run.contextReport;
+    run.uncertain = false;
+    run.attempts = 0;
+    run.workflow.retry();
+    this.#prepare(run);
+    this.#settle(run);
+    return { scope: 'phase', phase: run.phase };
   }
 
   pending(sessionID: string, phase: Phase): { runtime: Runtime; call: TaskCall; checks: string[] } {
@@ -333,15 +437,24 @@ export class PhaseRunner {
       uncertain: run.uncertain, limits: [...(run.verification?.limits ?? [])] };
   }
 
+  /**
+   * Only work that is genuinely running blocks a change. A stopped or failed run is changeable:
+   * treating its uncertainty flag as in-flight work is what used to make failures irreparable.
+   */
   assertChangeable(sessionID: string): void {
     const run = this.#runs.get(sessionID);
-    if (!run || run.side || run.uncertain || !['ready', 'await-approval', 'complete', 'blocked'].includes(run.state)) throw new Error('Wait for the current work to settle. Uncertain or in-flight work cannot be reset or redispatched.');
+    if (!run) return;
+    if (!['ready', 'await-approval', 'complete', 'blocked'].includes(run.state)) {
+      throw new Error('A native task is in flight for this run. Wait for its result, or use mdd_reset to release it; no evidence is lost.');
+    }
   }
 
   assertFreshStart(sessionID: string, userMessageID?: string): void {
     if (this.#runs.has(sessionID)) return;
     const marker = this.options.progress?.read(sessionID);
-    if (marker && (marker.state !== 'complete' || marker.userMessageID === userMessageID)) throw new Error('Previous work cannot be silently repeated after restart. Inspect its evidence and start new work in a new conversation.');
+    if (!marker) return;
+    if (marker.state === 'pending') throw new Error('A previous attempt in this conversation never reported an outcome. Inspect mdd_status, then use mdd_reset to release it before starting new work.');
+    if (marker.userMessageID === userMessageID) throw new Error('This exact request already ran in this conversation. Send a new request, or use mdd_reset to start it over deliberately.');
   }
 
   /** Read-only investigation is always reachable: it binds to an idle run when one exists, otherwise it stands alone. */
@@ -351,8 +464,10 @@ export class PhaseRunner {
     if (runtime.agent !== 'mdd-orchestrator') throw new Error('Only mdd-orchestrator may request read-only investigation.');
     const run = this.#runs.get(runtime.sessionID);
     if (!run) return this.#soloStart(runtime, purpose);
-    if (runtime.directory !== run.runtime.directory || runtime.worktree !== run.runtime.worktree || !['ready', 'await-approval', 'complete', 'blocked'].includes(run.state)) throw new Error('Contextual exploration requires an idle main run.');
-    this.assertChangeable(runtime.sessionID);
+    if (run.side) throw new Error('A read-only investigation is already in progress for this run; wait for its result.');
+    // Investigation only waits for a task that is actually running; a stopped or failed run must
+    // still be able to answer questions about the project.
+    if (runtime.directory !== run.runtime.directory || runtime.worktree !== run.runtime.worktree || !['ready', 'await-approval', 'complete', 'blocked'].includes(run.state)) throw new Error('A native task is in flight. Wait for its result before requesting investigation; nothing is locked.');
     const side = { id: randomUUID(), purpose, phase: run.phase, state: run.state, args: run.args, report: run.report };
     run.side = side;
     try {
@@ -482,7 +597,7 @@ export class PhaseRunner {
     solo.state = 'blocked';
     solo.reason = error instanceof Error ? error.message : 'Unknown read-only investigation outcome.';
     if (!blocked) this.#soloEvent(solo, 'phase-end', 'blocked');
-    throw new Error(`MDD read-only investigation blocked: ${solo.reason} No automatic retry is available; the main route is unaffected.`);
+    throw new Error(`MDD read-only investigation did not complete: ${solo.reason} Request it again with mdd_contextual_explore, or answer from what you can read directly; the main route is unaffected.`);
   }
 
   #soloEvent(solo: Solo, event: TelemetryEvent['event'], outcome?: TelemetryEvent['outcome']): void {
@@ -496,8 +611,10 @@ export class PhaseRunner {
   }
 
   #mark(run: Run, state: 'pending' | 'settled' | 'complete'): void {
-    if (!this.options.progress || !run.callID) return;
-    try { this.options.progress.write(run.runtime.sessionID, { runID: run.id, callID: run.callID, state, userMessageID: run.userMessageID }); }
+    // A released attempt still has to record that it ended, so the last dispatched call is kept.
+    const callID = run.callID ?? run.lastCallID;
+    if (!this.options.progress || !callID) return;
+    try { this.options.progress.write(run.runtime.sessionID, { runID: run.id, callID, state, userMessageID: run.userMessageID }); }
     catch (error) { run.uncertain = true; throw error; }
   }
 

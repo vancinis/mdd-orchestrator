@@ -24,6 +24,28 @@ function record(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+/** MDD tools belong to the MDD coordinator. Other agents share the registry but not this state. */
+export const MDD_TOOLS = ['mdd_start', 'mdd_status', 'mdd_reset', 'mdd_change_request', 'mdd_contextual_explore', 'mdd_pr_body'] as const;
+export const COORDINATOR = 'mdd-orchestrator';
+function coordinatorOnly(agent: string, tool: string): void {
+  if (agent !== COORDINATOR) {
+    throw new Error(`${tool} belongs to the ${COORDINATOR} agent and does nothing here. This session is not an MDD run; continue with your own tools.`);
+  }
+}
+/**
+ * Plugin tools are registered once for the whole app, so every agent would otherwise see and be
+ * able to call them. Disabling them per agent keeps them out of unrelated tool lists and prompts.
+ */
+export function restrictTools(config: { agent?: Record<string, Record<string, unknown>> }): void {
+  for (const [name, agent] of Object.entries(config.agent ?? {})) {
+    if (name === COORDINATOR || !agent || typeof agent !== 'object') continue;
+    const tools = { ...(agent.tools as Record<string, boolean> | undefined) };
+    for (const tool of MDD_TOOLS) if (tools[tool] === undefined) tools[tool] = false;
+    if (tools['mdd_*'] === undefined) tools['mdd_*'] = false;
+    agent.tools = tools;
+  }
+}
+
 /**
  * Inspection bounds are per subject. History stays tied to the requested page size, while
  * agent registries and resolved permission rulesets scale with the user's installed skills
@@ -306,7 +328,7 @@ const plugin: Plugin = async input => {
   // The tool hooks shadow the plugin input, so the workspace root is captured here.
   const workspace = input.directory;
   return {
-    config: async config => { applyModelOverrides(config, profile); },
+    config: async config => { applyModelOverrides(config, profile); restrictTools(config as Parameters<typeof restrictTools>[0]); },
     'chat.message': async (input, output) => {
       if (MODEL_ROLES.includes(output.message.agent as Phase) && output.message.agent !== 'orchestrator') childSessions.set(input.sessionID, phaseName(output.message.agent));
       if (output.message.agent === 'mdd-orchestrator') coordinatorSessions.add(input.sessionID);
@@ -316,7 +338,8 @@ const plugin: Plugin = async input => {
         description: 'Draft only a PR body using the exact local skill/template and recorded current-run evidence. Never commits, pushes or publishes. Optional notes must quote whole lines of the actual latest user text; unknown facts remain unverified.',
         args: { userText: tool.schema.string().min(1), notes: tool.schema.object({ environmentVariables: tool.schema.string().optional(), followUps: tool.schema.string().optional(), deployment: tool.schema.string().optional() }).optional() },
         async execute(args, context) {
-          if (context.agent !== 'mdd-orchestrator' || context.abort.aborted) throw new Error('Only the active coordinator may draft the current run.');
+          coordinatorOnly(context.agent, 'mdd_pr_body');
+          if (context.abort.aborted) throw new Error('The PR body draft was aborted.');
           const current = runner.prFacts(context.sessionID);
           await inspector.intake(context, boundedText(args.userText, 'actual user request', 12000), context.messageID);
           const facts = runner.prFacts(context.sessionID);
@@ -330,6 +353,7 @@ const plugin: Plugin = async input => {
           requirements: tool.schema.string().min(1).describe('Exact latest native user text or authenticated pendingStart requirements, without rewriting. Never substitute continuation text for a pending objective.'),
         },
         async execute(args, context) {
+          coordinatorOnly(context.agent, 'mdd_start');
           if (context.abort.aborted) throw new Error('MDD start was aborted.');
           const status = record(await intake.start(args, context, context.messageID));
           if (status.setupOrigin) status.setupOrigin = { ...record(status.setupOrigin), projectID: input.project.id };
@@ -340,6 +364,7 @@ const plugin: Plugin = async input => {
         description: 'Read this actual parent session MDD state; never retries, resets, or approves a phase.',
         args: {},
         async execute(_args, context) {
+          coordinatorOnly(context.agent, 'mdd_status');
           const status = record(intake.status(context.sessionID));
           let recovery = {};
           if (runner.status(context.sessionID).state === 'not-started' && !status.pendingStart) {
@@ -358,14 +383,24 @@ const plugin: Plugin = async input => {
         description: 'Request an explicit preflight rerun from fresh native user text, or propose a material change backed by a new user request or recorded concern. Keeps the current run until native confirmation and grouped preflight. Never use for ordinary plan choices or continuation.',
         args: { kind: tool.schema.enum(['rerun', 'material']), userText: tool.schema.string().min(1), requirements: tool.schema.string().optional(), concerns: tool.schema.unknown().optional() },
         async execute(args, context) {
+          coordinatorOnly(context.agent, 'mdd_change_request');
           if (context.abort.aborted) throw new Error('Change request was aborted.');
           return JSON.stringify(await intake.changeRequest(args, context, context.messageID));
+        },
+      }),
+      mdd_reset: tool({
+        description: 'Release stopped MDD work in this conversation. Scope phase makes the current phase runnable again; scope run forgets the run so a new objective can start here. Recorded artifacts and memory are never deleted.',
+        args: { scope: tool.schema.enum(['phase', 'run']).describe('phase releases the current attempt; run discards the run state for this conversation.') },
+        async execute(args, context) {
+          coordinatorOnly(context.agent, 'mdd_reset');
+          return JSON.stringify(intake.reset(context, args.scope));
         },
       }),
       mdd_contextual_explore: tool({
         description: 'Request one useful read-only investigation, with or without an accepted run. Use it for information-only questions instead of stopping. Never starts implementation and never changes the main route, answers or pending approval. Returns exact native task arguments through status.',
         args: { purpose: tool.schema.string().min(1) },
         async execute(args, context) {
+          coordinatorOnly(context.agent, 'mdd_contextual_explore');
           if (context.abort.aborted) throw new Error('Contextual exploration was aborted.');
           return JSON.stringify(await intake.explore(args, context));
         },
@@ -378,7 +413,7 @@ const plugin: Plugin = async input => {
           await inspector.beforeChild(input, phase, input.tool, output.args, (parent, phase) => { childParents.set(input.sessionID, parent); return runner.pending(parent, phase); });
         } catch (error) {
           const parent = childParents.get(input.sessionID);
-          if (parent) runner.block(parent, 'Child capability or invocation evidence was rejected.');
+          if (parent) runner.attemptRejected(parent, 'A capability or invocation in the delegated phase was rejected.');
           throw error;
         }
         return;
@@ -397,7 +432,7 @@ const plugin: Plugin = async input => {
     'tool.execute.after': async (input, output) => {
       if (childSessions.has(input.sessionID)) {
         try { inspector.afterChild(input, input.tool, input.args, output); }
-        catch (error) { const parent = childParents.get(input.sessionID); if (parent) runner.block(parent, 'Child result evidence was rejected.'); throw error; }
+        catch (error) { const parent = childParents.get(input.sessionID); if (parent) runner.attemptRejected(parent, 'Evidence returned by the delegated phase was rejected.'); throw error; }
         return;
       }
       if (input.tool === 'question') await intake.afterQuestion(input, input.args, output);
@@ -415,7 +450,7 @@ const plugin: Plugin = async input => {
       // partial execution is unknowable, invalidate the dispatch.
       if (part.type === 'tool' && part.state.status === 'error' && !READ_TOOLS.includes(String(part.tool))) {
         const parent = childParents.get(part.sessionID);
-        if (parent) runner.block(parent, 'A native child tool failed or was interrupted.');
+        if (parent) runner.attemptRejected(parent, 'A tool in the delegated phase failed or was interrupted.');
       }
       if (part.type === 'tool' && part.tool === 'task' && part.state.status === 'error') {
         runner.nativeError(part.sessionID, part.callID);

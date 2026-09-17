@@ -18,6 +18,11 @@ export class ProgressGuard {
     try { const text = this.#files.read(this.#name(parent), LIMIT); return text === undefined ? undefined : parse(JSON.parse(text)); }
     catch { throw new Error('Progress cannot be read safely. Do not retry prior work; inspect the local progress file.'); }
   }
+  /** Explicit recovery: a marker never keeps a conversation locked once the user asks to clear it. */
+  clear(parent: string): void {
+    try { this.#files.remove(this.#name(parent)); }
+    catch { throw new Error('The local progress marker could not be cleared. Inspect the .mdd directory.'); }
+  }
   write(parent: string, marker: Progress): void {
     try {
       const entry = parse(marker);

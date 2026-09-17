@@ -188,17 +188,20 @@ for (const route of ['low', 'high']) for (const store of ['none', 'openspec']) f
 }
 
 for (const fault of [{ forged: true }, { coverageFault: 'missing' }, { exit: 1 }]) {
-  test(`memory off retains native command and acceptance rejection: ${JSON.stringify(fault)}`, async t => {
+  test(`memory off rejects unusable native evidence and keeps the phase runnable: ${JSON.stringify(fault)}`, async t => {
     t.mock.method(globalThis, 'fetch', () => assert.fail('Memory off fetched'));
     const f = await fixture(t, { memoryEnabled: false });
     await f.phase(); await f.phase();
     await assert.rejects(f.phase(fault));
-    assert.equal((await f.status()).state, 'blocked');
-    assert.equal((await f.status()).task, undefined);
+    const after = await f.status();
+    assert.equal(after.state, 'ready');
+    assert.equal(after.attempts, 1);
+    assert.ok(after.task, 'a rejected attempt leaves the phase runnable');
+    assert.equal(after.workflow.results.length, 2);
   });
 }
 
-test('memory off contextual exploration and restart guard retain local provenance without HTTP', async t => {
+test('memory off contextual exploration keeps local provenance, and a restart leaves the conversation usable', async t => {
   t.mock.method(globalThis, 'fetch', () => assert.fail('Memory off fetched'));
   const f = await fixture(t, { memoryEnabled: false });
   await f.hooks.tool.mdd_contextual_explore.execute({ purpose: 'Inspect the current feature boundary.' }, f.context);
@@ -206,7 +209,11 @@ test('memory off contextual exploration and restart guard retain local provenanc
   assert.equal((await f.status()).workflow.results.length, 0);
   await f.phase();
   const restarted = await plugin(f.input);
-  assert.equal(JSON.parse(await restarted.tool.mdd_status.execute({}, f.context)).state, 'recovery-blocked');
+  // Settled work is not in flight: the conversation is free, it simply does not resume by itself.
+  assert.equal(JSON.parse(await restarted.tool.mdd_status.execute({}, f.context)).state, 'not-started');
+  f.user('A different objective for this conversation.');
+  const fresh = JSON.parse(await restarted.tool.mdd_start.execute({ requirements: 'A different objective for this conversation.' }, f.context));
+  assert.equal(fresh.state, 'ready');
 });
 
 for (const route of ['low', 'high']) for (const mode of ['automatic', 'interactive']) for (const store of ['none', 'openspec', 'engram', 'both']) {
@@ -244,14 +251,16 @@ for (const route of ['low', 'high']) for (const mode of ['automatic', 'interacti
 }
 
 for (const [name, fault] of Object.entries({ nonzero: { exit: 1 }, interrupted: { exit: null }, empty: { empty: true }, truncated: { truncated: true }, forged: { forged: true }, skipped: { noChecks: true }, skippedOnly: { skippedOnly: true }, missingHistory: { missingAfter: true }, model: { mismatch: true } })) {
-  test(`Verify rejects ${name} evidence and withdraws affected coverage`, async t => {
+  test(`Verify rejects ${name} evidence without claiming checks or losing earned coverage`, async t => {
     const f = await fixture(t);
     await f.phase(); await f.phase();
     assert.equal((await f.status()).coverage, 65);
     await assert.rejects(f.phase(fault));
-    const blocked = await f.status();
-    assert.equal(blocked.state, 'blocked'); assert.equal(blocked.coverage, 40);
-    assert.equal(blocked.task, undefined); assert.equal(blocked.workflow.results.length, 2);
+    const after = await f.status();
+    // The attempt earns nothing, but plan and implementation were corroborated earlier and are
+    // not withdrawn by a rejected verification; Verify simply stays runnable.
+    assert.equal(after.state, 'ready'); assert.equal(after.coverage, 65);
+    assert.equal(after.task.subagent_type, 'mdd-verify'); assert.equal(after.workflow.results.length, 2);
   });
 }
 
@@ -260,9 +269,10 @@ test('Apply no-change result earns no implementation credit; executable checks r
   assert.equal((await f.status()).state, 'complete'); assert.equal((await f.status()).coverage, 75);
   assert.match((await f.status()).report, /No implementation change was recorded/);
 });
-test('Apply external edit is rejected before writes and no later task becomes available', async t => {
+test('Apply external edit is rejected before writes and the phase stays on Apply', async t => {
   const f = await fixture(t); await f.phase(); await assert.rejects(f.phase({ external: true }));
-  assert.equal((await f.status()).state, 'blocked');
+  const status = await f.status();
+  assert.equal(status.state, 'ready'); assert.equal(status.task.subagent_type, 'mdd-apply');
 });
 for (const summary of ['low', 'medium', 'detailed']) {
   test(`live report ${summary} and disabled telemetry`, async t => {
@@ -283,22 +293,29 @@ test('late result memory failure never completes Verify or retains checks credit
     if (req.method === 'POST' && last?.type === 'workflow') { const body = JSON.parse(last.content); if (body.kind === 'agent-evidence' && body.phase === 'mdd-verify') reply.status = 500; }
   } });
   await f.phase(); await f.phase(); await assert.rejects(f.phase());
-  assert.equal((await f.status()).coverage, 40); assert.equal((await f.status()).state, 'blocked');
+  assert.equal((await f.status()).coverage, 65); assert.equal((await f.status()).state, 'ready');
+  assert.equal((await f.status()).evidence.checks, 'unearned');
 });
 
 for (const fault of ['missing', 'invented', 'drift', 'partial']) {
   test(`acceptance closure cannot claim success for ${fault} coverage`, async t => {
     const f = await fixture(t); await f.phase(); await f.phase();
-    if (fault === 'partial') await f.phase({ coverageFault: fault });
-    else await assert.rejects(f.phase({ coverageFault: fault }));
-    const status = await f.status();
-    assert.equal(status.state, 'blocked'); assert.equal(status.coverage, 40);
-    assert.match(status.report, /Not complete: requirements and plan are not fully verified/);
-    assert.doesNotMatch(status.report, /100%|requirements and plan matched/);
-    if (fault === 'drift' || fault === 'partial') {
+    if (fault === 'partial') {
+      // A phase that reports failure is a recorded outcome: it closes the route and withdraws
+      // the evidence it could not stand behind.
+      await f.phase({ coverageFault: fault });
+      const status = await f.status();
+      assert.equal(status.state, 'blocked'); assert.equal(status.coverage, 40);
+      assert.match(status.report, /Not complete: requirements and plan are not fully verified/);
+      assert.doesNotMatch(status.report, /100%|requirements and plan matched/);
       assert.equal(status.verification.decisions[0].status, 'deviation');
       assert.match(status.report, /diverges from the planned boundary/);
+      return;
     }
+    await assert.rejects(f.phase({ coverageFault: fault }));
+    const status = await f.status();
+    assert.equal(status.state, 'ready'); assert.equal(status.coverage, 65);
+    assert.doesNotMatch(status.report, /100%|requirements and plan matched/);
   });
 }
 
@@ -331,7 +348,8 @@ for (const fault of [{ denied: true }, { beforeMismatch: true }]) {
   test(`Apply native refusal or model mismatch prevents writes: ${JSON.stringify(fault)}`, async t => {
     const f = await fixture(t); await f.phase(); await assert.rejects(f.phase(fault));
     assert.equal(await readFile(join(f.root, 'feature.txt'), 'utf8'), 'pending\n');
-    const status = await f.status(); assert.equal(status.state, 'blocked'); assert.equal(status.coverage, 40);
+    const status = await f.status();
+    assert.equal(status.state, 'ready'); assert.equal(status.task.subagent_type, 'mdd-apply'); assert.equal(status.coverage, 40);
   });
 }
 
@@ -386,9 +404,13 @@ test('known failed phase permits a confirmed new planned run; unknown native res
   await known.phase(); assert.deepEqual((await known.status()).workflow, failed.workflow);
   known.user('Replan this failed task.'); await known.change(); await known.answer(); await known.answer();
   assert.equal((await known.status()).state, 'ready'); assert.equal((await known.status()).previousRuns[0].workflow.results[0].outcome, 'failed');
+  // A rejected attempt used to mark the run uncertain forever, which then refused every repair
+  // path. Releasing it is what keeps replanning, investigation and reset reachable after a failure.
   const unknown = await fixture(t); await assert.rejects(unknown.phase({ missingAfter: true }));
-  assert.equal((await unknown.status()).uncertain, true);
-  unknown.user('Try again.'); await assert.rejects(unknown.change(), /Uncertain|in-flight/);
+  assert.equal((await unknown.status()).uncertain, false);
+  assert.equal((await unknown.status()).state, 'ready');
+  unknown.user('Try again.');
+  assert.equal((await unknown.change()).question.questions.length, 1);
 });
 test('new task after completion uses profile without a redundant change confirmation', async t => {
   const f = await fixture(t); await f.phase(); await f.phase(); await f.phase();
@@ -502,11 +524,11 @@ for (const fault of [{ unauthorized: true }, { beforeMismatch: true }]) {
     assert.equal((await f.status()).task.subagent_type, 'mdd-explore');
   });
 }
-test('a recovery-blocked conversation still answers read-only investigation', async t => {
+test('a restarted conversation still answers read-only investigation', async t => {
   const f = await fixture(t, { memoryEnabled: false });
   await f.phase();
   const restarted = await plugin(f.input);
-  assert.equal(JSON.parse(await restarted.tool.mdd_status.execute({}, f.context)).state, 'recovery-blocked');
+  assert.equal(JSON.parse(await restarted.tool.mdd_status.execute({}, f.context)).state, 'not-started');
   await restarted.tool.mdd_contextual_explore.execute({ purpose: 'Explain the recorded project state.' }, f.context);
   const ready = JSON.parse(await restarted.tool.mdd_status.execute({}, f.context));
   assert.equal(ready.contextual, true);
@@ -519,14 +541,18 @@ test('restart detects pending work without repeating memory writes', async t => 
   const call = { sessionID: f.runtime.sessionID, callID: 'uncertain-task', tool: 'task' };
   f.parent[1].parts = [{ type: 'tool', tool: 'task', callID: call.callID, state: { status: 'running', input: ready.task } }];
   await f.hooks['tool.execute.before'](call, { args: ready.task });
-  f.user('Rerun while still pending.'); await assert.rejects(f.change(), /Uncertain|in-flight/);
+  f.user('Rerun while still pending.'); await assert.rejects(f.change(), /in flight/);
   const restarted = await plugin(f.input);
   const status = JSON.parse(await restarted.tool.mdd_status.execute({}, f.context));
   assert.equal(status.state, 'recovery-blocked');
+  assert.equal(status.recoverable, true);
   assert.equal(status.question, undefined);
   const writes = f.writes.length;
-  await assert.rejects(restarted.tool.mdd_start.execute({ requirements: 'Rerun while still pending.' }, f.context), /restart|repeated/);
+  await assert.rejects(restarted.tool.mdd_start.execute({ requirements: 'Rerun while still pending.' }, f.context), /mdd_reset/);
   assert.equal(f.writes.length, writes);
+  // The conversation is not sealed: an explicit reset releases it in place.
+  JSON.parse(await restarted.tool.mdd_reset.execute({ scope: 'run' }, f.context));
+  assert.equal(JSON.parse(await restarted.tool.mdd_status.execute({}, f.context)).state, 'not-started');
 });
 
 for (const stage of ['confirmation', 'preflight']) {
@@ -585,6 +611,38 @@ test('context accumulation is bounded without truncating results or advancing th
   const final = await f.status(); assert.deepEqual(final.workflow, main.workflow);
   assert.ok(final.contexts.length > 0);
   assert.ok(final.contexts.every(context => Buffer.byteLength(context.artifact.content) === 16000));
+});
+
+test('MDD tools belong to the coordinator and are withdrawn from every other agent', async t => {
+  const f = await fixture(t, { start: false });
+  const foreign = { ...f.context, agent: 'gentle-ai' };
+  const args = { requirements: 'x', userText: 'x', purpose: 'x', kind: 'rerun', scope: 'run' };
+  for (const name of ['mdd_status', 'mdd_start', 'mdd_reset', 'mdd_change_request', 'mdd_contextual_explore', 'mdd_pr_body']) {
+    await assert.rejects(f.hooks.tool[name].execute(args, foreign), /mdd-orchestrator/, `${name} answered a foreign agent`);
+  }
+  const config = { agent: { 'gentle-ai': {}, 'mdd-orchestrator': {} } };
+  await f.hooks.config(config);
+  assert.equal(config.agent['gentle-ai'].tools.mdd_status, false);
+  assert.equal(config.agent['gentle-ai'].tools['mdd_*'], false);
+  assert.equal(config.agent['mdd-orchestrator'].tools, undefined);
+});
+
+test('mdd_reset releases a stopped phase and a whole run without a new conversation', async t => {
+  const f = await fixture(t);
+  await assert.rejects(f.phase({ missingAfter: true }));
+  assert.equal((await f.status()).attempts, 1);
+  const released = JSON.parse(await f.hooks.tool.mdd_reset.execute({ scope: 'phase' }, f.context));
+  assert.deepEqual(released.reset, { scope: 'phase', phase: 'mdd-plan' });
+  assert.equal(released.state, 'ready');
+  assert.equal(released.attempts, 0);
+  assert.equal(released.reason, '');
+  await f.phase();
+  assert.equal((await f.status()).workflow.results.length, 1);
+  const cleared = JSON.parse(await f.hooks.tool.mdd_reset.execute({ scope: 'run' }, f.context));
+  assert.deepEqual(cleared.reset, { scope: 'run' });
+  assert.equal(cleared.state, 'not-started');
+  f.user('An entirely different objective.');
+  assert.equal(JSON.parse(await f.hooks.tool.mdd_start.execute({ requirements: 'An entirely different objective.' }, f.context)).state, 'ready');
 });
 
 test('native PR-body tool drafts recorded facts without changing workflow, approval or memory', async t => {

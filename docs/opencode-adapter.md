@@ -34,8 +34,13 @@ Run the single [setup wizard](setup.md): `npm run setup` from trusted source, or
    After the task, call `mdd_status` and present the readable artifact to the user.
    In interactive mode, a passed phase exposes an exact native Proceed/Stop question for
    the next phase. Approval prepares only that phase's task. Automatic mode returns the next
-   exact executable task without an approval question. Repeat through final Verify or stop
-   on failure/uncertainty. Neither mode suppresses native edit/bash permission requests.
+   exact executable task without an approval question. Repeat through final Verify. A rejected
+   attempt is not the end: the phase becomes ready again, so run it once more or carry it out
+   directly. Neither mode suppresses native edit/bash permission requests.
+
+The MDD tools are registered once for the whole app but belong to `mdd-orchestrator`. Every
+other agent has them disabled in configuration and refused at execution, so an unrelated
+agent neither sees nor mutates MDD state.
 
 ### Legacy setup-only recovery
 
@@ -116,13 +121,14 @@ pending; no automated recovery is attempted. Unrelated sessions remain unaffecte
 
 | Boundary | Behavior |
 |---|---|
-| Dispatch | One live run per actual parent. Synchronous reservation precedes asynchronous persistence. Wrong, duplicate, concurrent, resumed, or unsupported tasks block the run. |
+| Dispatch | One live run per actual parent. Synchronous reservation precedes asynchronous persistence. A task that arrives while one is already running is refused without touching it; any other unexpected task ends the attempt and returns the phase to `ready`. |
 | Capabilities | Planning actors admit only `read`, `glob`, `grep`; Apply additionally admits native-ask edits/bash, Verify native-ask planned checks. Tool-name gates block MCP aliases. Native tool-output directory read exceptions remain recognized. |
 | Correlation | Checks parent/call, native child metadata, child parent/project/directory/agent, final assistant completion/path/error, exact wrapper text, and strict JSON run/call/phase bindings. Unknown or failed child execution evidence is rejected. |
 | Models | Captures resolved model mappings and actual parent selection. Checks all nine actor identities/modes, explicit overrides, native task metadata model, and every child assistant model. Missing, changed, or substituted models fail closed. |
 | Consent | Complete startup profile or exact correlated native preflight answers; later interactive Proceed/Stop applies only to the currently waiting phase. No repeat preflight or implicit approval. |
 | Persistence | HTTP only to a literal IPv4 loopback origin, no credentials/path/query/redirects, no retries. Each HTTP/SDK read has a maximum five-second timeout. HTTP responses are bounded to 128 KiB. |
-| Failure | Infrastructure failures do not fabricate failed phase results. A missing after-hook leaves `await-result` with an uncertainty warning; a matching native tool error blocks it. `mdd_status` never grants approval or retries. |
+| Failure | Infrastructure failures do not fabricate failed phase results. A rejected dispatch, result, capability or persistence ends that attempt: the phase returns to `ready`, the attempt counter increases, and the run stops being uncertain, so delegating again, taking the phase over directly, replanning or resetting all stay available. A missing after-hook leaves `await-result` until a matching native error releases it. `mdd_status` never grants approval or dispatches by itself. |
+| Recovery | No MDD state is terminal. `mdd_reset` releases the current attempt (`scope: phase`) or forgets the run for this conversation (`scope: run`), clearing the local progress marker. Recorded artifacts, memory and `previousRuns` are never deleted by a reset. |
 | Next phase | Automatic success prepares only the next phase. Interactive success waits for exact native approval. Only final corroborated Verify returns `complete`. |
 | Other sessions | Unrelated tasks outside MDD are untouched. `mdd-*` native tasks are rejected unless they exactly match a registered parent run or an issued read-only investigation. |
 
@@ -164,7 +170,8 @@ repeatedly presented without a new user request. Ordinary implementation choices
 phase progression never initiate this path.
 
 A known failed phase can be explicitly replanned after its result and persistence are
-confirmed. In-flight work, uncertain native outcomes and uncertain writes cannot be reset.
+confirmed. Only a task that is actually running postpones a change request; a stopped or
+failed run is always changeable, and `mdd_reset` releases a dispatch that never reported.
 Harmless incorrect task/question parameters are rejected before effects without poisoning a
 ready plan. A completed run accepts a fresh next task through normal `mdd_start`, using the
 startup profile without an additional change confirmation. Permissions/models are not widened
@@ -199,7 +206,7 @@ while it is ready, then `contextualReport` plus bounded `contexts` (the four mos
 findings) once it settles. One investigation runs at a time; a second request while one is in
 flight is rejected, and a blocked one may be requested again without touching any main route.
 A pending native question also defers it, because that question is already waiting for the
-user. A `recovery-blocked` conversation still answers read-only questions.
+user. A conversation waiting for recovery still answers read-only questions.
 
 All prior validated artifact contents and references are handed to each subsequent phase.
 High-route specification/design/tasks receive the actual earlier proposal and specification,
@@ -364,11 +371,13 @@ user-message ID and pending/settled/complete state. The 2 KiB marker uses existi
 root-confined storage and is Git-ignored. It contains no prompts, source, paths or approvals.
 Confirmation of phase/side results settles it; final main completion marks it complete.
 
-If an incomplete conversation loses its live controller, startup refuses replay and explains
-that its evidence must be inspected before new work in a new conversation. Even a settled but
-unfinished run is not reconstructed automatically. Completed conversations accept fresh native
-user input, not reuse of their last message. Other parent IDs use independent marker files,
-so an old pending/corrupt marker does not indefinitely block unrelated new conversations.
+A run is never reconstructed automatically after process loss. Only a marker still `pending`,
+an attempt that never reported an outcome, holds the conversation: status reports it as
+`recovery-blocked` with `recoverable: true`, read-only investigation keeps working, and
+`mdd_reset` releases it in place. Settled or complete markers leave the conversation free for
+new work; only reusing the same native user message is refused, so nothing is silently
+replayed. Other parent IDs use independent marker files, so an old pending or corrupt marker
+never blocks unrelated conversations.
 The marker is a replay guard, not a second workflow ledger or authorization source. Live-only
 `none` artifacts cannot be recovered after process loss; persisted artifacts/memory remain.
 

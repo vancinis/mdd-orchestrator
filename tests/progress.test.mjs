@@ -31,17 +31,32 @@ test('progress never follows a linked metadata directory', t => {
   symlinkSync(outside, join(path, '.mdd'), process.platform === 'win32' ? 'junction' : 'dir');
   assert.throws(() => new ProgressGuard(path).write('parent', marker)); assert.deepEqual(readdirSync(outside), []);
 });
-test('settled but incomplete startup cannot replay; completed startup requires fresh native input', async t => {
+test('work that ended frees the conversation; only the same request cannot silently replay', async t => {
   const path = root(t); const guard = new ProgressGuard(path); const { endpoint, binding } = await memoryServer(t);
   binding.directory = path;
   const runtime = { sessionID: 'ses_parent', agent: 'mdd-orchestrator', directory: path, worktree: path };
   const runner = () => new PhaseRunner({ parent: async () => {}, result: async () => '{}' }, { progress: guard });
-  guard.write(runtime.sessionID, { ...marker, state: 'settled' });
-  assert.equal(runner().status(runtime.sessionID).state, 'recovery-blocked');
-  await assert.rejects(runner().start(request(endpoint), runtime, { requirementsConfirmed: true, userMessageID: 'new-user' }));
-  guard.write(runtime.sessionID, { ...marker, state: 'complete' });
-  await assert.rejects(runner().start(request(endpoint), runtime, { requirementsConfirmed: true, userMessageID: marker.userMessageID }));
-  assert.equal((await runner().start(request(endpoint), runtime, { requirementsConfirmed: true, userMessageID: 'new-user' })).state, 'ready');
+  for (const state of ['settled', 'complete']) {
+    guard.write(runtime.sessionID, { ...marker, state });
+    assert.equal(runner().status(runtime.sessionID).state, 'not-started');
+    await assert.rejects(runner().start(request(endpoint), runtime, { requirementsConfirmed: true, userMessageID: marker.userMessageID }));
+    assert.equal((await runner().start(request(endpoint), runtime, { requirementsConfirmed: true, userMessageID: 'new-user' })).state, 'ready');
+  }
+});
+test('an attempt that never reported an outcome is recoverable in place with reset', async t => {
+  const path = root(t); const guard = new ProgressGuard(path); const { endpoint, binding } = await memoryServer(t);
+  binding.directory = path;
+  const runtime = { sessionID: 'ses_parent', agent: 'mdd-orchestrator', directory: path, worktree: path };
+  const runner = new PhaseRunner({ parent: async () => {}, result: async () => '{}' }, { progress: guard });
+  guard.write(runtime.sessionID, marker);
+  const status = runner.status(runtime.sessionID);
+  assert.equal(status.state, 'recovery-blocked');
+  assert.equal(status.recoverable, true);
+  await assert.rejects(runner.start(request(endpoint), runtime, { requirementsConfirmed: true, userMessageID: 'new-user' }), /mdd_reset/);
+  assert.deepEqual(runner.reset(runtime.sessionID, 'run'), { scope: 'run' });
+  assert.equal(guard.read(runtime.sessionID), undefined);
+  assert.equal(runner.status(runtime.sessionID).state, 'not-started');
+  assert.equal((await runner.start(request(endpoint), runtime, { requirementsConfirmed: true, userMessageID: 'new-user' })).state, 'ready');
 });
 test('a pending old conversation does not prevent a different native parent from starting', async t => {
   const path = root(t); const guard = new ProgressGuard(path); guard.write('old-parent', marker);

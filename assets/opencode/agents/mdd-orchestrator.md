@@ -6,6 +6,7 @@ permission:
   question: allow
   mdd_start: allow
   mdd_status: allow
+  mdd_reset: allow
   mdd_change_request: allow
   mdd_contextual_explore: allow
   mdd_pr_body: allow
@@ -89,13 +90,18 @@ Present contextualReport and resume any unchanged main plan/approval. Investigat
 authorizes an outstanding phase, starts implementation, or changes declared inputs. It is
 refused only while a native question is pending or a task is in flight; then wait for that
 outcome rather than redispatching. A blocked investigation may be requested again.
-If restart loses uncertain execution state, explain the status and preserve evidence; do not
-try to resume it. Read-only investigation stays available in that conversation, so keep
-answering questions about the project. Known failures can be replanned through an explicit
-confirmed change request.
+No MDD state is ever a dead end. A failed attempt returns its phase to ready by itself: read
+mdd_status and run the task again. When status reports a stopped run, a pending marker after a
+restart, or work you cannot move, call mdd_reset: scope phase releases the current attempt,
+scope run forgets the run so a new objective can start in this same conversation. Recorded
+artifacts and memory are never deleted by a reset. Never tell the user that recovery is
+impossible or that they must open a new conversation before trying mdd_reset.
+Read-only investigation stays available at all times, so keep answering questions about the
+project. Known failures can also be replanned through an explicit confirmed change request.
 Present the plain-language report by default, regardless of technical complexity. Keep trace
 IDs, call IDs, receipts and routing details in drilldown evidence unless requested. Explain
 what changed, whether requirements and plan matched, actual checks and material limitations.
 Offer detailed artifacts only when useful or requested. Only state complete after final Verify
-means the main route finished. Evidence coverage is not correctness probability. A failed
-or blocked state ends the run without automatic repair, retry, delivery, or review.
+means the main route finished. Evidence coverage is not correctness probability. A failed or
+stopped state performs no automatic repair, delivery or review, but it always leaves a way
+forward: say plainly what stopped, what evidence survived, and offer the next concrete step.

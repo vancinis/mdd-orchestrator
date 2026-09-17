@@ -84,7 +84,7 @@ for (const mutate of [
   });
 }
 
-test('runner contract: synchronous reservation rejects racing dispatches and prevents first admission', async t => {
+test('runner contract: racing dispatches never both admit, and the phase stays runnable', async t => {
   const { runner, endpoint, inspect } = await fixture(t);
   const ready = await runner.start(request(endpoint), runtime);
   let release;
@@ -93,14 +93,15 @@ test('runner contract: synchronous reservation rejects racing dispatches and pre
   await assert.rejects(runner.before({ ...call, callID: 'two' }, ready.task));
   release();
   await assert.rejects(first);
-  const blocked = runner.status(runtime.sessionID);
-  assert.equal(blocked.state, 'blocked');
-  assert.equal(blocked.workflow.nextAction.kind, 'await-result');
-  assert.equal(blocked.workflow.results.length, 0);
+  const after = runner.status(runtime.sessionID);
+  assert.equal(after.state, 'ready');
+  assert.equal(after.workflow.nextAction.kind, 'execute');
+  assert.equal(after.workflow.results.length, 0);
+  assert.deepEqual(after.task, ready.task);
 });
 
 for (const kind of ['intent-write', 'intent-read', 'result-write', 'result-read']) {
-  test(`runner contract: ${kind} failure never advances workflow or enables retry`, async t => {
+  test(`runner contract: ${kind} failure never advances the workflow but leaves the phase runnable`, async t => {
     const { runner, endpoint } = await fixture(t, (req, reply, writes) => {
       const ordinal = kind.startsWith('intent') ? 1 : 2;
       if (writes.length === ordinal && (kind.endsWith('write') ? req.method === 'POST' : req.url.startsWith('/observations/'))) reply.status = 500;
@@ -111,10 +112,12 @@ for (const kind of ['intent-write', 'intent-read', 'result-write', 'result-read'
       const args = await runner.before(call, ready.task);
       await assert.rejects(runner.after(call, args, result(ready)));
     }
-    const blocked = runner.status(runtime.sessionID);
-    assert.equal(blocked.state, 'blocked');
-    assert.equal(blocked.workflow.nextAction.kind, 'await-result');
-    assert.equal(blocked.workflow.results.length, 0);
+    const stopped = runner.status(runtime.sessionID);
+    assert.equal(stopped.state, 'ready');
+    assert.equal(stopped.attempts, 1);
+    assert.equal(stopped.workflow.nextAction.kind, 'execute');
+    assert.equal(stopped.workflow.results.length, 0);
+    assert.deepEqual(stopped.task, ready.task);
     await assert.rejects(runner.start(request(endpoint), runtime));
   });
 }
@@ -160,7 +163,7 @@ test('runner contract: failed agent phase is saved before recording and blocks',
   assert.equal(writes.length, 2);
 });
 
-test('runner contract: missing after remains pending; only matching native error blocks', async t => {
+test('runner contract: missing after remains pending; only the matching native error releases it', async t => {
   const { runner, endpoint } = await fixture(t);
   const ready = await runner.start(request(endpoint), runtime);
   await runner.before(call, ready.task);
@@ -168,8 +171,10 @@ test('runner contract: missing after remains pending; only matching native error
   runner.nativeError(call.sessionID, 'other');
   assert.equal(runner.status(runtime.sessionID).state, 'await-result');
   runner.nativeError(call.sessionID, call.callID);
-  assert.equal(runner.status(runtime.sessionID).state, 'blocked');
-  assert.equal(runner.status(runtime.sessionID).workflow.results.length, 0);
+  const released = runner.status(runtime.sessionID);
+  assert.equal(released.state, 'ready');
+  assert.equal(released.uncertain, false);
+  assert.equal(released.workflow.results.length, 0);
 });
 
 test('runner contract: mismatched and duplicate after cannot record a result', async t => {
@@ -246,7 +251,7 @@ test('runner artifact contract: both partial failure exposes attempts without ge
   const args = await runner.before(call, ready.task);
   await assert.rejects(runner.after(call, args, result(ready)));
   const status = runner.status(runtime.sessionID);
-  assert.equal(status.state, 'blocked');
+  assert.equal(status.state, 'ready');
   assert.equal(status.workflow.results.length, 0);
   assert.equal(status.artifactAttempts[0].backend, 'openspec');
   assert.equal(status.artifactAttempts[0].status, 'confirmed');

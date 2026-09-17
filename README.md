@@ -109,7 +109,7 @@ workflow.recordResult({
 console.log(workflow.snapshot()); // Captured answers/evaluation, nextAction, results.
 ```
 
-`Workflow` accepts the same request as `evaluate`. Its first phase is ready immediately. `nextAction()` returns `execute`, `approve`, `await-result`, or `blocked` with the exact phase, or `finished` without one. Reads do not advance state. Interactive callers must use `approve(phase)` for each pending phase; automatic mode makes the next phase ready without approval. Neither mode dispatches it automatically. Failed results block permanently; there is no retry operation.
+`Workflow` accepts the same request as `evaluate`. Its first phase is ready immediately. `nextAction()` returns `execute`, `approve`, `await-result`, or `blocked` with the exact phase, or `finished` without one. Reads do not advance state. Interactive callers must use `approve(phase)` for each pending phase; automatic mode makes the next phase ready without approval. Neither mode dispatches it automatically. A recorded failed result stops the route; `retry()` releases an attempt that never produced a recorded result so the same phase can run again.
 
 Preflight reuse and state inspection work only within the live controller. New requirements need a new controller. There is no persistence, crash recovery, contextual rerouting, or substantive-change detection. Adapters must eventually enforce real phase evidence; this proof only validates caller-supplied result structure.
 

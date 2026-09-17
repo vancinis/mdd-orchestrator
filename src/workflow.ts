@@ -55,6 +55,16 @@ export class Workflow {
     this.#next = { kind: 'execute', phase };
   }
 
+  /**
+   * Returns an attempt that never produced a recorded result to ready, so the same phase can be
+   * tried again. A recorded result is never discarded here; only the pending attempt is released.
+   */
+  retry(): void {
+    if (this.#next.kind === 'await-result' || this.#next.kind === 'blocked') {
+      this.#next = { kind: 'execute', phase: this.#next.phase };
+    }
+  }
+
   recordResult(value: unknown): void {
     const { phase, outcome, evidenceSummary } = objectWithKeys(
       value, 'result', ['phase', 'outcome', 'evidenceSummary'],
