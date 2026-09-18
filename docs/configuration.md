@@ -132,7 +132,9 @@ credentials and disables cloud autosync. An exclusive empty database seed preven
 1.20.0's orphan-database migration from importing unrelated drive-root data.
 
 `EngramHttp.bootstrap()` checks health, resolves the actual native root with `/project/current`,
-and validates an existing exact active session or performs one 404-triggered create/readback.
+and validates an existing active session or performs one 404-triggered create/readback. The native
+root binds when it is the resolved project root, a directory inside it, or a linked worktree of the
+same repository, so worktree-based workflows need no separate memory project.
 `project` exposes only the validated resolved project. No synthetic coding-session IDs are used.
 See [binding safety](opencode-adapter.md#bootstrap-the-actual-parent) for conflict and race limits.
 Do not use the health response's hardcoded `0.1.0` as binary version evidence. A CLI version

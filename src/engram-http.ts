@@ -1,8 +1,57 @@
 import { ValidationError } from './validation.js';
-import { isAbsolute, resolve } from 'node:path';
+import { lstatSync, readFileSync } from 'node:fs';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 export type MemoryBinding = { id: string; project: string; directory: string };
 class MissingSession extends Error {}
+
+/**
+ * Windows resolves paths case-insensitively and Engram stores them lowercased, so comparing the
+ * exact strings rejected the very session MDD had just registered: the readback of `C:\Users\...`
+ * came back as `c:\users\...`. Path identity is compared the way the platform defines it.
+ */
+function pathKey(value: string): string {
+  const absolute = resolve(value);
+  return process.platform === 'win32' ? absolute.toLowerCase() : absolute;
+}
+
+export function samePath(a: string, b: string): boolean { return pathKey(a) === pathKey(b); }
+
+/**
+ * The repository a linked git worktree belongs to, or nothing when this directory is not one.
+ * A linked worktree keeps `gitdir: <repository>/.git/worktrees/<name>` in a `.git` file, and that
+ * administrative directory names its shared git directory in `commondir`. MDD reads that layout
+ * itself instead of trusting a provider field: it is what proves the native root is a checkout of
+ * the same repository the memory project points at.
+ */
+export function worktreeRepository(directory: string): string | undefined {
+  try {
+    const marker = join(resolve(directory), '.git');
+    const stat = lstatSync(marker, { throwIfNoEntry: false });
+    if (!stat?.isFile() || stat.size > 4096) return undefined;
+    const link = /^gitdir:[ \t]*(\S.*?)[ \t]*$/m.exec(readFileSync(marker, 'utf8'));
+    if (!link) return undefined;
+    const administrative = resolve(dirname(marker), link[1]!);
+    const shared = readFileSync(join(administrative, 'commondir'), 'utf8').trim();
+    return shared ? dirname(resolve(administrative, shared)) : undefined;
+  } catch { return undefined; }
+}
+
+/**
+ * Whether the native root actually belongs to the resolved memory project. Engram reports the
+ * project root, which is the repository root: a worktree and a subdirectory are ordinary places
+ * to work from and resolve to that same project, so requiring an identical path blocked them for
+ * no gain. A project root below the native root, or an unrelated one, still fails — those are the
+ * resolutions that would file this workspace's work under another project.
+ */
+export function partOfProject(projectRoot: string, directory: string): boolean {
+  if (!isAbsolute(projectRoot)) return false;
+  if (samePath(projectRoot, directory)) return true;
+  const inside = relative(pathKey(projectRoot), pathKey(directory));
+  if (inside && !isAbsolute(inside) && inside !== '..' && !inside.startsWith(`..${sep}`)) return true;
+  const repository = worktreeRepository(directory);
+  return repository !== undefined && samePath(repository, projectRoot);
+}
 
 export class ArtifactObservationError extends Error {
   constructor(readonly observationID?: number) {
@@ -73,10 +122,10 @@ export class EngramHttp {
     if (health.service !== 'engram' || health.status !== 'ok') throw new Error('Engram health capability mismatch.');
     const project = await this.#request(`/project/current?cwd=${encodeURIComponent(this.#binding.directory)}`, 200);
     if (project.error_hint || project.error || project.code || typeof project.project !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(project.project) || (this.#binding.project && project.project !== this.#binding.project) ||
-        project.cwd !== this.#binding.directory || typeof project.project_path !== 'string' ||
-        resolve(project.project_path) !== resolve(this.#binding.directory) ||
+        typeof project.cwd !== 'string' || !samePath(project.cwd, this.#binding.directory) || typeof project.project_path !== 'string' ||
+        !partOfProject(project.project_path, this.#binding.directory) ||
         (Array.isArray(project.available_projects) && project.available_projects.length > 1)) {
-      throw new Error('Engram project resolution is ambiguous or does not match the native root and configured project. Resolve this workspace in the memory provider before restarting MDD; no basename fallback is used.');
+      throw new Error('Engram project resolution is ambiguous, or the native root is not part of the resolved project: it is neither that project root, a directory inside it, nor a linked worktree of the same repository. Resolve this workspace in the memory provider before restarting MDD; no basename fallback is used.');
     }
     this.#binding.project = project.project;
     try { await this.checkBinding(); return; }
@@ -93,7 +142,7 @@ export class EngramHttp {
   async checkBinding(): Promise<void> {
     const session = await this.#request(`/sessions/${encodeURIComponent(this.#binding.id)}`, 200);
     if (session.id !== this.#binding.id || session.project !== this.#binding.project ||
-        session.directory !== this.#binding.directory || session.ended_at != null) {
+        typeof session.directory !== 'string' || !samePath(session.directory, this.#binding.directory) || session.ended_at != null) {
       throw new Error('Engram session binding mismatch or ended session; MDD never rebinds existing sessions.');
     }
   }
@@ -136,7 +185,7 @@ export class EngramHttp {
   }
 
   assertArtifactDirectory(directory: string): void {
-    if (resolve(directory) !== resolve(this.#binding.directory)) throw new Error('Artifact directory binding mismatch.');
+    if (!samePath(directory, this.#binding.directory)) throw new Error('Artifact directory binding mismatch.');
   }
 
   async readArtifact(id: number, title: string): Promise<string> {

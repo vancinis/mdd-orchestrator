@@ -54,7 +54,10 @@ objective. Native history must prove the same parent/workspace and a correlated 
 stop before execution. A status request or restart confirmation is not a new implementation goal.
 
 This recovery is a convenience, never the guard. What keeps a start honest is that requirements
-must equal the actual latest native user text, proven separately by `inspector.intake`. So history
+must equal an actual native user message of this conversation, proven separately by
+`inspector.intake`: an objective may be an earlier message, because a continuation such as
+"continue" never replaces the request it continues, while consent for a change still requires the
+latest user text. Two messages carrying the same text are refused rather than chosen between. So history
 that cannot prove a pending setup means there is none to offer, and the start proceeds on its own
 merits: an earlier successful start, a dispatched or reported phase, a reset, a compacted or
 unreadable history and a page that does not reach back far enough all simply report no pending
@@ -76,9 +79,13 @@ cross-project access or configuration edits.
 
 Only when memory is enabled, MDD checks health and `GET /project/current?cwd=<native-root>`.
 It validates the resolved project/root, including HTTP-200 error hints and ambiguity, and
-preserves an explicit legacy project only when it matches. It then reads
-`GET /sessions/{actual-native-parent-id}`. Existing sessions must match ID, project and
-directory exactly, with `ended_at` absent or null. Conflicting, incomplete or ended sessions
+preserves an explicit legacy project only when it matches. The provider resolves a project at its
+repository root, so the native root binds when it is that root, a directory inside it, or a linked
+worktree of the same repository — MDD proves the worktree link by reading `.git` and `commondir`
+itself. A project root below the native root, or one with no such relation, is still refused.
+It then reads `GET /sessions/{actual-native-parent-id}`. Existing sessions must match ID, project
+and directory, with `ended_at` absent or null. Directories are compared as the platform defines
+path identity, because Windows is case-insensitive and the provider stores paths lowercased. Conflicting, incomplete or ended sessions
 are rejected without a POST. Only a 404 permits one `POST /sessions` with `id`, `project`,
 and `directory`, followed by one exact GET. Unknown POST outcomes get the same single bounded
 readback, never a second POST. This is not CAS or an exactly-once guarantee: upstream create

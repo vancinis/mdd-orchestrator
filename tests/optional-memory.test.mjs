@@ -98,6 +98,72 @@ function temporary(t) {
   return root;
 }
 
+/**
+ * A repository with a linked worktree, written as git lays it out on disk: the worktree's `.git`
+ * is a file pointing at the administrative directory, which names the shared git directory.
+ */
+function repository(t) {
+  const root = temporary(t);
+  const main = join(root, 'MainRepo');
+  const administrative = join(main, '.git', 'worktrees', 'linked');
+  mkdirSync(administrative, { recursive: true });
+  writeFileSync(join(administrative, 'commondir'), '../..\n');
+  const worktree = join(root, 'linked');
+  mkdirSync(worktree);
+  writeFileSync(join(worktree, '.git'), `gitdir: ${administrative.replaceAll('\\', '/')}\n`);
+  const stranger = join(root, 'OtherRepo');
+  mkdirSync(join(stranger, '.git'), { recursive: true });
+  mkdirSync(join(root, 'unrelated'));
+  mkdirSync(join(main, 'packages', 'api'), { recursive: true });
+  return { root, main, worktree, stranger };
+}
+
+function boundProject(t, { directory, projectPath, sessionDirectory }) {
+  const binding = { id: 'ses_parent', project: '', directory };
+  t.mock.method(globalThis, 'fetch', async address => {
+    const url = new URL(address);
+    const data = url.pathname === '/health' ? { service: 'engram', status: 'ok' }
+      : url.pathname === '/project/current'
+        ? { project: 'mainrepo', cwd: url.searchParams.get('cwd'), project_path: projectPath, available_projects: null, project_source: 'git_root' }
+        : { id: binding.id, project: 'mainrepo', directory: sessionDirectory ?? directory, ownership_mode: 'shared' };
+    return new Response(JSON.stringify(data), { status: 200 });
+  });
+  return new EngramHttp('http://127.0.0.1:43210', binding);
+}
+
+// Engram resolves a project at its repository root, so a linked worktree and a subdirectory are
+// ordinary native roots that belong to it. Requiring an identical path blocked both of them.
+for (const place of ['project root', 'subdirectory', 'linked worktree']) {
+  test(`opted-in bootstrap binds a native root that is the ${place} of the resolved project`, async t => {
+    const { main, worktree } = repository(t);
+    const directory = place === 'subdirectory' ? join(main, 'packages', 'api') : place === 'linked worktree' ? worktree : main;
+    const client = boundProject(t, { directory, projectPath: main });
+    await client.bootstrap();
+    assert.equal(client.project, 'mainrepo');
+  });
+}
+
+for (const [name, select] of Object.entries({
+  'an unrelated sibling directory': ({ root, main }) => ({ directory: join(root, 'unrelated'), projectPath: main }),
+  'a project root below the native root': ({ main }) => ({ directory: main, projectPath: join(main, 'packages') }),
+  'a worktree of another repository': ({ worktree, stranger }) => ({ directory: worktree, projectPath: stranger }),
+  'a project root on no shared path at all': ({ root, worktree }) => ({ directory: worktree, projectPath: join(root, 'absent') }),
+})) {
+  test(`opted-in bootstrap still refuses ${name}`, async t => {
+    const client = boundProject(t, select(repository(t)));
+    await assert.rejects(client.bootstrap(), /not part of the resolved project/);
+  });
+}
+
+// Engram lowercases the directory it stores, so comparing the exact strings rejected the session
+// MDD had just registered. Path identity is compared the way the platform actually defines it.
+test('opted-in bootstrap accepts the platform path identity of the session Engram stored', async t => {
+  const { main } = repository(t);
+  const client = boundProject(t, { directory: main, projectPath: main, sessionDirectory: main.toLowerCase() });
+  if (process.platform === 'win32') await client.bootstrap();
+  else await assert.rejects(client.bootstrap(), /binding mismatch/);
+});
+
 test('managed local variant roundtrips without changing version-1 legacy settings', t => {
   const root = temporary(t);
   const settings = defaultSettings(); settings.engram = { mode: 'local', binary: process.execPath, dataDirectory: join(root, 'memory') };
