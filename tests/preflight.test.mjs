@@ -5,12 +5,12 @@ import { evaluate } from '../dist/kernel.js';
 import { Workflow } from '../dist/workflow.js';
 
 const answers = { certainty: 'very-sure', artifactStore: 'none', mode: 'interactive', summary: 'low', complexity: 'not-complex' };
-const labels = [['Very sure'], ['None'], ['Interactive'], ['Low'], ['Not complex']];
+const labels = [['Muy seguro'], ['Ninguno'], ['Interactivo'], ['Bajo'], ['Poco complejo']];
 
 test('native envelope uses only supported question and option fields in original order', () => {
   const envelope = questionEnvelope();
   assert.deepEqual(Object.keys(envelope), ['questions']);
-  assert.deepEqual(envelope.questions.map(q => q.header), ['Certainty', 'Artifacts', 'Mode', 'Summary', 'Complexity']);
+  assert.deepEqual(envelope.questions.map(q => q.header), ['Certeza', 'Artefactos', 'Modo', 'Resumen', 'Complejidad']);
   for (const question of envelope.questions) {
     assert.deepEqual(Object.keys(question).sort(), ['header', 'multiple', 'options', 'question']);
     assert.equal(question.multiple, false);
@@ -18,7 +18,7 @@ test('native envelope uses only supported question and option fields in original
     for (const option of question.options) assert.deepEqual(Object.keys(option).sort(), ['description', 'label']);
   }
   envelope.questions[0].options[0].label = 'changed';
-  assert.equal(questionEnvelope().questions[0].options[0].label, 'Very sure');
+  assert.equal(questionEnvelope().questions[0].options[0].label, 'Muy seguro');
 });
 
 test('every partial subset asks all and only missing fields together, preserving order and kernel evaluation', () => {
@@ -45,8 +45,8 @@ test('complete profile skips questions; submission makes first phase ready even 
 });
 
 for (const selected of [undefined, null, {}, [], labels.slice(1), [...labels, ['Low']], labels.map(x => x[0]),
-  [['very-sure'], ...labels.slice(1)], [['Very sure', 'Not sure'], ...labels.slice(1)],
-  [['None'], ['Very sure'], ...labels.slice(2)], [[' Very sure'], ...labels.slice(1)]]) {
+  [['very-sure'], ...labels.slice(1)], [['Muy seguro', 'Poco seguro'], ...labels.slice(1)],
+  [['Ninguno'], ['Muy seguro'], ...labels.slice(2)], [[' Muy seguro'], ...labels.slice(1)]]) {
   test(`reject ordered label ambiguity/missing data ${JSON.stringify(selected)}`, () => assert.throws(() => answersFromLabels({}, selected)));
 }
 

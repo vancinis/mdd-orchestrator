@@ -77,8 +77,8 @@ for (const store of ['engram', 'both']) test(`off profile transition reasks only
   const status = await gate.start({ requirements: 'User request' }, runtime, 'actual-message');
   assert.equal(status.memory, 'off');
   assert.match(status.notice, /requires optional Engram.*profile is unchanged/);
-  assert.deepEqual(status.question.questions.map(q => q.header), ['Artifacts', 'Summary']);
-  assert.deepEqual(status.question.questions[0].options.map(q => q.label), ['OpenSpec', 'None']);
+  assert.deepEqual(status.question.questions.map(q => q.header), ['Artefactos', 'Resumen']);
+  assert.deepEqual(status.question.questions[0].options.map(q => q.label), ['OpenSpec', 'Ninguno']);
   assert.deepEqual(settings, original);
 });
 

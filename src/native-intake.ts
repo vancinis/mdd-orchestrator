@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { EngramHttp } from './engram-http.js';
-import { boundedText } from './phase-runner.js';
+import { boundedText, runContext } from './phase-runner.js';
 import type { PhaseRunner, Runtime, TaskCall } from './phase-runner.js';
 import { answersFromLabels, questionEnvelope } from './preflight.js';
 import type { QuestionEnvelope } from './preflight.js';
@@ -16,7 +16,7 @@ export type IntakeInspect = {
   intake(runtime: Runtime, requirements: string, messageID: string): Promise<void | string>;
   question(runtime: Runtime, call: TaskCall, args: QuestionEnvelope): Promise<void>;
 };
-type Runner = Pick<PhaseRunner, 'start' | 'status' | 'approveNative' | 'block'> & Partial<Pick<PhaseRunner, 'approvalStopped' | 'assertChangeable' | 'assertFreshStart' | 'explore' | 'reset' | 'submit'>>;
+type Runner = Pick<PhaseRunner, 'start' | 'status' | 'approveNative' | 'block'> & Partial<Pick<PhaseRunner, 'approvalStopped' | 'assertChangeable' | 'assertFreshStart' | 'contribute' | 'explore' | 'priorGuards' | 'recordConsent' | 'reset' | 'submit'>>;
 type Slot = { kind: 'preflight' | 'approval' | 'change'; args: QuestionEnvelope; phase?: Phase; callID?: string; requirements?: string };
 type Intake = {
   runtime: Runtime; requirements: string;
@@ -26,12 +26,20 @@ type Intake = {
   receipts: { kind: Slot['kind']; phase?: Phase; callID: string; answers: string[][]; cancelled?: true }[];
   known: Partial<Answers>; userMessageID?: string; usedMessages: Set<string>; proposed: Set<string>; replacing?: true; notice?: string;
   restore?: { state: Intake['state']; slot?: Slot; requirements: string; known: Partial<Answers>; userMessageID?: string };
-  memory?: { endpoint: string; project: string };
+  memory?: { endpoint: string; project: string }; context?: { label: string; content: string };
 };
 
+/**
+ * Approval and change labels are both user-facing text and the answer tokens this module
+ * compares against, so they live in one place: a translated label can never drift from the
+ * comparison that maps it to an outcome.
+ */
+export const APPROVAL_LABELS = Object.freeze({ proceed: 'Continuar', stop: 'Detener' });
+export const CHANGE_LABELS = Object.freeze({ confirm: 'Confirmar el cambio', keep: 'Mantener el plan actual' });
+
 export function approvalEnvelope(runID: string, phase: Phase): QuestionEnvelope {
-  return { questions: [{ header: 'Approval', question: `Proceed with ${phase} for MDD run ${runID}? This authorizes only this phase; native permission requests still apply.`, multiple: false,
-    options: [{ label: 'Proceed', description: 'Authorize this phase only.' }, { label: 'Stop', description: 'Stop without authorizing this phase.' }] }] };
+  return { questions: [{ header: 'Aprobación', question: `¿Continuar con ${phase} en el run MDD ${runID}? Esto autoriza solo esta fase; los pedidos de permiso nativos siguen aplicando.`, multiple: false,
+    options: [{ label: APPROVAL_LABELS.proceed, description: 'Autorizar únicamente esta fase.' }, { label: APPROVAL_LABELS.stop, description: 'Detener sin autorizar esta fase.' }] }] };
 }
 
 export function nativeQuestionAnswers(args: QuestionEnvelope, raw: unknown): string[][] {
@@ -82,13 +90,20 @@ export class NativeIntake {
         (state === 'not-started' && ['blocked', 'stopped'].includes(previous.state));
       if (!replaceable) throw new Error('This parent already has an MDD intake; use mdd_status or request a confirmed change.');
     }
-    const input = objectWithKeys(value, 'start', ['requirements']);
+    const input = objectWithKeys(value, 'start', ['requirements', 'context']);
     const requirements = boundedText(input.requirements, 'requirements', 12000);
+    // Validated at intake so bad context fails here, not later when the first phase is prepared.
+    // Only the pair is held: the runner attributes provenance itself when the run is created.
+    const context = input.context === undefined ? undefined : (({ label, content }) => ({ label, content }))(runContext(input.context));
     const engram = this.#settings.engram;
     const pending = !previous && this.runner.status?.(runtime.sessionID).state !== 'complete' ? await this.inspect.setupPending?.(runtime, requirements, boundedText(messageID, 'native messageID', 256)) : undefined;
     if (pending && pending.requirements !== requirements) throw new Error('The original objective is pending. Resubmit its exact pendingStart arguments, not continuation text. For a different objective, use a fresh parent.');
     if (this.#sessions.get(runtime.sessionID) !== previous) throw new Error('Intake changed during setup inspection; read mdd_status.');
-    const entry: Intake = { runtime: { ...runtime }, requirements, state: 'starting', receipts: previous?.receipts ?? [], known: { ...this.#profile.answers }, usedMessages: new Set(previous?.usedMessages), proposed: new Set(previous?.proposed), ...(previous ? { replacing: true } : {}) };
+    // A restarted process has no previous intake, but the run it lost may have consumed user
+    // messages and change proposals. Those guards are restored; the receipts that recorded actual
+    // consent are not, because their call IDs would look like approvals this run never received.
+    const guards = previous ? undefined : this.runner.priorGuards?.(runtime.sessionID);
+    const entry: Intake = { runtime: { ...runtime }, requirements, state: 'starting', receipts: previous?.receipts ?? [], known: { ...this.#profile.answers }, usedMessages: new Set(previous?.usedMessages ?? guards?.usedMessages), proposed: new Set(previous?.proposed ?? guards?.proposed), ...(context ? { context } : {}), ...(previous ? { replacing: true } : {}) };
     if (previous) entry.restore = { state: previous.state, requirements: previous.requirements, known: previous.known, ...(previous.slot ? { slot: previous.slot } : {}), ...(previous.userMessageID ? { userMessageID: previous.userMessageID } : {}) };
     this.#sessions.set(runtime.sessionID, entry);
     try {
@@ -147,8 +162,9 @@ export class NativeIntake {
       if (entry.proposed.has(proposal)) throw new Error('This change proposal was already presented. Do not repeat it without a new user request.');
       if (entry.state !== 'accepting') throw new Error('Change validation was interrupted.');
       entry.proposed.add(proposal); entry.usedMessages.add(userID); entry.userMessageID = userID; entry.restore = saved;
-      const question = `${input.kind === 'rerun' ? 'Rerun all five preflight questions for a new planned run?' : 'Confirm this material scope change and new planned run?'} Current artifacts and memory will be retained. Proposed requirements: ${requirements}${advisory.length ? ` Advisory evidence: ${JSON.stringify(advisory)}` : ''} [MDD change ${randomUUID()}]`;
-      this.#slot(entry, { kind: 'change', requirements, args: { questions: [{ header: 'Change', question, multiple: false, options: [{ label: 'Confirm change', description: 'Answer preflight once, then start a new planned run.' }, { label: 'Keep current plan', description: 'Do not change the current run, answers, or approval.' }] }] } });
+      this.#recordConsent(entry);
+      const question = `${input.kind === 'rerun' ? '¿Volver a hacer las cinco preguntas de preflight para un run planificado nuevo?' : '¿Confirmás este cambio material de alcance y un run planificado nuevo?'} Los artefactos y la memoria actuales se conservan. Requisitos propuestos: ${requirements}${advisory.length ? ` Evidencia advertida: ${JSON.stringify(advisory)}` : ''} [MDD change ${randomUUID()}]`;
+      this.#slot(entry, { kind: 'change', requirements, args: { questions: [{ header: 'Cambio', question, multiple: false, options: [{ label: CHANGE_LABELS.confirm, description: 'Responder el preflight una vez y arrancar un run planificado nuevo.' }, { label: CHANGE_LABELS.keep, description: 'No cambiar el run actual, sus respuestas ni su aprobación.' }] }] } });
       return this.status(runtime.sessionID);
     } catch (error) { entry.state = saved.state; throw error; }
   }
@@ -162,6 +178,18 @@ export class NativeIntake {
       throw new Error('A native question is pending. Let the user answer it before requesting investigation.');
     }
     await this.runner.explore(value, runtime);
+    return this.status(runtime.sessionID);
+  }
+
+  /**
+   * The coordinator hands MDD material it gathered for the current objective. MDD composes it into
+   * the phase prompt, so the dispatched task stays exactly the one status returned.
+   */
+  contribute(value: unknown, runtime: Runtime): unknown {
+    if (runtime.agent !== 'mdd-orchestrator' || !this.runner.contribute) throw new Error('Only the coordinator may contribute run context.');
+    const entry = this.#sessions.get(runtime.sessionID);
+    if (entry && entry.state !== 'active') throw new Error('Finish or dismiss the pending native interaction before contributing context; nothing was recorded.');
+    this.runner.contribute(value, runtime);
     return this.status(runtime.sessionID);
   }
 
@@ -240,15 +268,18 @@ export class NativeIntake {
       if (entry.state !== 'accepting') throw new Error('Question became uncertain during result inspection.');
       const selections = nativeQuestionAnswers(slot.args, output);
       if (slot.kind === 'change') {
-        if (selections[0]![0] === 'Keep current plan') this.#restore(entry, 'Kept the current plan, answers and approval unchanged.');
+        if (selections[0]![0] === CHANGE_LABELS.keep) this.#restore(entry, 'Kept the current plan, answers and approval unchanged.');
         else {
+          // A material change replaces the objective, so context gathered for the old one is no
+          // longer trustworthy data. A plain preflight rerun keeps the same objective and its context.
+          if (slot.requirements!.trim() !== entry.requirements.trim()) delete entry.context;
           entry.requirements = slot.requirements!; entry.known = {}; entry.replacing = true;
           const args = questionEnvelope({}, !!this.#settings.engram);
           for (const question of args.questions) question.question += ` [MDD re-preflight ${randomUUID()}]`;
           this.#slot(entry, { kind: 'preflight', args });
         }
       } else if (slot.kind === 'preflight') await this.#startRunner(entry, selections, 'native-question');
-      else if (selections[0]![0] === 'Stop') {
+      else if (selections[0]![0] === APPROVAL_LABELS.stop) {
         entry.state = 'stopped';
         entry.reason = 'The user stopped at the phase approval boundary. No phase was authorized.';
         this.runner.approvalStopped?.(call.sessionID);
@@ -258,6 +289,7 @@ export class NativeIntake {
         entry.state = 'active';
       }
       entry.receipts.push({ kind: slot.kind, ...(slot.phase ? { phase: slot.phase } : {}), callID: call.callID, answers: selections });
+      this.#recordConsent(entry);
     } catch (error) { this.#fail(entry, error); }
   }
 
@@ -281,6 +313,7 @@ export class NativeIntake {
     const entry = this.#sessions.get(call.sessionID);
     if (!entry || entry.slot?.callID !== call.callID || !['accepting', 'await-answer'].includes(entry.state)) return;
     entry.receipts.push({ kind: entry.slot.kind, callID: call.callID, answers: [], cancelled: true });
+    this.#recordConsent(entry);
     if (entry.restore) { this.#restore(entry, 'Change cancelled; the current plan and approval are unchanged.'); return; }
     entry.state = 'stopped';
     entry.reason = 'The native question failed or was dismissed. No approval was recorded; do not repeat or dispatch.';
@@ -293,6 +326,17 @@ export class NativeIntake {
     return this.#sessions.get(call.sessionID);
   }
 
+  /**
+   * Consent lives here, but only the runner writes the preserved record, so the parts worth
+   * keeping are handed over whenever they change. Receipts go across as history; the reuse
+   * guards go across because a restarted process must still refuse a message or proposal that
+   * was already used. Neither can authorize anything on its own.
+   */
+  #recordConsent(entry: Intake): void {
+    this.runner.recordConsent?.(entry.runtime.sessionID, { questionReceipts: structuredClone(entry.receipts),
+      usedMessages: [...entry.usedMessages], proposed: [...entry.proposed] });
+  }
+
   #slot(entry: Intake, slot: Slot): void {
     entry.slot = structuredClone(slot);
     entry.state = 'question-ready';
@@ -302,7 +346,11 @@ export class NativeIntake {
   async #startRunner(entry: Intake, selections: unknown, source: 'startup-profile' | 'native-question'): Promise<void> {
     const expectedState = entry.state;
     const engram = entry.memory;
+    // Handed over before the run exists, so the record the runner writes at start already carries
+    // the guards rather than waiting for the first phase to close.
+    this.#recordConsent(entry);
     await this.runner.start({ requirements: entry.requirements, preflight: { answers: answersFromLabels(entry.known, selections) },
+      ...(entry.context ? { context: entry.context } : {}),
       ...(engram ? { engramEndpoint: engram.endpoint, project: engram.project } : {}) }, entry.runtime, { requirementsConfirmed: true, ...(entry.replacing ? { replace: true } : {}), ...(entry.userMessageID ? { userMessageID: entry.userMessageID } : {}) });
     if (entry.state !== expectedState) throw new Error('Intake became uncertain during runner initialization.');
     entry.provenance = { requirements: 'native-user', preflight: source, profile: this.#profile.name };

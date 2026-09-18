@@ -11,24 +11,6 @@ import type { ModelCatalog, VariantCatalog } from './model-catalog.js';
 
 export type { Choice, ConfigIO } from './tui.js';
 
-/** Display-only Spanish for the shared preflight labels, which stay the native answer tokens. */
-const LABELS: Record<string, { label: string; hint: string }> = {
-  'Very sure': { label: 'Muy seguro', hint: 'Los requisitos están claros y confirmados' },
-  'Somewhat sure': { label: 'Algo seguro', hint: 'Algunos requisitos necesitan aclaración' },
-  'Not sure': { label: 'Poco seguro', hint: 'Conviene explorar antes de planificar' },
-  Engram: { label: 'Engram', hint: 'Guardar los artefactos en Engram' },
-  OpenSpec: { label: 'OpenSpec', hint: 'Guardar los artefactos en archivos OpenSpec del proyecto' },
-  Both: { label: 'Ambos', hint: 'Guardar en los dos lugares' },
-  None: { label: 'Ninguno', hint: 'Solo durante la ejecución, sin persistencia dedicada' },
-  Interactive: { label: 'Interactivo', hint: 'Aprobar cada fase posterior una por una' },
-  Automatic: { label: 'Automático', hint: 'Continuar sin aprobación fase por fase' },
-  Detailed: { label: 'Detallado', hint: 'Resumen, cómo, estado y cobertura de evidencia' },
-  Medium: { label: 'Medio', hint: 'Resumen y cómo se hizo el trabajo' },
-  Low: { label: 'Bajo', hint: 'Resumen corto de la fase actual' },
-  'Very complex': { label: 'Muy complejo', hint: 'Alcance o complejidad técnica importante' },
-  'Somewhat complex': { label: 'Algo complejo', hint: 'Algo de alcance o complejidad técnica' },
-  'Not complex': { label: 'Poco complejo', hint: 'Trabajo chico y directo' },
-};
 const FIELD_TITLES: Record<string, string> = {
   certainty: 'Certeza sobre los requisitos',
   artifactStore: 'Dónde guardar los artefactos del flujo',
@@ -152,9 +134,8 @@ async function editAnswers(io: ConfigIO, profile: Settings['profiles'][string]):
   const questions = questionEnvelope().questions;
   io.write(heading('Respuestas de preflight por defecto'));
   for (const [index, field] of ANSWER_FIELDS.entries()) {
-    const options = questions[index]!.options.map(option => ({
-      value: option.label, ...(LABELS[option.label] ?? { label: option.label, hint: option.description }),
-    }));
+    // The envelope already carries the user-facing Spanish label; a second copy here could drift.
+    const options = questions[index]!.options.map(option => ({ value: option.label, label: option.label, hint: option.description }));
     const current = options.findIndex(option => answerFromLabel(field, option.value) === answers[field]);
     const choice = await choose(io, `${FIELD_TITLES[field] ?? field}  (${index + 1}/${ANSWER_FIELDS.length})`,
       [...options, UNANSWERED], { initial: current < 0 ? options.length : current });

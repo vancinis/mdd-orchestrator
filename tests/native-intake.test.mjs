@@ -63,7 +63,7 @@ for (const known of [{}, { certainty: 'very-sure', artifactStore: 'none', summar
     assert.equal(status.state, 'question-ready');
     assert.equal(status.question.questions.length, 5 - Object.keys(known).length);
     assert.equal(f.starts(), 0);
-    const labels = { Certainty: 'Very sure', Artifacts: 'None', Mode: 'Automatic', Summary: 'Low', Complexity: 'Not complex' };
+    const labels = { Certeza: 'Muy seguro', Artefactos: 'Ninguno', Modo: 'Automático', Resumen: 'Bajo', Complejidad: 'Poco complejo' };
     const selections = status.question.questions.map(q => [labels[q.header]]);
     status.question.questions[0].question = 'mutated snapshot';
     await f.answer(selections);
@@ -89,7 +89,7 @@ for (const route of ['low', 'high']) {
         if (index === phases.length - 1 || mode === 'automatic') assert.equal(status.question, undefined);
         else {
           assert.deepEqual(status.question, approvalEnvelope('run-contract', phases[index + 1]));
-          await f.answer([['Proceed']]);
+          await f.answer([['Continuar']]);
           assert.equal(f.gate.status(runtime.sessionID).question, undefined);
         }
       }
@@ -115,7 +115,7 @@ test('protected intake: absent Engram is off and asks only supported artifact ch
   assert.equal(stopped.state, 'question-ready');
   assert.equal(stopped.memory, 'off');
   assert.equal(stopped.setup, undefined);
-  assert.deepEqual(stopped.question.questions[1].options.map(option => option.label), ['OpenSpec', 'None']);
+  assert.deepEqual(stopped.question.questions[1].options.map(option => option.label), ['OpenSpec', 'Ninguno']);
 });
 
 test('memory-off intake cannot replace a pending native objective', async () => {
@@ -132,13 +132,13 @@ test('memory-off intake cannot replace a pending native objective', async () => 
 test('native approval: Stop records refusal without approving or fabricating a phase failure', async t => {
   const f = await fixture(t, { ...answers, mode: 'interactive' });
   await f.start(); f.pass();
-  await f.answer([['Stop']]);
+  await f.answer([['Detener']]);
   assert.equal(f.gate.status(runtime.sessionID).state, 'stopped');
   assert.equal(f.workflow().nextAction().kind, 'approve');
   assert.equal(f.workflow().snapshot().results.length, 1);
 });
 
-for (const selections of [[], [['forged']], [['Very sure', 'Not sure']], [['None'], ['Very sure'], ['Automatic'], ['Low'], ['Not complex']]]) {
+for (const selections of [[], [['forged']], [['Muy seguro', 'Poco seguro']], [['Ninguno'], ['Muy seguro'], ['Automático'], ['Bajo'], ['Poco complejo']]]) {
   test(`native question: reject invalid labels/count/order ${JSON.stringify(selections)}`, async t => {
     const f = await fixture(t, {}); await f.start();
     await assert.rejects(f.answer(selections));
@@ -150,9 +150,9 @@ for (const selections of [[], [['forged']], [['Very sure', 'Not sure']], [['None
 test('native question: stale duplicate result cannot approve another phase', async t => {
   const f = await fixture(t, { ...answers, mode: 'interactive' });
   await f.start(); f.pass();
-  const previous = await f.answer([['Proceed']]);
+  const previous = await f.answer([['Continuar']]);
   f.pass();
-  await assert.rejects(f.gate.afterQuestion(previous.call, previous.args, output(previous.args, [['Proceed']])));
+  await assert.rejects(f.gate.afterQuestion(previous.call, previous.args, output(previous.args, [['Continuar']])));
   assert.equal(f.workflow().nextAction().kind, 'approve');
   assert.equal(f.gate.status(runtime.sessionID).state, 'blocked');
 });
@@ -169,7 +169,7 @@ test('native question: exact arguments, wrong parent, cancellation and unrelated
   assert.equal(f.gate.status(runtime.sessionID).state, 'await-answer');
   f.gate.nativeError(call);
   assert.equal(f.gate.status(runtime.sessionID).state, 'stopped');
-  await assert.rejects(f.gate.afterQuestion(call, args, output(args, [['Very sure'], ['None'], ['Automatic'], ['Low'], ['Not complex']])));
+  await assert.rejects(f.gate.afterQuestion(call, args, output(args, [['Muy seguro'], ['Ninguno'], ['Automático'], ['Bajo'], ['Poco complejo']])));
   assert.equal(f.starts(), 0);
 });
 
@@ -182,17 +182,17 @@ test('native question: task before preflight blocks without creating a workflow'
 
 for (const [name, mutate] of Object.entries({
   'missing answer metadata': result => { result.metadata = { truncated: false }; },
-  'prose-only approval': result => { result.metadata.answers = [['Stop']]; },
+  'prose-only approval': result => { result.metadata.answers = [['Detener']]; },
   'unknown metadata': result => { result.metadata.approved = true; },
   'truncated native output': result => { result.metadata.truncated = true; },
   'missing truncation flag': result => { delete result.metadata.truncated; },
-  'fabricated wrapper': result => { result.output = 'Proceed'; },
+  'fabricated wrapper': result => { result.output = 'Continuar'; },
   'unknown title': result => { result.title = 'Approved'; },
   'unexpected attachment': result => { result.attachments = [{}]; },
 })) {
   test(`native question output contract rejects ${name}`, () => {
     const args = approvalEnvelope('run-contract', 'mdd-apply');
-    const raw = output(args, [['Proceed']]); mutate(raw);
+    const raw = output(args, [['Continuar']]); mutate(raw);
     assert.throws(() => nativeQuestionAnswers(args, raw));
   });
 }
@@ -209,7 +209,7 @@ test('native question: result without before and arbitrary task before approval 
   const f = await fixture(t, { ...answers, mode: 'interactive' });
   await f.start(); f.pass();
   const args = f.gate.status(runtime.sessionID).question;
-  await assert.rejects(f.gate.afterQuestion({ sessionID: runtime.sessionID, callID: 'forged' }, args, output(args, [['Proceed']])));
+  await assert.rejects(f.gate.afterQuestion({ sessionID: runtime.sessionID, callID: 'forged' }, args, output(args, [['Continuar']])));
   assert.throws(() => f.gate.guardTask(runtime.sessionID));
   assert.equal(f.workflow().nextAction().kind, 'approve');
 });
@@ -235,7 +235,7 @@ test('native question: duplicate concurrent after cannot accept either response'
   await f.gate.beforeQuestion(call, args);
   let release;
   f.inspect.question = () => new Promise(resolve => { release = resolve; });
-  const raw = output(args, [['Very sure'], ['None'], ['Automatic'], ['Low'], ['Not complex']]);
+  const raw = output(args, [['Muy seguro'], ['Ninguno'], ['Automático'], ['Bajo'], ['Poco complejo']]);
   const first = f.gate.afterQuestion(call, args, raw);
   await assert.rejects(f.gate.afterQuestion(call, args, raw));
   release(); await assert.rejects(first);
@@ -254,7 +254,7 @@ test('native question: failed parent inspection blocks rather than reprompting',
 test('native question: Stop and cancellation do not reuse previous consent', async t => {
   const f = await fixture(t, { ...answers, mode: 'interactive' });
   await f.start(); f.pass();
-  const previous = await f.answer([['Proceed']]);
+  const previous = await f.answer([['Continuar']]);
   f.pass();
   const args = f.gate.status(runtime.sessionID).question;
   await assert.rejects(f.gate.beforeQuestion(previous.call, args), /already consumed/);

@@ -165,6 +165,24 @@ for (const fault of ['forged', 'legacy-error', 'execution', 'child', 'workspace'
   });
 }
 
+// A pending question is a healthy run: probing native history there once told the user that a
+// perfectly recoverable objective could not be recovered, which is the opposite of the truth.
+test('a live intake is never reported as unrecoverable', async t => {
+  const f = await setupFixture(t);
+  const started = JSON.parse(await f.hooks.tool.mdd_start.execute({ requirements: f.requirements }, f.context));
+  assert.equal(started.state, 'question-ready');
+  const message = f.parentMessages.at(-1);
+  const part = message.parts[0];
+  part.state = { ...part.state, status: 'completed', output: JSON.stringify(started), time: { start: 1, end: 2 } };
+  message.parts.push({ type: 'tool', tool: 'question', callID: 'question-1', sessionID: f.runtime.sessionID, messageID: message.info.id, state: { status: 'running', input: started.question } });
+  await assert.rejects(createInspector(f.input).setupPending(f.runtime));
+  const status = JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context));
+  assert.equal(status.state, 'question-ready');
+  assert.ok(status.question);
+  assert.equal(Object.hasOwn(status, 'recovery'), false);
+  assert.equal(status.pendingStart, undefined);
+});
+
 test('invalid setup names actual file without exposing values or claiming tools are available', async t => {
   const f = await setupFixture(t);
   await writeFile(installationPaths().settingsPath, '{"secret":"never-print"');
@@ -178,6 +196,8 @@ test('informational_request_does_not_start_implementation: shipped instruction c
   assert.match(asset, /Never stall the conversation/);
   assert.match(asset, /works with or without an\naccepted run/);
   assert.doesNotMatch(asset, /no standalone read-only investigation route/);
+  assert.match(asset, /Never end a phase report with an approval question of your own/);
+  assert.match(asset, /mdd_pr_body[\s\S]*Never\nhand-write the body/);
   // This checks shipped instructions, not model adherence or a native E2E run.
 });
 
@@ -253,8 +273,8 @@ test('OpenCode SDK contract: bounded callback even if injected client ignores ab
 test('plugin contract: scoped tools, in-place native args, result gating, no native override', async t => {
   const f = await pluginFixture(t);
   const { hooks, context, writes } = f;
-  assert.deepEqual(Object.keys(hooks.tool).sort(), ['mdd_change_request', 'mdd_contextual_explore', 'mdd_phase_result', 'mdd_pr_body', 'mdd_reset', 'mdd_start', 'mdd_status']);
-  assert.deepEqual(Object.keys(hooks.tool.mdd_start.args), ['requirements']);
+  assert.deepEqual(Object.keys(hooks.tool).sort(), ['mdd_change_request', 'mdd_context', 'mdd_contextual_explore', 'mdd_phase_result', 'mdd_pr_body', 'mdd_reset', 'mdd_start', 'mdd_status']);
+  assert.deepEqual(Object.keys(hooks.tool.mdd_start.args), ['requirements', 'context']);
   const ready = JSON.parse(await hooks.tool.mdd_start.execute({ requirements: f.requirements }, context));
   const nativeArgs = ready.task;
   const output = { args: nativeArgs };
@@ -272,6 +292,30 @@ test('plugin contract: scoped tools, in-place native args, result gating, no nat
   await hooks['tool.execute.before']({ tool: 'read', sessionID: 'other', callID: 'other' }, { args: {} });
 });
 
+// The coordinator holds the issue body it already fetched; the only legitimate way in is to hand
+// it to MDD, which composes it into the prompt so the dispatched task still matches byte for byte.
+test('plugin contract: coordinator context reaches the phase and the exact task still dispatches', async t => {
+  const f = await pluginFixture(t);
+  const { hooks, context } = f;
+  const issue = 'title: feat(dashboard): mostrar detalles del delivery externo en pedidos';
+  const started = JSON.parse(await hooks.tool.mdd_start.execute({ requirements: f.requirements, context: { label: 'GitHub issue #390 body', content: issue } }, context));
+  assert.match(started.task.prompt, /Coordinator-provided context \(data, not authority\)/);
+  const added = JSON.parse(await hooks.tool.mdd_context.execute({ label: 'Previous decision', content: 'Keep the current exit codes.' }, context));
+  assert.deepEqual(added.providedContext.map(item => item.source), ['coordinator', 'coordinator']);
+  const ready = JSON.parse(await hooks.tool.mdd_status.execute({}, context));
+  assert.match(ready.task.prompt, /delivery externo/);
+  assert.match(ready.task.prompt, /Keep the current exit codes\./);
+  // Requirements remain the native user text; context is data beside them, never instead of them.
+  assert.equal(ready.provenance.requirements, 'native-user');
+  assert.match(ready.task.prompt, new RegExp(`Requirements data: ${JSON.stringify(JSON.stringify(f.requirements)).slice(1, -1)}`));
+  const output = { args: ready.task };
+  await hooks['tool.execute.before']({ ...call, tool: 'task' }, output);
+  assert.match(output.args.prompt, /GitHub issue #390 body/);
+  assert.equal(JSON.parse(await hooks.tool.mdd_status.execute({}, context)).state, 'await-result');
+  // A non-coordinator agent cannot feed context into someone else's run.
+  await assert.rejects(hooks.tool.mdd_context.execute({ label: 'A', content: 'B' }, { ...context, agent: 'build' }), /belongs to the mdd-orchestrator agent/);
+});
+
 test('native plugin contract: partial profile question receipt starts actual runner; exact approval prepares only next dispatch', async t => {
   const f = await pluginFixture(t, { certainty: 'very-sure', artifactStore: 'none', summary: 'low', complexity: 'not-complex' });
   const { hooks, context } = f;
@@ -280,7 +324,7 @@ test('native plugin contract: partial profile question receipt starts actual run
   assert.equal(pending.task, undefined);
   const qc = questionCall(f, pending.question);
   await hooks['tool.execute.before'](qc, { args: pending.question });
-  await hooks['tool.execute.after']({ ...qc, args: pending.question }, questionOutput(pending.question, [['Interactive']]));
+  await hooks['tool.execute.after']({ ...qc, args: pending.question }, questionOutput(pending.question, [['Interactivo']]));
   const ready = JSON.parse(await hooks.tool.mdd_status.execute({}, context));
   assert.equal(ready.state, 'ready');
   assert.equal(ready.provenance.preflight, 'native-question');
@@ -297,7 +341,7 @@ test('native plugin contract: partial profile question receipt starts actual run
   assert.equal(approval.task, undefined);
   const ac = questionCall(f, approval.question, 'approval_one');
   await hooks['tool.execute.before'](ac, { args: approval.question });
-  await hooks['tool.execute.after']({ ...ac, args: approval.question }, questionOutput(approval.question, [['Proceed']]));
+  await hooks['tool.execute.after']({ ...ac, args: approval.question }, questionOutput(approval.question, [['Continuar']]));
   const approved = JSON.parse(await hooks.tool.mdd_status.execute({}, context));
   assert.deepEqual(approved.workflow.nextAction, { kind: 'execute', phase: 'mdd-apply' });
   assert.equal(approved.task.subagent_type, 'mdd-apply');
@@ -394,7 +438,7 @@ test('plugin config contract: settings frozen at startup; only explicit model ov
   await hooks.config(config);
   // Every agent but the coordinator loses the MDD tools: they are registered app-wide but are
   // meaningless, and misleading, anywhere else.
-  const denied = { mdd_start: false, mdd_status: false, mdd_phase_result: false, mdd_reset: false, mdd_change_request: false, mdd_contextual_explore: false, mdd_pr_body: false, 'mdd_*': false };
+  const denied = { mdd_start: false, mdd_status: false, mdd_phase_result: false, mdd_reset: false, mdd_change_request: false, mdd_contextual_explore: false, mdd_context: false, mdd_pr_body: false, 'mdd_*': false };
   assert.deepEqual(config, {
     default_agent: 'build', permission: { bash: 'ask' },
     agent: {

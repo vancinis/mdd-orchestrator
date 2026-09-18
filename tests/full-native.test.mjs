@@ -9,6 +9,7 @@ import { saveGlobalSettings } from '../dist/global-settings.js';
 import { memoryServer, installCleanup, isolateHome, answers, traceFixture } from './adapter-fixture.mjs';
 import { traceArtifact } from '../dist/acceptance.js';
 import { ManagedMemory } from '../dist/managed-memory.js';
+import { STATUS_BUDGET_BYTES } from '../dist/status-budget.js';
 
 // Native SDK/hook contract fixtures. No model or real shell execution is performed.
 async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', partial = false, summary = 'low', telemetry = true, memoryEnabled = true, memoryFault, start = true } = {}) {
@@ -53,7 +54,7 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
     const call = { sessionID: runtime.sessionID, callID: `question-${++questionCount}`, tool: 'question' };
     parent[1].parts = [{ type: 'tool', tool: 'question', callID: call.callID, sessionID: runtime.sessionID, messageID: context.messageID, state: { status: 'running', input: structuredClone(args) } }];
     await hooks['tool.execute.before'](call, { args });
-    const labels = { Approval: 'Proceed', Change: 'Confirm change', Certainty: known.certainty === 'not-sure' ? 'Not sure' : known.certainty === 'somewhat-sure' ? 'Somewhat sure' : 'Very sure', Artifacts: { none: 'None', openspec: 'OpenSpec', engram: 'Engram', both: 'Both' }[store], Mode: mode === 'automatic' ? 'Automatic' : 'Interactive', Summary: { low: 'Low', medium: 'Medium', detailed: 'Detailed' }[summary], Complexity: known.complexity === 'very-complex' ? 'Very complex' : 'Not complex' };
+    const labels = { 'Aprobación': 'Continuar', Cambio: 'Confirmar el cambio', Certeza: known.certainty === 'not-sure' ? 'Poco seguro' : known.certainty === 'somewhat-sure' ? 'Algo seguro' : 'Muy seguro', Artefactos: { none: 'Ninguno', openspec: 'OpenSpec', engram: 'Engram', both: 'Ambos' }[store], Modo: mode === 'automatic' ? 'Automático' : 'Interactivo', Resumen: { low: 'Bajo', medium: 'Medio', detailed: 'Detallado' }[summary], Complejidad: known.complexity === 'very-complex' ? 'Muy complejo' : 'Poco complejo' };
     const selections = Array.isArray(selection) ? selection : args.questions.map(q => [typeof selection === 'string' ? selection : labels[q.header]]);
     const formatted = args.questions.map((q, i) => `"${q.question}"="${selections[i].join(', ')}"`).join(', ');
     await hooks['tool.execute.after']({ ...call, args }, { title: `Asked ${args.questions.length} question${args.questions.length > 1 ? 's' : ''}`, output: `User has answered your questions: ${formatted}. You can now continue with the user's answers in mind.`, metadata: { answers: selections, truncated: false } });
@@ -79,6 +80,11 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
     const phase = args.subagent_type;
     for (const prior of visited) assert.ok(args.prompt.includes(`Artifact for ${prior}`), `Missing ${prior} dependency in ${phase}`);
     if (phase === 'mdd-apply') assert.ok(args.prompt.includes('Trusted local mdd-cleanup instructions with provenance'));
+    // Every phase is shown only its own result schema; a leaked one made plan fill verification.
+    // A standalone read-only investigation has its own prompt and no phase result fields at all.
+    const standalone = args.prompt.includes('Standalone read-only investigation only');
+    assert.equal(args.prompt.includes(`Phase fields for ${phase}:`), !standalone, `own field list in ${phase}`);
+    assert.equal(args.prompt.includes('verification={scenarios:'), phase === 'mdd-verify', `verification schema leak in ${phase}`);
     // Prose phases carry the documentation guide; structural ones do not pay for it.
     assert.equal(args.prompt.includes('Trusted local mdd-doc instructions with provenance'),
       !['mdd-tasks', 'mdd-apply'].includes(phase), `mdd-doc injection for ${phase}`);
@@ -210,7 +216,11 @@ test('memory off contextual exploration keeps local provenance, and a restart le
   await f.phase();
   const restarted = await plugin(f.input);
   // Settled work is not in flight: the conversation is free, it simply does not resume by itself.
-  assert.equal(JSON.parse(await restarted.tool.mdd_status.execute({}, f.context)).state, 'not-started');
+  // Its evidence is preserved as data, which must not turn into a block on starting new work.
+  const after = JSON.parse(await restarted.tool.mdd_status.execute({}, f.context));
+  assert.equal(after.state, 'recoverable');
+  assert.equal(after.priorRun.capability, 'data-only');
+  assert.equal(after.task, undefined, 'a preserved run is never runnable');
   f.user('A different objective for this conversation.');
   const fresh = JSON.parse(await restarted.tool.mdd_start.execute({ requirements: 'A different objective for this conversation.' }, f.context));
   assert.equal(fresh.state, 'ready');
@@ -372,7 +382,7 @@ test('confirmed rerun asks every field once despite complete profile and preserv
   await f.answer();
   const preflight = await f.status(); assert.equal(preflight.question.questions.length, 5);
   assert.equal(preflight.runID, old.runID);
-  await f.answer([['Very sure'], ['None'], ['Interactive'], ['Low'], ['Not complex']]);
+  await f.answer([['Muy seguro'], ['Ninguno'], ['Interactivo'], ['Bajo'], ['Poco complejo']]);
   const next = await f.status();
   assert.notEqual(next.runID, old.runID); assert.equal(next.task.subagent_type, 'mdd-plan');
   assert.equal(next.previousRuns[0].runID, old.runID);
@@ -386,7 +396,7 @@ test('rejected material change restores exact answers, plan and pending approval
   const f = await fixture(t, { mode: 'interactive' }); await f.phase();
   const old = await f.status();
   f.user('Consider adding a new integration.'); await f.change('material', 'Implement the feature with the new integration.');
-  await f.answer('Keep current plan');
+  await f.answer('Mantener el plan actual');
   const current = await f.status();
   assert.equal(current.runID, old.runID); assert.deepEqual(current.workflow, old.workflow);
   assert.deepEqual(current.question, old.question); assert.deepEqual(current.acceptance, old.acceptance);
@@ -511,7 +521,10 @@ test('read-only investigation answers without an accepted run and leaves impleme
   assert.match(done.contextualReport, /Read-only investigation completed/);
   assert.match(done.contextualReport, /Artifact for mdd-explore/);
   assert.equal(f.writes.length, 0);
-  assert.ok(!(await readdir(join(f.root, '.mdd')).catch(() => [])).some(name => name.startsWith('progress-')));
+  // Standalone investigation leaves no local trace at all: neither a marker nor a preserved run.
+  const traces = await readdir(join(f.root, '.mdd')).catch(() => []);
+  assert.ok(!traces.some(name => name.startsWith('progress-')));
+  assert.ok(!traces.some(name => name.startsWith('run-')));
   f.user(f.requirements);
   await f.hooks.tool.mdd_start.execute({ requirements: f.requirements }, f.context);
   const started = await f.status();
@@ -538,12 +551,100 @@ test('a restarted conversation still answers read-only investigation', async t =
   const f = await fixture(t, { memoryEnabled: false });
   await f.phase();
   const restarted = await plugin(f.input);
-  assert.equal(JSON.parse(await restarted.tool.mdd_status.execute({}, f.context)).state, 'not-started');
+  // The lost run is reported as recoverable data, and that must not occupy the dispatch slot:
+  // read-only investigation stays reachable exactly as it was when nothing had been preserved.
+  assert.equal(JSON.parse(await restarted.tool.mdd_status.execute({}, f.context)).state, 'recoverable');
   await restarted.tool.mdd_contextual_explore.execute({ purpose: 'Explain the recorded project state.' }, f.context);
   const ready = JSON.parse(await restarted.tool.mdd_status.execute({}, f.context));
   assert.equal(ready.contextual, true);
   assert.equal(ready.task.subagent_type, 'mdd-explore');
   await assert.rejects(restarted.tool.mdd_start.execute({ requirements: 'Continue the old work.' }, f.context));
+});
+
+test('a run lost mid-route keeps its plan reachable as read-only data', async t => {
+  // The actual incident: the process died during mdd-apply after ~40 minutes. Artifacts were
+  // persisted in Engram, but the index naming them lived only in memory, so nothing was findable.
+  const f = await fixture(t, { route: 'low-explore', store: 'engram' });
+  const phases = (await f.status()).workflow.evaluation.phases;
+  assert.deepEqual(phases.slice(0, 2), ['mdd-explore', 'mdd-plan']);
+  await f.phase(); await f.phase();
+  const live = await f.status();
+  assert.equal(live.state, 'ready');
+  assert.equal(live.task.subagent_type, 'mdd-apply');
+  // Fresh instances over the same directory hold empty maps, exactly like a restarted plugin.
+  const restarted = await plugin(f.input);
+  const status = JSON.parse(await restarted.tool.mdd_status.execute({}, f.context));
+  assert.equal(status.state, 'recoverable');
+  assert.equal(status.recovery, 'data-only');
+  assert.equal(status.priorRun.capability, 'data-only');
+  assert.equal(status.priorRun.runID, live.runID);
+  assert.equal(status.priorRun.phase, 'mdd-apply');
+  assert.deepEqual(status.priorRun.results.map(item => item.phase), ['mdd-explore', 'mdd-plan']);
+  assert.equal(status.priorRun.requirements, f.requirements);
+  // What the lost time actually bought: the acceptance map, the plan and the artifact bodies.
+  assert.equal(status.priorRun.acceptance.goal, traceFixture().acceptance.goal);
+  assert.equal(status.priorRun.planned.length, 1);
+  assert.equal(status.priorRun.artifacts.length, 2);
+  assert.match(status.priorRun.artifacts[1].content, /Artifact for mdd-plan/);
+  // The Engram observation ID is retained as a diagnostic identifier, not as a live capability.
+  assert.ok(status.priorRun.artifacts[1].ref.observationID);
+  // It is evidence, never something runnable, and it says plainly what it cannot know.
+  assert.equal(status.task, undefined);
+  assert.equal(status.workflow, undefined);
+  assert.ok(status.limits.some(limit => /git status/.test(limit)), 'the working tree must be declared unknown');
+  assert.ok(status.limits.some(limit => /approval/i.test(limit)));
+  assert.match(status.reason, /does not resume/i);
+  // A preserved run informs the restart; it never blocks it. New consent starts new work.
+  f.user('Retomemos el objetivo original con consentimiento nuevo.');
+  const fresh = JSON.parse(await restarted.tool.mdd_start.execute({ requirements: 'Retomemos el objetivo original con consentimiento nuevo.' }, f.context));
+  assert.equal(fresh.state, 'ready');
+  assert.notEqual(fresh.runID, live.runID);
+  // The new run earns its own evidence: nothing is inherited from the record.
+  assert.equal(fresh.workflow.results.length, 0);
+  assert.equal(fresh.acceptance, undefined);
+  assert.equal(fresh.priorRun, undefined);
+});
+
+test('a preserved run restores no approval and no live consent receipt', async t => {
+  const f = await fixture(t, { mode: 'interactive', partial: true, memoryEnabled: false });
+  await f.answer();
+  await f.phase();
+  assert.equal((await f.status()).question.questions[0].header, 'Aprobación');
+  await f.answer();
+  const live = await f.status();
+  assert.ok(live.questionReceipts.some(item => item.kind === 'approval'));
+  const restarted = await plugin(f.input);
+  const status = JSON.parse(await restarted.tool.mdd_status.execute({}, f.context));
+  assert.equal(status.state, 'recoverable');
+  // Receipts are a historical record of what the user was asked, never live consent: their call
+  // IDs are anti-reuse guards, so loading them would both fake approval and cause false refusals.
+  assert.deepEqual(status.questionReceipts, []);
+  assert.ok(status.priorRun.questionReceipts.some(item => item.kind === 'approval'));
+  // There is no restored workflow for an approval to authorize, so no phase is dispatchable.
+  assert.equal(status.task, undefined);
+  assert.equal(status.next, undefined);
+  assert.equal(status.question, undefined);
+  // The new run wins its own preflight; the old confirmed requirements flag is not inherited.
+  f.user('Empecemos de nuevo con este objetivo.');
+  const fresh = JSON.parse(await restarted.tool.mdd_start.execute({ requirements: 'Empecemos de nuevo con este objetivo.' }, f.context));
+  assert.equal(fresh.state, 'question-ready');
+  assert.deepEqual(fresh.questionReceipts, []);
+});
+
+test('mdd_reset with scope run discards the preserved record, memory off', async t => {
+  t.mock.method(globalThis, 'fetch', () => assert.fail('Memory off fetched'));
+  const f = await fixture(t, { memoryEnabled: false });
+  await f.phase();
+  const names = async () => readdir(join(f.root, '.mdd')).catch(() => []);
+  assert.ok((await names()).some(name => name.startsWith('run-')), 'evidence is preserved without memory');
+  const restarted = await plugin(f.input);
+  const status = JSON.parse(await restarted.tool.mdd_status.execute({}, f.context));
+  assert.equal(status.state, 'recoverable');
+  assert.equal(status.memory, 'off');
+  assert.equal(status.priorRun.results.length, 1);
+  JSON.parse(await restarted.tool.mdd_reset.execute({ scope: 'run' }, f.context));
+  assert.ok(!(await names()).some(name => name.startsWith('run-')), 'an explicit discard removes the record');
+  assert.equal(JSON.parse(await restarted.tool.mdd_status.execute({}, f.context)).state, 'not-started');
 });
 
 test('restart detects pending work without repeating memory writes', async t => {
@@ -580,7 +681,7 @@ for (const stage of ['confirmation', 'preflight']) {
 test('stale change confirmation cannot approve a later phase or erase the old run', async t => {
   const f = await fixture(t); await f.phase(); f.user('Rerun preflight.'); await f.change();
   const used = await f.answer(); await f.answer(); const next = await f.status();
-  await assert.rejects(f.hooks['tool.execute.after']({ ...used.call, args: used.args }, { title: 'Approved', output: 'approved', metadata: { answers: [['Confirm change']], truncated: false } }));
+  await assert.rejects(f.hooks['tool.execute.after']({ ...used.call, args: used.args }, { title: 'Approved', output: 'approved', metadata: { answers: [['Confirmar el cambio']], truncated: false } }));
   const blocked = await f.status(); assert.equal(blocked.runID, next.runID); assert.equal(blocked.previousRuns.length, 1); assert.equal(blocked.workflow.results.length, 0);
 });
 test('a side exploration that does not complete restores the main plan untouched', async t => {
@@ -604,7 +705,7 @@ test('a recorded material concern can be proposed once without inventing new hum
   await f.phase({ concerns: [concern] }); const old = await f.status();
   const args = { kind: 'material', userText: f.parent[0].parts[0].text, requirements: 'Implement a different integration.', concerns: [concern] };
   await f.hooks.tool.mdd_change_request.execute(args, f.context);
-  await f.answer('Keep current plan');
+  await f.answer('Mantener el plan actual');
   await assert.rejects(f.hooks.tool.mdd_change_request.execute(args, f.context), /already presented/);
   assert.deepEqual((await f.status()).workflow, old.workflow);
 });
@@ -620,7 +721,40 @@ test('context accumulation is bounded without truncating results or advancing th
   assert.equal(stopped, true);
   const final = await f.status(); assert.deepEqual(final.workflow, main.workflow);
   assert.ok(final.contexts.length > 0);
-  assert.ok(final.contexts.every(context => Buffer.byteLength(context.artifact.content) === 16000));
+  // The status reports the ref only; the bytes it records still prove nothing was truncated.
+  assert.ok(final.contexts.every(context => context.artifact.content === undefined && context.artifact.ref.bytes === 16000));
+});
+
+// The observed failure: mdd_status grew past the host output limit, the host truncated it and
+// saved the rest to a file, the coordinator could no longer copy the exact task, and it
+// abandoned delegation to implement the phase itself. The status must stay copyable instead.
+test('a large history keeps mdd_status within budget and the task byte-identical for dispatch', async t => {
+  const f = await fixture(t, { route: 'high' });
+  await f.phase({ large: true });
+  // A superseded run leaves its own history and contexts behind in previousRuns.
+  f.user('Please rerun the preflight for this task.');
+  await f.change(); await f.answer();
+  await f.answer([['Poco seguro'], ['Ninguno'], ['Automático'], ['Bajo'], ['Muy complejo']]);
+  f.visited.length = 0;
+  await f.hooks.tool.mdd_contextual_explore.execute({ purpose: 'Inspect the current feature boundary.' }, f.context);
+  await f.phase({ large: true });
+  await f.phase({ large: true });
+  const previous = await f.status();
+  assert.ok(previous.previousRuns === undefined || previous.previousRuns.length === 1);
+  const raw = await f.hooks.tool.mdd_status.execute({}, f.context);
+  assert.ok(Buffer.byteLength(raw) <= STATUS_BUDGET_BYTES, `mdd_status was ${Buffer.byteLength(raw)} bytes`);
+  const status = JSON.parse(raw);
+  assert.equal(status.budget, undefined, 'the task fits without an unresolved budget problem');
+  assert.ok(status.omitted.length > 0, 'what was left out is declared, not silently missing');
+  assert.match(status.omittedNote, /Nothing was deleted/);
+  for (const key of status.omitted) assert.equal(status[key], undefined);
+  assert.ok(status.task && status.state === 'ready');
+  // The invariant the bug broke: the task read back from a budgeted status still satisfies the
+  // byte-for-byte check in PhaseRunner.before, so delegation survives a large history.
+  await f.phase({ large: true });
+  const after = await f.status();
+  assert.notEqual(after.phase, status.phase, 'the delegated phase actually advanced');
+  assert.ok(after.task, 'the next phase stays dispatchable');
 });
 
 // Delegation is the default route, never the only one: a subagent that cannot finish the work

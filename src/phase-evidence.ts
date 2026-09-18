@@ -9,11 +9,12 @@ export function deliverables(value: unknown): Deliverable[] {
   const ids = new Set<string>();
   return value.map(item => {
     const entry = objectWithKeys(item, 'deliverable', ['id', 'description', 'path', 'check', 'scenarios', 'decisions', 'dependsOn']);
-    if (typeof entry.id !== 'string' || !/^[a-zA-Z0-9_-]{1,64}$/.test(entry.id) || ids.has(entry.id)) throw new Error('Invalid or duplicate deliverable.');
+    if (typeof entry.id !== 'string' || !/^[a-zA-Z0-9_-]{1,64}$/.test(entry.id)) throw new Error(`Deliverable id ${JSON.stringify(String(entry.id).slice(0, 64))} must be a stable short identifier of 1–64 letters, digits, underscores or hyphens.`);
+    if (ids.has(entry.id)) throw new Error(`Deliverable id ${entry.id} is used more than once.`);
     ids.add(entry.id);
-    return { id: entry.id, description: shortText(entry.description, 'implementation step'),
-      path: shortText(entry.path, 'implementation target', 400), check: shortText(entry.check, 'planned check command', 500),
-      scenarios: references(entry.scenarios, 'step scenarios'), decisions: references(Object.hasOwn(entry, 'decisions') ? entry.decisions : [], 'step decisions', true), dependsOn: references(Object.hasOwn(entry, 'dependsOn') ? entry.dependsOn : [], 'step dependencies', true) };
+    return { id: entry.id, description: shortText(entry.description, `description of deliverable ${entry.id}`),
+      path: shortText(entry.path, `implementation target of deliverable ${entry.id}`, 400), check: shortText(entry.check, `planned check command of deliverable ${entry.id}`, 500),
+      scenarios: references(entry.scenarios, `scenarios of deliverable ${entry.id}`), decisions: references(Object.hasOwn(entry, 'decisions') ? entry.decisions : [], `decisions of deliverable ${entry.id}`, true), dependsOn: references(Object.hasOwn(entry, 'dependsOn') ? entry.dependsOn : [], `dependencies of deliverable ${entry.id}`, true) };
   });
 }
 

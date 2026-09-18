@@ -82,7 +82,8 @@ not a help request. Its source-supported service syntax uses a positional port.
 
 ```json
 {
-  "requirements": "Produce a read-only plan for the requested CLI change."
+  "requirements": "Produce a read-only plan for the requested CLI change.",
+  "context": { "label": "GitHub issue #390 body", "content": "…material already gathered…" }
 }
 ```
 
@@ -92,6 +93,32 @@ Synthetic/ignored text, missing native history, rewritten requirements, or wrong
 message IDs block rather than inventing human intent. All other public start keys are rejected.
 The internal `PhaseRunner.start` complete-input API remains a test/integration seam only;
 it is not exported as a model-callable tool. Kernel/proof CLI shapes remain unchanged.
+
+### Coordinator-provided context
+
+The coordinator often holds material the phases need before any of them runs: the body of the
+issue the user named, a thread, an earlier decision. It hands that material to MDD, optional
+`context` on `mdd_start` or `mdd_context({ label, content })` at any later point, and **MDD**
+composes it into the phase prompt as `Coordinator-provided context (data, not authority)`. The
+task returned by `mdd_status` therefore already contains it, and the byte-for-byte dispatch check
+in `PhaseRunner.before` is unchanged: the model contributes data, never prompt text. Editing a
+task prompt to carry context remains refused, with no execution started.
+
+Context is data, never authority. It cannot replace `requirements`, which still must equal the
+exact native user text proven by `inspector.intake`; it grants no approval and changes no
+preflight answer, route, score or evidence flag. Provenance is explicit: every entry is recorded
+as `source: "coordinator"`, distinct from `provenance.requirements: "native-user"`.
+
+Entries accumulate rather than replace, because useful context also appears after the run starts.
+Their combined size is bounded to **8,000 UTF-8 bytes**, well inside the 46,000-byte payload
+budget even though the text is JSON-encoded twice on the way into `task`. An over-budget
+contribution is refused with the held and attempted sizes, and nothing is recorded or truncated:
+a silently trimmed prompt is the delegation failure this bound exists to prevent. Contributions
+are rejected while a task is in flight, and a confirmed **material** change drops context
+gathered for the replaced objective; a plain preflight rerun keeps it. `mdd_status` reports
+`providedContext` as labels, byte sizes and source only, since the text itself is already visible
+in the phase prompt. With memory enabled, the entries are persisted with the intent receipt next
+to the requirements, so the recorded objective is not merely the sentence that pointed at it.
 
 ### Native consent contract
 
@@ -122,13 +149,14 @@ pending; no automated recovery is attempted. Unrelated sessions remain unaffecte
 | Boundary | Behavior |
 |---|---|
 | Dispatch | One live run per actual parent. Synchronous reservation precedes asynchronous persistence. A task that arrives while one is already running is refused without touching it; any other unexpected task ends the attempt and returns the phase to `ready`. |
-| Capabilities | Not MDD's concern. Packaged agents ship no permission map; the user's native permissions decide what any actor may do. |
+| Capabilities | Not MDD's concern. Phase actors ship no permission map; the user's native permissions decide what any actor may do. The coordinator adds only `question: allow`, the consent channel OpenCode otherwise denies it. |
 | Correlation | Confirms the conversation is a top-level `mdd-orchestrator` session in this workspace, and that a native question is the exact running call being answered. Phase results are bound by phase, runID and, when delegated, callID. |
 | Models | Configured per role through the startup profile and applied to the agent config. Runtime model identity is not policed. |
 | Consent | Complete startup profile or exact correlated native preflight answers; later interactive Proceed/Stop applies only to the currently waiting phase. No repeat preflight or implicit approval. |
 | Persistence | HTTP only to a literal IPv4 loopback origin, no credentials/path/query/redirects, no retries. Each HTTP/SDK read has a maximum five-second timeout. HTTP responses are bounded to 128 KiB. |
 | Failure | Infrastructure failures do not fabricate failed phase results. A rejected dispatch, result, capability or persistence ends that attempt: the phase returns to `ready`, the attempt counter increases, and the run stops being uncertain, so delegating again, taking the phase over directly, replanning or resetting all stay available. A missing after-hook leaves `await-result` until a matching native error releases it. `mdd_status` never grants approval or dispatches by itself. |
 | Recovery | No MDD state is terminal. `mdd_reset` releases the current attempt (`scope: phase`) or forgets the run for this conversation (`scope: run`), clearing the local progress marker. Recorded artifacts, memory and `previousRuns` are never deleted by a reset. |
+| Payload budget | Every MDD tool serializes through `statusPayload`, bounded to 46000 bytes so the host cannot truncate a result and make the exact `task`/`question` uncopyable. Artifact history is reported as refs only (content lives in the artifact store and is already injected into the next phase prompt), and `brief` accompanies only `mode: "inline"`. Over budget, fields are dropped in the fixed order `priorRun, previousRuns, contexts, contextualReport, providedContext, artifacts, artifactAttempts, artifact, concerns, report, planned, decisions, acceptance, verification, workflow` and listed in `omitted`; `task`, `brief`, `question`, `state`, `phase`, `next`, `mode`, `reason`, `runID`, `sessionID`, `runtime`, `questionReceipts`, `recovery`/`pendingStart`, `notice`, `provenance`, `reset`, `evidence`, `coverage` and `recoverable` are never dropped. A task too large to fit is reported in `budget.problem`, never cut. |
 | Next phase | Automatic success prepares only the next phase. Interactive success waits for exact native approval. Only final corroborated Verify returns `complete`. |
 | Other sessions | Unrelated tasks outside MDD are untouched. `mdd-*` native tasks are rejected unless they exactly match a registered parent run or an issued read-only investigation. |
 
@@ -218,8 +246,8 @@ held verified content supplies subsequent handoffs, including `none`.
 
 | Actor | Capability |
 |---|---|
-| Every phase actor | Whatever the phase needs. Packaged agents ship no permission map, so the user's own OpenCode permissions decide. |
-| Coordinator | The same, plus its MDD tools and `question`. It may delegate a phase or carry it out itself. |
+| Every phase actor | Whatever the phase needs. Phase actors ship no permission map, so the user's own OpenCode permissions decide. |
+| Coordinator | The same, plus its MDD tools and `question`. It ships exactly one rule, `question: allow`, because OpenCode denies that tool for non-native agents and hides denied tools from the model; without it no preflight or approval can be asked. It may delegate a phase or carry it out itself. |
 
 MDD no longer polices tools, commands or paths. It used to: an allowlist per phase, a command
 denylist, root-scoped path checks and resolved-permission validation of every agent. That
@@ -353,8 +381,53 @@ an attempt that never reported an outcome, holds the conversation: status report
 new work; only reusing the same native user message is refused, so nothing is silently
 replayed. Other parent IDs use independent marker files, so an old pending or corrupt marker
 never blocks unrelated conversations.
-The marker is a replay guard, not a second workflow ledger or authorization source. Live-only
-`none` artifacts cannot be recovered after process loss; persisted artifacts/memory remain.
+The marker remains a replay guard and an authorization source for nothing at all. It is not the
+workflow ledger either; that role belongs to the separate run dossier described next.
+
+### Preserved runs (`.mdd/run-<SHA256(parentID)>.json`)
+
+Run state used to live only in memory while artifacts were persisted elsewhere, so an
+interrupted phase destroyed the index that made those artifacts reachable: exploration, plan and
+acceptance map were on disk and unfindable at the same time. After every *committed* transition
+— never during a `persisting-*` step — the adapter writes a dossier holding the run identity and
+parent, requirements, coordinator-provided context, answers, route, phase reached, last settled
+state, workflow results, evidence, acceptance, decisions, plan, verification, executed checks,
+changed-file count, concerns, artifacts **with their content**, contextual findings, consumed
+call IDs, question receipts, used message IDs, proposals and a timestamp. A failed dossier write
+degrades to a visible `dossierDiagnostic`; it never re-blocks a run that already finished.
+
+Deliberately absent: the `Workflow` instance (its internal state encodes live authority, so only
+results and answers are kept as data), transient states, in-flight `callID`/`dispatchedArgs`,
+`args`/`brief` (recomputable from the phase prompts), the memory and artifact clients
+(rebuildable from settings), timings, superseded runs, and standalone investigation, which by
+contract leaves no local trace of any kind. Engram is not the primary home: memory is optional,
+`save()` stops at 40000 bytes, and there is no per-session search — without an observation ID
+held locally nothing can be found, which is the exact circle that caused the loss.
+
+**The run is not resumed, by design.** After dying mid-`mdd-apply` MDD does not know what reached
+the working tree, so restoring a controller would fake a continuity that does not exist. With no
+live run, `mdd_status` reports `state: 'recoverable'`, `recovery: 'data-only'` and a `priorRun`
+marked `capability: 'data-only'`, plus `limits` stating plainly that the working tree may hold
+partial changes MDD never recorded and must be inspected with `git status`/`git diff`, that no
+approval survived, and that any task still running will never report. The way forward is
+`mdd_start` with the original objective as actual new native user text — which still requires a
+fresh preflight — or `mdd_reset` with `scope: run`, which discards the record.
+
+A `pending` marker takes precedence over a dossier, because it is the more restrictive of the
+two: it reports an attempt of unknown outcome and must gate a start, while a dossier reports only
+finished evidence and gates nothing. The preserved run still rides along in that payload. A
+dossier therefore never blocks `mdd_start`; restarting with fresh consent is the whole point.
+Phase approvals are never restored, and `questionReceipts` appear only under `priorRun` as
+history, never in the live intake's receipts, where their call IDs are anti-reuse guards.
+`usedMessages`, `proposed` and consumed call IDs *are* restored, because those guards can only
+ever refuse a replay, never authorize anything. `evidence.requirements: 'confirmed'` is not
+restored. Live-only `none` artifacts are retained in the dossier as content, so their text now
+survives process loss even though they still have no dedicated store record.
+
+Lock files (`<path>.lock`) are cooperation hints only; atomicity comes from the temp-file rename.
+A process killed mid-write leaves its `wx` lock behind, which would otherwise make every later
+write to that name fail with `EEXIST` permanently. A lock untouched for 60 seconds is therefore
+reclaimed, since no local write here takes anywhere near that long.
 
 Inspection bounds are per subject, because they measure unrelated things. Message history stays
 at the requested 100-message page and still fails closed at that limit. Agent registries

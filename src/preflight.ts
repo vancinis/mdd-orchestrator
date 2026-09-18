@@ -5,31 +5,36 @@ import { objectWithKeys, parseAnswers, ValidationError } from './validation.js';
 export const ANSWER_FIELDS = Object.freeze(['certainty', 'artifactStore', 'mode', 'summary', 'complexity'] as const);
 type Field = keyof Answers;
 type Choice = { label: string; description: string; token: string };
+/**
+ * User-facing text is Spanish, like the installer and the config wizard: MDD must not install in
+ * one language and interrogate in another. Labels are also the native answer tokens, so every
+ * label comparison elsewhere reads them from here instead of repeating a literal.
+ */
 const fields: Record<Field, { header: string; question: string; choices: Choice[] }> = {
-  certainty: { header: 'Certainty', question: 'How certain are the requirements?', choices: [
-    { label: 'Very sure', token: 'very-sure', description: 'Requirements are clear and confirmed.' },
-    { label: 'Somewhat sure', token: 'somewhat-sure', description: 'Some requirements need clarification.' },
-    { label: 'Not sure', token: 'not-sure', description: 'Explore the requirements before planning.' },
+  certainty: { header: 'Certeza', question: '¿Qué tan claros están los requisitos?', choices: [
+    { label: 'Muy seguro', token: 'very-sure', description: 'Los requisitos están claros y confirmados.' },
+    { label: 'Algo seguro', token: 'somewhat-sure', description: 'Algunos requisitos necesitan aclaración.' },
+    { label: 'Poco seguro', token: 'not-sure', description: 'Conviene explorar los requisitos antes de planificar.' },
   ] },
-  artifactStore: { header: 'Artifacts', question: 'Where should workflow artifacts be stored? Optional memory is configured separately.', choices: [
-    { label: 'Engram', token: 'engram', description: 'Store workflow artifacts in Engram.' },
-    { label: 'OpenSpec', token: 'openspec', description: 'Store workflow artifacts in project OpenSpec files.' },
-    { label: 'Both', token: 'both', description: 'Store artifacts in both locations.' },
-    { label: 'None', token: 'none', description: 'Keep artifacts only in the live run, without dedicated persistence.' },
+  artifactStore: { header: 'Artefactos', question: '¿Dónde se guardan los artefactos del flujo? La memoria opcional se configura por separado.', choices: [
+    { label: 'Engram', token: 'engram', description: 'Guardar los artefactos del flujo en Engram.' },
+    { label: 'OpenSpec', token: 'openspec', description: 'Guardar los artefactos en archivos OpenSpec del proyecto.' },
+    { label: 'Ambos', token: 'both', description: 'Guardar los artefactos en los dos lugares.' },
+    { label: 'Ninguno', token: 'none', description: 'Mantener los artefactos solo durante la ejecución, sin persistencia dedicada.' },
   ] },
-  mode: { header: 'Mode', question: 'How should later phases be approved? Submitting preflight authorizes the first phase.', choices: [
-    { label: 'Interactive', token: 'interactive', description: 'Approve each later phase individually.' },
-    { label: 'Automatic', token: 'automatic', description: 'Continue later phases without individual approval.' },
+  mode: { header: 'Modo', question: '¿Cómo se aprueban las fases posteriores? Enviar el preflight autoriza la primera fase.', choices: [
+    { label: 'Interactivo', token: 'interactive', description: 'Aprobar cada fase posterior una por una.' },
+    { label: 'Automático', token: 'automatic', description: 'Continuar las fases posteriores sin aprobación individual.' },
   ] },
-  summary: { header: 'Summary', question: 'How much reporting detail do you want?', choices: [
-    { label: 'Detailed', token: 'detailed', description: 'Summary, how, status, and evidence coverage.' },
-    { label: 'Medium', token: 'medium', description: 'Summary and how the work was performed.' },
-    { label: 'Low', token: 'low', description: 'A short summary of work performed in the current phase.' },
+  summary: { header: 'Resumen', question: '¿Cuánto detalle querés en los reportes?', choices: [
+    { label: 'Detallado', token: 'detailed', description: 'Resumen, cómo se hizo, estado y cobertura de evidencia.' },
+    { label: 'Medio', token: 'medium', description: 'Resumen y cómo se realizó el trabajo.' },
+    { label: 'Bajo', token: 'low', description: 'Un resumen corto del trabajo de la fase actual.' },
   ] },
-  complexity: { header: 'Complexity', question: 'How complex is the requested work?', choices: [
-    { label: 'Very complex', token: 'very-complex', description: 'Substantial scope or technical complexity.' },
-    { label: 'Somewhat complex', token: 'somewhat-complex', description: 'Some scope or technical complexity.' },
-    { label: 'Not complex', token: 'not-complex', description: 'Small, straightforward work.' },
+  complexity: { header: 'Complejidad', question: '¿Qué tan complejo es el trabajo pedido?', choices: [
+    { label: 'Muy complejo', token: 'very-complex', description: 'Alcance o complejidad técnica importante.' },
+    { label: 'Algo complejo', token: 'somewhat-complex', description: 'Algo de alcance o complejidad técnica.' },
+    { label: 'Poco complejo', token: 'not-complex', description: 'Trabajo chico y directo.' },
   ] },
 };
 

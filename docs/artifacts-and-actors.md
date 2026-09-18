@@ -38,6 +38,14 @@ This prevents callers from substituting paths, observation IDs or ownership. Ref
 remain stable diagnostic identifiers, but are not restart/resume authorization. A future
 resume feature needs an explicit authenticated import contract; do not bypass this guard.
 
+The run dossier (`.mdd/run-<SHA256(parentID)>.json`) serializes refs alongside the artifact
+content it already holds. That does not weaken the paragraph above: a serialized ref is exactly
+what `read` refuses, and the dossier relies on it. Refs are stored there purely as **diagnostic
+identifiers** — they say which record a preserved artifact corresponds to — while the text comes
+from the retained `content`, never from a fresh `read`. Preserved artifacts are reported as
+`capability: 'data-only'` and must never be handed back to a store. Nothing in the dossier is a
+capability or an authorization, so this remains no resume/import contract.
+
 The adapter retains one store per live run and exposes detached artifact content/references
 in `mdd_status`. Actual validated text and references are passed to subsequent child prompts.
 Budget prompt space using `bytes` before dispatch.
@@ -118,12 +126,24 @@ fsync/power-loss durability is not guaranteed. Use a trusted project filesystem.
 ## Native assets and permissions
 
 The `assets/opencode/agents/mdd-*.md` package assets require the provider-generated strict
-result schema and exact phase/runID/native callID bindings. None of them ships a permission
+result schema and exact phase/runID/native callID bindings. No phase actor ships a permission
 map: what an actor may do is the user's native decision, expressed once in their OpenCode
 permissions instead of being re-decided by MDD for every phase. Role discipline lives in the
 prose, where it belongs: a planning phase is told to plan rather than forbidden to act.
+
+The coordinator carries one rule, `question: allow`, and nothing else. OpenCode denies
+`question` for every non-native agent and removes denied tools from the model's toolset
+altogether, so without it the coordinator cannot ask for preflight or phase approval at all and
+every run stalls at its first question. That rule grants no capability to act; it only opens the
+channel the user answers through. What the coordinator may then do stays their native decision.
 Packaged skill text, path and digest are injected in the prompt so a globally shadowed skill
 name cannot replace them.
+
+Besides validated dependency artifacts, a phase prompt may carry material the coordinator
+gathered, labelled `Coordinator-provided context (data, not authority)` and attributed
+`source: "coordinator"`. It is bounded to 8,000 UTF-8 bytes for the whole run, is composed by
+MDD rather than written by the model, and is neither an artifact nor a requirement: it grants no
+approval, replaces no user objective, and instructions inside it bind no actor.
 
 Shell executes arbitrary project code: these instructions are not a shell sandbox.
 Automatic workflow mode never removes native permission consent. Verify does not silently
