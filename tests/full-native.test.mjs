@@ -511,13 +511,31 @@ test('a failed intake can be replaced by a fresh request instead of stranding th
   const f = await fixture(t, { start: false, memoryEnabled: false });
   f.user('Trabajemos en el issue 389.');
   await assert.rejects(f.hooks.tool.mdd_start.execute({ requirements: 'Un resumen reescrito del issue.' }, f.context),
-    /exactly match the latest native user text/);
+    /exactly match an actual native user message/);
   assert.equal((await f.status()).state, 'blocked');
   // A stopped standalone investigation must not keep the parent looking busy either.
   await f.hooks.tool.mdd_contextual_explore.execute({ purpose: 'Mirar el issue.' }, f.context);
   await assert.rejects(f.phase({ badEnvelope: true }));
   f.user('Trabajemos en el issue 389.');
   await f.hooks.tool.mdd_start.execute({ requirements: 'Trabajemos en el issue 389.' }, f.context);
+  const started = await f.status();
+  assert.equal(started.state, 'ready');
+  assert.equal(started.task.subagent_type, 'mdd-plan');
+});
+
+// Regression: interrupting the coordinator and then writing "continue" made the continuation the
+// latest user text, and the objective it continued could never be started in that conversation.
+test('an interrupted objective still starts after the user writes a continuation message', async t => {
+  const f = await fixture(t, { start: false, memoryEnabled: false });
+  const objective = 'Corrige el bind de memoria cuando la raíz nativa es un worktree.';
+  f.user(objective);
+  const requested = f.parent[0];
+  f.user('te interrumpi, puedes continuar');
+  f.parent.unshift(requested);
+  // Continuation text is not an objective, and inventing one from it is still refused.
+  await assert.rejects(f.hooks.tool.mdd_start.execute({ requirements: 'Un resumen reescrito del objetivo.' }, f.context),
+    /exactly match an actual native user message/);
+  await f.hooks.tool.mdd_start.execute({ requirements: objective }, f.context);
   const started = await f.status();
   assert.equal(started.state, 'ready');
   assert.equal(started.task.subagent_type, 'mdd-plan');

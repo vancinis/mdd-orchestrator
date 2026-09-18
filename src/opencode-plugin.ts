@@ -220,21 +220,37 @@ export function createInspector(input: PluginInput, timeout = 5000): Inspect & I
         throw new Error('The native question history differs from the exact running call.');
       }
     },
-    async intake(runtime, requirements, messageID) {
+    /**
+     * Proves the text MDD was handed is text the user actually wrote here, and returns the message
+     * it came from. Consent still has to be the latest thing they said. An objective does not:
+     * interrupting and then writing "continue" buried the real request behind continuation text,
+     * and made it unstartable for the rest of the conversation. Reaching an earlier message is
+     * still their own words, never the model's, and the fresh-start guard keeps a message that
+     * already ran from running again. Identical texts are refused rather than picked between.
+     */
+    async intake(runtime, requirements, messageID, scope = 'latest') {
       await inspector.parent(runtime);
       const history = await messages(runtime.sessionID, runtime.directory);
       const caller = history.at(-1);
       if (!caller || record(caller.info, 'caller message').id !== messageID || record(caller.info, 'caller message').role !== 'assistant') throw new Error('Start does not match the actual native caller message.');
-      const user = history.slice(0, -1).findLast(message => record(message.info, 'message').role === 'user');
-      if (!user || record(user.info, 'message').sessionID !== runtime.sessionID) throw new Error('No actual native user requirements found.');
-      const info = record(user.info, 'message');
-      const parts = list(user.parts, 'message parts', PARTS_MAX).filter(part => part.type === 'text');
-      if (!parts.length || parts.some(part => part.synthetic === true || part.ignored === true ||
-          part.sessionID !== runtime.sessionID || part.messageID !== info.id || typeof part.text !== 'string') ||
-          parts.map(part => part.text).join('\n') !== requirements) {
-        throw new Error('Requirements must exactly match the latest native user text; do not rewrite or invent them.');
+      const users = history.slice(0, -1).filter(message => record(message.info, 'message').role === 'user');
+      const candidates = scope === 'objective' ? users : users.slice(-1);
+      if (!candidates.length) throw new Error('No actual native user requirements found.');
+      const matches = candidates.filter(user => {
+        const info = record(user.info, 'message');
+        if (info.sessionID !== runtime.sessionID) return false;
+        const parts = list(user.parts, 'message parts', PARTS_MAX).filter(part => part.type === 'text');
+        return parts.length > 0 && !parts.some(part => part.synthetic === true || part.ignored === true ||
+          part.sessionID !== runtime.sessionID || part.messageID !== info.id || typeof part.text !== 'string') &&
+          parts.map(part => part.text).join('\n') === requirements;
+      });
+      if (matches.length > 1) throw new Error('Several native user messages carry exactly this text; ask the user to restate the objective so the run binds to one message.');
+      if (!matches.length) {
+        throw new Error(scope === 'objective'
+          ? 'Requirements must exactly match an actual native user message in this conversation; do not rewrite or invent them.'
+          : 'Requirements must exactly match the latest native user text; do not rewrite or invent them.');
       }
-      return boundedText(info.id, 'native user message ID', 256);
+      return boundedText(record(matches[0]!.info, 'message').id, 'native user message ID', 256);
     },
     async question(runtime, call, args) {
       if (call.sessionID !== runtime.sessionID) throw new Error('Native question parent mismatch.');

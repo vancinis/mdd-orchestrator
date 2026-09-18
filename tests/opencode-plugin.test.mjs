@@ -394,6 +394,23 @@ test('native plugin contract: question error event blocks only matching intake w
   assert.equal(f.writes.length, 0);
 });
 
+// An objective is the request the user made, not necessarily the last thing they said: a
+// continuation message must not bury it. Consent is the opposite and still needs the latest text.
+test('native intake SDK contract: an objective reaches past a continuation; consent does not', async () => {
+  const f = sdkFixture(); addNativeUser(f, 'Objetivo real');
+  const continuation = { info: { id: 'msg_continue', sessionID: runtime.sessionID, role: 'user' },
+    parts: [{ type: 'text', text: 'te interrumpi, puedes continuar', sessionID: runtime.sessionID, messageID: 'msg_continue' }] };
+  f.parentMessages.splice(1, 0, continuation);
+  const inspector = createInspector(f.input);
+  assert.equal(await inspector.intake(runtime, 'Objetivo real', 'msg_parent', 'objective'), 'msg_user');
+  await assert.rejects(inspector.intake(runtime, 'Objetivo real', 'msg_parent'), /latest native user text/);
+  await assert.rejects(inspector.intake(runtime, 'Un resumen reescrito', 'msg_parent', 'objective'), /actual native user message/);
+  // Two messages carrying the same text are not a choice MDD may make on the user's behalf.
+  f.parentMessages.splice(1, 0, { info: { id: 'msg_repeat', sessionID: runtime.sessionID, role: 'user' },
+    parts: [{ type: 'text', text: 'Objetivo real', sessionID: runtime.sessionID, messageID: 'msg_repeat' }] });
+  await assert.rejects(inspector.intake(runtime, 'Objetivo real', 'msg_parent', 'objective'), /Several native user messages/);
+});
+
 test('native intake SDK contract: exact multiple user text parts are accepted; wrong caller is not', async () => {
   const f = sdkFixture(); addNativeUser(f, 'First');
   f.parentMessages[0].parts.push({ ...f.parentMessages[0].parts[0], text: 'Second' });

@@ -13,7 +13,7 @@ import { concerns } from './concerns.js';
 
 export type IntakeInspect = {
   setupPending?(runtime: Runtime, requirements?: string, messageID?: string): Promise<{ requirements: string; userMessageID: string } | undefined>;
-  intake(runtime: Runtime, requirements: string, messageID: string): Promise<void | string>;
+  intake(runtime: Runtime, requirements: string, messageID: string, scope?: 'latest' | 'objective'): Promise<void | string>;
   question(runtime: Runtime, call: TaskCall, args: QuestionEnvelope): Promise<void>;
 };
 type Runner = Pick<PhaseRunner, 'start' | 'status' | 'approveNative' | 'block'> & Partial<Pick<PhaseRunner, 'approvalStopped' | 'assertChangeable' | 'assertFreshStart' | 'contribute' | 'explore' | 'priorGuards' | 'recordConsent' | 'reset' | 'submit'>>;
@@ -122,7 +122,9 @@ export class NativeIntake {
     if (previous) entry.restore = { state: previous.state, requirements: previous.requirements, known: previous.known, ...(previous.slot ? { slot: previous.slot } : {}), ...(previous.userMessageID ? { userMessageID: previous.userMessageID } : {}) };
     this.#sessions.set(runtime.sessionID, entry);
     try {
-      const userID = pending?.userMessageID ?? await this.inspect.intake(entry.runtime, requirements, boundedText(messageID, 'native messageID', 256));
+      // An objective may be older than the last thing the user said: a continuation message never
+      // replaces the request it continues. Consent paths keep requiring the latest user text.
+      const userID = pending?.userMessageID ?? await this.inspect.intake(entry.runtime, requirements, boundedText(messageID, 'native messageID', 256), 'objective');
       if (typeof userID === 'string') {
         if (entry.usedMessages.has(userID)) throw new Error('This user message was already used; wait for an actual new request.');
         entry.userMessageID = userID; entry.usedMessages.add(userID);
