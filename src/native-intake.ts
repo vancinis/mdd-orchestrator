@@ -236,7 +236,7 @@ export class NativeIntake {
       return { ...this.status(runtime.sessionID), reset: { scope: 'phase' as const } };
     }
     const applied = this.runner.reset?.(runtime.sessionID, scope) ?? { scope: 'run' as const };
-    if (applied.scope === 'run') this.#sessions.delete(runtime.sessionID);
+    if (applied.scope === 'run') this.#forget(runtime.sessionID);
     else if (entry) {
       delete entry.slot; delete entry.reason; delete entry.restore; delete entry.replacing;
       entry.state = 'active';
@@ -390,6 +390,17 @@ export class NativeIntake {
   /** Only an envelope MDD composed drives consent. Anything else is the coordinator's own question. */
   #owned(args: unknown): boolean {
     return [...this.#questionOwners.keys()].some(question => isDeepStrictEqual(question, args));
+  }
+
+  /**
+   * Every envelope MDD ever issued stays registered, so a stale one is still recognised as a
+   * replay rather than mistaken for a question of the coordinator's own. That record belongs to
+   * the conversation, though: once a run is forgotten, keeping its envelopes would grow this map
+   * for the life of the process and slow down every question that has to be matched against it.
+   */
+  #forget(sessionID: string): void {
+    for (const [question, owner] of this.#questionOwners) if (owner === sessionID) this.#questionOwners.delete(question);
+    this.#sessions.delete(sessionID);
   }
 
   /**
