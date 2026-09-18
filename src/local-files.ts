@@ -54,7 +54,7 @@ export class LocalFiles {
 
   #path(name: LocalName, create: boolean): string {
     if (name !== 'mdd.config.json' && name !== 'mdd/setup-assets.json' && name !== '.mdd/.gitignore' && name !== '.mdd/telemetry.jsonl' &&
-        !/^\.mdd\/progress-[a-f0-9]{64}\.json$/.test(name) && !/^\.mdd\/run-[a-f0-9]{64}\.json$/.test(name)) throw new LocalFileError();
+        !/^\.mdd\/progress-[a-f0-9]{64}\.json$/.test(name) && !/^\.mdd\/run-[a-f0-9]{64}(\.discarded)?\.json$/.test(name)) throw new LocalFileError();
     directory(this.#root);
     const path = join(this.#root, name);
     const parent = dirname(path);

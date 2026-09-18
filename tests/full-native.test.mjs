@@ -631,7 +631,7 @@ test('a preserved run restores no approval and no live consent receipt', async t
   assert.deepEqual(fresh.questionReceipts, []);
 });
 
-test('mdd_reset with scope run discards the preserved record, memory off', async t => {
+test('mdd_reset with scope run frees the conversation and sets the record aside, memory off', async t => {
   t.mock.method(globalThis, 'fetch', () => assert.fail('Memory off fetched'));
   const f = await fixture(t, { memoryEnabled: false });
   await f.phase();
@@ -643,8 +643,15 @@ test('mdd_reset with scope run discards the preserved record, memory off', async
   assert.equal(status.memory, 'off');
   assert.equal(status.priorRun.results.length, 1);
   JSON.parse(await restarted.tool.mdd_reset.execute({ scope: 'run' }, f.context));
-  assert.ok(!(await names()).some(name => name.startsWith('run-')), 'an explicit discard removes the record');
+  // The live record is gone, so nothing holds the conversation or offers a recovery it cleared.
+  assert.ok(!(await names()).some(name => /^run-[a-f0-9]{64}\.json$/.test(name)), 'the live record no longer occupies the conversation');
+  // What the run produced is not destroyed by the request to start something else.
+  assert.ok((await names()).some(name => name.endsWith('.discarded.json')), 'the evidence is set aside, not deleted');
   assert.equal(JSON.parse(await restarted.tool.mdd_status.execute({}, f.context)).state, 'not-started');
+  // A second discard replaces that slot instead of filling the directory with one file per reset.
+  await f.phase();
+  JSON.parse(await restarted.tool.mdd_reset.execute({ scope: 'run' }, f.context));
+  assert.equal((await names()).filter(name => name.endsWith('.discarded.json')).length, 1);
 });
 
 test('restart detects pending work without repeating memory writes', async t => {
@@ -835,8 +842,15 @@ test('mdd_reset releases a stopped phase and a whole run without a new conversat
   await f.phase();
   assert.equal((await f.status()).workflow.results.length, 1);
   const cleared = JSON.parse(await f.hooks.tool.mdd_reset.execute({ scope: 'run' }, f.context));
-  assert.deepEqual(cleared.reset, { scope: 'run' });
+  assert.equal(cleared.reset.scope, 'run');
   assert.equal(cleared.state, 'not-started');
+  // Freeing the conversation is not destroying what it produced: the record is set aside, named,
+  // and no longer reported as recoverable, so the recorded plan survives the reset that frees it.
+  assert.match(cleared.reset.preserved.file, /\.mdd\/run-[a-f0-9]{64}\.discarded\.json$/);
+  const preserved = JSON.parse(await readFile(join(f.root, cleared.reset.preserved.file), 'utf8'));
+  assert.equal(preserved.runID, cleared.reset.preserved.runID);
+  assert.equal(preserved.results.length, 1);
+  assert.ok(preserved.discardedAt > 0);
   f.user('An entirely different objective.');
   assert.equal(JSON.parse(await f.hooks.tool.mdd_start.execute({ requirements: 'An entirely different objective.' }, f.context)).state, 'ready');
 });

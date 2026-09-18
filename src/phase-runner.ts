@@ -573,7 +573,7 @@ export class PhaseRunner {
    * Explicit recovery. Phase scope releases the current attempt and makes the same phase runnable
    * again; run scope discards the run, its investigation and the local marker so new work can start.
    */
-  reset(sessionID: string, scope: 'phase' | 'run'): { scope: 'phase' | 'run'; phase?: Phase; approval?: true } {
+  reset(sessionID: string, scope: 'phase' | 'run'): { scope: 'phase' | 'run'; phase?: Phase; approval?: true; preserved?: { file: string; runID: string } } {
     const run = this.#runs.get(sessionID);
     if (run) this.#event(run, 'reset');
     if (scope === 'run' || !run) {
@@ -581,11 +581,14 @@ export class PhaseRunner {
       this.#solo.delete(sessionID);
       this.#consent.delete(sessionID);
       this.options.progress?.clear(sessionID);
-      // Discarding the run means discarding its preserved evidence too: leaving the record behind
-      // would report the conversation as recoverable immediately after the user cleared it.
-      try { this.options.dossier?.clear(sessionID); }
-      catch { throw new Error('The preserved run record could not be cleared. Inspect the .mdd directory.'); }
-      return { scope: 'run' };
+      // The conversation must come out of this free, so the record cannot stay where status reads
+      // it. Deleting it is a different promise than the one this scope makes: it is set aside
+      // instead, and the caller is told where, because discarding a run is rarely a decision to
+      // destroy the plan and the exploration that were already paid for.
+      let preserved: { file: string; runID: string } | undefined;
+      try { preserved = this.options.dossier?.discard(sessionID, this.#now()); }
+      catch { throw new Error('The preserved run record could not be set aside. Inspect the .mdd directory.'); }
+      return { scope: 'run', ...(preserved ? { preserved } : {}) };
     }
     delete run.side;
     delete run.callID;

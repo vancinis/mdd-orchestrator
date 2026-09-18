@@ -73,6 +73,8 @@ export type RunDossier = {
   /** True when artifact bodies were shed to fit the file budget; the refs still identify them. */
   artifactContentOmitted?: true;
   timestamp: number;
+  /** Set only on the copy left behind by an explicit discard, which nothing reports as recoverable. */
+  discardedAt?: number;
 };
 
 const TEXT = (value: unknown): boolean => typeof value === 'string';
@@ -136,6 +138,10 @@ export class RunDossierStore {
     return `.mdd/run-${createHash('sha256').update(parent).digest('hex')}.json`;
   }
 
+  #discarded(parent: string): `.mdd/run-${string}.json` {
+    return `.mdd/run-${createHash('sha256').update(parent).digest('hex')}.discarded.json`;
+  }
+
   /** The local file backing a conversation, so a report can point the user at the real source. */
   name(parent: string): string { return this.#name(parent); }
 
@@ -150,6 +156,30 @@ export class RunDossierStore {
 
   /** Explicit discard. Preserved evidence never keeps a conversation occupied once the user clears it. */
   clear(parent: string): void { this.#files.remove(this.#name(parent)); }
+
+  /**
+   * Freeing the conversation is not the same as destroying what it produced. The record is moved
+   * aside instead of deleted: nothing reports a set-aside run as recoverable, so a new objective
+   * starts clean, while a user who discarded a run after forty minutes of exploration can still
+   * be pointed at their own plan. One slot per conversation, so a later discard replaces it and
+   * the directory never grows with every reset.
+   */
+  discard(parent: string, now: number): { file: string; runID: string } | undefined {
+    let moved: { file: string; runID: string } | undefined;
+    try {
+      const dossier = this.read(parent);
+      if (dossier) {
+        const name = this.#discarded(parent);
+        const text = JSON.stringify({ ...dossier, discardedAt: now });
+        this.#files.update(name, () => text, DOSSIER_MAX_BYTES);
+        moved = { file: name, runID: dossier.runID };
+      }
+      // A record that cannot be read or copied must never hold up the reset that frees the
+      // conversation: the live file below is still removed, and nothing claims it was preserved.
+    } catch { moved = undefined; }
+    this.#files.remove(this.#name(parent));
+    return moved;
+  }
 
   write(parent: string, dossier: RunDossier): void {
     const entry = parse(dossier);
