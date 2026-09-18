@@ -70,6 +70,18 @@ test('assets: the coordinator asks approval only natively, tracks inline steps a
   assert.match(text, /Never\nhand-write the body with gh, git or a template of your own/);
 });
 
+// A user answered an approval question in their own words and the run was thrown away; the
+// coordinator also needs to know it may ask its own questions, and when it may not.
+test('assets: the coordinator recovers an unanswered approval instead of losing the run', () => {
+  const text = fs.readFileSync('assets/opencode/agents/mdd-orchestrator.md', 'utf8');
+  assert.match(text, /answers that question in their own words instead of choosing an option/);
+  assert.match(text, /mdd_status still holds the same question/);
+  assert.match(text, /ask it yourself with the native question tool while no MDD question is pending/);
+  assert.match(text, /While one is pending, it is the only question/);
+  assert.match(text, /scope phase[\s\S]*re-opens exactly\nthat question/);
+  assert.match(text, /the same phase goes out again and its task\n\s+already carries what went wrong/);
+});
+
 // The coordinator once fetched a whole issue body, could not hand it over, and dropped it: the
 // only channel is mdd_start context or mdd_context, never an edited task prompt.
 test('assets: the coordinator hands gathered context to MDD instead of editing a task prompt', () => {

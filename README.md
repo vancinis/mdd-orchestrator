@@ -114,7 +114,7 @@ console.log(workflow.snapshot()); // Captured answers/evaluation, nextAction, re
 
 `Workflow` accepts the same request as `evaluate`. Its first phase is ready immediately. `nextAction()` returns `execute`, `approve`, `await-result`, or `blocked` with the exact phase, or `finished` without one. Reads do not advance state. Interactive callers must use `approve(phase)` for each pending phase; automatic mode makes the next phase ready without approval. Neither mode dispatches it automatically. A recorded failed result stops the route; `retry()` releases an attempt that never produced a recorded result so the same phase can run again.
 
-Preflight reuse and state inspection work only within the live controller. New requirements need a new controller. There is no persistence, crash recovery, contextual rerouting, or substantive-change detection. Adapters must eventually enforce real phase evidence; this proof only validates caller-supplied result structure.
+Preflight reuse and state inspection work only within the live controller. New requirements need a new controller. The controller itself holds no persistence, contextual rerouting or substantive-change detection, and it is never resumed after process loss; the OpenCode adapter preserves what a lost run produced as read-only evidence and restarts with fresh consent. Adapters must eventually enforce real phase evidence; this proof only validates caller-supplied result structure.
 
 ## Implementation boundaries
 
@@ -123,13 +123,13 @@ Preflight reuse and state inspection work only within the live controller. New r
 | Kernel | Pure validated evaluation; no clocks, randomness, model inference, I/O, or confidence reporting. |
 | CLI/setup | One consent-driven setup TUI, source bootstrap, trusted local package installation, optional pinned Windows memory installer, owned-asset updates, read-only doctor and advanced editor; proof flags unchanged. |
 | Foundations | Frozen models/profile/Engram settings, phase-specific coverage reports, and allowlisted local runtime telemetry. |
-| Lifecycle | Private in-memory state, isolated snapshots, exact phase/result/approval boundaries; no dispatch. No state is terminal: a failed attempt returns its phase to ready and `mdd_reset` always has an exit. |
+| Lifecycle | Private in-memory state, isolated snapshots, exact phase/result/approval boundaries; no dispatch. No state is terminal: a failed attempt returns its phase to ready, one retry stays with the same actor before the coordinator takes over, an unlisted answer leaves its question open, and `mdd_reset` always has an exit, including re-opening a pending approval. |
 | OpenCode adapter | Requirements-only native intake; exact questions/approvals; all eight phases by delegation or carried out inline by the coordinator; bounded dependency handoff; reported change/check evidence; selected artifact storage and general receipts. |
 | Tests | Native Node tests, CLI subprocesses, real loopback HTTP transport, and explicitly mocked SDK contract tests. No paid agent E2E execution. |
 | Changes and context | Native-confirmed re-preflight creates a new planned run without erasing old evidence; idle contextual exploration leaves the main workflow/approval unchanged. |
 | PR body | A coordinator tool uses the exact packaged skill/template and current recorded facts. Unknowns remain unverified; no branch/commit/push/PR creation authority. |
 | Validation boundary | Contract suites and model-free startup checks do not prove real model output quality or permission UI behavior. User-authorized model-backed E2E/final review remains pending. |
-| Deliberately unsupported | Automatic crash recovery/exactly-once guarantees, delivery/publication automation, and non-OpenCode provider adapters. |
+| Deliberately unsupported | Resuming a run after process loss and exactly-once guarantees (its evidence is preserved and reported as read-only data instead), delivery/publication automation, and non-OpenCode provider adapters. |
 
 The adapter uses Engram as optional general memory independently of artifact storage. Omit
 `engram` settings to keep memory off: no HTTP, service startup or session registration occurs.

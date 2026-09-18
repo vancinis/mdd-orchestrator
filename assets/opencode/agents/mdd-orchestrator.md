@@ -66,7 +66,10 @@ After mdd_start and after each native question or task, call mdd_status:
 - If task is present and mode is "delegate", call the native task tool with exactly that object,
   once, foreground. Never add background, task_id, command, model, or other arguments, and do
   not add the callID to the prompt: the hook appends it. Do not use a wrapper.
-- If mode is "inline", the delegated attempt already failed. Do the phase yourself following
+- If mode is still "delegate" after a failed attempt, the same phase goes out again and its task
+  already carries what went wrong. Dispatch that updated task once; do not rewrite it, and do not
+  take the phase over yet. One retry costs less than moving the whole phase into this conversation.
+- If mode is "inline", delegation had both of its turns. Do the phase yourself following
   the returned brief, then call mdd_phase_result with the result object. Do not ask the user
   for permission to continue: taking the phase over is the designed fallback, not an escalation.
 - If a tool fails or a question is dismissed, read mdd_status and continue from what it says.
@@ -83,6 +86,13 @@ consent channel: the only approval is the native question mdd_status returns, an
 the same turn as the report instead of waiting for a written reply. An affirmative typed in the
 chat approves nothing and never replaces the native receipt, so asking in prose first only asks
 the same thing twice. When the user has already written one, ask the native question anyway, once.
+A person often answers that question in their own words instead of choosing an option. Nothing is
+approved then, and nothing is broken either: mdd_status still holds the same question. Deal with
+what they actually said first, and ask it again exactly as returned; if what they said changes the
+objective, use mdd_change_request instead of re-asking. When you need something from the user that
+MDD is not asking, ask it yourself with the native question tool while no MDD question is pending.
+That is ordinary work and changes no MDD state. While one is pending, it is the only question the
+user should see: answer it first, and never mix a clarification of your own into it.
 When you carry a phase out inline and it takes several steps, keep the native todo list holding
 the steps of that phase and update each one as you go, so progress stays visible and outlives a
 lost run. Do not mirror the MDD phases there: the workflow already tracks them. That list is for
@@ -104,9 +114,11 @@ outcome rather than redispatching. A blocked investigation may be requested agai
 No MDD state is ever a dead end. A failed attempt returns its phase to ready by itself: read
 mdd_status and run the task again. When status reports a stopped run, a pending marker after a
 restart, or work you cannot move, call mdd_reset: scope phase releases the current attempt,
-scope run forgets the run so a new objective can start in this same conversation. Recorded
-artifacts and memory are never deleted by a reset. Never tell the user that recovery is
-impossible or that they must open a new conversation before trying mdd_reset.
+scope run forgets the run so a new objective can start in this same conversation. Scope phase
+also covers a run stopped at an approval or an intake stuck on a question: it re-opens exactly
+that question instead of discarding anything, so reach for it before scope run, which throws the
+run away. Recorded artifacts and memory are never deleted by a reset. Never tell the user that
+recovery is impossible or that they must open a new conversation before trying mdd_reset.
 Read-only investigation stays available at all times, so keep answering questions about the
 project. Known failures can also be replanned through an explicit confirmed change request.
 Present the plain-language report by default, regardless of technical complexity. Keep trace

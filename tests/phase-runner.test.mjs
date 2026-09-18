@@ -115,7 +115,9 @@ test('runner contract: racing dispatches never both admit, and the phase stays r
   assert.equal(after.state, 'ready');
   assert.equal(after.workflow.nextAction.kind, 'execute');
   assert.equal(after.workflow.results.length, 0);
-  assert.deepEqual(after.task, ready.task);
+  assert.equal(after.task.description, ready.task.description);
+  assert.equal(after.task.subagent_type, ready.task.subagent_type);
+  assert.match(after.task.prompt, /previous attempt at this exact phase did not complete/);
 });
 
 for (const kind of ['intent-write', 'intent-read', 'result-write', 'result-read']) {
@@ -135,7 +137,13 @@ for (const kind of ['intent-write', 'intent-read', 'result-write', 'result-read'
     assert.equal(stopped.attempts, 1);
     assert.equal(stopped.workflow.nextAction.kind, 'execute');
     assert.equal(stopped.workflow.results.length, 0);
-    assert.deepEqual(stopped.task, ready.task);
+    // The same phase, dispatched to the same actor, now carrying what just failed: one failure
+    // buys a retry, not a handover, because handing it over costs the isolation it exists for.
+    assert.equal(stopped.mode, 'delegate');
+    assert.equal(stopped.task.description, ready.task.description);
+    assert.equal(stopped.task.subagent_type, ready.task.subagent_type);
+    assert.match(stopped.task.prompt, /previous attempt at this exact phase did not complete/);
+    assert.equal(stopped.brief, undefined);
     await assert.rejects(runner.start(request(endpoint), runtime));
   });
 }

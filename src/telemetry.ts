@@ -10,7 +10,12 @@ const LIMIT = 1024 * 1024;
 const MAX_EVENTS = 5000;
 export type TelemetryEvent = {
   timestamp: number;
-  event: 'preflight' | 'phase-start' | 'phase-end' | 'approval' | 'report';
+  /**
+   * `retry` and `handover` record what a failed attempt did next: delegate the same phase again,
+   * or hand it to the coordinator. Without them a local log shows repeated blocked phases and no
+   * way to tell a route that recovered from one that quietly stopped being delegated at all.
+   */
+  event: 'preflight' | 'phase-start' | 'phase-end' | 'approval' | 'report' | 'retry' | 'handover' | 'reset';
   phase?: Phase;
   duration?: number;
   route?: 'low' | 'high';
@@ -23,7 +28,7 @@ export type TelemetryResult =
 function parseEvent(value: unknown): TelemetryEvent {
   const input = objectWithKeys(value, 'event', ['timestamp', 'event', 'phase', 'duration', 'route', 'outcome']);
   if (!Number.isSafeInteger(input.timestamp) || (input.timestamp as number) < 0 || (input.timestamp as number) > 8640000000000000 ||
-      !['preflight', 'phase-start', 'phase-end', 'approval', 'report'].includes(input.event as string)) {
+      !['preflight', 'phase-start', 'phase-end', 'approval', 'report', 'retry', 'handover', 'reset'].includes(input.event as string)) {
     throw new ValidationError('Invalid telemetry event.');
   }
   const result: TelemetryEvent = { timestamp: input.timestamp as number, event: input.event as TelemetryEvent['event'] };

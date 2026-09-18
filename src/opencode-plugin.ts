@@ -15,8 +15,8 @@ import { RunDossierStore } from './run-dossier.js';
 import { renderPRBody } from './pr-body.js';
 import { statusPayload } from './status-budget.js';
 
-function record(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Unknown OpenCode response structure.');
+function record(value: unknown, subject = 'response'): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`Unknown OpenCode ${subject} structure.`);
   return value as Record<string, unknown>;
 }
 
@@ -55,7 +55,7 @@ export const PARTS_MAX = 1000;
 function list(value: unknown, subject: string, max: number): Record<string, unknown>[] {
   if (!Array.isArray(value)) throw new Error(`Unknown OpenCode ${subject} structure.`);
   if (value.length > max) throw new Error(`OpenCode ${subject} exceeds the ${max} entry inspection limit.`);
-  return value.map(record);
+  return value.map(item => record(item, `${subject} entry`));
 }
 
 async function readSdk<T>(operation: (signal: AbortSignal) => Promise<T>, timeout: number): Promise<T> {
@@ -79,77 +79,114 @@ export function createInspector(input: PluginInput, timeout = 5000): Inspect & I
     }), timeout);
     return record(response.data);
   };
+  /**
+   * A full page means the conversation is longer than one page, not that this read failed.
+   * Correlating the actual caller or the exact running question only ever needs the tail, so a
+   * full page is returned as it is: failing there used to make every MDD tool stop working once a
+   * real run had produced a hundred messages, which is an ordinary length for a completed route.
+   * Only proof that has to span the whole conversation needs completeness, and it asks for it.
+   */
   const messages = async (id: string, directory: string) => {
     const response = await readSdk(signal => input.client.session.messages({
       path: { id }, query: { directory, limit: 100 }, signal, throwOnError: true,
     }), timeout);
-    const history = list(response.data, 'message history', HISTORY_MAX);
-    if (history.length === HISTORY_MAX) throw new Error('History reaches inspection limit; completeness is uncertain.');
-    return history;
+    return list(response.data, 'message history', HISTORY_MAX);
   };
   const checkWorkspace = (runtime: Runtime) => {
     if (runtime.directory !== input.directory || runtime.worktree !== input.worktree) {
       throw new Error('Runtime workspace differs from the project plugin instance.');
     }
   };
+  /**
+   * Collects the setup-only starts a history actually proves, keyed by the native user message
+   * each one came from. A tool that is not such a start is skipped, because ordinary work is not
+   * a fault; a history that cannot be read at all throws, and the caller reports no recovery.
+   */
+  const setupOnlyStarts = (history: Record<string, unknown>[], runtime: Runtime) => {
+    const candidates = new Map<string, { requirements: string; userMessageID: string }>();
+    if (history.some(message => record(message.info, 'message').summary === true || list(message.parts, 'message parts', PARTS_MAX).some(part => part.type === 'compaction'))) throw new Error('Compacted history proves no pending setup.');
+    const identities = new Set<string>();
+    const calls = new Set<string>();
+    for (const message of history) {
+      const info = record(message.info, 'message');
+      const id = boundedText(info.id, 'history message ID', 256);
+      if (identities.has(id) || info.sessionID !== runtime.sessionID || !['user', 'assistant'].includes(String(info.role))) throw new Error('Incomplete or ambiguous native history.');
+      identities.add(id);
+      if (info.role === 'assistant') {
+        const path = record(info.path, 'message path');
+        if (info.agent !== 'mdd-orchestrator' || info.error != null || path.cwd !== runtime.directory || path.root !== runtime.worktree) throw new Error('Native workspace or caller changed.');
+      }
+      for (const part of list(message.parts, 'message parts', PARTS_MAX)) {
+        if (!['text', 'reasoning', 'step-start', 'step-finish', 'tool', 'file'].includes(String(part.type))) throw new Error('Unknown history part.');
+        if (part.type !== 'tool') continue;
+        const callID = boundedText(part.callID, 'historical call ID', 256);
+        if (calls.has(callID)) throw new Error('Ambiguous tool call.');
+        calls.add(callID);
+        if (info.role !== 'assistant' || part.sessionID !== runtime.sessionID || part.messageID !== id) throw new Error('Tool ownership mismatch.');
+        const state = record(part.state, 'tool state');
+        // A dispatched phase, a reported one or a reset all prove this conversation got past
+        // setup, so whatever it was once stuck on is no longer pending. That is not a fault
+        // either: there is simply nothing to recover, and holding the coordinator to a stale
+        // objective would be worse than offering none.
+        if (['task', 'mdd_phase_result', 'mdd_reset'].includes(String(part.tool))) return new Map();
+        // An ordinary tool, a start that errored and the current invocation are all just history.
+        if (part.tool !== 'mdd_start' || state.status !== 'completed' || typeof state.output !== 'string') continue;
+        const time = record(state.time, 'tool time');
+        if (!Number.isFinite(time.start) || !Number.isFinite(time.end) || Number(time.end) < Number(time.start) || time.compacted !== undefined) throw new Error('Incomplete or compacted tool result.');
+        let output: Record<string, unknown>;
+        try { output = record(JSON.parse(boundedText(state.output, 'setup-only output', 96000))); } catch { throw new Error('Unknown start output.'); }
+        // A start that reached preflight or a run is a start that worked, which also settles that
+        // nothing here is still waiting on setup. Only the setup-only shape carries an objective
+        // nobody has been able to act on yet.
+        if (output.setupOrigin === undefined && output.pendingStart === undefined && output.setup === undefined) return new Map();
+        const origin = record(output.setupOrigin, 'setup origin');
+        const start = record(output.pendingStart, 'pending start');
+        const setup = record(output.setup, 'setup report');
+        const preceding = history.slice(0, history.indexOf(message));
+        const latestUser = preceding.findLast(item => record(item.info, 'message').role === 'user');
+        const user = preceding.find(item => record(item.info, 'message').role === 'user' && record(item.info, 'message').id === origin.userMessageID);
+        if (!user || !latestUser) throw new Error('Missing original native user.');
+        const userInfo = record(user.info, 'message');
+        const prior = candidates.get(String(userInfo.id));
+        const text = list(user.parts, 'message parts', PARTS_MAX).filter(item => item.type === 'text');
+        if (output.state !== 'blocked' || output.task !== undefined || output.question !== undefined || !Array.isArray(output.questionReceipts) || output.questionReceipts.length ||
+            !['missing-file', 'missing-engram'].includes(String(setup.problem)) || setup.workspaceRoot !== runtime.directory ||
+            origin.projectID !== input.project.id || origin.directory !== runtime.directory || origin.worktree !== runtime.worktree || info.parentID !== record(latestUser.info, 'message').id ||
+            (user !== latestUser && prior?.requirements !== start.requirements) ||
+            !text.length || text.some(item => item.synthetic === true || item.ignored === true || item.sessionID !== runtime.sessionID || item.messageID !== userInfo.id || typeof item.text !== 'string') ||
+            text.map(item => item.text).join('\n') !== start.requirements || !isDeepStrictEqual(state.input, start)) throw new Error('Original objective lacks correlated setup-only proof.');
+        const requirements = boundedText(start.requirements, 'original requirements', 12000);
+        candidates.set(String(userInfo.id), { requirements, userMessageID: String(userInfo.id) });
+      }
+    }
+    return candidates;
+  };
   const inspector: Inspect & IntakeInspect = {
+    /**
+     * Recovers the objective of a start that only failed because MDD was not set up yet. That is a
+     * narrow, legacy shape: one completed `mdd_start` whose own output says it stopped at setup.
+     *
+     * Everything else is an ordinary conversation, not a fault. History that carries real work,
+     * an earlier successful start, another tool or a page that does not reach back far enough
+     * simply proves no pending setup, so recovery is unavailable and this returns nothing. It
+     * used to throw instead, which made a second `mdd_start` in a working conversation fail with
+     * an unreadable message and left `mdd_reset` with scope run promising a restart it could not
+     * deliver. Nothing is lost by degrading: the objective of an ordinary start is proven by
+     * `intake` against the actual latest native user text, which is the stronger guard anyway.
+     */
     async setupPending(runtime, selected, messageID) {
       await inspector.parent(runtime);
       const history = await messages(runtime.sessionID, runtime.directory);
-      if (messageID !== undefined && record(history.at(-1)?.info).id !== messageID) throw new Error('Setup recovery does not match the actual native caller message.');
-      if (history.some(message => record(message.info).summary === true || list(message.parts, 'message parts', PARTS_MAX).some(part => part.type === 'compaction'))) throw new Error('Setup recovery unavailable: compacted history.');
-      if (!history.some(message => list(message.parts, 'message parts', PARTS_MAX).some(part => part.type === 'tool' && part.tool === 'mdd_start' && !(message === history.at(-1) && record(part.state).status === 'running')))) return undefined;
-      const candidates = new Map<string, { requirements: string; userMessageID: string }>();
-      const identities = new Set<string>();
-      const calls = new Set<string>();
-      for (const message of history) {
-        const info = record(message.info);
-        const id = boundedText(info.id, 'history message ID', 256);
-        if (identities.has(id) || info.sessionID !== runtime.sessionID || !['user', 'assistant'].includes(String(info.role))) throw new Error('Setup recovery unavailable: incomplete or ambiguous native history. Restate the original objective in a fresh parent.');
-        identities.add(id);
-        if (info.role === 'assistant') {
-          const path = record(info.path);
-          if (info.agent !== 'mdd-orchestrator' || info.error != null || path.cwd !== runtime.directory || path.root !== runtime.worktree) throw new Error('Setup recovery unavailable: native workspace or caller changed.');
-        }
-        for (const part of list(message.parts, 'message parts', PARTS_MAX)) {
-          if (!['text', 'reasoning', 'step-start', 'step-finish', 'tool', 'file'].includes(String(part.type))) throw new Error('Setup recovery unavailable: unknown history part.');
-          if (part.type !== 'tool') continue;
-          const callID = boundedText(part.callID, 'historical call ID', 256);
-          if (calls.has(callID)) throw new Error('Setup recovery unavailable: ambiguous tool call.');
-          calls.add(callID);
-          if (info.role !== 'assistant' || part.sessionID !== runtime.sessionID || part.messageID !== id) throw new Error('Setup recovery unavailable: tool ownership mismatch.');
-          const state = record(part.state);
-          if (part.tool === 'mdd_status') continue;
-          // The current invocation is not historical evidence or permission to resume.
-          if (message === history.at(-1) && part.tool === 'mdd_start' && state.status === 'running') continue;
-          if (part.tool !== 'mdd_start' || state.status !== 'completed' || typeof state.output !== 'string') throw new Error('Setup recovery unavailable: earlier execution or unknown start outcome. Restate the original objective in a fresh parent; do not resume uncertain work.');
-          const time = record(state.time);
-          if (!Number.isFinite(time.start) || !Number.isFinite(time.end) || Number(time.end) < Number(time.start) || time.compacted !== undefined) throw new Error('Setup recovery unavailable: incomplete or compacted tool result.');
-          let output: Record<string, unknown>;
-          try { output = record(JSON.parse(boundedText(state.output, 'setup-only output', 96000))); } catch { throw new Error('Setup recovery unavailable: unknown start output.'); }
-          const origin = record(output.setupOrigin);
-          const start = record(output.pendingStart);
-          const setup = record(output.setup);
-          const preceding = history.slice(0, history.indexOf(message));
-          const latestUser = preceding.findLast(item => record(item.info).role === 'user');
-          const user = preceding.find(item => record(item.info).role === 'user' && record(item.info).id === origin.userMessageID);
-          if (!user) throw new Error('Setup recovery unavailable: missing original native user.');
-          const userInfo = record(user.info);
-          const prior = candidates.get(String(userInfo.id));
-          const text = list(user.parts, 'message parts', PARTS_MAX).filter(item => item.type === 'text');
-          if (output.state !== 'blocked' || output.task !== undefined || output.question !== undefined || !Array.isArray(output.questionReceipts) || output.questionReceipts.length ||
-              !['missing-file', 'missing-engram'].includes(String(setup.problem)) || setup.workspaceRoot !== runtime.directory ||
-              origin.projectID !== input.project.id || origin.directory !== runtime.directory || origin.worktree !== runtime.worktree || info.parentID !== record(latestUser?.info).id ||
-              (user !== latestUser && prior?.requirements !== start.requirements) ||
-              !text.length || text.some(item => item.synthetic === true || item.ignored === true || item.sessionID !== runtime.sessionID || item.messageID !== userInfo.id || typeof item.text !== 'string') ||
-              text.map(item => item.text).join('\n') !== start.requirements || !isDeepStrictEqual(state.input, start)) throw new Error('Setup recovery unavailable: original objective lacks correlated setup-only proof.');
-          const requirements = boundedText(start.requirements, 'original requirements', 12000);
-          candidates.set(String(userInfo.id), { requirements, userMessageID: String(userInfo.id) });
-        }
-      }
+      if (messageID !== undefined && record(history.at(-1)?.info, 'caller message').id !== messageID) throw new Error('Setup recovery does not match the actual native caller message.');
+      // Proof has to span the whole conversation, so a page that is already full cannot carry it.
+      if (history.length >= HISTORY_MAX) return undefined;
+      let candidates: Map<string, { requirements: string; userMessageID: string }>;
+      try { candidates = setupOnlyStarts(history, runtime); } catch { return undefined; }
       const matches = [...candidates.values()].filter(item => selected === undefined || item.requirements === selected);
       if (matches.length === 1) return matches[0];
       if (candidates.size === 1) return [...candidates.values()][0];
+      // Real candidates that cannot be told apart are the one case worth interrupting for: picking
+      // one of two pending objectives at random is not a degradation, it is the wrong run.
       if (candidates.size) throw new Error('Setup recovery needs the original objective: select the exact native setup-failed requirements; history is ambiguous.');
       return undefined;
     },
@@ -168,10 +205,16 @@ export function createInspector(input: PluginInput, timeout = 5000): Inspect & I
       const history = await messages(runtime.sessionID, runtime.directory);
       const parts = history.flatMap(message => list(message.parts, 'message parts', PARTS_MAX)
         .filter(part => part.type === 'tool' && part.tool === tool && part.callID === callID)
-        .map(part => ({ part, info: record(message.info) })));
+        .map(part => ({ part, info: record(message.info, 'message') })));
       if (parts.length !== 1) throw new Error('The native question call is not uniquely readable.');
       const { part, info } = parts[0]!;
-      const state = record(part.state);
+      // A full page hides older messages, so being unique inside it proves nothing by itself. The
+      // call being answered is always the one the current message is running, and requiring
+      // exactly that is a tighter correlation than scanning a history that may be incomplete.
+      if (history.length >= HISTORY_MAX && record(history.at(-1)!.info, 'message').id !== info.id) {
+        throw new Error('The native question call is not the running call of the current message, and this incomplete history cannot prove consent.');
+      }
+      const state = record(part.state, 'tool state');
       if (part.sessionID !== runtime.sessionID || part.messageID !== info.id || info.role !== 'assistant' ||
           state.status !== 'running' || !isDeepStrictEqual(state.input, args)) {
         throw new Error('The native question history differs from the exact running call.');
@@ -181,10 +224,10 @@ export function createInspector(input: PluginInput, timeout = 5000): Inspect & I
       await inspector.parent(runtime);
       const history = await messages(runtime.sessionID, runtime.directory);
       const caller = history.at(-1);
-      if (!caller || record(caller.info).id !== messageID || record(caller.info).role !== 'assistant') throw new Error('Start does not match the actual native caller message.');
-      const user = history.slice(0, -1).findLast(message => record(message.info).role === 'user');
-      if (!user || record(user.info).sessionID !== runtime.sessionID) throw new Error('No actual native user requirements found.');
-      const info = record(user.info);
+      if (!caller || record(caller.info, 'caller message').id !== messageID || record(caller.info, 'caller message').role !== 'assistant') throw new Error('Start does not match the actual native caller message.');
+      const user = history.slice(0, -1).findLast(message => record(message.info, 'message').role === 'user');
+      if (!user || record(user.info, 'message').sessionID !== runtime.sessionID) throw new Error('No actual native user requirements found.');
+      const info = record(user.info, 'message');
       const parts = list(user.parts, 'message parts', PARTS_MAX).filter(part => part.type === 'text');
       if (!parts.length || parts.some(part => part.synthetic === true || part.ignored === true ||
           part.sessionID !== runtime.sessionID || part.messageID !== info.id || typeof part.text !== 'string') ||
@@ -202,7 +245,7 @@ export function createInspector(input: PluginInput, timeout = 5000): Inspect & I
      * a corroborated record: MDD reads the completed task envelope and nothing else.
      */
     async result(_runtime, _call, _phase, raw) {
-      const output = record(raw);
+      const output = record(raw, 'task result');
       const envelope = typeof output.output === 'string' ? output.output : '';
       const match = /^<task id="[^"]*" state="completed">\r?\n<task_result>\r?\n([\s\S]*)\r?\n<\/task_result>\r?\n<\/task>$/.exec(envelope);
       if (!match) throw new Error('The delegated phase did not return a completed task result.');
@@ -244,8 +287,8 @@ const plugin: Plugin = async input => {
         async execute(args, context) {
           coordinatorOnly(context.agent, 'mdd_start');
           if (context.abort.aborted) throw new Error('MDD start was aborted.');
-          const status = record(await intake.start(args, context, context.messageID));
-          if (status.setupOrigin) status.setupOrigin = { ...record(status.setupOrigin), projectID: input.project.id };
+          const status = record(await intake.start(args, context, context.messageID), 'start status');
+          if (status.setupOrigin) status.setupOrigin = { ...record(status.setupOrigin, 'setup origin'), projectID: input.project.id };
           return statusPayload(status);
         },
       }),
@@ -254,7 +297,7 @@ const plugin: Plugin = async input => {
         args: {},
         async execute(_args, context) {
           coordinatorOnly(context.agent, 'mdd_status');
-          const status = record(intake.status(context.sessionID));
+          const status = record(intake.status(context.sessionID), 'status');
           let recovery = {};
           // A live intake in this session is the answer: probing native history there could only
           // report an unrecoverable objective for a run that is healthy and waiting for an answer.

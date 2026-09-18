@@ -764,11 +764,20 @@ test('a failed delegation hands the phase to the coordinator, which finishes it 
   const initial = await f.status();
   assert.equal(initial.mode, 'delegate');
   assert.ok(initial.task, 'delegation is offered first');
+  // One failure buys another delegated attempt that knows what went wrong: handing the phase over
+  // immediately spends the parent's context on work that was delegated to keep it out of there.
+  await assert.rejects(f.phase({ badEnvelope: true }), /dispatch that updated task once more/);
+  const retry = await f.status();
+  assert.equal(retry.state, 'ready');
+  assert.equal(retry.mode, 'delegate');
+  assert.equal(retry.attempts, 1);
+  assert.equal(retry.brief, undefined);
+  assert.match(retry.task.prompt, /previous attempt at this exact phase did not complete/);
   await assert.rejects(f.phase({ badEnvelope: true }), /now yours/);
   const handed = await f.status();
   assert.equal(handed.state, 'ready');
   assert.equal(handed.mode, 'inline');
-  assert.equal(handed.attempts, 1);
+  assert.equal(handed.attempts, 2);
   assert.match(handed.brief, /carrying this phase out yourself/);
   assert.match(handed.brief, /Perform only mdd-plan/);
   assert.match(handed.brief, /Requirements data/);

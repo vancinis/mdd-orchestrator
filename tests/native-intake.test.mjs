@@ -138,14 +138,61 @@ test('native approval: Stop records refusal without approving or fabricating a p
   assert.equal(f.workflow().snapshot().results.length, 1);
 });
 
-for (const selections of [[], [['forged']], [['Muy seguro', 'Poco seguro']], [['Ninguno'], ['Muy seguro'], ['Automático'], ['Bajo'], ['Poco complejo']]]) {
-  test(`native question: reject invalid labels/count/order ${JSON.stringify(selections)}`, async t => {
+for (const selections of [[], [['forged']], [['Muy seguro', 'Poco seguro']], [['Muy seguro', 'Poco seguro'], ['Ninguno'], ['Automático'], ['Bajo'], ['Poco complejo']]]) {
+  test(`native question: reject malformed answer envelopes ${JSON.stringify(selections)}`, async t => {
     const f = await fixture(t, {}); await f.start();
     await assert.rejects(f.answer(selections));
     assert.equal(f.gate.status(runtime.sessionID).state, 'blocked');
     assert.equal(f.starts(), 0);
   });
 }
+
+// A well-formed answer naming something outside the offered options is the user writing their own
+// words, or a host that reordered them. MDD cannot tell those apart, and neither is consent: it
+// starts nothing and records nothing. Ending the run over it is what cost a whole route once, so
+// the question simply stays open and can be answered again.
+test('native question: an unlisted label answers nothing and leaves the question open', async t => {
+  const f = await fixture(t, {}); await f.start();
+  await f.answer([['Ninguno'], ['Muy seguro'], ['Automático'], ['Bajo'], ['Poco complejo']]);
+  const stalled = f.gate.status(runtime.sessionID);
+  assert.equal(stalled.state, 'question-ready');
+  assert.ok(stalled.question);
+  assert.equal(f.starts(), 0);
+  assert.equal(stalled.questionReceipts.at(-1).cancelled, true);
+  assert.equal(stalled.questionReceipts.at(-1).answers.length, 0);
+  await f.answer([['Muy seguro'], ['Ninguno'], ['Automático'], ['Bajo'], ['Poco complejo']]);
+  assert.equal(f.starts(), 1);
+  assert.equal(f.gate.status(runtime.sessionID).state, 'phase-recorded');
+});
+
+// The same rule at the approval boundary, where it actually cost a run: the user answered the
+// phase report in prose, the label did not match, and the whole route was thrown away.
+test('native question: an unlisted approval answer keeps the run and re-opens the approval', async t => {
+  const f = await fixture(t, { ...answers, mode: 'interactive' });
+  await f.start(); f.pass();
+  await f.answer([['Ya no lo quiero en la esquina, lo quiero centrado']]);
+  const stalled = f.gate.status(runtime.sessionID);
+  assert.equal(stalled.state, 'question-ready');
+  assert.equal(stalled.question.questions[0].header, 'Aprobación');
+  assert.equal(f.workflow().nextAction().kind, 'approve');
+  assert.match(stalled.notice, /approved/);
+  await f.answer([['Continuar']]);
+  assert.equal(f.workflow().nextAction().kind, 'execute');
+});
+
+// A question the coordinator asks on its own, between phases, is ordinary work. MDD used to treat
+// every native question as its own and blocked the run over an unrelated clarification.
+test('native question: the coordinator may ask its own question without ending the run', async t => {
+  const f = await fixture(t, { ...answers, mode: 'interactive' });
+  await f.start();
+  const mine = { questions: [{ header: 'Detalle', question: '¿Qué formato de fecha usamos?', multiple: false, options: [{ label: 'ISO', description: 'AAAA-MM-DD.' }] }] };
+  const call = { sessionID: runtime.sessionID, callID: 'own-question' };
+  await f.gate.beforeQuestion(call, mine);
+  await f.gate.afterQuestion(call, mine, output(mine, [['ISO']]));
+  const status = f.gate.status(runtime.sessionID);
+  assert.equal(status.state, 'phase-recorded');
+  assert.equal(status.questionReceipts.some(receipt => receipt.callID === 'own-question'), false);
+});
 
 test('native question: stale duplicate result cannot approve another phase', async t => {
   const f = await fixture(t, { ...answers, mode: 'interactive' });

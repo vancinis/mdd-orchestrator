@@ -42,6 +42,18 @@ export function approvalEnvelope(runID: string, phase: Phase): QuestionEnvelope 
     options: [{ label: APPROVAL_LABELS.proceed, description: 'Autorizar únicamente esta fase.' }, { label: APPROVAL_LABELS.stop, description: 'Detener sin autorizar esta fase.' }] }] };
 }
 
+/**
+ * The user typed their own text instead of choosing one of the offered options. Nothing is
+ * selected, so nothing is approved, accepted or changed — but a person answering in their own
+ * words is ordinary, not a protocol violation, and it is carried separately so the caller can
+ * keep the run alive and deal with what was actually said.
+ */
+export class UnselectedAnswer extends Error {
+  constructor(readonly text: string) {
+    super('The user answered with their own text instead of choosing one of the offered options.');
+  }
+}
+
 export function nativeQuestionAnswers(args: QuestionEnvelope, raw: unknown): string[][] {
   const result = objectWithKeys(raw, 'native question output', ['title', 'output', 'metadata', 'attachments']);
   const metadata = objectWithKeys(result.metadata, 'native question metadata', ['answers', 'truncated']);
@@ -50,10 +62,9 @@ export function nativeQuestionAnswers(args: QuestionEnvelope, raw: unknown): str
   }
   const answers = metadata.answers;
   if (!Array.isArray(answers) || answers.length !== args.questions.length) throw new Error('Native question answer count mismatch.');
-  const selections = args.questions.map((question, index) => {
+  const selections = args.questions.map((_question, index) => {
     const selected: unknown = answers[index];
-    if (!Array.isArray(selected) || selected.length !== 1 || typeof selected[0] !== 'string' ||
-        !question.options.some(option => option.label === selected[0])) throw new Error('Invalid native question answer label.');
+    if (!Array.isArray(selected) || selected.length !== 1 || typeof selected[0] !== 'string') throw new Error('Invalid native question answer label.');
     return [selected[0]];
   });
   const formatted = args.questions.map((q, i) => `"${q.question}"="${selections[i]!.join(', ')}"`).join(', ');
@@ -61,6 +72,10 @@ export function nativeQuestionAnswers(args: QuestionEnvelope, raw: unknown): str
       result.output !== `User has answered your questions: ${formatted}. You can now continue with the user's answers in mind.`) {
     throw new Error('Native question output does not match its answer metadata.');
   }
+  // Only an envelope that agrees with itself can have its labels read as what the user chose, so
+  // an unlisted one is their own words here, rather than a result that was rewritten on the way.
+  const unlisted = args.questions.findIndex((question, index) => !question.options.some(option => option.label === selections[index]![0]));
+  if (unlisted >= 0) throw new UnselectedAnswer(selections[unlisted]![0]!);
   return selections;
 }
 
@@ -210,12 +225,27 @@ export class NativeIntake {
   reset(runtime: Runtime, scope: 'phase' | 'run'): unknown {
     if (runtime.agent !== 'mdd-orchestrator') throw new Error('Only the coordinator may reset MDD state.');
     const entry = this.#sessions.get(runtime.sessionID);
+    // Releasing the phase of a conversation whose run never started is really about the question
+    // the user is stuck on, so the pending one is re-opened rather than the intake discarded.
+    if (scope === 'phase' && entry?.slot && entry.state !== 'active' && !('runID' in (this.runner.status(runtime.sessionID) as object))) {
+      const pending: Slot = { ...entry.slot };
+      delete pending.callID;
+      delete entry.restore; delete entry.reason;
+      this.#slot(entry, pending);
+      entry.notice = 'The pending question was re-opened. Nothing was approved or recorded: ask it again exactly as mdd_status returns it.';
+      return { ...this.status(runtime.sessionID), reset: { scope: 'phase' as const } };
+    }
     const applied = this.runner.reset?.(runtime.sessionID, scope) ?? { scope: 'run' as const };
     if (applied.scope === 'run') this.#sessions.delete(runtime.sessionID);
     else if (entry) {
       delete entry.slot; delete entry.reason; delete entry.restore; delete entry.replacing;
       entry.state = 'active';
-      entry.notice = `The ${applied.phase ?? 'current'} phase was released and is ready to run again. Previous evidence is retained.`;
+      entry.notice = applied.approval
+        ? `The run was released at its approval boundary: ${applied.phase ?? 'the next phase'} is waiting for the same approval question again. Nothing was approved and previous evidence is retained.`
+        : `The ${applied.phase ?? 'current'} phase was released and is ready to run again. Previous evidence is retained.`;
+      // A run released while it waited for approval still needs that approval, so its question is
+      // re-armed here instead of leaving the conversation with nothing to answer.
+      this.phaseRecorded(runtime.sessionID);
     }
     return { ...this.status(runtime.sessionID), reset: applied };
   }
@@ -241,9 +271,16 @@ export class NativeIntake {
   async beforeQuestion(call: TaskCall, args: unknown): Promise<void> {
     const entry = this.#entry(call, args);
     if (!entry) return;
+    // While MDD has a question pending, that one is the only question that may run: anything else
+    // leaves the user answering two things at once, and an altered copy of it is a forgery.
+    // Otherwise a question MDD never issued belongs to the coordinator, and asking the user
+    // something of its own is ordinary work: treating that as MDD's own turned a clarification
+    // between phases into a blocked run.
+    if (entry.state === 'question-ready') {
+      if (!isDeepStrictEqual(args, entry.slot!.args)) throw new Error('Question arguments differ from the pending question; no answer was accepted.');
+    } else if (!this.#owned(args)) return;
     const status = this.runner.status(call.sessionID);
     if ('contextual' in status && status.contextual) throw new Error('Wait for the contextual exploration before answering the main approval.');
-    if (entry.state === 'question-ready' && !isDeepStrictEqual(args, entry.slot?.args)) throw new Error('Question arguments differ from the pending question; no answer was accepted.');
     if (entry.state !== 'question-ready') return this.#fail(entry, new Error('Unexpected, duplicate, or changed native question.'));
     entry.state = 'accepting';
     try {
@@ -257,7 +294,7 @@ export class NativeIntake {
 
   async afterQuestion(call: TaskCall, args: unknown, output: unknown): Promise<void> {
     const entry = this.#entry(call, args);
-    if (!entry) return;
+    if (!entry || !this.#owned(args)) return;
     const slot = entry.slot;
     if (entry.state !== 'await-answer' || !slot || slot.callID !== call.callID || !isDeepStrictEqual(args, slot.args)) {
       return this.#fail(entry, new Error('Native answer does not match the pending parent, call, and question.'));
@@ -290,7 +327,31 @@ export class NativeIntake {
       }
       entry.receipts.push({ kind: slot.kind, ...(slot.phase ? { phase: slot.phase } : {}), callID: call.callID, answers: selections });
       this.#recordConsent(entry);
-    } catch (error) { this.#fail(entry, error); }
+    } catch (error) {
+      if (error instanceof UnselectedAnswer) return this.#unanswered(entry, slot, call);
+      this.#fail(entry, error);
+    }
+  }
+
+  /**
+   * Nothing was selected, so nothing is approved, accepted or changed and the same question stays
+   * open. The coordinator still receives the user's actual words in the question output, so it can
+   * answer them and ask again. Ending the run here instead used to throw away a whole route, its
+   * evidence and its approvals over one sentence typed in place of a click.
+   */
+  #unanswered(entry: Intake, slot: Slot, call: TaskCall): void {
+    entry.receipts.push({ kind: slot.kind, ...(slot.phase ? { phase: slot.phase } : {}), callID: call.callID, answers: [], cancelled: true });
+    this.#recordConsent(entry);
+    if (slot.kind === 'change' && entry.restore) {
+      this.#restore(entry, 'The user did not confirm the change in their answer, so the current run, its answers and its approval are unchanged. Read what they actually said before proposing anything again.');
+      return;
+    }
+    const pending: Slot = { ...slot };
+    delete pending.callID;
+    this.#slot(entry, pending);
+    entry.notice = slot.kind === 'approval'
+      ? 'The user answered in their own words instead of choosing an option, so no phase was approved and nothing was recorded. Read what they actually said and respond to it; when the phase should still go ahead, ask the same approval question again exactly as mdd_status returns it. If their message changes the objective, use mdd_change_request instead.'
+      : 'The user answered in their own words instead of choosing an option, so the run has not started and no answer was recorded. Respond to what they said, then ask the same preflight question again exactly as mdd_status returns it.';
   }
 
   phaseRecorded(sessionID: string): void {
@@ -324,6 +385,11 @@ export class NativeIntake {
     const owner = [...this.#questionOwners].find(([question]) => isDeepStrictEqual(question, args))?.[1];
     if (owner !== undefined && owner !== call.sessionID) throw new Error('MDD question belongs to another parent.');
     return this.#sessions.get(call.sessionID);
+  }
+
+  /** Only an envelope MDD composed drives consent. Anything else is the coordinator's own question. */
+  #owned(args: unknown): boolean {
+    return [...this.#questionOwners.keys()].some(question => isDeepStrictEqual(question, args));
   }
 
   /**

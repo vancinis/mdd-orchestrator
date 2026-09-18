@@ -42,11 +42,14 @@ type Run = {
   id: string; runtime: Runtime; workflow: Workflow; phase: Phase;
   requirements: string; memory: EngramHttp | undefined; args: TaskArgs; state: State;
   callID?: string; lastCallID?: string; dispatchedArgs?: TaskArgs; reason?: string; attempts: number;
-  /** Delegation is the default route; a failed attempt hands the phase back to the coordinator. */
-  mode: 'delegate' | 'inline'; brief: string;
+  /**
+   * Delegation is the default route. One failed attempt is retried by the same actor with the
+   * failure in its prompt; a second hands the phase back to the coordinator.
+   */
+  mode: 'delegate' | 'inline'; brief: string; lastFailure?: string;
   artifacts: ArtifactStore; artifact?: ArtifactResult; artifactAttempts?: readonly ArtifactAttempt[];
   history: ArtifactResult[]; calls: Set<string>; planned: Deliverable[]; evidence: Evidence;
-  report: PhaseReport; started?: number; telemetryDiagnostic?: string;
+  report: PhaseReport; started?: number; readyAt?: number; telemetryDiagnostic?: string;
   acceptance?: Acceptance; decisions: Decision[]; verification?: Verification; executedChecks: string[]; changedFiles: number;
   uncertain: boolean; userMessageID: string; concerns: Concern[]; contextReport?: string; context: RunContext[]; dossierDiagnostic?: string;
   contexts: { explorationID: string; outcome: 'passed' | 'failed'; artifact: ArtifactResult; summary: string; concerns: Concern[] }[];
@@ -260,14 +263,30 @@ export class PhaseRunner {
     delete run.dispatchedArgs;
     const phase = run.phase;
     if (run.started !== undefined) this.#event(run, 'phase-end', 'blocked');
+    // A failed investigation is not a failed phase: the main plan it paused keeps its own task,
+    // mode and attempt history untouched.
+    const side = !!run.side;
+    // The next attempt is told what just failed, so retrying is a different attempt rather than
+    // the same one again. A dropped connection or a rejected result rarely needs a different
+    // actor; it needs another try that knows it is one.
+    if (!side) run.lastFailure = run.reason;
     const recovered = this.#recover(run);
-    // Delegation had its turn. The coordinator can act, so the phase is handed back to it rather
-    // than retried forever against the same failure.
-    if (recovered) run.mode = 'inline';
+    // One retry belongs to delegation, because handing the phase back to the coordinator costs
+    // exactly the context isolation that delegating it was for. After that the coordinator takes
+    // it: retrying forever against the same failure is not resilience.
+    const handover = !side && run.attempts >= 2;
+    if (recovered && !side) {
+      run.mode = handover ? 'inline' : 'delegate';
+      this.#event(run, handover ? 'handover' : 'retry');
+    }
     this.#settle(run);
-    throw new Error(`MDD attempt ${run.attempts} for ${phase} did not complete: ${run.reason} ${recovered
-      ? 'The phase is ready again and is now yours: read mdd_status and carry it out directly, reporting it with mdd_phase_result. Delegating again is still allowed. Nothing is locked.'
-      : 'Read mdd_status, then use mdd_reset to retry this phase or start over. Nothing is locked.'}`);
+    throw new Error(`MDD attempt ${run.attempts} for ${phase} did not complete: ${run.reason} ${!recovered
+      ? 'Read mdd_status, then use mdd_reset to retry this phase or start over. Nothing is locked.'
+      : side
+        ? 'The investigation stopped; the main plan, its task and its approval are unchanged. Nothing is locked.'
+        : handover
+          ? 'The phase is ready again and is now yours: read mdd_status and carry it out directly, reporting it with mdd_phase_result. Delegating again is still allowed. Nothing is locked.'
+          : 'The phase is ready again and its task now carries what failed: read mdd_status and dispatch that updated task once more. If it fails again the phase becomes yours. Nothing is locked.'}`);
   }
 
   /** Puts the route back on a runnable step. Contextual work restores the main plan it paused. */
@@ -370,7 +389,7 @@ export class PhaseRunner {
     const input = objectWithKeys(value, 'phase submission', ['result']);
     const text = typeof input.result === 'string' ? input.result : JSON.stringify(input.result);
     run.state = 'persisting-result';
-    run.started = this.#now();
+    run.started = run.readyAt ?? this.#now();
     try {
       if (!run.side) run.workflow.start(run.phase);
       this.#event(run, 'phase-start');
@@ -479,6 +498,8 @@ export class PhaseRunner {
       if (run.state !== 'persisting-result') throw new Error('Result became uncertain during persistence.');
       run.uncertain = false;
       run.workflow.recordResult({ phase: run.phase, outcome: result.outcome, evidenceSummary });
+      // A recorded result closes the attempt, so the next phase is not warned about this one.
+      delete run.lastFailure;
       run.history.push(run.artifact);
       run.planned = planned;
       if (accepted) run.acceptance = accepted;
@@ -552,8 +573,9 @@ export class PhaseRunner {
    * Explicit recovery. Phase scope releases the current attempt and makes the same phase runnable
    * again; run scope discards the run, its investigation and the local marker so new work can start.
    */
-  reset(sessionID: string, scope: 'phase' | 'run'): { scope: 'phase' | 'run'; phase?: Phase } {
+  reset(sessionID: string, scope: 'phase' | 'run'): { scope: 'phase' | 'run'; phase?: Phase; approval?: true } {
     const run = this.#runs.get(sessionID);
+    if (run) this.#event(run, 'reset');
     if (scope === 'run' || !run) {
       this.#runs.delete(sessionID);
       this.#solo.delete(sessionID);
@@ -573,7 +595,19 @@ export class PhaseRunner {
     run.uncertain = false;
     run.attempts = 0;
     run.mode = 'delegate';
+    delete run.lastFailure;
     run.workflow.retry();
+    const next = run.workflow.nextAction();
+    // A run stopped at an approval boundary is not waiting for work to be prepared, it is waiting
+    // for the user. Releasing it re-opens that question; preparing a phase nobody authorized is
+    // exactly what this must not do, and refusing to release it at all left the only escape route
+    // as discarding the whole run.
+    if (next.kind === 'approve') {
+      run.state = 'await-approval';
+      run.report = { phase: run.phase, summary: `${phaseLabel(run.phase)} is recorded; the next phase is waiting for approval.`, how: [], status: 'in-progress', evidence: run.evidence };
+      this.#settle(run);
+      return { scope: 'phase', phase: next.phase, approval: true };
+    }
     this.#prepare(run);
     this.#settle(run);
     return { scope: 'phase', phase: run.phase };
@@ -858,6 +892,10 @@ export class PhaseRunner {
     const phase = next.phase;
     run.phase = phase;
     delete run.started;
+    // A delegated phase is timed from its dispatch, which a phase carried out inline never has.
+    // Timing that one from the report instead measured the report, so every inline phase looked
+    // like it took three seconds. Ready is the moment the work could actually begin.
+    run.readyAt = this.#now();
     // Every phase starts from delegation; only a failed attempt hands this one back.
     run.mode = 'delegate';
     const prompts = this.#phasePrompts(run, phase);
@@ -891,6 +929,10 @@ export class PhaseRunner {
       'Optional concerns: [{category,evidence,impact}], at most eight, with category objective/integrations/sensitive-data/permissions. These are advisory only; never change scores or request governance for ordinary implementation choices.',
       'Prioritize a useful plan, matching requirements and plan, and reaching the user goal. Time and quality are joint constraints on both routes. Keep user-facing summaries simple; evidenceSummary must avoid internal call IDs or routing details.',
       'Use the tools and commands the phase actually needs; native permission requests are the real boundary. Shell executes real project code and is NOT a sandbox.',
+      // Phase actors sit at the native subagent depth limit, so a task they dispatch fails. Saying
+      // so costs one line and saves an attempt spent discovering it.
+      'You are the actor for this phase: carry it out with your own tools. Dispatching another subagent is refused by the native depth limit, so do not delegate any part of it.',
+      ...(run.lastFailure ? [`A previous attempt at this exact phase did not complete: ${JSON.stringify(run.lastFailure)}. This attempt is a retry, not a repeat: where that is what failed, take a different route to the same outcome, and do not redo work whose result is already listed below.`] : []),
       phase === 'mdd-apply' ? 'This phase implements: edit the sources the plan calls for.' : 'This phase produces understanding or a plan, so change sources only if the phase genuinely requires it.',
       'Return exactly one JSON object, no fences: phase, runID, callID, outcome (passed or failed), evidenceSummary (1–2000 bytes), artifact (1–16000 bytes).',
       ...phaseSchemaLines(phase),

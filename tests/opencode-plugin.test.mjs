@@ -130,8 +130,12 @@ test('setup_continuation_preserves_native_origin_across_restart', async t => {
   assert.deepEqual(requests, []);
 });
 
+// Recovery of a setup-only objective is a convenience, not a guard: what keeps a start honest is
+// that its requirements must equal the actual latest native user text. So history that cannot
+// prove a pending setup means there is none to offer, and only two things still interrupt: a
+// conversation that is not this coordinator's, and two candidates that cannot be told apart.
 for (const fault of ['forged', 'legacy-error', 'execution', 'child', 'workspace', 'project', 'incomplete', 'compacted', 'compacted-tool', 'duplicate', 'synthetic', 'ownership', 'ambiguous']) {
-  test(`setup_recovery_rejects_forged_ambiguous_or_execution_started_history: ${fault}`, async t => {
+  test(`setup_recovery_never_invents_or_guesses_an_objective: ${fault}`, async t => {
     const f = await setupFixture(t);
     const output = legacySetup(f);
     const part = f.parentMessages[1].parts[0];
@@ -156,14 +160,39 @@ for (const fault of ['forged', 'legacy-error', 'execution', 'child', 'workspace'
       f.parentMessages.push(user, assistant);
     }
     const inspector = createInspector(f.input);
-    await assert.rejects(inspector.setupPending(f.runtime));
+    // A conversation that is not this coordinator's, and an ambiguous pair of real candidates,
+    // are the only faults worth stopping for. Everything else simply proves no pending setup.
+    const interrupts = ['child', 'ambiguous'].includes(fault);
+    if (interrupts) await assert.rejects(inspector.setupPending(f.runtime));
+    else assert.equal(await inspector.setupPending(f.runtime), undefined);
     const restarted = await plugin(f.input);
     const status = JSON.parse(await restarted.tool.mdd_status.execute({}, f.context));
-    assert.equal(status.recovery, 'unavailable');
+    assert.equal(status.recovery, interrupts ? 'unavailable' : undefined);
     assert.equal(status.pendingStart, undefined);
+    // Continuation text is never an objective, whatever the history around it looks like.
     await assert.rejects(restarted.tool.mdd_start.execute({ requirements: 'Continue' }, f.context));
   });
 }
+
+// One successful start used to poison its own conversation: every later mdd_start failed on an
+// unreadable structure error, so mdd_reset with scope run promised a restart it could not deliver
+// and the only way to keep working was abandoning the conversation with its evidence in it.
+test('a conversation that already ran can start a second objective after a reset', async t => {
+  const f = await setupFixture(t);
+  const first = JSON.parse(await f.hooks.tool.mdd_start.execute({ requirements: f.requirements }, f.context));
+  assert.equal(first.state, 'question-ready');
+  const caller = f.parentMessages.at(-1);
+  caller.parts[0].state = { ...caller.parts[0].state, status: 'completed', output: JSON.stringify(first), time: { start: 1, end: 2 } };
+  caller.parts.push({ type: 'tool', tool: 'task', callID: 'phase-call', sessionID: f.runtime.sessionID, messageID: caller.info.id,
+    state: { status: 'completed', output: 'phase output', time: { start: 3, end: 4 } } });
+  assert.equal(await createInspector(f.input).setupPending(f.runtime), undefined);
+  assert.deepEqual(JSON.parse(await f.hooks.tool.mdd_reset.execute({ scope: 'run' }, f.context)).reset, { scope: 'run' });
+  const second = 'Ahora el aviso tiene que quedar siempre centrado';
+  f.parentMessages.splice(-1, 0, { info: { id: 'msg_user_2', sessionID: f.runtime.sessionID, role: 'user' },
+    parts: [{ type: 'text', text: second, sessionID: f.runtime.sessionID, messageID: 'msg_user_2' }] });
+  const restarted = JSON.parse(await f.hooks.tool.mdd_start.execute({ requirements: second }, f.context));
+  assert.equal(restarted.state, 'question-ready');
+});
 
 // A pending question is a healthy run: probing native history there once told the user that a
 // perfectly recoverable objective could not be recovered, which is the opposite of the truth.
@@ -175,7 +204,7 @@ test('a live intake is never reported as unrecoverable', async t => {
   const part = message.parts[0];
   part.state = { ...part.state, status: 'completed', output: JSON.stringify(started), time: { start: 1, end: 2 } };
   message.parts.push({ type: 'tool', tool: 'question', callID: 'question-1', sessionID: f.runtime.sessionID, messageID: message.info.id, state: { status: 'running', input: started.question } });
-  await assert.rejects(createInspector(f.input).setupPending(f.runtime));
+  assert.equal(await createInspector(f.input).setupPending(f.runtime), undefined);
   const status = JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context));
   assert.equal(status.state, 'question-ready');
   assert.ok(status.question);
@@ -372,12 +401,21 @@ test('native intake SDK contract: exact multiple user text parts are accepted; w
   await assert.rejects(createInspector(f.input).intake(runtime, 'First\nSecond', 'wrong'));
 });
 
-test('native question SDK contract: incomplete history is never accepted as consent', async () => {
+// A conversation longer than one page is ordinary once a route has actually run, so refusing to
+// read it at all stopped approvals exactly where they were needed most. What an incomplete history
+// cannot do is prove that some older call is the one being answered: only the running call of the
+// current message qualifies, which is a tighter correlation than the full scan it replaces.
+test('native question SDK contract: an incomplete history proves only the current running call', async () => {
   const f = sdkFixture();
   const args = { questions: [] };
   const call = questionCall(f, args);
+  const current = f.parentMessages.at(-1);
   f.parentMessages.push(...Array.from({ length: 99 }, () => ({ info: { role: 'user' }, parts: [] })));
-  await assert.rejects(createInspector(f.input).question(runtime, call, args), /completeness/);
+  await assert.rejects(createInspector(f.input).question(runtime, call, args), /incomplete history/);
+  // The same full page, with the call belonging to the message that is running it, is consent.
+  f.parentMessages.splice(f.parentMessages.indexOf(current), 1);
+  f.parentMessages.push(current);
+  await createInspector(f.input).question(runtime, call, args);
 });
 
 for (const [name, mutate] of Object.entries({

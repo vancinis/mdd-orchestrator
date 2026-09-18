@@ -51,9 +51,20 @@ loading; repair the named file against the schema and restart. No endpoint or pr
 A setup-only stop retains proven original requirements. After saving and restarting,
 the coordinator may resubmit exact `pendingStart` arguments when the user continues that
 objective. Native history must prove the same parent/workspace and a correlated setup-only
-stop before execution. Legacy errors, incomplete/ambiguous history or uncertain execution
-do not grant recovery: restate the original objective in a fresh parent, without resuming
-uncertain work. A status request or restart confirmation is not a new implementation goal.
+stop before execution. A status request or restart confirmation is not a new implementation goal.
+
+This recovery is a convenience, never the guard. What keeps a start honest is that requirements
+must equal the actual latest native user text, proven separately by `inspector.intake`. So history
+that cannot prove a pending setup means there is none to offer, and the start proceeds on its own
+merits: an earlier successful start, a dispatched or reported phase, a reset, a compacted or
+unreadable history and a page that does not reach back far enough all simply report no pending
+objective. Only two things still interrupt: a conversation that is not this coordinator's, and two
+candidates that cannot be told apart, because picking one of those at random is the wrong run.
+
+Treating all of it as a fault instead is what made a start fail once a conversation had done any
+real work. The second `mdd_start` in a live session died on an unreadable structure error, which
+in turn made `mdd_reset` with `scope: run` promise a restart it could not deliver, and left
+abandoning the conversation as the only way to keep working.
 
 For information-only requests such as explaining a project, the coordinator calls
 `mdd_contextual_explore` instead of stopping or forcing `mdd_start`. That route is available
@@ -152,10 +163,10 @@ pending; no automated recovery is attempted. Unrelated sessions remain unaffecte
 | Capabilities | Not MDD's concern. Phase actors ship no permission map; the user's native permissions decide what any actor may do. The coordinator adds only `question: allow`, the consent channel OpenCode otherwise denies it. |
 | Correlation | Confirms the conversation is a top-level `mdd-orchestrator` session in this workspace, and that a native question is the exact running call being answered. Phase results are bound by phase, runID and, when delegated, callID. |
 | Models | Configured per role through the startup profile and applied to the agent config. Runtime model identity is not policed. |
-| Consent | Complete startup profile or exact correlated native preflight answers; later interactive Proceed/Stop applies only to the currently waiting phase. No repeat preflight or implicit approval. |
+| Consent | Complete startup profile or exact correlated native preflight answers; later interactive Proceed/Stop applies only to the currently waiting phase. No repeat preflight or implicit approval. An answer that names nothing on offer selects nothing: the user wrote their own words, or a host reordered the result, and MDD cannot tell those apart. Neither is consent, so the receipt is recorded as cancelled and the same question stays open to be asked again. A question MDD did not compose is the coordinator's own and touches no MDD state, except while an MDD question is pending, when it is the only question that may run. |
 | Persistence | HTTP only to a literal IPv4 loopback origin, no credentials/path/query/redirects, no retries. Each HTTP/SDK read has a maximum five-second timeout. HTTP responses are bounded to 128 KiB. |
-| Failure | Infrastructure failures do not fabricate failed phase results. A rejected dispatch, result, capability or persistence ends that attempt: the phase returns to `ready`, the attempt counter increases, and the run stops being uncertain, so delegating again, taking the phase over directly, replanning or resetting all stay available. A missing after-hook leaves `await-result` until a matching native error releases it. `mdd_status` never grants approval or dispatches by itself. |
-| Recovery | No MDD state is terminal. `mdd_reset` releases the current attempt (`scope: phase`) or forgets the run for this conversation (`scope: run`), clearing the local progress marker. Recorded artifacts, memory and `previousRuns` are never deleted by a reset. |
+| Failure | Infrastructure failures do not fabricate failed phase results. A rejected dispatch, result, capability or persistence ends that attempt: the phase returns to `ready`, the attempt counter increases, and the run stops being uncertain, so delegating again, taking the phase over directly, replanning or resetting all stay available. The first failure keeps `mode: "delegate"` and rewrites the phase task to carry what went wrong, so the retry is a different attempt rather than the same one; the second sets `mode: "inline"` and hands the phase to the coordinator, because retrying forever against one failure is not resilience and handing it over immediately spends the context that delegation exists to protect. A failed read-only investigation leaves the main plan's task, mode and attempts untouched. A missing after-hook leaves `await-result` until a matching native error releases it. `mdd_status` never grants approval or dispatches by itself. |
+| Recovery | No MDD state is terminal. `mdd_reset` releases the current attempt (`scope: phase`) or forgets the run for this conversation (`scope: run`), clearing the local progress marker. Scope `phase` also covers work waiting on a person rather than on an actor: a run stopped at an approval returns to `await-approval` with that question re-armed, and an intake stopped before any run re-opens its pending question. Neither prepares a phase nobody authorized. Recorded artifacts, memory and `previousRuns` are never deleted by a reset. |
 | Payload budget | Every MDD tool serializes through `statusPayload`, bounded to 46000 bytes so the host cannot truncate a result and make the exact `task`/`question` uncopyable. Artifact history is reported as refs only (content lives in the artifact store and is already injected into the next phase prompt), and `brief` accompanies only `mode: "inline"`. Over budget, fields are dropped in the fixed order `priorRun, previousRuns, contexts, contextualReport, providedContext, artifacts, artifactAttempts, artifact, concerns, report, planned, decisions, acceptance, verification, workflow` and listed in `omitted`; `task`, `brief`, `question`, `state`, `phase`, `next`, `mode`, `reason`, `runID`, `sessionID`, `runtime`, `questionReceipts`, `recovery`/`pendingStart`, `notice`, `provenance`, `reset`, `evidence`, `coverage` and `recoverable` are never dropped. A task too large to fit is reported in `budget.problem`, never cut. |
 | Next phase | Automatic success prepares only the next phase. Interactive success waits for exact native approval. Only final corroborated Verify returns `complete`. |
 | Other sessions | Unrelated tasks outside MDD are untouched. `mdd-*` native tasks are rejected unless they exactly match a registered parent run or an issued read-only investigation. |
@@ -430,7 +441,14 @@ write to that name fail with `EEXIST` permanently. A lock untouched for 60 secon
 reclaimed, since no local write here takes anywhere near that long.
 
 Inspection bounds are per subject, because they measure unrelated things. Message history stays
-at the requested 100-message page and still fails closed at that limit. Agent registries
+at the requested 100-message page. Reaching that limit no longer fails: a conversation longer
+than one page is what a finished route looks like, and refusing to read it stopped intake,
+approvals and the PR-body tool exactly when a run had produced the most. What a full page cannot
+do is prove something about the whole conversation, so the two readings that need that say so
+themselves. Setup recovery reports no pending objective rather than guessing at one, and question
+consent accepts only the running call of the current message, which is a tighter correlation than
+the full scan it replaces. Correlating the actual caller and the latest native user text is
+unaffected either way, because both live at the tail. Agent registries
 (2,000), resolved permission rulesets (4,000) and message parts (1,000) are sized for real
 installations, where many agents and skill directories routinely resolve to well over a hundred
 entries each. Every overflow names its own subject, so a bound that is reached is diagnosable
