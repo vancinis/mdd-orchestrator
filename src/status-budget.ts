@@ -34,7 +34,10 @@ export const STATUS_PROTECTED_FIELDS: readonly string[] = Object.freeze([
  */
 export const STATUS_DROP_ORDER: readonly string[] = Object.freeze([
   'priorRun', 'previousRuns', 'contexts', 'contextualReport', 'providedContext', 'artifacts', 'artifactAttempts', 'artifact',
-  'concerns', 'report', 'planned', 'decisions', 'acceptance', 'verification', 'workflow',
+  'concerns', 'report', 'planned', 'decisions', 'acceptance', 'verification',
+  // A handful of refs, and it explains why the phase prompt carries summaries instead of full
+  // artifacts. Shedding it early would drop the explanation exactly in the payloads that need it.
+  'handoff', 'workflow',
 ]);
 
 const OMITTED_NOTE = 'These fields were left out to keep this payload under the host output limit, so that task and question stay readable and copyable. Nothing was deleted: artifacts remain in the configured artifact store and every omitted field is still held by the run.';

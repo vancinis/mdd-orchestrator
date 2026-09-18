@@ -78,7 +78,14 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
     const args = current.task;
     assert.ok(args, `Expected task, got ${current.state}`);
     const phase = args.subagent_type;
-    for (const prior of visited) assert.ok(args.prompt.includes(`Artifact for ${prior}`), `Missing ${prior} dependency in ${phase}`);
+    // A dependency reaches the phase in full, or as its recorded summary and ref when inlining
+    // every artifact would exceed the handoff budget. What it never does is disappear silently.
+    const announced = /appear above as their recorded summary and ref/.test(args.prompt);
+    for (const prior of visited) {
+      const summarized = (current.handoff?.summarized ?? []).some(item => item.phase === prior);
+      assert.ok(args.prompt.includes(`Artifact for ${prior}`) || summarized || announced, `Missing ${prior} dependency in ${phase}`);
+      if (summarized) assert.ok(announced, `unannounced compaction in ${phase}`);
+    }
     if (phase === 'mdd-apply') assert.ok(args.prompt.includes('Trusted local mdd-cleanup instructions with provenance'));
     // Every phase is shown only its own result schema; a leaked one made plan fill verification.
     // A standalone read-only investigation has its own prompt and no phase result fields at all.
@@ -333,15 +340,29 @@ for (const fault of ['missing', 'invented', 'drift', 'partial']) {
   });
 }
 
-test('combined dependency budget fails explicitly without truncation or Verify dispatch', async t => {
+// Seven phases of maximum-size artifacts outgrow the handoff budget, and the route used to die
+// there: at Tasks, Apply or Verify, after everything that produced them had already been paid for.
+// The oldest artifacts now travel as their own recorded summary plus the ref that still identifies
+// the full text, announced in the prompt, while recent ones stay whole.
+test('a long route compacts its oldest artifacts instead of dying at the handoff budget', async t => {
   const f = await fixture(t, { route: 'high' });
-  let blocked = false;
+  let compacted;
   for (let i = 0; i < 7; i++) {
-    try { await f.phase({ large: true }); }
-    catch (error) { assert.match(error.message, /combined phase handoff/); blocked = true; break; }
+    // Verify reports its own links, which share the artifact bound, so it does not fill it.
+    await f.phase({ large: i < 6 });
+    const current = await f.status();
+    if (current.handoff && current.task) compacted ??= current;
   }
-  assert.equal(blocked, true); assert.equal((await f.status()).state, 'blocked');
-  assert.ok(!f.visited.includes('mdd-verify'));
+  const final = await f.status();
+  assert.equal(final.state, 'complete');
+  assert.ok(f.visited.includes('mdd-verify'));
+  assert.ok(compacted, 'a seven-phase route of maximum artifacts must exceed the handoff budget');
+  // Oldest first, and the phase that produced each one is still named with its store record.
+  assert.equal(compacted.handoff.summarized[0].phase, 'mdd-explore');
+  assert.ok(compacted.handoff.summarized.every(item => item.recordID));
+  assert.equal(compacted.task.prompt.includes('Artifact for mdd-explore'), false);
+  assert.match(compacted.task.prompt, /appear above as their recorded summary and ref/);
+  assert.ok(Buffer.byteLength(compacted.task.prompt) <= 96000);
 });
 test('telemetry storage failure is bounded and does not fabricate a failed phase', async t => {
   const f = await fixture(t);
@@ -752,9 +773,13 @@ test('a large history keeps mdd_status within budget and the task byte-identical
   assert.ok(Buffer.byteLength(raw) <= STATUS_BUDGET_BYTES, `mdd_status was ${Buffer.byteLength(raw)} bytes`);
   const status = JSON.parse(raw);
   assert.equal(status.budget, undefined, 'the task fits without an unresolved budget problem');
-  assert.ok(status.omitted.length > 0, 'what was left out is declared, not silently missing');
-  assert.match(status.omittedNote, /Nothing was deleted/);
-  for (const key of status.omitted) assert.equal(status[key], undefined);
+  // Compacting the oldest artifacts keeps the handoff deliverable in the first place, so a large
+  // history no longer has to shed reportable fields; when it still does, it declares them.
+  if (status.omitted !== undefined) {
+    assert.ok(status.omitted.length > 0, 'what was left out is declared, not silently missing');
+    assert.match(status.omittedNote, /Nothing was deleted/);
+    for (const key of status.omitted) assert.equal(status[key], undefined);
+  }
   assert.ok(status.task && status.state === 'ready');
   // The invariant the bug broke: the task read back from a budgeted status still satisfies the
   // byte-for-byte check in PhaseRunner.before, so delegation survives a large history.
