@@ -345,6 +345,14 @@ Reports honor low/medium/detailed settings and never take a model-selected perce
 Telemetry supports off/delete and retains 30 days locally. Diagnostics are bounded, and
 telemetry failure does not alter phase outcomes. Status reads do not append telemetry.
 
+Every event of a run carries that run's identity, the attempt it belongs to and whether the
+phase was delegated or carried out inline, and an ended attempt also carries the adapter's own
+failure class. What a delegated phase cost is read from the child session the completed task
+envelope names in its `id`, which is the only attribution MDD can make without guessing: no
+child enumeration, no correlation heuristic, and nothing recorded when the envelope names no
+session. Counters that survive the 30-day window live in a separate fixed-key rollup; both are
+local, workspace-scoped and never exported. See [configuration](configuration.md#local-telemetry-telemetryts).
+
 ## Verification and limitations
 
 `npm test` includes the original 83 routing/CLI/workflow tests and additional

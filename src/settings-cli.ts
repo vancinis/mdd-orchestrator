@@ -1,5 +1,5 @@
 import { changeProfile, runTerminalConfig } from './config-ui.js';
-import { clearTelemetry, telemetryStatus } from './telemetry.js';
+import { clearTelemetry, telemetryReport, telemetryStatus } from './telemetry.js';
 import { ValidationError } from './validation.js';
 import { initProject } from './setup.js';
 import { doctor } from './doctor.js';
@@ -65,14 +65,18 @@ export async function settingsCommand(args: string[], root: string, write: (text
     return true;
   }
   if (command === 'telemetry') {
-    if (args.length !== 2 || !['status', 'on', 'off', 'clear'].includes(action ?? '')) {
-      throw new ValidationError('Usage: mdd telemetry status | on | off | clear');
+    if (args.length !== 2 || !['status', 'on', 'off', 'clear', 'report'].includes(action ?? '')) {
+      throw new ValidationError('Usage: mdd telemetry status | report | on | off | clear');
     }
     if (action === 'on' || action === 'off') {
       const settings = loadGlobalSettings();
       settings.telemetry.enabled = action === 'on';
       saveGlobalSettings(settings);
       write(`Global telemetry preference ${action}. Event files remain workspace-local; clear affects only the current workspace.\n`);
+    } else if (action === 'report') {
+      const report = telemetryReport(root);
+      if (!report.ok) throw new Error(report.diagnostic);
+      write(report.text);
     } else {
       const result = action === 'clear' ? clearTelemetry(root) : telemetryStatus(root);
       if (!result.ok) throw new Error(result.diagnostic);

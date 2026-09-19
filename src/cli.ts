@@ -12,7 +12,7 @@ Usage:
   mdd-ai link                 put mdd-ai on your user PATH
   mdd-ai config | doctor | init | update
   mdd-ai profile list | create <name> | use <name>
-  mdd-ai telemetry status | on | off | clear
+  mdd-ai telemetry status | report | on | off | clear
   node dist/cli.js --answers <file.json> [--config <file.json>] [--explore]
   node dist/cli.js --profile <file.json> [--config <file.json>] [--explore]
   node dist/cli.js --help
@@ -28,6 +28,7 @@ Project settings: config opens an advanced terminal editor; Save is explicit, Ca
 Named profiles live in mdd.config.json, separate from the proof's --profile file.
 Model/profile changes require native runtime restart. Missing models inherit native selection.
 Telemetry is local-only, enabled by default, with 30-day retention on API use.
+Telemetry report reads the workspace ledger: phase time, retries, failures and tokens.
 
 Answers: all five preflight fields. Profile: { "answers": { ... } }.
 Config: optional threshold and partial weight overrides. See docs/product-contract.md.

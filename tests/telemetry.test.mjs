@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { recordTelemetry, telemetryStatus, clearTelemetry, RETENTION_MS } from '../dist/telemetry.js';
+import { recordTelemetry, telemetryStatus, clearTelemetry, telemetryReport, RETENTION_MS } from '../dist/telemetry.js';
 import { defaultSettings } from '../dist/settings.js';
 import { saveGlobalSettings } from '../dist/global-settings.js';
 import { isolateHome } from './adapter-fixture.mjs';
@@ -19,6 +19,10 @@ function fixture(t) {
 }
 const event = () => ({ timestamp: now, event: 'phase-end', phase: 'mdd-plan', duration: 12, route: 'low', outcome: 'passed' });
 const log = root => join(root, '.mdd', 'telemetry.jsonl');
+const rollupFile = root => join(root, '.mdd', 'telemetry-rollup.json');
+const rollupOf = root => JSON.parse(fs.readFileSync(rollupFile(root), 'utf8'));
+const runID = '9f1c2b3a-4d5e-4f60-8a1b-2c3d4e5f6071';
+const usage = () => ({ input: 1200, output: 340, reasoning: 20, cacheRead: 90, cacheWrite: 10, cost: 0.0125, messages: 3 });
 
 test('status and clear on absent telemetry do not create files; writes happen only on API use', t => {
   const root = fixture(t);
@@ -28,7 +32,7 @@ test('status and clear on absent telemetry do not create files; writes happen on
   assert.equal(recordTelemetry(root, event(), now).count, 1);
   assert.deepEqual(JSON.parse(fs.readFileSync(log(root), 'utf8')), event());
   assert.deepEqual(fs.readdirSync(root), ['.mdd']);
-  assert.deepEqual(fs.readdirSync(join(root, '.mdd')), ['.gitignore', 'telemetry.jsonl']);
+  assert.deepEqual(fs.readdirSync(join(root, '.mdd')), ['.gitignore', 'telemetry-rollup.json', 'telemetry.jsonl']);
 });
 
 test('retention excludes exact 30-day boundary and prunes on append and status', t => {
@@ -98,7 +102,7 @@ test('telemetry atomic failure preserves log bytes and emits bounded diagnostics
   assert.deepEqual(recordTelemetry(root, event(), now), { ok: false, diagnostic: 'telemetry-unavailable' });
   mock.mock.restore();
   assert.equal(fs.readFileSync(log(root), 'utf8'), before);
-  assert.deepEqual(fs.readdirSync(join(root, '.mdd')), ['.gitignore', 'telemetry.jsonl']);
+  assert.deepEqual(fs.readdirSync(join(root, '.mdd')), ['.gitignore', 'telemetry-rollup.json', 'telemetry.jsonl']);
 });
 
 test('telemetry refuses symlinked directory and never writes/deletes external target', t => {
@@ -118,8 +122,94 @@ test('local telemetry never calls the network', t => {
   const network = t.mock.method(globalThis, 'fetch', () => { throw new Error('No network allowed'); });
   assert.equal(recordTelemetry(root, event(), now).ok, true);
   assert.equal(telemetryStatus(root, now).ok, true);
+  assert.equal(telemetryReport(root, now).ok, true);
   assert.equal(clearTelemetry(root).ok, true);
   assert.equal(network.mock.callCount(), 0);
+});
+
+test('run identity, attempt, mode, failure and usage are recorded; free text cannot enter through them', t => {
+  const root = fixture(t);
+  const full = { ...event(), runID, attempt: 2, mode: 'inline', failure: 'result-rejected', usage: usage() };
+  assert.equal(recordTelemetry(root, full, now).count, 1);
+  assert.deepEqual(JSON.parse(fs.readFileSync(log(root), 'utf8')), full);
+  for (const change of [{ runID: 'run-1' }, { runID: 'Implement the scoped feature' }, { runID: '' },
+    { attempt: -1 }, { attempt: 1.5 }, { attempt: 1001 }, { mode: 'delegated' }, { failure: 'unknown' },
+    { usage: { ...usage(), origin: 'secret' } }, { usage: { ...usage(), input: -1 } }, { usage: { ...usage(), cost: 'free' } },
+    { usage: { ...usage(), partial: false } }, { usage: 'a lot' }]) {
+    assert.deepEqual(recordTelemetry(root, { ...full, ...change }, now), { ok: false, diagnostic: 'invalid-event' });
+  }
+  assert.equal(fs.readFileSync(log(root), 'utf8').trim().split('\n').length, 1);
+});
+
+test('the rollup accumulates runs, attempts and usage, and outlives the events it came from', t => {
+  const root = fixture(t);
+  const base = { timestamp: now, runID, mode: 'delegate', route: 'low' };
+  for (const row of [
+    { ...base, event: 'preflight', outcome: 'passed' },
+    { ...base, event: 'phase-start', phase: 'mdd-plan', attempt: 1 },
+    { ...base, event: 'phase-end', phase: 'mdd-plan', attempt: 1, outcome: 'blocked', failure: 'result-rejected', duration: 500 },
+    { ...base, event: 'retry', phase: 'mdd-plan', attempt: 1, failure: 'result-rejected' },
+    { ...base, event: 'phase-start', phase: 'mdd-plan', attempt: 2 },
+    { ...base, event: 'phase-end', phase: 'mdd-plan', attempt: 2, outcome: 'passed', duration: 1000, usage: usage() },
+    { ...base, event: 'report', outcome: 'passed' },
+  ]) assert.equal(recordTelemetry(root, row, now).ok, true, row.event);
+  const rollup = rollupOf(root);
+  assert.equal(rollup.version, 1);
+  assert.equal(rollup.events, 7);
+  assert.deepEqual(rollup.runs, { started: 1, completed: 1, blocked: 0, reset: 0 });
+  assert.deepEqual(rollup.routes, { low: 1, high: 0 });
+  // The retry repeats the class of the attempt it follows and must not be counted as a second one.
+  assert.equal(rollup.failures['result-rejected'], 1);
+  assert.deepEqual(rollup.phases['mdd-plan'], { starts: 2, passed: 1, failed: 0, blocked: 1, retries: 1, handovers: 0,
+    duration: 1500, timed: 2, input: 1200, output: 340, reasoning: 20, cacheRead: 90, cacheWrite: 10, cost: 0.0125, measured: 1, partial: 0 });
+  // Events expire; what MDD learned from them does not.
+  const later = now + RETENTION_MS;
+  assert.equal(telemetryStatus(root, later).count, 0);
+  assert.equal(fs.existsSync(log(root)), false);
+  const report = telemetryReport(root, later);
+  assert.match(report.text, /Runs: 1 started, 1 completed/);
+  assert.match(report.text, /0 still inside the 30-day event window/);
+  assert.match(report.text, /result-rejected 1/);
+  assert.deepEqual(rollupOf(root).phases['mdd-plan'].input, 1200);
+});
+
+test('clearing telemetry deletes the rollup with the events it summarizes', t => {
+  const root = fixture(t);
+  recordTelemetry(root, { ...event(), runID }, now);
+  assert.equal(fs.existsSync(rollupFile(root)), true);
+  assert.equal(clearTelemetry(root).ok, true);
+  assert.deepEqual(fs.readdirSync(join(root, '.mdd')), ['.gitignore']);
+  assert.match(telemetryReport(root, now).text, /No runs have been recorded yet/);
+});
+
+test('a damaged rollup is reported instead of overwritten, and the event is still recorded', t => {
+  const root = fixture(t);
+  fs.mkdirSync(join(root, '.mdd'));
+  fs.writeFileSync(rollupFile(root), '{ damaged and not this module\u2019s output');
+  const result = recordTelemetry(root, event(), now);
+  assert.deepEqual(result, { ok: true, enabled: true, count: 1, retentionDays: 30, rollup: 'unavailable' });
+  assert.equal(fs.readFileSync(rollupFile(root), 'utf8'), '{ damaged and not this module\u2019s output');
+  assert.deepEqual(JSON.parse(fs.readFileSync(log(root), 'utf8')), event());
+  assert.deepEqual(telemetryReport(root, now), { ok: false, diagnostic: 'telemetry-unavailable' });
+});
+
+test('the report reads the local ledger only, and says so when telemetry is off', t => {
+  const root = fixture(t);
+  assert.match(telemetryReport(root, now).text, /No runs have been recorded yet/);
+  recordTelemetry(root, { ...event(), runID, usage: usage() }, now);
+  const text = telemetryReport(root, now).text;
+  assert.match(text, /local only, never exported/);
+  assert.match(text, /^plan\s+0\s+1\s+0\s+0\s+0\s+0s\s+1\.2k\s+340\s+100\s+0\.0125$/m);
+  assert.match(text, /Usage measured for 1 of 0 phase run\(s\)/);
+  // A log written before this workspace kept totals is still evidence, and reading it must not
+  // rebuild anything: the report is the one command that only ever reads.
+  fs.rmSync(rollupFile(root));
+  assert.match(telemetryReport(root, now).text, /No totals have been kept in this workspace yet, and 1 event\(s\)/);
+  assert.equal(fs.existsSync(rollupFile(root)), false);
+  const settings = defaultSettings();
+  settings.telemetry.enabled = false;
+  saveGlobalSettings(settings);
+  assert.match(telemetryReport(root, now).text, /Telemetry is currently off/);
 });
 
 test('row bounds prune oldest insertion and oversized storage fails without overwrite', t => {

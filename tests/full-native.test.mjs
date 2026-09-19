@@ -102,7 +102,7 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
     const childID = `child-${index}`;
     parent[1].parts[0].state.metadata = { sessionId: childID, parentSessionId: runtime.sessionID, model };
     sessions.set(childID, { id: childID, parentID: runtime.sessionID, directory: root, projectID: 'project', agent: phase, permission: [{ permission: 'task', pattern: '*', action: 'deny' }] });
-    const child = [{ info: { id: `msg-${index}`, sessionID: childID, role: 'assistant', agent: phase, ...model, path: { cwd: root, root }, time: { completed: 10 }, finish: 'stop' }, parts: [] }];
+    const child = [{ info: { id: `msg-${index}`, sessionID: childID, role: 'assistant', agent: phase, ...model, path: { cwd: root, root }, time: { completed: 10 }, finish: 'stop', ...(options.spent ?? {}) }, parts: [] }];
     histories.set(childID, child);
     if (options.beforeMismatch) child[0].info.modelID = 'substituted';
     async function tool(name, input, output, execute = async () => {}) {
@@ -263,7 +263,13 @@ for (const route of ['low', 'high']) for (const mode of ['automatic', 'interacti
     const events = (await readFile(join(f.root, '.mdd/telemetry.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
     assert.equal(events.filter(event => event.event === 'phase-start').length, phases.length);
     assert.equal(events.filter(event => event.event === 'preflight').length, 1);
-    for (const event of events) assert.ok(Object.keys(event).every(key => ['timestamp', 'event', 'phase', 'duration', 'route', 'outcome'].includes(key)));
+    // The ledger stays metadata: identities are opaque, everything else is an enum or a number,
+    // and no field exists that could carry requirements, a path or any other text.
+    for (const event of events) {
+      assert.ok(Object.keys(event).every(key => ['timestamp', 'event', 'phase', 'duration', 'route', 'outcome', 'runID', 'attempt', 'mode', 'failure', 'usage'].includes(key)));
+      assert.equal(event.runID, final.runID);
+      assert.ok(!/[A-Za-z]{2}/.test(event.runID.replaceAll(/[0-9a-f-]/g, '')));
+    }
   });
 }
 
@@ -539,6 +545,66 @@ test('an interrupted objective still starts after the user writes a continuation
   const started = await f.status();
   assert.equal(started.state, 'ready');
   assert.equal(started.task.subagent_type, 'mdd-plan');
+});
+
+// A ledger that cannot say what a phase cost cannot answer the question it exists for. The child
+// session the task envelope names is the only place that price is reported.
+test('a delegated phase records the tokens its own child session reported', async t => {
+  const f = await fixture(t, { memoryEnabled: false });
+  await f.phase({ spent: { tokens: { input: 1200, output: 340, reasoning: 20, cache: { read: 90, write: 10 } }, cost: 0.0125 } });
+  const rows = (await readFile(join(f.root, '.mdd/telemetry.jsonl'), 'utf8')).trim().split('\n').map(row => JSON.parse(row));
+  const ended = rows.findLast(row => row.event === 'phase-end');
+  assert.deepEqual(ended.usage, { input: 1200, output: 340, reasoning: 20, cacheRead: 90, cacheWrite: 10, cost: 0.0125, messages: 1 });
+  assert.equal(ended.phase, 'mdd-plan');
+  assert.equal(ended.mode, 'delegate');
+  assert.equal(ended.attempt, 1);
+  assert.match(ended.runID, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+  assert.equal(new Set(rows.map(row => row.runID)).size, 1);
+  const rollup = JSON.parse(await readFile(join(f.root, '.mdd/telemetry-rollup.json'), 'utf8'));
+  assert.equal(rollup.phases['mdd-plan'].input, 1200);
+  assert.equal(rollup.phases['mdd-plan'].cost, 0.0125);
+  assert.equal(rollup.phases['mdd-plan'].measured, 1);
+  assert.equal(rollup.phases['mdd-plan'].partial, 0);
+  // A host that reports no usage produces a run without numbers, never a failed phase.
+  await f.phase();
+  const quiet = (await readFile(join(f.root, '.mdd/telemetry.jsonl'), 'utf8')).trim().split('\n').map(row => JSON.parse(row)).findLast(row => row.event === 'phase-end');
+  assert.equal(quiet.phase, 'mdd-apply');
+  assert.equal(quiet.usage, undefined);
+  assert.equal((await f.status()).telemetryDiagnostic, undefined);
+});
+
+test('a failed attempt is filed under the class that ended it, with what it spent getting there', async t => {
+  const f = await fixture(t, { memoryEnabled: false });
+  const spent = { tokens: { input: 900, output: 120, reasoning: 0, cache: { read: 0, write: 0 } }, cost: 0.004 };
+  await f.phase({ outcome: 'failed', spent });
+  const rows = (await readFile(join(f.root, '.mdd/telemetry.jsonl'), 'utf8')).trim().split('\n').map(row => JSON.parse(row));
+  const ended = rows.findLast(row => row.event === 'phase-end');
+  assert.equal(ended.outcome, 'failed');
+  assert.equal(ended.failure, 'phase-failed');
+  assert.equal(ended.usage.input, 900);
+  const rollup = JSON.parse(await readFile(join(f.root, '.mdd/telemetry-rollup.json'), 'utf8'));
+  assert.equal(rollup.failures['phase-failed'], 1);
+  assert.equal(rollup.phases['mdd-plan'].failed, 1);
+  assert.equal(rollup.phases['mdd-plan'].input, 900);
+  assert.equal(rollup.runs.blocked, 1);
+});
+
+test('a result that names no session is charged to nobody rather than to a guess', async t => {
+  const f = await fixture(t, { memoryEnabled: false });
+  await assert.rejects(f.phase({ badEnvelope: true, spent: { tokens: { input: 900, output: 120, reasoning: 0, cache: { read: 0, write: 0 } }, cost: 0.004 } }));
+  const rows = (await readFile(join(f.root, '.mdd/telemetry.jsonl'), 'utf8')).trim().split('\n').map(row => JSON.parse(row));
+  const ended = rows.findLast(row => row.event === 'phase-end');
+  assert.equal(ended.outcome, 'blocked');
+  assert.equal(ended.failure, 'result-rejected');
+  // The envelope that would name the child is exactly what was malformed, so the spending is
+  // real but unattributable. Recording it against this phase anyway would be inventing evidence.
+  assert.equal(ended.usage, undefined);
+  assert.equal(rows.findLast(row => row.event === 'retry').failure, 'result-rejected');
+  const rollup = JSON.parse(await readFile(join(f.root, '.mdd/telemetry-rollup.json'), 'utf8'));
+  assert.equal(rollup.failures['result-rejected'], 1);
+  assert.equal(rollup.phases['mdd-plan'].retries, 1);
+  assert.equal(rollup.phases['mdd-plan'].blocked, 1);
+  assert.equal(rollup.phases['mdd-plan'].measured, 0);
 });
 
 test('read-only investigation answers without an accepted run and leaves implementation available', async t => {

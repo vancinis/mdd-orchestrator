@@ -10,6 +10,7 @@ import { applyModelOverrides } from './native-models.js';
 import { NativeIntake } from './native-intake.js';
 import type { IntakeInspect } from './native-intake.js';
 import { recordTelemetry } from './telemetry.js';
+import type { TelemetryUsage } from './telemetry.js';
 import { ProgressGuard } from './progress.js';
 import { RunDossierStore } from './run-dossier.js';
 import { renderPRBody } from './pr-body.js';
@@ -51,6 +52,16 @@ export const HISTORY_MAX = 100;
 export const AGENTS_MAX = 2000;
 export const PERMISSION_MAX = 4000;
 export const PARTS_MAX = 1000;
+/**
+ * A delegated phase is read for its cost, not its content, so this window is about holding a
+ * whole actor conversation rather than the tail that identifies a caller.
+ */
+export const USAGE_MAX = 1000;
+
+/** A reported count, or zero. Anything unreported is flagged by the caller, never invented. */
+function metric(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0;
+}
 
 function list(value: unknown, subject: string, max: number): Record<string, unknown>[] {
   if (!Array.isArray(value)) throw new Error(`Unknown OpenCode ${subject} structure.`);
@@ -266,6 +277,44 @@ export function createInspector(input: PluginInput, timeout = 5000): Inspect & I
       const match = /^<task id="[^"]*" state="completed">\r?\n<task_result>\r?\n([\s\S]*)\r?\n<\/task_result>\r?\n<\/task>$/.exec(envelope);
       if (!match) throw new Error('The delegated phase did not return a completed task result.');
       return boundedText(match[1], 'delegated phase result', 20000);
+    },
+    /**
+     * What the phase cost, taken from the child session the task envelope already names in its
+     * `id`. Reading that session directly is what makes the number the phase's own: enumerating
+     * children and guessing which one ran would attribute one actor's spending to another.
+     */
+    async usage(runtime, raw) {
+      const envelope = typeof record(raw, 'task result').output === 'string' ? String(record(raw, 'task result').output) : '';
+      // Bounded and safe as a path segment, without assuming the host's identifier format: what
+      // proves this is the right session is that its messages say so, not that the id looks right.
+      const child = /^<task id="([A-Za-z0-9_-]{1,128})" state="completed">/.exec(envelope)?.[1];
+      if (!child) return undefined;
+      const response = await readSdk(signal => input.client.session.messages({
+        path: { id: child }, query: { directory: runtime.directory, limit: USAGE_MAX }, signal, throwOnError: true,
+      }), timeout);
+      const history = list(response.data, 'child message history', USAGE_MAX);
+      const usage: TelemetryUsage = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0, messages: 0 };
+      // A window this size holds any ordinary phase, so reaching it means only the tail was read
+      // and these totals are a floor rather than a measurement.
+      let partial = history.length >= USAGE_MAX;
+      for (const message of history) {
+        const info = record(message.info, 'message');
+        if (info.role !== 'assistant' || info.sessionID !== child) continue;
+        const tokens = info.tokens as Record<string, unknown> | undefined;
+        const time = info.time as Record<string, unknown> | undefined;
+        // A host that reports no usage for a message leaves nothing to add up. Counting it as
+        // zero would quietly turn silence into a measurement of free work, so it is flagged.
+        if ((!tokens || typeof tokens !== 'object') && typeof info.cost !== 'number') { partial = true; continue; }
+        const cache = tokens?.cache as Record<string, unknown> | undefined;
+        usage.messages += 1;
+        usage.input += metric(tokens?.input); usage.output += metric(tokens?.output);
+        usage.reasoning += metric(tokens?.reasoning);
+        usage.cacheRead += metric(cache?.read); usage.cacheWrite += metric(cache?.write);
+        usage.cost += metric(info.cost);
+        // Usage is written when a message settles, so one still running has not reported its own.
+        if (time?.completed === undefined) partial = true;
+      }
+      return usage.messages ? { ...usage, ...(partial ? { partial: true as const } : {}) } : undefined;
     },
   };
   return inspector;

@@ -297,7 +297,11 @@ test('runner telemetry uses controlled timestamps/duration and never marks the n
   const ready = await runner.start(request(endpoint), runtime, { requirementsConfirmed: true });
   clock = 110; const args = await runner.before(call, ready.task);
   clock = 125; await runner.after(call, args, result(ready));
-  assert.deepEqual(events.find(event => event.event === 'phase-end'), { timestamp: 125, event: 'phase-end', phase: 'mdd-plan', route: 'low', outcome: 'passed', duration: 15 });
+  const ended = events.find(event => event.event === 'phase-end');
+  assert.deepEqual({ ...ended, runID: typeof ended.runID },
+    { timestamp: 125, event: 'phase-end', phase: 'mdd-plan', route: 'low', outcome: 'passed', duration: 15, attempt: 1, mode: 'delegate', runID: 'string' });
+  // Every row of one run carries that run, so a ledger can be read a run at a time.
+  assert.equal(new Set(events.map(event => event.runID)).size, 1);
   assert.ok(!events.some(event => event.phase === 'mdd-apply' && event.outcome === 'passed'));
   const count = events.length; runner.status(runtime.sessionID); runner.status(runtime.sessionID); assert.equal(events.length, count);
 });

@@ -11,7 +11,7 @@ import { changed, deliverables, executed } from './phase-evidence.js';
 import type { Check, Deliverable } from './phase-evidence.js';
 import { emptyEvidence, invalidateEvidence, renderReport, renderClosure, phaseLabel, evidenceCoverage } from './reporting.js';
 import type { Evidence, EvidenceFlag, PhaseReport } from './reporting.js';
-import type { TelemetryEvent, TelemetryResult } from './telemetry.js';
+import type { FailureClass, TelemetryEvent, TelemetryResult, TelemetryUsage } from './telemetry.js';
 import { acceptance, assertNoTraceSection, decisions, phaseSchemaLines, PHASE_RESULT_FIELDS, validatePlan, verification, traceArtifact } from './acceptance.js';
 import type { Acceptance, Decision, Verification } from './acceptance.js';
 import { concerns } from './concerns.js';
@@ -56,6 +56,12 @@ type Run = {
    * failure in its prompt; a second hands the phase back to the coordinator.
    */
   mode: 'delegate' | 'inline'; brief: string; lastFailure?: string;
+  /**
+   * Set when a phase begins and reported by every event of that attempt, so a row cannot claim an
+   * ordinal the failure path already moved past. `usage` holds what the delegated child actually
+   * spent until the phase that ends collects it.
+   */
+  attempt?: number; usage?: TelemetryUsage;
   /** Set when the phase prompt reports earlier artifacts as summaries rather than full text. */
   handoff?: { inlined: number; summarized: { phase: Phase; recordID: string }[] };
   artifacts: ArtifactStore; artifact?: ArtifactResult; artifactAttempts?: readonly ArtifactAttempt[];
@@ -96,6 +102,12 @@ const DOC_PHASES: readonly Phase[] = ['mdd-explore', 'mdd-plan', 'mdd-propose', 
 export type Inspect = {
   parent(runtime: Runtime, callID?: string, tool?: 'task' | 'question', args?: unknown): Promise<void>;
   result(runtime: Runtime, call: TaskCall, phase: string, output: unknown): Promise<string>;
+  /**
+   * What the delegated child spent, read from the native session the task envelope names. It is
+   * optional because measurement must never be a condition of working: a host that cannot report
+   * usage produces a run with no numbers, not a run that fails.
+   */
+  usage?(runtime: Runtime, output: unknown): Promise<TelemetryUsage | undefined>;
 };
 
 /** Actors occasionally wrap the envelope in a code fence; unwrapping it changes no field. */
@@ -268,7 +280,7 @@ export class PhaseRunner {
    * ready so the same work can be delegated again or carried out directly, and uncertainty is
    * cleared so change requests, investigation and reset all stay reachable.
    */
-  #degrade(run: Run, error: unknown): never {
+  #degrade(run: Run, error: unknown, failure: FailureClass = 'result-rejected'): never {
     if (error instanceof ArtifactWriteError) run.artifactAttempts = error.attempts;
     run.reason = error instanceof Error ? error.message : 'Unknown attempt outcome.';
     run.attempts += 1;
@@ -276,7 +288,7 @@ export class PhaseRunner {
     delete run.callID;
     delete run.dispatchedArgs;
     const phase = run.phase;
-    if (run.started !== undefined) this.#event(run, 'phase-end', 'blocked');
+    if (run.started !== undefined) this.#event(run, 'phase-end', 'blocked', failure);
     // A failed investigation is not a failed phase: the main plan it paused keeps its own task,
     // mode and attempt history untouched.
     const side = !!run.side;
@@ -291,8 +303,12 @@ export class PhaseRunner {
     const handover = !side && run.attempts >= 2;
     if (recovered && !side) {
       run.mode = handover ? 'inline' : 'delegate';
-      this.#event(run, handover ? 'handover' : 'retry');
+      this.#event(run, handover ? 'handover' : 'retry', undefined, failure);
     }
+    // Recovery failing is a different fact from the attempt that ended: the run itself stopped.
+    // `report` is where a run's own outcome is recorded, so without this one a route that died
+    // here would leave attempts in the ledger and no blocked run to account for them.
+    if (!recovered) this.#event(run, 'report', 'blocked', 'route-blocked');
     this.#settle(run);
     throw new Error(`MDD attempt ${run.attempts} for ${phase} did not complete: ${run.reason} ${!recovered
       ? 'Read mdd_status, then use mdd_reset to retry this phase or start over. Nothing is locked.'
@@ -373,6 +389,7 @@ export class PhaseRunner {
       run.state = 'await-result';
       run.report = { phase: run.phase, summary: `${phaseLabel(run.phase)} is in progress.`, how: ['Using the agreed requirements and available plan evidence.'], status: 'in-progress', evidence: run.evidence };
       run.started = this.#now();
+      run.attempt = run.attempts + 1;
       this.#event(run, 'phase-start');
       return { ...run.dispatchedArgs };
     } catch (error) { return this.#degrade(run, error); }
@@ -382,9 +399,14 @@ export class PhaseRunner {
     const run = this.#runs.get(call.sessionID);
     if (!run) return this.#soloAfter(call, args, output);
     if (run.state !== 'await-result' || run.callID !== call.callID || !isDeepStrictEqual(args, run.dispatchedArgs)) {
-      return this.#degrade(run, new Error('This result does not match the task this phase dispatched, so it was discarded.'));
+      // Nothing here is read, not even to measure it: a result this run did not dispatch is not
+      // its own, and following the session it names would be following a stranger's.
+      return this.#degrade(run, new Error('This result does not match the task this phase dispatched, so it was discarded.'), 'dispatch-mismatch');
     }
     run.state = 'persisting-result';
+    // Measured before the result is judged, because an attempt whose result is rejected still
+    // spent everything it spent, and that is the attempt worth knowing the price of.
+    await this.#measure(run, output);
     try {
       const text = await this.inspect.result(run.runtime, call, run.phase, output);
       await this.#record(run, text, call.callID);
@@ -406,6 +428,7 @@ export class PhaseRunner {
     run.started = run.readyAt ?? this.#now();
     try {
       if (!run.side) run.workflow.start(run.phase);
+      run.attempt = run.attempts + 1;
       this.#event(run, 'phase-start');
       // The inline route dispatches no native task, so no hook would otherwise record that this
       // phase began. Without this marker an interruption here leaves nothing to recover from.
@@ -523,7 +546,7 @@ export class PhaseRunner {
       if (run.phase === 'mdd-verify') run.executedChecks = ran.filter(check => check.exit === 0).map(check => check.command);
       run.evidence = nextEvidence;
       run.report = { phase: run.phase, summary: evidenceSummary, how: ['Kept the requirements, decisions and implementation evidence linked.', ...(applied?.paths.length ? [`${new Set(applied.paths).size} file(s) reported as changed.`] : []), ...ran.map(check => `Reported running ${check.command}; exit ${check.exit ?? 'unknown'}.`)], status: result.outcome, evidence: run.evidence };
-      this.#event(run, 'phase-end', result.outcome);
+      this.#event(run, 'phase-end', result.outcome, result.outcome === 'failed' ? 'phase-failed' : undefined);
       if (result.outcome === 'failed') { run.state = 'blocked'; run.reason = 'The phase reported failure. Nothing is repaired automatically: inspect the evidence, then use mdd_reset to run this phase again or request a change.'; }
       else {
         const next = run.workflow.nextAction();
@@ -541,17 +564,17 @@ export class PhaseRunner {
     const run = this.#runs.get(sessionID);
     const pending = run ?? this.#solo.get(sessionID);
     if (pending?.callID !== callID || !['await-result', 'persisting-result'].includes(pending.state)) return;
-    this.attemptRejected(sessionID, 'The dispatched task failed or was interrupted before reporting a result.');
+    this.attemptRejected(sessionID, 'The dispatched task failed or was interrupted before reporting a result.', 'native-error');
   }
 
   /**
    * Evidence rejected in a child, or a task that failed natively, ends that attempt. The phase
    * becomes runnable again so the same work can be delegated once more or carried out directly.
    */
-  attemptRejected(sessionID: string, reason: string): void {
+  attemptRejected(sessionID: string, reason: string, failure: FailureClass = 'result-rejected'): void {
     const run = this.#runs.get(sessionID);
     if (!run) { this.block(sessionID, reason); return; }
-    try { this.#degrade(run, new Error(reason)); }
+    try { this.#degrade(run, new Error(reason), failure); }
     catch { /* The caller reports its own failure to the actor; the run is already released. */ }
   }
 
@@ -572,7 +595,7 @@ export class PhaseRunner {
     }
     if (!run.side) run.evidence = invalidateEvidence(run.evidence, this.#affected(run.phase));
     run.report = { phase: run.phase, summary: 'Execution stopped; affected evidence was withdrawn.', how: [], status: 'blocked', evidence: run.evidence };
-    if (run.state !== 'blocked') this.#event(run, 'phase-end', 'blocked');
+    if (run.state !== 'blocked') this.#event(run, 'phase-end', 'blocked', 'stopped');
     run.state = 'blocked';
     run.reason = reason;
     // Stopped work is not in flight. Releasing the dispatch slot and the uncertainty flag is what
@@ -1016,14 +1039,34 @@ export class PhaseRunner {
 
   #now(): number { return (this.options.now ?? Date.now)(); }
   #affected(phase: Phase): EvidenceFlag[] { return ['mdd-apply', 'mdd-verify'].includes(phase) ? ['implementation', 'checks'] : ['plan', 'implementation', 'checks']; }
-  #event(run: Run, event: TelemetryEvent['event'], outcome?: TelemetryEvent['outcome']): void {
+  #event(run: Run, event: TelemetryEvent['event'], outcome?: TelemetryEvent['outcome'], failure?: FailureClass): void {
+    // Usage belongs to the attempt that spent it, so the phase that ends carries it away even
+    // when that ending is a failure: tokens burned on work that had to be redone are exactly
+    // the ones worth seeing.
+    const usage = event === 'phase-end' ? run.usage : undefined;
+    if (event === 'phase-end') delete run.usage;
     if (!this.options.telemetry) return;
     const now = this.#now();
     const duration = run.started === undefined ? undefined : now - run.started;
     try {
       const result = this.options.telemetry(run.runtime.directory, { timestamp: now, event, phase: run.phase, route: run.workflow.snapshot().evaluation.route,
-        ...(outcome ? { outcome } : {}), ...(event === 'phase-end' && duration !== undefined && duration >= 0 && duration <= 86400000 ? { duration } : {}) }, now);
+        runID: run.id, mode: run.mode, ...(run.attempt !== undefined ? { attempt: run.attempt } : {}),
+        ...(outcome ? { outcome } : {}), ...(failure ? { failure } : {}), ...(usage ? { usage } : {}),
+        ...(event === 'phase-end' && duration !== undefined && duration >= 0 && duration <= 86400000 ? { duration } : {}) }, now);
       if (!result.ok) run.telemetryDiagnostic = result.diagnostic;
+      else if (result.rollup === 'unavailable') run.telemetryDiagnostic = 'rollup-unavailable';
     } catch { run.telemetryDiagnostic = 'telemetry-unavailable'; }
+  }
+
+  /**
+   * Measurement runs outside the result path on purpose. A phase that produced a good artifact
+   * must not be failed because the host would not say what it cost, so every outcome here is
+   * either a usage record or none.
+   */
+  async #measure(run: Run, output: unknown): Promise<void> {
+    try {
+      const usage = await this.inspect.usage?.(run.runtime, output);
+      if (usage) run.usage = usage;
+    } catch { run.telemetryDiagnostic = 'usage-unavailable'; }
   }
 }

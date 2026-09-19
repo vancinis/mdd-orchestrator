@@ -20,6 +20,7 @@ npm run mdd -- profile list
 npm run mdd -- profile create work
 npm run mdd -- profile use default
 npm run mdd -- telemetry status
+npm run mdd -- telemetry report
 npm run mdd -- telemetry off
 npm run mdd -- telemetry clear
 ```
@@ -248,35 +249,66 @@ Reports generate neither receipts nor invented claims about implementation/check
 
 ### Local telemetry (`telemetry.ts`)
 
-The preference is global. `telemetry on/off` changes only global settings. Status, retention
-and `clear` address only the active workspace's `.mdd/telemetry.jsonl`; there is no aggregate
-archive or cross-project deletion. Telemetry and progress lazily create private `.mdd` storage
-with its own ignore file on first runtime write, never during installation. API helpers accept
-an optional final `InstallationEnvironment` argument for isolated global preference tests.
+The preference is global. `telemetry on/off` changes only global settings. Status, retention,
+`report` and `clear` address only the active workspace's `.mdd/telemetry.jsonl` and
+`.mdd/telemetry-rollup.json`; there is no cross-project archive or deletion. Telemetry and
+progress lazily create private `.mdd` storage with its own ignore file on first runtime write,
+never during installation. API helpers accept an optional final `InstallationEnvironment`
+argument for isolated global preference tests.
 
 ```typescript
+type TelemetryUsage = {
+  input: number; output: number; reasoning: number; cacheRead: number; cacheWrite: number;
+  cost: number; messages: number; partial?: true;
+};
 type TelemetryEvent = {
   timestamp: number;
-  event: 'preflight' | 'phase-start' | 'phase-end' | 'approval' | 'report';
+  event: 'preflight' | 'phase-start' | 'phase-end' | 'approval' | 'report' | 'retry' | 'handover' | 'reset';
   phase?: Phase; duration?: number; route?: 'low' | 'high';
   outcome?: 'passed' | 'failed' | 'blocked' | 'cancelled';
+  runID?: string; attempt?: number; mode?: 'delegate' | 'inline';
+  failure?: 'phase-failed' | 'result-rejected' | 'dispatch-mismatch' | 'native-error' | 'route-blocked' | 'stopped';
+  usage?: TelemetryUsage;
 };
 type TelemetryResult =
-  | { ok: true; enabled: boolean; count: number; retentionDays: 30 }
+  | { ok: true; enabled: boolean; count: number; retentionDays: 30; rollup?: 'unavailable' }
   | { ok: false; diagnostic: 'telemetry-unavailable' | 'invalid-event' };
 function recordTelemetry(root: string, value: unknown, now?: number): TelemetryResult;
 function telemetryStatus(root: string, now?: number): TelemetryResult;
+function telemetryReport(root: string, now?: number): { ok: true; text: string } | { ok: false; diagnostic: 'telemetry-unavailable' };
 function clearTelemetry(root: string): TelemetryResult;
 ```
 
 `RETENTION_MS` is 30 days. Timestamp is integer Unix milliseconds; duration is integer
 milliseconds, 0–86,400,000. Only listed fields/values are allowed: no source, prompts, raw
 errors, paths, identifiers, credentials, model/provider, environment, network, or export.
-The native runner records accepted preflight, phase start/end, approval and report events
-using its clock. Imports and startup settings reads never record events. Status reads do
-not append events. Failed writes yield a bounded telemetry diagnostic without changing
-the execution outcome. Telemetry off is checked on each record, independently of frozen
-model/profile selections.
+`runID` is validated as a UUID and nothing else, so no free text enters through it; `attempt`
+is the run's attempt counter when the phase began, and `failure` is assigned by the adapter at
+the point where it already knows, never proposed by an actor. The native runner records accepted
+preflight, phase start/end, approval, report, retry, handover and reset events using its clock.
+Imports and startup settings reads never record events. Status and report reads do not append
+events. Failed writes yield a bounded telemetry diagnostic without changing the execution
+outcome. Telemetry off is checked on each record, independently of frozen model/profile
+selections.
+
+`usage` is what the provider reported for the child session the completed task envelope names,
+summed over that session's assistant messages. A phase carried out by the coordinator has no
+separate child and records no usage; a result whose envelope is malformed names no session and
+is charged to nobody. `partial` marks an undercount — a history longer than the 1,000-message
+read window, a message that had not settled, or a host that reported no usage at all — because
+an undercount presented as a measurement is worse than none. Measurement never fails a phase:
+an unreadable session yields a `usage-unavailable` diagnostic and the run continues.
+
+`.mdd/telemetry-rollup.json` holds fixed-key counters that outlive event retention: runs
+started/completed/blocked/reset, runs per route, failures per class, and per phase the starts,
+outcomes, retries, handovers, timed duration and summed usage. It contains no identity and no
+text, and nothing in it expires. A `retry` or `handover` row repeats the class of the attempt
+it follows, so only `phase-end` and `report` rows increment a failure counter. A rollup that
+cannot be updated is reported as `rollup: 'unavailable'` while the event itself is still
+recorded, and a damaged rollup is never overwritten. `telemetry clear` deletes the rollup with
+the events it summarizes. `telemetry report` renders both locally with plain arithmetic: no
+model is asked what the numbers mean, and a workspace whose events predate its rollup is told
+exactly that instead of being reported as empty.
 
 `.mdd/telemetry.jsonl` is Git-ignored. Append/status prune rows at or older than 30 days;
 there is no background deletion for unused projects. Future timestamps are rejected on
