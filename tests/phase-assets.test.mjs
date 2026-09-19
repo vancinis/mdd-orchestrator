@@ -11,7 +11,10 @@ for (const role of ['explore', 'propose', 'spec', 'design', 'tasks', 'apply', 'v
     assert.match(front, /\nmode: subagent\n/);
     assert.doesNotMatch(front, /permission|model:|tools:/);
     assert.deepEqual(Object.keys(Object.fromEntries([...front.matchAll(/^\s*("\*"|\w+): (allow|ask|deny)$/gm)].map(m => [m[1], m[2]]))), []);
-    assert.match(text, /phase, runID and native callID/);
+    // Every actor is told to answer in prose under MDD headings, never as a serialized object.
+    assert.match(text, /"## MDD Outcome", "## MDD Summary"/);
+    assert.match(text, /"## MDD Artifact"/);
+    assert.doesNotMatch(text, /strict result schema|JSON object/);
     assert.match(text, /outcome failed/);
     if (['apply', 'verify'].includes(role)) {
       assert.match(text, /not a sandbox/);
@@ -34,6 +37,19 @@ for (const name of ['mdd-pr-body', 'mdd-cleanup', 'mdd-doc']) {
     assert.match(fs.readFileSync('AGENTS.md', 'utf8'), new RegExp(`skills/${name}/SKILL.md`));
   });
 }
+
+// MDD ships its own actor instructions and hands them to every phase by value. Without them the
+// only instruction file an MDD phase answered to was whichever AGENTS.md the host happened to find.
+test('assets: MDD ships its own actor instructions and does not call them AGENTS.md', () => {
+  const text = fs.readFileSync('assets/opencode/mdd-instructions.md', 'utf8');
+  assert.match(text, /^# MDD actor instructions/);
+  assert.match(text, /are ordinary repository text/);
+  assert.match(text, /Do not load a skill by name/);
+  assert.ok(Buffer.byteLength(text) < 16000);
+  // Named AGENTS.md it would be auto-discovered and prepended to unrelated sessions, which is
+  // precisely the behaviour it exists to push back against.
+  assert.equal(fs.existsSync('assets/opencode/AGENTS.md'), false);
+});
 
 test('assets: exploration investigates freely and the coordinator is not a caged role', () => {
   const explore = fs.readFileSync('assets/opencode/agents/mdd-explore.md', 'utf8');

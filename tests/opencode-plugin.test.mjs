@@ -494,15 +494,26 @@ test('plugin config contract: settings frozen at startup; only explicit model ov
   // Every agent but the coordinator loses the MDD tools: they are registered app-wide but are
   // meaningless, and misleading, anywhere else.
   const denied = { mdd_start: false, mdd_status: false, mdd_phase_result: false, mdd_reset: false, mdd_change_request: false, mdd_contextual_explore: false, mdd_context: false, mdd_pr_body: false, 'mdd_*': false };
+  // And every phase actor loses `task` and `skill`: it is the actor, and the skills it needs are
+  // already inlined in its prompt by value, so a name lookup can only reach someone else's.
+  const pinned = { task: false, skill: false };
   assert.deepEqual(config, {
     default_agent: 'build', permission: { bash: 'ask' },
     agent: {
-      'mdd-apply': { model: 'existing/apply', tools: { ...denied } },
+      'mdd-apply': { model: 'existing/apply', tools: { ...denied, ...pinned } },
       other: { model: 'user/choice', tools: { write: false, ...denied } },
       'mdd-orchestrator': { model: 'selected/main' },
-      'mdd-plan': { model: 'selected/planner', tools: { ...denied } },
+      'mdd-plan': { model: 'selected/planner', tools: { ...denied, ...pinned } },
+      'mdd-explore': { tools: { ...pinned } },
+      'mdd-propose': { tools: { ...pinned } },
+      'mdd-spec': { tools: { ...pinned } },
+      'mdd-design': { tools: { ...pinned } },
+      'mdd-tasks': { tools: { ...pinned } },
+      'mdd-verify': { tools: { ...pinned } },
     },
   });
+  // The coordinator dispatches phases, so it keeps both.
+  assert.equal(config.agent['mdd-orchestrator'].tools, undefined);
 });
 
 test('plugin config contract: a stored reasoning effort is applied as a native variant, never as part of the model', async t => {

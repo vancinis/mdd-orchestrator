@@ -22,10 +22,14 @@ export const PHASE_RESULT_FIELDS: Record<Phase, readonly string[]> = Object.free
   'mdd-spec': ['domain', 'acceptance'],
   'mdd-design': ['decisions'],
   'mdd-tasks': ['deliverables'],
-  'mdd-apply': ['changes', 'noChangeReason'],
+  // Apply is told to report the commands it ran, and for a long time reporting them was what got
+  // it rejected: the field belonged to Verify alone. Implementation checks are evidence the phase
+  // genuinely produced, so it keeps them. They are recorded as its claim; only Verify's checks
+  // earn the checks evidence flag.
+  'mdd-apply': ['changes', 'noChangeReason', 'checks'],
   'mdd-verify': ['checks', 'verification'],
 });
-const FIELD_SCHEMA: Record<string, string> = {
+export const FIELD_SCHEMA: Record<string, string> = {
   acceptance: 'acceptance={goal,requirements:[{id,description,scenarios:[{id,given,when,then}]}]}. Keep IDs stable.',
   decisions: 'decisions=[{id,description,requirements:[requirementID]}]; empty when the work needs no decision.',
   deliverables: 'deliverables=[{id,description,path,check,scenarios:[scenarioID],decisions:[decisionID],dependsOn:[earlierStepID]}]. Keep IDs stable. Every scenario and relevant decision must map to an applicable step.',
@@ -35,15 +39,19 @@ const FIELD_SCHEMA: Record<string, string> = {
   checks: 'checks=[{command,exit}] reports only checks this phase actually ran.',
   verification: 'verification={scenarios:[{requirementID,scenarioID,stepID,status,checks:[command],assessment}],steps:[{stepID,status,checks,assessment}],decisions:[{decisionID,status,checks,assessment}],changes,limits:[]}. Status is verified/not-verified/deviation. Assessment explains source evidence and limits, not just a pass label. Cover all held links exactly once.',
 };
-/** Prompt text for exactly the fields this phase may return, and for no other field. */
-export function phaseSchemaLines(phase: Phase): string[] {
-  const fields = PHASE_RESULT_FIELDS[phase];
-  return [
-    fields.length
-      ? `Phase fields for ${phase}: ${fields.join(', ')}. Any other field is rejected, so do not report fields belonging to another phase. Never emit confidence percentages.`
-      : `Phase fields for ${phase}: none beyond the common result object. Any extra field is rejected. Never emit confidence percentages.`,
-    ...fields.map(field => FIELD_SCHEMA[field]!),
-  ];
+/**
+ * Fields a phase reported that belong to no phase. They are dropped rather than fatal: a finished
+ * phase must not be discarded over a key it added in good faith, and the actor is told which ones
+ * were ignored so the next report is cleaner. Fields that carry meaning are still validated.
+ */
+export function phaseFields(phase: Phase, result: Record<string, unknown>): { fields: Record<string, unknown>; ignored: string[] } {
+  const allowed = new Set(['phase', 'runID', 'callID', 'outcome', 'evidenceSummary', 'artifact', 'concerns', ...PHASE_RESULT_FIELDS[phase]]);
+  const fields: Record<string, unknown> = {};
+  const ignored: string[] = [];
+  for (const [key, value] of Object.entries(result)) {
+    if (allowed.has(key)) fields[key] = value; else ignored.push(key);
+  }
+  return { fields, ignored: ignored.slice(0, 16) };
 }
 export function shortText(value: unknown, label: string, max = 500): string {
   if (typeof value !== 'string' || !value.trim() || value.length > max || /[\x00-\x1f\x7f]/.test(value)) throw new Error(`${label} must be concise nonempty text without control characters.`);

@@ -1,11 +1,20 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { PhaseRunner } from '../dist/phase-runner.js';
-import { phaseSchemaLines } from '../dist/acceptance.js';
-import { memoryServer, request, result, runtime, call, answers, installCleanup } from './adapter-fixture.mjs';
+import { reportFormatLines } from '../dist/phase-report.js';
+import { memoryServer, request, result, runtime, call, answers, installCleanup, traceFixture, ARTIFACT_TEXT, SUMMARY_TEXT } from './adapter-fixture.mjs';
 import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+
+/** The shape MDD accepted before reports became documents; still read, never asked for. */
+function legacyResult(status, outcome = 'passed') {
+  return JSON.stringify({
+    phase: status.phase, runID: status.runID, callID: call.callID, outcome,
+    evidenceSummary: SUMMARY_TEXT, artifact: ARTIFACT_TEXT,
+    ...(status.phase === 'mdd-plan' ? traceFixture() : status.phase === 'mdd-tasks' ? { deliverables: traceFixture().deliverables } : {}),
+  });
+}
 
 async function fixture(t, fault) {
   const memory = await memoryServer(t, fault);
@@ -29,13 +38,13 @@ for (const explore of [false, true]) {
     await runner.after(call, args, result(ready));
     const done = runner.status(runtime.sessionID);
     assert.equal(done.state, 'ready');
-    assert.ok(done.artifact.content.startsWith(JSON.parse(result(ready)).artifact));
+    assert.ok(done.artifact.content.startsWith(ARTIFACT_TEXT));
     if (!explore) assert.match(done.artifact.content, /Acceptance and plan links/);
     assert.equal(done.artifact.ref.store, 'none');
     done.artifact.content = 'changed';
     assert.notEqual(runner.status(runtime.sessionID).artifact.content, 'changed');
     assert.equal(Object.hasOwn(JSON.parse(writes[1].content), 'artifact'), false);
-    assert.ok(!writes[1].content.includes(JSON.parse(result(ready)).artifact));
+    assert.ok(!writes[1].content.includes(ARTIFACT_TEXT));
     assert.equal(done.workflow.results.length, 1);
     assert.equal(done.next.kind, 'execute');
     assert.equal(writes.length, 2);
@@ -51,16 +60,16 @@ test('runner contract: a phase prompt carries only the schema of its own result 
   const { runner, endpoint } = await fixture(t);
   const ready = await runner.start(request(endpoint), runtime);
   assert.equal(ready.phase, 'mdd-plan');
-  assert.match(ready.task.prompt, /Phase fields for mdd-plan: acceptance, decisions, deliverables\./);
+  assert.match(ready.task.prompt, /exactly these keys: acceptance, decisions, deliverables\./);
   // The injected mdd-doc guide names verification reports in prose; no verification schema leaks.
-  assert.doesNotMatch(ready.task.prompt, /verification=\{|Phase fields for mdd-verify/);
-  const plan = phaseSchemaLines('mdd-plan').join('\n');
-  const verify = phaseSchemaLines('mdd-verify').join('\n');
+  assert.doesNotMatch(ready.task.prompt, /verification=\{|keys: checks, verification/);
+  const plan = reportFormatLines('mdd-plan').join('\n');
+  const verify = reportFormatLines('mdd-verify').join('\n');
   assert.doesNotMatch(plan, /verification/);
-  assert.match(verify, /Phase fields for mdd-verify: checks, verification\./);
+  assert.match(verify, /exactly these keys: checks, verification\./);
   assert.match(verify, /verification=\{scenarios:/);
   assert.doesNotMatch(verify, /deliverables=/);
-  assert.match(phaseSchemaLines('mdd-explore').join('\n'), /none beyond the common result object/);
+  assert.match(reportFormatLines('mdd-explore').join('\n'), /reports no structured data/);
 });
 
 test('runner contract: high route starts only explore and preserves profile validation', async t => {
@@ -148,35 +157,76 @@ for (const kind of ['intent-write', 'intent-read', 'result-write', 'result-read'
   });
 }
 
-// A clean code fence is a syntactic wrapper that changes no validated field, so it is
-// unwrapped instead of failing a whole phase. Anything around it stays invalid.
-test('runner contract: a fenced envelope is unwrapped; prose around it is not', async t => {
-  const { runner, endpoint } = await fixture(t);
-  const ready = await runner.start(request(endpoint), runtime);
-  const args = await runner.before(call, ready.task);
-  const text = result(ready);
-  await runner.after(call, args, `\`\`\`json\n${text}\n\`\`\``);
-  assert.equal(runner.status(runtime.sessionID).workflow.results.length, 1);
-});
-for (const invalid of [
-  text => `Here it is:\n\`\`\`json\n${text}\n\`\`\``, text => `\`\`\`json\n${text}\n\`\`\`\ndone`,
-  () => '{}', () => 'not JSON',
-  text => JSON.stringify({ ...JSON.parse(text), phase: 'mdd-apply' }),
-  text => JSON.stringify({ ...JSON.parse(text), runID: 'wrong' }),
-  text => JSON.stringify({ ...JSON.parse(text), callID: 'wrong' }),
-  text => JSON.stringify({ ...JSON.parse(text), outcome: 'unknown' }),
-  text => JSON.stringify({ ...JSON.parse(text), evidenceSummary: '' }),
-  text => JSON.stringify({ ...JSON.parse(text), artifact: '' }),
-  text => JSON.stringify({ ...JSON.parse(text), artifact: 'x'.repeat(16001) }),
-  text => JSON.stringify({ ...JSON.parse(text), extra: true }),
+// A report is a document, not a payload. Prose around the sections, a fenced legacy object, and
+// fields no phase asked for are all forms of the same finished work: none of them is a reason to
+// run the phase again, so each of these is read rather than refused.
+for (const [label, tolerated] of [
+  ['prose framing the document', text => `Here is what I found.\n\n${text}\n\nHappy to expand on any of it.`],
+  ['a legacy JSON object', (_text, ready) => legacyResult(ready)],
+  ['a fenced legacy JSON object', (_text, ready) => `\`\`\`json\n${legacyResult(ready)}\n\`\`\``],
+  ['unprefixed headings', text => text.replaceAll('## MDD ', '## ')],
+  ['a field no phase reports', text => text.replace('"deliverables"', '"notes": "extra", "deliverables"')],
 ]) {
-  test(`runner contract: invalid bound result ${invalid.toString().slice(0, 95)}`, async t => {
+  test(`runner contract: a report is still read with ${label}`, async t => {
+    const { runner, endpoint } = await fixture(t);
+    const ready = await runner.start(request(endpoint), runtime);
+    const args = await runner.before(call, ready.task);
+    await runner.after(call, args, tolerated(result(ready), ready));
+    assert.equal(runner.status(runtime.sessionID).workflow.results.length, 1);
+  });
+}
+// A finished phase is never re-run over the shape of its report: each of these costs a
+// restatement, not an attempt, and the text comes back so the work survives the refusal.
+for (const invalid of [
+  () => 'I did the work and it went well.',
+  () => '## MDD Outcome\n\npassed\n\n## MDD Summary\n\nDone.\n',
+  text => text.replace('\npassed\n', '\nunknown\n'),
+  text => text.replace(/## MDD Summary\n\n[^\n]+/, '## MDD Summary\n\n'),
+  text => text.replace(/(## MDD Artifact\n\n)[^\n]+/, `$1${'x'.repeat(16001)}`),
+  text => text.replace('```json', '```json\nnot json'),
+  text => `${text}\n## MDD Summary\n\nsecond one\n`,
+]) {
+  test(`runner contract: unreadable report costs a restatement, not the phase ${invalid.toString().slice(0, 70)}`, async t => {
     const { runner, endpoint, writes } = await fixture(t);
     const ready = await runner.start(request(endpoint), runtime);
     const args = await runner.before(call, ready.task);
     await assert.rejects(runner.after(call, args, invalid(result(ready))));
-    assert.equal(runner.status(runtime.sessionID).workflow.results.length, 0);
+    const status = runner.status(runtime.sessionID);
+    assert.equal(status.workflow.results.length, 0);
+    assert.equal(status.attempts, 0, 'form is not an attempt');
+    assert.equal(status.mode, 'inline', 'the report comes back to be restated, not redispatched');
+    assert.equal(status.state, 'ready');
+    assert.ok(status.rejected.reason.length > 0);
     assert.equal(writes.length, 1);
+  });
+}
+
+// Four unreadable reports in a row is no longer only a transcription problem.
+test('runner contract: restatements are bounded and then spend the attempt', async t => {
+  const { runner, endpoint } = await fixture(t);
+  const ready = await runner.start(request(endpoint), runtime);
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const args = await runner.before({ ...call, callID: `call_${attempt}` }, runner.status(runtime.sessionID).task);
+    await assert.rejects(runner.after({ ...call, callID: `call_${attempt}` }, args, 'nothing readable here'));
+    assert.equal(runner.status(runtime.sessionID).attempts, 0);
+  }
+  const args = await runner.before({ ...call, callID: 'call_last' }, runner.status(runtime.sessionID).task);
+  await assert.rejects(runner.after({ ...call, callID: 'call_last' }, args, 'still nothing readable'));
+  assert.equal(runner.status(runtime.sessionID).attempts, 1);
+});
+
+// Stated binding is checked when it is stated. It can only reject a mismatch, never allow one.
+for (const wrong of [
+  text => text.replace(/## MDD Phase\n\n[^\n]+/, '## MDD Phase\n\nmdd-apply'),
+  text => text.replace(/## MDD Run\n\n[^\n]+/, '## MDD Run\n\nwrong'),
+]) {
+  test(`runner contract: a report naming another phase or run is refused ${wrong.toString().slice(0, 60)}`, async t => {
+    const { runner, endpoint } = await fixture(t);
+    const ready = await runner.start(request(endpoint), runtime);
+    const args = await runner.before(call, ready.task);
+    const bound = `## MDD Phase\n\n${ready.phase}\n\n## MDD Run\n\n${ready.runID}\n\n${result(ready)}`;
+    await assert.rejects(runner.after(call, args, wrong(bound)), /names a different phase, run or call/);
+    assert.equal(runner.status(runtime.sessionID).workflow.results.length, 0);
   });
 }
 
@@ -252,7 +302,7 @@ for (const store of ['none', 'engram', 'openspec', 'both']) {
     const status = runner.status(runtime.sessionID);
     assert.equal(status.state, 'ready');
     assert.equal(status.artifact.ref.store, store);
-    assert.ok(status.artifact.content.startsWith(JSON.parse(result(ready)).artifact));
+    assert.ok(status.artifact.content.startsWith(ARTIFACT_TEXT));
     assert.match(status.artifact.content, /Acceptance and plan links/);
     const general = writes.filter(write => write.type === 'workflow');
     assert.equal(general.length, 2);

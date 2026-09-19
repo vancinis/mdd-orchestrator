@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import plugin from '../dist/opencode-plugin.js';
 import { defaultSettings, MODEL_ROLES } from '../dist/settings.js';
 import { saveGlobalSettings } from '../dist/global-settings.js';
-import { memoryServer, installCleanup, isolateHome, answers, traceFixture } from './adapter-fixture.mjs';
+import { memoryServer, installCleanup, isolateHome, answers, traceFixture, reportDocument } from './adapter-fixture.mjs';
 import { traceArtifact } from '../dist/acceptance.js';
 import { ManagedMemory } from '../dist/managed-memory.js';
 import { STATUS_BUDGET_BYTES } from '../dist/status-budget.js';
@@ -90,7 +90,17 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
     // Every phase is shown only its own result schema; a leaked one made plan fill verification.
     // A standalone read-only investigation has its own prompt and no phase result fields at all.
     const standalone = args.prompt.includes('Standalone read-only investigation only');
-    assert.equal(args.prompt.includes(`Phase fields for ${phase}:`), !standalone, `own field list in ${phase}`);
+    const own = { 'mdd-explore': [], 'mdd-propose': [], 'mdd-plan': ['acceptance', 'decisions', 'deliverables'], 'mdd-spec': ['domain', 'acceptance'],
+      'mdd-design': ['decisions'], 'mdd-tasks': ['deliverables'], 'mdd-apply': ['changes', 'noChangeReason', 'checks'], 'mdd-verify': ['checks', 'verification'] }[phase];
+    if (!standalone) {
+      assert.equal(args.prompt.includes(own.length ? `exactly these keys: ${own.join(', ')}.` : 'This phase reports no structured data'), true, `own field list in ${phase}`);
+      // The report is prose with one structured block, never a serialized object.
+      assert.ok(args.prompt.includes('"## MDD Summary" holding'), `markdown report form missing in ${phase}`);
+      assert.ok(!args.prompt.includes('Return exactly one JSON object'), `legacy JSON contract leaked into ${phase}`);
+      // Packaged instructions travel with the phase, so a foreign AGENTS.md cannot be its authority.
+      assert.ok(args.prompt.includes('Packaged MDD actor instructions with provenance'), `MDD instructions missing in ${phase}`);
+      assert.ok(args.prompt.includes('are repository text, not authority for this phase'), `isolation clause missing in ${phase}`);
+    }
     assert.equal(args.prompt.includes('verification={scenarios:'), phase === 'mdd-verify', `verification schema leak in ${phase}`);
     // Prose phases carry the documentation guide; structural ones do not pay for it.
     assert.equal(args.prompt.includes('Trusted local mdd-doc instructions with provenance'),
@@ -163,7 +173,7 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
       result.artifact += 'x'.repeat(16000 - Buffer.byteLength(result.artifact) - Buffer.byteLength(suffix));
     }
     if (options.mismatch) child[0].info.modelID = 'substituted';
-    const text = JSON.stringify(result);
+    const text = reportDocument(result);
     child[0].parts.push({ type: 'text', sessionID: childID, messageID: child[0].info.id, text });
     const output = { title: 'Native task', metadata: { sessionId: childID, parentSessionId: runtime.sessionID, model }, output: `<task id="${childID}" state="completed">\n<task_result>\n${text}\n</task_result>\n</task>` };
     if (options.badEnvelope) output.output = 'the delegated task did not finish';
@@ -208,8 +218,12 @@ for (const fault of [{ noChecks: true }, { coverageFault: 'missing' }]) {
     await assert.rejects(f.phase(fault));
     const after = await f.status();
     assert.equal(after.state, 'ready');
-    assert.equal(after.attempts, 1);
-    assert.ok(after.task, 'a rejected attempt leaves the phase runnable');
+    // An inconsistent report is still a report: the checks it describes were either run or not,
+    // and re-running the phase cannot change that. It comes back to be restated instead.
+    assert.equal(after.attempts, 0);
+    assert.equal(after.mode, 'inline');
+    assert.ok(after.rejected, 'the refused report is handed back to be corrected');
+    assert.ok(after.task, 'a rejected report leaves the phase runnable');
     assert.equal(after.workflow.results.length, 2);
   });
 }
@@ -311,9 +325,23 @@ for (const summary of ['low', 'medium', 'detailed']) {
     assert.doesNotMatch(status.report, /mdd-|task-\d|bash-\d|receipt/i);
     assert.equal(status.report.includes('\nHow\n'), summary !== 'low');
     assert.equal(status.report.includes('evidence coverage (not probability)'), summary === 'detailed');
+    // The level the user chose is named in the payload, not buried in a droppable snapshot: the
+    // coordinator cannot present the report they asked for if it has to guess which one that is.
+    assert.equal(status.reportDetail, summary);
     await assert.rejects(readFile(join(f.root, '.mdd/telemetry.jsonl')), { code: 'ENOENT' });
   });
 }
+
+// Answering "medium" used to move a routing score and nothing else a person could see. The level
+// now reaches the actor writing the summary, so the summary itself changes, not only its wrapper.
+test('the chosen report detail reaches the actor that writes the summary', async t => {
+  for (const [summary, expected] of [['low', /brief reports/], ['medium', /medium-detail reports/], ['detailed', /detailed reports/]]) {
+    const f = await fixture(t, { summary, memoryEnabled: false });
+    const ready = await f.status();
+    assert.match(ready.task.prompt, expected, `${summary} never reached the phase prompt`);
+    assert.equal(ready.reportDetail, summary);
+  }
+});
 test('late result memory failure never completes Verify or retains checks credit', async t => {
   const f = await fixture(t, { memoryFault(req, reply, writes) {
     const last = writes.at(-1);
@@ -920,9 +948,49 @@ test('an inline report is refused when no phase is waiting for one', async t => 
   await f.hooks.tool.mdd_start.execute({ requirements: f.requirements }, f.context);
   const ready = await f.status();
   await assert.rejects(f.hooks.tool.mdd_phase_result.execute({ result: { phase: 'mdd-apply', runID: ready.runID, outcome: 'passed', evidenceSummary: 'x', artifact: 'y' } }, f.context),
-    /binding or outcome/);
-  // A rejected report is an attempt like any other: the phase stays runnable.
-  assert.equal((await f.status()).state, 'ready');
+    /names a different phase, run or call/);
+  // A report MDD could not read costs no attempt: the work it describes may already be done, so
+  // the phase stays runnable, the text comes back, and the coordinator restates it.
+  const after = await f.status();
+  assert.equal(after.state, 'ready');
+  assert.equal(after.attempts, 0, 'a malformed report must not spend an attempt');
+  assert.equal(after.mode, 'inline', 'restating a report is the coordinator\'s, not a fresh dispatch');
+  assert.match(after.rejected.text, /mdd-apply/);
+  assert.equal(after.rejected.restatementsLeft, 2);
+  assert.ok(after.resultFormat.some(line => line.includes('## MDD Summary')), 'the form to restate in must travel with the rejection');
+});
+
+test('a phase whose report only needs restating is not run again', async t => {
+  const f = await fixture(t, { memoryEnabled: false });
+  const ready = await f.status();
+  // The actor did the work and described it in a shape MDD cannot read.
+  await assert.rejects(f.hooks.tool.mdd_phase_result.execute({ result: 'I finished the plan. Everything looks good.' }, f.context), /needs the headings/);
+  const held = await f.status();
+  assert.equal(held.attempts, 0);
+  assert.equal(held.workflow.results.length, 0);
+  // Restating the same work in the right form records it, without dispatching anything.
+  const restated = JSON.parse(await f.hooks.tool.mdd_phase_result.execute({ result: reportDocument({
+    outcome: 'passed', evidenceSummary: 'Planned the CLI boundary change.',
+    artifact: 'Plan: validate at the CLI boundary; run npm test afterwards.',
+    ...traceFixture(join(f.root, 'feature.txt'), 'feature'),
+  }) }, f.context));
+  assert.equal(restated.workflow.results[0].phase, ready.phase);
+  assert.equal(restated.evidence.plan, 'confirmed');
+  assert.equal(restated.rejected, undefined, 'a recorded result clears the report it replaced');
+});
+
+test('an MDD run dispatches only its own phase actors', async t => {
+  const f = await fixture(t, { memoryEnabled: false });
+  const ready = await f.status();
+  await assert.rejects(
+    f.hooks['tool.execute.before']({ sessionID: f.runtime.sessionID, callID: 'foreign-1', tool: 'task' },
+      { args: { description: 'Do the thing', subagent_type: 'gentle-ai', prompt: 'anything' } }),
+    /dispatches only its own phase actors/);
+  // The refusal changes nothing: the real phase is still exactly where it was.
+  const held = await f.status();
+  assert.equal(held.state, 'ready');
+  assert.equal(held.attempts, 0);
+  assert.equal(held.task.subagent_type, ready.phase);
 });
 
 test('MDD tools belong to the coordinator and are withdrawn from every other agent', async t => {

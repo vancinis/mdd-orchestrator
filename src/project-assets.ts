@@ -5,12 +5,19 @@ import { scopedPath } from './safe-paths.js';
 import { MODEL_ROLES } from './settings.js';
 
 export const PACKAGE_ROOT = fileURLToPath(new URL('../', import.meta.url));
+/** Assets installed into the user's OpenCode config, where the host resolves them by name. */
 export const MDD_ASSETS = Object.freeze([
   ...MODEL_ROLES.map(role => `assets/opencode/agents/${role === 'orchestrator' ? 'mdd-orchestrator' : role}.md`),
   'assets/opencode/skills/mdd-cleanup/SKILL.md', 'assets/opencode/skills/mdd-doc/SKILL.md',
   'assets/opencode/skills/mdd-pr-body/SKILL.md',
   'assets/opencode/skills/mdd-pr-body/assets/template.md',
 ]);
+/**
+ * Shipped in the package and never installed. MDD's actor instructions are read from the package
+ * and injected into each phase prompt by value with their digest, so a copy in the shared config
+ * directory would add nothing except a file someone could edit to change what a phase obeys.
+ */
+export const MDD_PACKAGED_ASSETS = Object.freeze([...MDD_ASSETS, 'assets/opencode/mdd-instructions.md']);
 export function assetText(root: string, name: string, max = 16000): { path: string; content: string; digest: string } {
   const path = scopedPath(root, name);
   const fd = fs.openSync(path, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));

@@ -297,8 +297,30 @@ Both routes share one contract and one recording path, so artifacts, memory, evi
 workflow do not depend on which one produced the result. The next phase starts from
 delegation again, and delegating a handed-back phase a second time stays allowed.
 
-Strict result JSON retains phase/runID/callID/outcome/evidenceSummary/artifact and permits
-these phase-specific fields:
+A phase answers with a short markdown document, not a serialized object. `## MDD Outcome` holds
+`passed` or `failed`, `## MDD Summary` holds the prose a person reads first, `## MDD Artifact`
+holds the deliverable, and `## MDD Data` holds one fenced JSON block for the phases that carry
+traceability fields. `## MDD Concerns` is optional. The headings are prefixed so an artifact may
+use its own `## Summary` or `## Data` without being cut in half by the envelope carrying it, and
+a heading inside a fenced block is content rather than a delimiter. Unprefixed headings are read
+for a document that used no prefixed heading anywhere.
+
+Reading is deliberately lenient everywhere leniency cannot change a fact. Prose around the
+document is ignored, the legacy whole-message JSON object is still understood, and a field no
+phase reports is dropped and named rather than failing the phase. `phase`, `runID` and `callID`
+are checked when the actor states them and are never required: the dispatch was already matched
+by call ID and by exact task arguments, so stating them can only reject a mismatch, never
+authorize one. `mdd_status` returns `resultFormat`, the exact headings for the current phase, as
+a protected field, so a phase reported inline is never reported against a remembered shape.
+
+A report MDD cannot read is not a phase that failed. The work it describes is often finished and
+already in the working tree, so it costs a restatement rather than an attempt: the text comes
+back under `rejected`, the phase becomes the coordinator's to restate through
+`mdd_phase_result`, and the telemetry failure class is `result-malformed`, distinct from
+`result-rejected`. After `MALFORMED_RESTATEMENTS` (3) consecutive unreadable reports the attempt
+is spent normally, because a report nobody can state correctly is no longer only transcription.
+
+`## MDD Data` permits these phase-specific fields:
 - Plan: `acceptance`, `decisions`, and nonempty `deliverables`. The same single plan artifact
   contains the concise narrative and the adapter-appended canonical acceptance/step map.
 - Spec: `acceptance: { goal, requirements: [{ id, description, scenarios: [{ id, given, when, then }] }] }`.
@@ -310,7 +332,10 @@ these phase-specific fields:
   Dependencies refer to earlier steps. Paths and commands retain existing scope checks.
 - Spec: `domain: "project"`, matching the dispatched storage namespace.
 - Apply: `changes`, the file paths the phase changed. Alternatively `noChangeReason`, which
-  earns no implementation points.
+  earns no implementation points. Also `checks: [{ command, exit }]`, the commands Apply reports
+  having run. Its own agent definition asks for them, and rejecting the phase for supplying them
+  was one of the ways a finished implementation had to be run twice. They are recorded as the
+  phase's claim and shown as one; only Verify's checks earn the `checks` evidence flag.
 - Verify: `checks: [{ command, exit }]`, the commands the phase reports having run. `exit` is
   an integer, or `null` when the command did not finish. MDD records the claim as a claim: it
   never re-runs the command and an exit code is not a semantic certificate.

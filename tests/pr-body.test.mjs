@@ -11,9 +11,27 @@ test('PR renderer uses the local template exactly once per section and recorded 
   const result = renderPRBody(root(t), facts, 'Draft the PR body.');
   assert.deepEqual([...result.body.matchAll(/^## (.+)$/gm)].map(match => match[1]), ['Summary', 'Changes', 'Environment variables', 'Follow-ups', 'Blockers', 'Deployment']);
   assert.match(result.body, /2 scoped file/); assert.match(result.body, /npm test; exit 0/);
-  assert.match(result.body, /not independent review/); assert.match(result.body, /Unverified: no applicable information/);
+  assert.match(result.body, /not independent review/);
+  // A note the user never mentioned is not missing evidence, it is an inapplicable section, and
+  // the template, the skill and the docs all answer that with the same two words.
+  assert.match(result.body, /## Environment variables\n\nNot applicable\./);
   assert.equal(result.publication, 'not-authorized'); assert.match(result.provenance.skill.digest, /^[a-f0-9]{64}$/);
   assert.equal(result.provenance.skill.path, 'assets/opencode/skills/mdd-pr-body/SKILL.md');
+  // The body is rendered here from recorded facts, so it travels with an explicit instruction not
+  // to be rewritten: a coordinator that paraphrases it can only move it away from the template.
+  assert.equal(result.render, 'final');
+  assert.match(result.instruction, /verbatim/);
+});
+test('an ordinary goal is not mistaken for a credential and survives intact', t => {
+  // `/i` on the assignment pattern matched prose like "count = 5" and replaced the whole summary.
+  const result = renderPRBody(root(t), { ...facts, goal: 'Reject an order when count = 5 or the total is negative.' }, 'Draft.');
+  assert.match(result.body, /count = 5/);
+  assert.doesNotMatch(result.body, /text was omitted/);
+});
+test('an oversize goal is shortened rather than discarded', t => {
+  const result = renderPRBody(root(t), { ...facts, goal: `Validate orders. ${'detail '.repeat(300)}` }, 'Draft.');
+  assert.match(result.body, /Validate orders\./);
+  assert.match(result.body, /… \(truncated\)/);
 });
 test('PR draft without changes or successful verification stays explicitly incomplete', t => {
   const result = renderPRBody(root(t), { ...facts, changedFiles: 0, checks: [], verified: false, uncertain: true }, 'Draft only.');

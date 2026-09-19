@@ -125,11 +125,29 @@ fsync/power-loss durability is not guaranteed. Use a trusted project filesystem.
 
 ## Native assets and permissions
 
-The `assets/opencode/agents/mdd-*.md` package assets require the provider-generated strict
-result schema and exact phase/runID/native callID bindings. No phase actor ships a permission
-map: what an actor may do is the user's native decision, expressed once in their OpenCode
-permissions instead of being re-decided by MDD for every phase. Role discipline lives in the
-prose, where it belongs: a planning phase is told to plan rather than forbidden to act.
+The `assets/opencode/agents/mdd-*.md` package assets ask for the markdown report form described
+in the [adapter contract](opencode-adapter.md). No phase actor ships a permission map: what an
+actor may do is the user's native decision, expressed once in their OpenCode permissions instead
+of being re-decided by MDD for every phase. Role discipline lives in the prose, where it belongs:
+a planning phase is told to plan rather than forbidden to act.
+
+Capability is one thing; reach is another. MDD runs inside the user's own OpenCode, sharing a
+registry with every other agent, skill and instruction file installed there, so the phase actors
+are pinned in the `config` hook with `task: false` and `skill: false`. A phase actor is the
+actor — anything it delegated would run under instructions MDD never composed — and the skills a
+phase needs are already inlined in its prompt by value and digest, so a name lookup against the
+shared registry can only find something else. The coordinator keeps both, because dispatching
+phases is its job. While a run or an investigation is live, a `task` naming anything other than
+the eight phase actors is refused before it starts.
+
+Instruction files are the part a plugin cannot take away: the host prepends whatever `AGENTS.md`
+and `instructions` globs it finds to every agent, MDD's included. MDD answers by naming the text
+that governs a phase and delivering that text itself. `assets/opencode/mdd-instructions.md` is
+packaged, never installed, and injected into every phase prompt with its path and digest, beside
+an explicit statement that foreign instruction files are repository text rather than authority:
+they add no phases, demand no named skill, require no memory writes, change nothing a phase
+reports and relax no permission. It is deliberately not called `AGENTS.md`, since the host would
+then discover it and prepend it to unrelated sessions — the behaviour it exists to push back on.
 
 The coordinator carries one rule, `question: allow`, and nothing else. OpenCode denies
 `question` for every non-native agent and removes denied tools from the model's toolset

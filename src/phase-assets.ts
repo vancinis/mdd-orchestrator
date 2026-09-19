@@ -27,3 +27,23 @@ function packagedSkill(name: string): PackagedSkill {
 }
 export function cleanupInstructions(): PackagedSkill { return packagedSkill('mdd-cleanup'); }
 export function docInstructions(): PackagedSkill { return packagedSkill('mdd-doc'); }
+
+/**
+ * MDD's own actor instructions. The host prepends whatever `AGENTS.md` and `instructions` files
+ * it finds to every agent it runs, and a plugin cannot take them away. What it can do is say
+ * which text governs the phase, and deliver that text itself: packaged, digested, and injected
+ * by value, so the instructions an MDD phase answers to are MDD's and are the same every run.
+ */
+export function mddInstructions(): PackagedSkill {
+  // Deliberately not named AGENTS.md. The host discovers files with that name and prepends them
+  // to agents working anywhere near them, which would make MDD's own instructions leak into
+  // unrelated sessions — the exact behaviour this text exists to push back against.
+  const path = fileURLToPath(new URL('../assets/opencode/mdd-instructions.md', import.meta.url));
+  const digest = fileDigest(path);
+  if (digest === 'absent') throw new Error('The packaged MDD actor instructions are missing. Restore the MDD installation.');
+  const content = fs.readFileSync(path, 'utf8');
+  if (Buffer.byteLength(content) > 16000 || !content.startsWith('# MDD actor instructions')) {
+    throw new Error('Invalid packaged MDD actor instructions.');
+  }
+  return { path, digest, content };
+}

@@ -21,6 +21,15 @@ function record(value: unknown, subject = 'response'): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+/**
+ * The completed-task envelope the host wraps around a subagent's final message. It is matched
+ * leniently on purpose: the optional `<summary>` line and trailing whitespace are host-side
+ * variations that say nothing about whether the phase did its work, and rejecting the envelope
+ * discards a finished phase without ever reading it. Only the shape that identifies a completed
+ * task is required; the body is validated separately, where a real problem can be reported.
+ */
+export const TASK_ENVELOPE = /^<task id="[^"\r\n]*" state="completed">\r?\n(?:<summary>[^\r\n]*<\/summary>\r?\n)?<task_result>\r?\n([\s\S]*?)\r?\n?<\/task_result>\r?\n?<\/task>$/;
+
 /** MDD tools belong to the MDD coordinator. Other agents share the registry but not this state. */
 export const MDD_TOOLS = ['mdd_start', 'mdd_status', 'mdd_phase_result', 'mdd_reset', 'mdd_change_request', 'mdd_contextual_explore', 'mdd_context', 'mdd_pr_body'] as const;
 export const COORDINATOR = 'mdd-orchestrator';
@@ -40,6 +49,32 @@ export function restrictTools(config: { agent?: Record<string, Record<string, un
     for (const tool of MDD_TOOLS) if (tools[tool] === undefined) tools[tool] = false;
     if (tools['mdd_*'] === undefined) tools['mdd_*'] = false;
     agent.tools = tools;
+  }
+}
+
+/** The eight phase actors. The coordinator may dispatch these and nothing else. */
+export const PHASE_AGENTS: readonly string[] = Object.freeze([
+  'mdd-explore', 'mdd-plan', 'mdd-propose', 'mdd-spec', 'mdd-design', 'mdd-tasks', 'mdd-apply', 'mdd-verify',
+]);
+
+/**
+ * Closes the other direction. `restrictTools` keeps MDD's tools out of agents that are not MDD's;
+ * this keeps agents that are not MDD's out of MDD. A phase actor runs in a shared registry full
+ * of other people's agents and skills, and the only thing that used to stop it from reaching for
+ * them was a sentence in its prompt asking it not to.
+ *
+ * `task` goes because a phase actor is the actor: it carries the phase out itself, and anything
+ * it delegated would run under instructions MDD never composed. `skill` goes because the skills
+ * a phase needs are already inlined in its prompt by value and digest, so a name lookup against
+ * the shared registry can only find something else. The coordinator keeps both: it dispatches
+ * phases, and its own work is not a phase.
+ */
+export function pinPhaseAgents(config: { agent?: Record<string, Record<string, unknown>> }): void {
+  config.agent ??= {};
+  for (const name of PHASE_AGENTS) {
+    const agent = { ...config.agent[name] };
+    agent.tools = { ...(agent.tools as Record<string, boolean> | undefined), task: false, skill: false };
+    config.agent[name] = agent;
   }
 }
 
@@ -274,7 +309,7 @@ export function createInspector(input: PluginInput, timeout = 5000): Inspect & I
     async result(_runtime, _call, _phase, raw) {
       const output = record(raw, 'task result');
       const envelope = typeof output.output === 'string' ? output.output : '';
-      const match = /^<task id="[^"]*" state="completed">\r?\n<task_result>\r?\n([\s\S]*)\r?\n<\/task_result>\r?\n<\/task>$/.exec(envelope);
+      const match = TASK_ENVELOPE.exec(envelope.trim());
       if (!match) throw new Error('The delegated phase did not return a completed task result.');
       return boundedText(match[1], 'delegated phase result', 20000);
     },
@@ -327,7 +362,11 @@ const plugin: Plugin = async input => {
   const runner = new PhaseRunner(inspector, { telemetry: recordTelemetry, progress: new ProgressGuard(input.directory), dossier: new RunDossierStore(input.directory) });
   const intake = new NativeIntake(runner, inspector, settings);
   return {
-    config: async config => { applyModelOverrides(config, profile); restrictTools(config as Parameters<typeof restrictTools>[0]); },
+    config: async config => {
+      applyModelOverrides(config, profile);
+      restrictTools(config as Parameters<typeof restrictTools>[0]);
+      pinPhaseAgents(config as Parameters<typeof pinPhaseAgents>[0]);
+    },
     tool: {
       mdd_pr_body: tool({
         description: 'Draft only a PR body using the exact local skill/template and recorded current-run evidence. Never commits, pushes or publishes. Optional notes must quote whole lines of the actual latest user text; unknown facts remain unverified.',
@@ -389,8 +428,8 @@ const plugin: Plugin = async input => {
         },
       }),
       mdd_phase_result: tool({
-        description: 'Report a phase you carried out yourself, instead of delegating it. Same result object a delegated phase returns, without a callID. Use it when delegation failed or when doing the work directly is simply the better route.',
-        args: { result: tool.schema.unknown().describe('The phase result object, or its exact JSON text: phase, runID, outcome, evidenceSummary, artifact and the fields this phase requires.') },
+        description: 'Report a phase you carried out yourself, or restate one whose report MDD could not read. Same markdown report a delegated phase returns, without a callID; mdd_status.resultFormat states the exact headings. Use it when delegation failed, when a rejected report only needs restating, or when doing the work directly is simply the better route.',
+        args: { result: tool.schema.string().min(1).describe('The phase report as markdown: "## MDD Outcome" with passed or failed, "## MDD Summary" with prose a person reads, "## MDD Artifact" with the deliverable, and "## MDD Data" with one fenced json block when the phase has fields. mdd_status.resultFormat states the exact form for the current phase.') },
         async execute(args, context) {
           coordinatorOnly(context.agent, 'mdd_phase_result');
           if (context.abort.aborted) throw new Error('The phase report was aborted.');
@@ -432,6 +471,16 @@ const plugin: Plugin = async input => {
     'tool.execute.before': async (input, output) => {
       if (input.tool === 'question') return intake.beforeQuestion(input, output.args);
       if (input.tool !== 'task') return;
+      // An MDD conversation dispatches MDD phases. Reaching past them into the shared registry is
+      // refused here rather than discouraged in a prompt, because the agent that answers an
+      // unrelated name runs under instructions MDD never wrote and reports evidence MDD cannot
+      // account for. Conversations MDD is not running are untouched: this only speaks for its own.
+      if (runner.governs(input.sessionID)) {
+        const subagent = (output.args as { subagent_type?: unknown }).subagent_type;
+        if (typeof subagent !== 'string' || !PHASE_AGENTS.includes(subagent)) {
+          throw new Error(`An MDD run dispatches only its own phase actors (${PHASE_AGENTS.join(', ')}); ${typeof subagent === 'string' ? JSON.stringify(subagent) : 'this task'} is not one of them. Nothing was started. Read mdd_status and dispatch the task it returns, or carry the phase out yourself with your own tools.`);
+        }
+      }
       intake.guardTask(input.sessionID);
       const args = await runner.before(input, output.args);
       if (args) Object.assign(output.args, args);

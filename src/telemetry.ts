@@ -20,7 +20,10 @@ const MAX_COST = 1e9;
  * in every row, which free text reported by a model cannot promise.
  */
 export const FAILURE_CLASSES = Object.freeze([
-  'phase-failed', 'result-rejected', 'dispatch-mismatch', 'native-error', 'route-blocked', 'stopped',
+  // `result-malformed` is deliberately separate from `result-rejected`: one says the report could
+  // not be read, the other says the work behind it could not be accepted. Counting them together
+  // hid the single most common and cheapest-to-fix reason a phase had to be run twice.
+  'phase-failed', 'result-rejected', 'result-malformed', 'dispatch-mismatch', 'native-error', 'route-blocked', 'stopped',
 ] as const);
 export type FailureClass = typeof FAILURE_CLASSES[number];
 const PHASES = MODEL_ROLES.filter((role): role is Phase => role !== 'orchestrator');

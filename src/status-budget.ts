@@ -21,6 +21,10 @@ export const STATUS_PROTECTED_FIELDS: readonly string[] = Object.freeze([
   'task', 'brief', 'question', 'state', 'phase', 'next', 'mode', 'reason', 'runID', 'sessionID',
   'runtime', 'questionReceipts', 'recovery', 'pendingStart', 'notice', 'provenance', 'reset',
   'evidence', 'coverage', 'recoverable',
+  // Both are small and both are protocol. `resultFormat` is what a phase reported inline must
+  // look like, and `reportDetail` is the detail level the user chose; dropping either one puts
+  // the coordinator back to guessing, which is the failure these fields exist to end.
+  'resultFormat', 'reportDetail',
 ]);
 
 /**
@@ -35,6 +39,9 @@ export const STATUS_PROTECTED_FIELDS: readonly string[] = Object.freeze([
 export const STATUS_DROP_ORDER: readonly string[] = Object.freeze([
   'priorRun', 'previousRuns', 'contexts', 'contextualReport', 'providedContext', 'artifacts', 'artifactAttempts', 'artifact',
   'concerns', 'report', 'planned', 'decisions', 'acceptance', 'verification',
+  // A rejected report is the work itself, waiting to be restated. It sheds late, because dropping
+  // it turns a free restatement into re-running the phase that produced it.
+  'rejected',
   // A handful of refs, and it explains why the phase prompt carries summaries instead of full
   // artifacts. Shedding it early would drop the explanation exactly in the payloads that need it.
   'handoff', 'workflow',

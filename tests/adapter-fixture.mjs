@@ -76,11 +76,31 @@ export const call = { sessionID: runtime.sessionID, callID: 'call_one' };
 export function request(endpoint, explore = false) {
   return { preflight: { answers, explore }, requirements: 'Plan a safe change to the CLI.', project: 'mdd-test', engramEndpoint: endpoint };
 }
+/**
+ * Renders a phase result in the markdown form actors are actually asked for. Tests drive the
+ * contract the product ships, so the structured fields live in one fenced block and the rest is
+ * prose, exactly as a real actor writes it.
+ */
+export function reportDocument(result) {
+  const { phase, runID, callID, outcome, evidenceSummary, artifact, concerns, ...data } = result;
+  return [
+    ...(phase ? [`## MDD Phase\n\n${phase}\n`] : []),
+    ...(runID ? [`## MDD Run\n\n${runID}\n`] : []),
+    `## MDD Outcome\n\n${outcome ?? 'passed'}\n`,
+    `## MDD Summary\n\n${evidenceSummary}\n`,
+    `## MDD Artifact\n\n${artifact}\n`,
+    ...(Object.keys(data).length ? [`## MDD Data\n\n\`\`\`json\n${JSON.stringify(data, null, 2)}\n\`\`\`\n`] : []),
+    ...(concerns ? [`## MDD Concerns\n\n\`\`\`json\n${JSON.stringify(concerns)}\n\`\`\`\n`] : []),
+  ].join('\n');
+}
+
+export const SUMMARY_TEXT = 'Read src/cli.ts; no commands were executed.';
+export const ARTIFACT_TEXT = 'Plan: add validation at the CLI boundary. Later run CLI tests. Risk: preserve existing exit codes.';
 export function result(status, outcome = 'passed') {
-  return JSON.stringify({
-    phase: status.phase, runID: status.runID, callID: call.callID, outcome,
-    evidenceSummary: 'Read src/cli.ts; no commands were executed.',
-    artifact: 'Plan: add validation at the CLI boundary. Later run CLI tests. Risk: preserve existing exit codes.',
+  return reportDocument({
+    outcome,
+    evidenceSummary: SUMMARY_TEXT,
+    artifact: ARTIFACT_TEXT,
     ...(status.phase === 'mdd-plan' ? traceFixture() : status.phase === 'mdd-tasks' ? { deliverables: traceFixture().deliverables } : {}),
   });
 }
