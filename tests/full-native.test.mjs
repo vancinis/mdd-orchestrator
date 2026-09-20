@@ -73,11 +73,28 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
   }
   let index = 0;
   const visited = [];
+  // What the last dispatched actor actually received. The parent only ever sees a handle now, so
+  // assertions about prompt content belong here, where the prompt is really delivered.
+  let delivered;
   async function phase(options = {}) {
     const current = await status();
     const args = current.task;
     assert.ok(args, `Expected task, got ${current.state}`);
     const phase = args.subagent_type;
+    // The parent conversation is handed a dispatch handle, never the prompt itself. That is the
+    // contract: the prompt is what fills a coordinator's context window and gets it compacted,
+    // and the actor receives it all the same because the hook expands the handle below.
+    assert.ok(args.prompt.startsWith('mdd:dispatch:'), `status handed the full prompt for ${phase}`);
+    assert.ok(Buffer.byteLength(JSON.stringify(args)) < 300, `oversized dispatched task for ${phase}`);
+    assert.equal(current.dispatch.mode, 'handle');
+    assert.deepEqual(current.nextAction.args, args, `nextAction must carry the dispatchable task for ${phase}`);
+    const callID = `task-${++index}`;
+    const call = { sessionID: runtime.sessionID, callID, tool: 'task' };
+    parent[1].parts = [{ type: 'tool', tool: 'task', callID, state: { status: 'running', input: args } }];
+    await hooks['tool.execute.before'](call, { args });
+    // Expanded in place by the hook, so from here `args` is exactly what the actor receives.
+    assert.ok(args.prompt.length > 1000, `the handle was not expanded for ${phase}`);
+    delivered = args.prompt;
     // A dependency reaches the phase in full, or as its recorded summary and ref when inlining
     // every artifact would exceed the handoff budget. What it never does is disappear silently.
     const announced = /appear above as their recorded summary and ref/.test(args.prompt);
@@ -105,10 +122,6 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
     // Prose phases carry the documentation guide; structural ones do not pay for it.
     assert.equal(args.prompt.includes('Trusted local mdd-doc instructions with provenance'),
       !['mdd-tasks', 'mdd-apply'].includes(phase), `mdd-doc injection for ${phase}`);
-    const callID = `task-${++index}`;
-    const call = { sessionID: runtime.sessionID, callID, tool: 'task' };
-    parent[1].parts = [{ type: 'tool', tool: 'task', callID, state: { status: 'running', input: args } }];
-    await hooks['tool.execute.before'](call, { args });
     const childID = `child-${index}`;
     parent[1].parts[0].state.metadata = { sessionId: childID, parentSessionId: runtime.sessionID, model };
     sessions.set(childID, { id: childID, parentID: runtime.sessionID, directory: root, projectID: 'project', agent: phase, permission: [{ permission: 'task', pattern: '*', action: 'deny' }] });
@@ -182,7 +195,8 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
     return status();
   }
   if (start) await hooks.tool.mdd_start.execute({ requirements }, context);
-  return { root, settings, hooks, status, phase, answer, user, change, input, context, parent, runtime, visited, requirements, writes: memory.writes, questions: () => questionCount };
+  return { root, settings, hooks, status, phase, answer, user, change, input, context, parent, runtime, visited, requirements,
+    delivered: () => delivered, writes: memory.writes, questions: () => questionCount };
 }
 
 for (const route of ['low', 'high']) for (const store of ['none', 'openspec']) for (const mode of ['automatic', 'interactive']) {
@@ -337,9 +351,9 @@ for (const summary of ['low', 'medium', 'detailed']) {
 test('the chosen report detail reaches the actor that writes the summary', async t => {
   for (const [summary, expected] of [['low', /brief reports/], ['medium', /medium-detail reports/], ['detailed', /detailed reports/]]) {
     const f = await fixture(t, { summary, memoryEnabled: false });
-    const ready = await f.status();
-    assert.match(ready.task.prompt, expected, `${summary} never reached the phase prompt`);
-    assert.equal(ready.reportDetail, summary);
+    assert.equal((await f.status()).reportDetail, summary);
+    await f.phase();
+    assert.match(f.delivered(), expected, `${summary} never reached the phase prompt`);
   }
 });
 test('late result memory failure never completes Verify or retains checks credit', async t => {
@@ -381,9 +395,13 @@ for (const fault of ['missing', 'invented', 'drift', 'partial']) {
 test('a long route compacts its oldest artifacts instead of dying at the handoff budget', async t => {
   const f = await fixture(t, { route: 'high' });
   let compacted;
+  // The compacted handoff is announced in the prompt of the phase that follows it, and that
+  // prompt only exists where it is delivered: in the arguments the hook expands for the actor.
+  let compactedPrompt;
   for (let i = 0; i < 7; i++) {
     // Verify reports its own links, which share the artifact bound, so it does not fill it.
     await f.phase({ large: i < 6 });
+    if (compacted && compactedPrompt === undefined) compactedPrompt = f.delivered();
     const current = await f.status();
     if (current.handoff && current.task) compacted ??= current;
   }
@@ -394,9 +412,12 @@ test('a long route compacts its oldest artifacts instead of dying at the handoff
   // Oldest first, and the phase that produced each one is still named with its store record.
   assert.equal(compacted.handoff.summarized[0].phase, 'mdd-explore');
   assert.ok(compacted.handoff.summarized.every(item => item.recordID));
-  assert.equal(compacted.task.prompt.includes('Artifact for mdd-explore'), false);
-  assert.match(compacted.task.prompt, /appear above as their recorded summary and ref/);
-  assert.ok(Buffer.byteLength(compacted.task.prompt) <= 96000);
+  assert.ok(compactedPrompt, 'the compacted handoff must reach an actor');
+  assert.equal(compactedPrompt.includes('Artifact for mdd-explore'), false);
+  assert.match(compactedPrompt, /appear above as their recorded summary and ref/);
+  assert.ok(Buffer.byteLength(compactedPrompt) <= 96000);
+  // The coordinator never pays for any of it: what reaches the parent is the handle alone.
+  assert.ok(compacted.task.prompt.startsWith('mdd:dispatch:'));
 });
 test('telemetry storage failure is bounded and does not fabricate a failed phase', async t => {
   const f = await fixture(t);
@@ -461,8 +482,10 @@ test('confirmed material change replans from new requirements after one grouped 
   f.user('Change the scope to include an integration.');
   await f.change('material', 'New integration requirements.'); await f.answer(); await f.answer();
   const next = await f.status();
-  assert.notEqual(next.runID, old.runID); assert.match(next.task.prompt, /New integration requirements/);
+  assert.notEqual(next.runID, old.runID);
   assert.equal(next.workflow.results.length, 0); assert.equal(next.acceptance, undefined);
+  await f.phase();
+  assert.match(f.delivered(), /New integration requirements/);
 });
 test('invalid change parameters and wrong user text do not poison a ready plan', async t => {
   const f = await fixture(t); const old = await f.status();
@@ -508,9 +531,10 @@ for (const mode of ['automatic', 'interactive']) {
     assert.equal(current.contexts[0].artifact.ref.explorationID, current.contexts[0].explorationID);
     assert.deepEqual(current.question, old.question);
     if (current.question) await f.answer();
-    assert.match((await f.status()).task.prompt, /Contextual findings/);
-    assert.match((await f.status()).task.prompt, /integration assumption needs inspection/);
     await f.phase();
+    // What the investigation found reaches the next actor as advisory data, never as approval.
+    assert.match(f.delivered(), /Contextual findings/);
+    assert.match(f.delivered(), /integration assumption needs inspection/);
     assert.equal((await f.status()).contextualReport, undefined);
     assert.equal((await f.status()).contexts.length, 1);
   });
@@ -520,8 +544,8 @@ test('side exploration does not expose Apply capabilities and invalid purpose le
   await assert.rejects(f.hooks.tool.mdd_contextual_explore.execute({ purpose: 'x'.repeat(2001) }, f.context));
   assert.deepEqual((await f.status()).task, old.task);
   await f.hooks.tool.mdd_contextual_explore.execute({ purpose: 'Inspect only.' }, f.context);
-  assert.match((await f.status()).task.prompt, /Contextual exploration only/);
   await f.phase({ outcome: 'failed' });
+  assert.match(f.delivered(), /Contextual exploration only/);
   assert.deepEqual((await f.status()).workflow, old.workflow); assert.equal((await f.status()).contexts[0].outcome, 'failed');
 });
 // Regression: one grep refused outside the workspace used to block the whole investigation,
@@ -643,10 +667,10 @@ test('read-only investigation answers without an accepted run and leaves impleme
   const ready = await f.status();
   assert.equal(ready.contextual, true);
   assert.equal(ready.task.subagent_type, 'mdd-explore');
-  assert.match(ready.task.prompt, /Standalone read-only investigation only/);
-  assert.match(ready.task.prompt, /No MDD run is accepted/);
   await assert.rejects(f.hooks.tool.mdd_contextual_explore.execute({ purpose: 'A concurrent investigation.' }, f.context), /already in progress/);
   await f.phase();
+  assert.match(f.delivered(), /Standalone read-only investigation only/);
+  assert.match(f.delivered(), /No MDD run is accepted/);
   const done = await f.status();
   assert.equal(done.task, undefined);
   assert.equal(done.contextual, false);
@@ -831,7 +855,13 @@ test('a side exploration that does not complete restores the main plan untouched
   const status = await f.status();
   assert.deepEqual(status.workflow, main.workflow); assert.deepEqual(status.evidence, main.evidence);
   assert.equal(status.contextual, false);
-  assert.deepEqual(status.task, main.task);
+  // The restored plan is the same phase and the same task; only its handle is retired with the
+  // investigation that borrowed the dispatch, so a stale one cannot start the main phase.
+  assert.equal(status.task.description, main.task.description);
+  assert.equal(status.task.subagent_type, main.task.subagent_type);
+  assert.notEqual(status.task.prompt, main.task.prompt);
+  await f.phase();
+  assert.match(f.delivered(), /Perform only mdd-plan/);
 });
 test('advisory concerns alone do not change routing or create a confirmation question', async t => {
   const f = await fixture(t); const initial = await f.status();
@@ -916,8 +946,9 @@ test('a failed delegation hands the phase to the coordinator, which finishes it 
   assert.equal(retry.mode, 'delegate');
   assert.equal(retry.attempts, 1);
   assert.equal(retry.brief, undefined);
-  assert.match(retry.task.prompt, /previous attempt at this exact phase did not complete/);
   await assert.rejects(f.phase({ badEnvelope: true }), /now yours/);
+  // The second attempt was dispatched carrying what the first one failed at.
+  assert.match(f.delivered(), /previous attempt at this exact phase did not complete/);
   const handed = await f.status();
   assert.equal(handed.state, 'ready');
   assert.equal(handed.mode, 'inline');
@@ -1041,6 +1072,106 @@ test('native PR-body tool drafts recorded facts without changing workflow, appro
   assert.equal(draft.publication, 'not-authorized'); assert.equal(draft.provenance.runID, before.runID);
   assert.ok(!draft.body.includes(f.root)); assert.deepEqual(await f.status(), before); assert.equal(f.writes.length, writes);
 });
+// The coordinator's context window is a resource the protocol spends. It used to spend it twice
+// per attempt on a prompt the coordinator never reads, which is what filled it and got the
+// conversation compacted. What reaches the parent now is a handle and the derived next call.
+test('the dispatch contract keeps whole phase prompts out of the coordinator conversation', async t => {
+  const f = await fixture(t, { route: 'high' });
+  let worst = 0;
+  let prompts = 0;
+  for (let i = 0; i < 3; i++) {
+    const ready = await f.status();
+    const text = JSON.stringify(ready);
+    worst = Math.max(worst, Buffer.byteLength(text));
+    assert.ok(ready.task.prompt.startsWith('mdd:dispatch:'));
+    assert.match(ready.dispatch.note, /single-use MDD dispatch handle/);
+    // Not one line of the phase prompt reaches the conversation, which is the whole claim.
+    assert.equal(text.includes('Perform only mdd-'), false, 'a phase prompt leaked into the parent payload');
+    assert.equal(text.includes('Packaged MDD actor instructions'), false);
+    await f.phase({ large: true });
+    // The actor still receives everything: nothing was shortened, only moved off the transcript.
+    assert.ok(Buffer.byteLength(f.delivered()) > 3000);
+    prompts += Buffer.byteLength(f.delivered());
+  }
+  // The dispatched prompts alone used to be written into this conversation twice over. What the
+  // parent keeps now is the run's own evidence, and it stays a fraction of what it carried.
+  assert.ok(worst < prompts / 2, `status payload grew to ${worst} bytes against ${prompts} bytes of prompt`);
+});
+
+test('a dispatch handle is single-use and never survives the prompt it stood for', async t => {
+  const f = await fixture(t);
+  const first = (await f.status()).task;
+  await f.phase();
+  const second = (await f.status()).task;
+  assert.notEqual(second.prompt, first.prompt, 'a new phase mints a new handle');
+  // A handle from a phase that is already recorded must not be able to start the next one.
+  await assert.rejects(f.hooks['tool.execute.before']({ ...f.runtime, callID: 'replay', tool: 'task' }, { args: first }),
+    /Read mdd_status and pass its exact task object/);
+  assert.equal((await f.status()).state, 'ready');
+});
+
+// A prompt that arrives as neither the handle nor the real text is the one failure that says the
+// handle did not travel. The run stops saving bytes rather than stop being dispatchable.
+test('a handle that cannot travel falls back to the full prompt instead of blocking the phase', async t => {
+  const f = await fixture(t);
+  const ready = await f.status();
+  await assert.rejects(f.hooks['tool.execute.before']({ ...f.runtime, callID: 'lost', tool: 'task' },
+    { args: { ...ready.task, prompt: 'I will write the prompt myself.' } }), /full phase prompt instead/);
+  const after = await f.status();
+  assert.equal(after.state, 'ready');
+  assert.equal(after.dispatch, undefined, 'the fallback stops advertising a handle');
+  assert.match(after.task.prompt, /Perform only mdd-plan/);
+  assert.deepEqual(after.nextAction.args, after.task);
+  // And the phase still dispatches, which is the entire point of degrading rather than refusing.
+  const output = { args: after.task };
+  await f.hooks['tool.execute.before']({ ...f.runtime, callID: 'recovered', tool: 'task' }, output);
+  assert.equal((await f.status()).state, 'await-result');
+  assert.match(output.args.prompt, /Native callID="recovered"/);
+});
+
+// Compaction is not a failure and MDD's state never lived in the transcript. What the coordinator
+// loses is its own memory of the protocol, so the run restates itself from state instead.
+test('a compacted conversation is handed the run back as a card, not left to reconstruct it', async t => {
+  const f = await fixture(t);
+  await f.phase();
+  const before = await f.status();
+  assert.equal(before.compacted, undefined);
+  assert.equal(before.runCard, undefined);
+  await f.hooks.event({ event: { type: 'session.compacted', properties: { sessionID: f.runtime.sessionID } } });
+  const after = await f.status();
+  assert.equal(after.compacted, 1);
+  assert.equal(after.runCard.runID, before.runID);
+  assert.equal(after.runCard.objective, f.requirements);
+  assert.deepEqual(after.runCard.completed, ['mdd-plan: passed']);
+  assert.equal(after.runCard.phase, after.phase);
+  assert.match(after.runCard.note, /must not be run again/);
+  // The card is a description, never a capability: nothing about the run moved.
+  assert.deepEqual(after.workflow, before.workflow);
+  assert.deepEqual(after.evidence, before.evidence);
+  assert.equal(after.nextAction.tool, 'task');
+  // Counted where the cost of an oversized conversation becomes visible.
+  const rollup = JSON.parse(await readFile(join(f.root, '.mdd/telemetry-rollup.json'), 'utf8'));
+  assert.equal(rollup.runs.compacted, 1);
+  // A conversation MDD is not running is none of its business.
+  await f.hooks.event({ event: { type: 'session.compacted', properties: { sessionID: 'ses_other' } } });
+  assert.equal((await f.status()).compacted, 1);
+});
+
+// A conversation that dies at its first question used to leave the workspace exactly as it found
+// it, so the most expensive failures were also the invisible ones.
+test('the workspace records that a coordinator opened MDD here, before any run exists', async t => {
+  const f = await fixture(t, { start: false, memoryEnabled: false });
+  assert.equal((await f.status()).state, 'not-started');
+  const sessions = (await readFile(join(f.root, '.mdd/sessions.jsonl'), 'utf8')).trimEnd().split('\n').map(line => JSON.parse(line));
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0].sessionID, f.runtime.sessionID);
+  assert.equal(sessions[0].agent, 'mdd-orchestrator');
+  assert.equal(sessions[0].directory, f.root);
+  // Recorded once per conversation, not once per tool call.
+  await f.status(); await f.status();
+  assert.equal((await readFile(join(f.root, '.mdd/sessions.jsonl'), 'utf8')).trimEnd().split('\n').length, 1);
+});
+
 test('PR-body tool preserves pending approval and refuses wrong user/parent evidence claims', async t => {
   const f = await fixture(t, { mode: 'interactive' }); await f.phase(); f.user('Draft a preliminary PR body.');
   const before = await f.status();

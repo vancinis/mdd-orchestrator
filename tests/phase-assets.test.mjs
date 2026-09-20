@@ -98,6 +98,18 @@ test('assets: the coordinator recovers an unanswered approval instead of losing 
   assert.match(text, /the same phase goes out again and its task\n\s+already carries what went wrong/);
 });
 
+// The prompt is the largest thing a run produces and the coordinator never needed to read it.
+// Carrying it here twice per attempt is what filled the window and got the conversation compacted.
+test('assets: the coordinator passes dispatch handles through and resumes after a compaction', () => {
+  const text = fs.readFileSync('assets/opencode/agents/mdd-orchestrator.md', 'utf8');
+  assert.match(text, /short dispatch handle/);
+  assert.match(text, /never ask MDD for the full prompt/);
+  assert.match(text, /spent once/);
+  assert.match(text, /It returns nextAction/);
+  assert.match(text, /Continue from runCard and nextAction/);
+  assert.match(text, /do not\n {2}tell the user that work was lost/);
+});
+
 // The coordinator once fetched a whole issue body, could not hand it over, and dropped it: the
 // only channel is mdd_start context or mdd_context, never an edited task prompt.
 test('assets: the coordinator hands gathered context to MDD instead of editing a task prompt', () => {

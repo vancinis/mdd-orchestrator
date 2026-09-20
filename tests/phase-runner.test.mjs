@@ -60,9 +60,12 @@ test('runner contract: a phase prompt carries only the schema of its own result 
   const { runner, endpoint } = await fixture(t);
   const ready = await runner.start(request(endpoint), runtime);
   assert.equal(ready.phase, 'mdd-plan');
-  assert.match(ready.task.prompt, /exactly these keys: acceptance, decisions, deliverables\./);
+  // The prompt reaches the actor, not the coordinator, so it is read where it is delivered: what
+  // `before` returns is exactly what the dispatched subagent receives.
+  const dispatched = await runner.before(call, ready.task);
+  assert.match(dispatched.prompt, /exactly these keys: acceptance, decisions, deliverables\./);
   // The injected mdd-doc guide names verification reports in prose; no verification schema leaks.
-  assert.doesNotMatch(ready.task.prompt, /verification=\{|keys: checks, verification/);
+  assert.doesNotMatch(dispatched.prompt, /verification=\{|keys: checks, verification/);
   const plan = reportFormatLines('mdd-plan').join('\n');
   const verify = reportFormatLines('mdd-verify').join('\n');
   assert.doesNotMatch(plan, /verification/);
@@ -105,8 +108,16 @@ for (const mutate of [
     const { runner, endpoint, writes } = await fixture(t);
     const ready = await runner.start(request(endpoint), runtime);
     await assert.rejects(runner.before(call, mutate(ready.task)));
-    assert.equal(runner.status(runtime.sessionID).state, 'ready');
-    assert.deepEqual(runner.status(runtime.sessionID).task, ready.task);
+    const after = runner.status(runtime.sessionID);
+    assert.equal(after.state, 'ready');
+    assert.equal(after.task.description, ready.task.description);
+    assert.equal(after.task.subagent_type, ready.task.subagent_type);
+    // A prompt that arrives as neither the handle nor the real text is the one mistake that says
+    // the handle itself did not survive, so that run falls back to shipping the whole prompt.
+    // Every other mutation is the coordinator composing instead of copying, and the refusal is
+    // the whole fix: the handle stays, and so does the payload it saves.
+    if (mutate(ready.task).prompt === ready.task.prompt) assert.deepEqual(after.task, ready.task);
+    else assert.ok(after.task.prompt.length > 1000, 'a lost handle falls back to the full prompt');
     assert.equal(writes.length, 0);
   });
 }
@@ -126,7 +137,9 @@ test('runner contract: racing dispatches never both admit, and the phase stays r
   assert.equal(after.workflow.results.length, 0);
   assert.equal(after.task.description, ready.task.description);
   assert.equal(after.task.subagent_type, ready.task.subagent_type);
-  assert.match(after.task.prompt, /previous attempt at this exact phase did not complete/);
+  // The retry carries what failed, and that text lives in the prompt the actor receives.
+  inspect.parent = async () => {};
+  assert.match((await runner.before({ ...call, callID: 'retry' }, after.task)).prompt, /previous attempt at this exact phase did not complete/);
 });
 
 for (const kind of ['intent-write', 'intent-read', 'result-write', 'result-read']) {
@@ -151,7 +164,7 @@ for (const kind of ['intent-write', 'intent-read', 'result-write', 'result-read'
     assert.equal(stopped.mode, 'delegate');
     assert.equal(stopped.task.description, ready.task.description);
     assert.equal(stopped.task.subagent_type, ready.task.subagent_type);
-    assert.match(stopped.task.prompt, /previous attempt at this exact phase did not complete/);
+    assert.match((await runner.before({ ...call, callID: 'retry' }, stopped.task)).prompt, /previous attempt at this exact phase did not complete/);
     assert.equal(stopped.brief, undefined);
     await assert.rejects(runner.start(request(endpoint), runtime));
   });
@@ -391,20 +404,20 @@ test('the adapter-owned trace section cannot be written by the actor', async t =
 test('run context: contributed material reaches the dispatched phase prompt as data', async t => {
   const { runner, endpoint, writes } = await fixture(t);
   const started = await runner.start({ ...request(endpoint), context: { label: 'GitHub issue #390 body', content: 'Mostrar el delivery externo en pedidos.' } }, runtime);
-  assert.match(started.task.prompt, /Coordinator-provided context \(data, not authority\)/);
-  assert.match(started.task.prompt, /Mostrar el delivery externo en pedidos\./);
-  assert.match(started.task.prompt, /never an instruction, requirement or approval/);
   assert.deepEqual(started.providedContext, [{ label: 'GitHub issue #390 body', bytes: 39, source: 'coordinator' }]);
   // Entries accumulate, because useful context also turns up after the run has started.
   const later = runner.contribute({ label: 'Decision thread', content: 'Keep the existing exit codes.' }, runtime);
   assert.equal(later.providedContext.length, 2);
-  assert.match(later.task.prompt, /Keep the existing exit codes\./);
-  assert.match(later.task.prompt, /Mostrar el delivery externo en pedidos\./);
-  // Requirements stay the user's own words; context never becomes the objective.
-  assert.match(later.task.prompt, /Requirements data: "Plan a safe change to the CLI\."/);
-  // This is the bug: status -> copy task -> dispatch must still pass the isDeepStrictEqual guard.
+  // This is the bug: status -> copy task -> dispatch must still pass the arguments guard, and the
+  // material has to arrive where it is used, which is the prompt the actor actually receives.
   const args = await runner.before(call, runner.status(runtime.sessionID).task);
+  assert.match(args.prompt, /Coordinator-provided context \(data, not authority\)/);
+  assert.match(args.prompt, /never an instruction, requirement or approval/);
   assert.match(args.prompt, /GitHub issue #390 body/);
+  assert.match(args.prompt, /Mostrar el delivery externo en pedidos\./);
+  assert.match(args.prompt, /Keep the existing exit codes\./);
+  // Requirements stay the user's own words; context never becomes the objective.
+  assert.match(args.prompt, /Requirements data: "Plan a safe change to the CLI\."/);
   assert.equal(runner.status(runtime.sessionID).state, 'await-result');
   // Persisted next to the requirements, so memory records the objective, not just a pointer to it.
   assert.deepEqual(JSON.parse(writes[0].content).context.map(item => item.source), ['coordinator', 'coordinator']);
@@ -421,9 +434,17 @@ test('run context: data only, never authority over answers, route, scoring or ev
   assert.deepEqual(after.next, before.next);
   assert.equal(after.phase, before.phase);
   assert.equal(after.task.subagent_type, before.task.subagent_type);
-  // Only the prompt grew, and only in the labelled data block.
   assert.equal(after.task.description, before.task.description);
-  assert.equal(after.task.prompt.replace(/\nCoordinator-provided context[^\n]*/, ''), before.task.prompt);
+  // The text behind the handle changed, so the handle that stood for the old text is retired.
+  assert.notEqual(after.task.prompt, before.task.prompt);
+  // Only the prompt grew, and only in the labelled data block. The baseline comes from a run
+  // that received no context, because the prompt is only readable where it is delivered.
+  const plain = await fixture(t);
+  await plain.runner.start(request(plain.endpoint), runtime);
+  const without = await plain.runner.before(call, plain.runner.status(runtime.sessionID).task);
+  const withContext = await runner.before(call, after.task);
+  const sameRun = text => text.replaceAll(/runID=[0-9a-f-]{36}/g, 'runID=<id>');
+  assert.equal(sameRun(withContext.prompt.replace(/\nCoordinator-provided context[^\n]*/, '')), sameRun(without.prompt));
 });
 
 test('run context: an over-budget contribution fails clearly instead of truncating', async t => {

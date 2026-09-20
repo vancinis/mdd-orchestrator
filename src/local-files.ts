@@ -6,7 +6,7 @@ export class LocalFileError extends Error {
   constructor() { super('Local storage unavailable or unsafe. Check project permissions and local file types.'); }
 }
 
-type LocalName = 'mdd.config.json' | 'mdd/setup-assets.json' | '.mdd/.gitignore' | '.mdd/telemetry.jsonl' | '.mdd/telemetry-rollup.json' | `.mdd/progress-${string}.json` | `.mdd/run-${string}.json`;
+type LocalName = 'mdd.config.json' | 'mdd/setup-assets.json' | '.mdd/.gitignore' | '.mdd/telemetry.jsonl' | '.mdd/telemetry-rollup.json' | '.mdd/sessions.jsonl' | `.mdd/progress-${string}.json` | `.mdd/run-${string}.json`;
 
 /**
  * A lock is only a cooperation hint between concurrent writers; atomicity comes from the
@@ -54,6 +54,7 @@ export class LocalFiles {
 
   #path(name: LocalName, create: boolean): string {
     if (name !== 'mdd.config.json' && name !== 'mdd/setup-assets.json' && name !== '.mdd/.gitignore' && name !== '.mdd/telemetry.jsonl' && name !== '.mdd/telemetry-rollup.json' &&
+        name !== '.mdd/sessions.jsonl' &&
         !/^\.mdd\/progress-[a-f0-9]{64}\.json$/.test(name) && !/^\.mdd\/run-[a-f0-9]{64}(\.discarded)?\.json$/.test(name)) throw new LocalFileError();
     directory(this.#root);
     const path = join(this.#root, name);

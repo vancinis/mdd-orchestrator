@@ -21,6 +21,13 @@ export const STATUS_PROTECTED_FIELDS: readonly string[] = Object.freeze([
   'task', 'brief', 'question', 'state', 'phase', 'next', 'mode', 'reason', 'runID', 'sessionID',
   'runtime', 'questionReceipts', 'recovery', 'pendingStart', 'notice', 'provenance', 'reset',
   'evidence', 'coverage', 'recoverable',
+  // The derived next call and the note explaining the dispatch handle are both small and both
+  // protocol: dropping either one puts the coordinator back to deriving the state machine from
+  // prose, which is the guessing these fields exist to end.
+  'nextAction', 'dispatch',
+  // A run restated for a conversation the host just rewrote. It is a few hundred bytes and it is
+  // the only description of the run that survives losing the transcript, so it is never shed.
+  'runCard', 'compacted',
   // Both are small and both are protocol. `resultFormat` is what a phase reported inline must
   // look like, and `reportDetail` is the detail level the user chose; dropping either one puts
   // the coordinator back to guessing, which is the failure these fields exist to end.

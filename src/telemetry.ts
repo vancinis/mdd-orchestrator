@@ -44,8 +44,14 @@ export type TelemetryEvent = {
    * `retry` and `handover` record what a failed attempt did next: delegate the same phase again,
    * or hand it to the coordinator. Without them a local log shows repeated blocked phases and no
    * way to tell a route that recovered from one that quietly stopped being delegated at all.
+   *
+   * `compaction` records that the host summarized the coordinator's conversation mid-run. It costs
+   * no tokens of MDD's own and it is not a failure, but it is the event behind a whole class of
+   * them: a coordinator that forgets which phase it is on redispatches, re-reports or stops. It
+   * was invisible until now, which is why the cost of an oversized phase handoff was only ever
+   * argued about rather than measured.
    */
-  event: 'preflight' | 'phase-start' | 'phase-end' | 'approval' | 'report' | 'retry' | 'handover' | 'reset';
+  event: 'preflight' | 'phase-start' | 'phase-end' | 'approval' | 'report' | 'retry' | 'handover' | 'reset' | 'compaction';
   phase?: Phase;
   duration?: number;
   route?: 'low' | 'high';
@@ -95,7 +101,7 @@ function parseUsage(value: unknown): TelemetryUsage {
 function parseEvent(value: unknown): TelemetryEvent {
   const input = objectWithKeys(value, 'event', ['timestamp', 'event', 'phase', 'duration', 'route', 'outcome', 'runID', 'attempt', 'mode', 'failure', 'usage']);
   if (!Number.isSafeInteger(input.timestamp) || (input.timestamp as number) < 0 || (input.timestamp as number) > 8640000000000000 ||
-      !['preflight', 'phase-start', 'phase-end', 'approval', 'report', 'retry', 'handover', 'reset'].includes(input.event as string)) {
+      !['preflight', 'phase-start', 'phase-end', 'approval', 'report', 'retry', 'handover', 'reset', 'compaction'].includes(input.event as string)) {
     throw new ValidationError('Invalid telemetry event.');
   }
   const result: TelemetryEvent = { timestamp: input.timestamp as number, event: input.event as TelemetryEvent['event'] };
@@ -149,7 +155,7 @@ type PhaseRollup = {
 export type TelemetryRollup = {
   version: typeof ROLLUP_VERSION;
   since: number; updated: number; events: number;
-  runs: { started: number; completed: number; blocked: number; reset: number };
+  runs: { started: number; completed: number; blocked: number; reset: number; compacted: number };
   routes: { low: number; high: number };
   failures: Record<FailureClass, number>;
   phases: { [Key in Phase]?: PhaseRollup };
@@ -164,7 +170,7 @@ function emptyPhase(): PhaseRollup {
 
 export function emptyRollup(now: number): TelemetryRollup {
   return { version: ROLLUP_VERSION, since: now, updated: now, events: 0,
-    runs: { started: 0, completed: 0, blocked: 0, reset: 0 }, routes: { low: 0, high: 0 },
+    runs: { started: 0, completed: 0, blocked: 0, reset: 0, compacted: 0 }, routes: { low: 0, high: 0 },
     failures: Object.fromEntries(FAILURE_CLASSES.map(name => [name, 0])) as Record<FailureClass, number>,
     phases: {} };
 }
@@ -177,7 +183,10 @@ function parseRollup(value: unknown): TelemetryRollup {
   rollup.updated = counter(input.updated, 8640000000000000);
   rollup.events = counter(input.events, MAX_COUNT);
   const runs = objectWithKeys(input.runs, 'rollup.runs', Object.keys(rollup.runs));
-  for (const key of Object.keys(rollup.runs) as (keyof TelemetryRollup['runs'])[]) rollup.runs[key] = counter(runs[key], MAX_COUNT);
+  // A counter added after a workspace started keeping totals is absent from its file, and that
+  // file is the only record older than retention. Treating the gap as zero keeps those totals;
+  // rejecting it would quietly discard every run the workspace had ever counted.
+  for (const key of Object.keys(rollup.runs) as (keyof TelemetryRollup['runs'])[]) rollup.runs[key] = counter(runs[key] ?? 0, MAX_COUNT);
   const routes = objectWithKeys(input.routes, 'rollup.routes', Object.keys(rollup.routes));
   for (const key of ['low', 'high'] as const) rollup.routes[key] = counter(routes[key], MAX_COUNT);
   const failures = objectWithKeys(input.failures, 'rollup.failures', FAILURE_CLASSES);
@@ -205,6 +214,7 @@ function fold(rollup: TelemetryRollup, event: TelemetryEvent): TelemetryRollup {
   if (event.event === 'report' && event.outcome === 'passed') rollup.runs.completed = add(rollup.runs.completed, 1);
   if (event.event === 'report' && event.outcome === 'blocked') rollup.runs.blocked = add(rollup.runs.blocked, 1);
   if (event.event === 'reset') rollup.runs.reset = add(rollup.runs.reset, 1);
+  if (event.event === 'compaction') rollup.runs.compacted = add(rollup.runs.compacted, 1);
   // An ended attempt and an ended run are both counted, because they are different facts: one
   // route dying after a rejected result is two things worth knowing. The `retry` and `handover`
   // rows repeat the class of the attempt they follow, so counting those too would inflate it.
@@ -363,6 +373,9 @@ export function renderTelemetryReport(rollup: TelemetryRollup | undefined, recen
   lines.push(`${rollup.events} event(s) since ${new Date(rollup.since).toISOString().slice(0, 10)} (${days} day(s)); ${recent} still inside the 30-day event window.`,
     '',
     `Runs: ${rollup.runs.started} started, ${rollup.runs.completed} completed, ${rollup.runs.blocked} blocked, ${rollup.runs.reset} reset. Routes: ${rollup.routes.low} low, ${rollup.routes.high} high.`,
+    ...(rollup.runs.compacted
+      ? [`The host compacted a coordinator conversation ${rollup.runs.compacted} time(s) mid-run. Each one costs the coordinator the state it was holding, so a rising count is a reason to look at what the conversation is carrying.`]
+      : []),
     '',
     row(COLUMNS.map(column => column.head)));
   const totals = emptyPhase();

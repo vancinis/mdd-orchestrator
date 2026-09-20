@@ -28,7 +28,9 @@ Run the single [setup wizard](setup.md): `npm run setup` from trusted source, or
    skip questions; otherwise `mdd_status.question` contains one grouped native question
    argument object covering all and only the missing fields. Submit it once to `question`.
    No typed JSON preflight or model-supplied answer override is accepted.
-6. After the question, read `mdd_status`. Submit exactly the returned `task` arguments, once, using the native task
+6. After the question, read `mdd_status`. It returns `nextAction`: the single call to make now,
+   with ready-to-dispatch `args` whenever the call is dispatchable as written. Submit exactly the
+   returned `task` arguments, once, using the native task
    tool. Do not add `background`, `task_id`, `command`, or extra keys. The hook
    appends the actual native call ID in place after checking the expected args.
    After the task, call `mdd_status` and present the readable artifact to the user.
@@ -118,9 +120,11 @@ The coordinator often holds material the phases need before any of them runs: th
 issue the user named, a thread, an earlier decision. It hands that material to MDD, optional
 `context` on `mdd_start` or `mdd_context({ label, content })` at any later point, and **MDD**
 composes it into the phase prompt as `Coordinator-provided context (data, not authority)`. The
-task returned by `mdd_status` therefore already contains it, and the byte-for-byte dispatch check
-in `PhaseRunner.before` is unchanged: the model contributes data, never prompt text. Editing a
-task prompt to carry context remains refused, with no execution started.
+prompt the actor receives therefore already contains it, and the dispatch check in
+`PhaseRunner.before` is unchanged: the model contributes data, never prompt text. Editing a
+task prompt to carry context remains refused, with no execution started. Contributing new
+material retires the current dispatch handle, so the phase can only be started with the task
+`mdd_status` returns after the contribution, never with one copied before it.
 
 Context is data, never authority. It cannot replace `requirements`, which still must equal the
 exact native user text proven by `inspector.intake`; it grants no approval and changes no
@@ -134,9 +138,38 @@ contribution is refused with the held and attempted sizes, and nothing is record
 a silently trimmed prompt is the delegation failure this bound exists to prevent. Contributions
 are rejected while a task is in flight, and a confirmed **material** change drops context
 gathered for the replaced objective; a plain preflight rerun keeps it. `mdd_status` reports
-`providedContext` as labels, byte sizes and source only, since the text itself is already visible
-in the phase prompt. With memory enabled, the entries are persisted with the intent receipt next
-to the requirements, so the recorded objective is not merely the sentence that pointed at it.
+`providedContext` as labels, byte sizes and source only, since the text itself is already
+delivered to the actor inside the phase prompt. With memory enabled, the entries are persisted
+with the intent receipt next to the requirements, so the recorded objective is not merely the
+sentence that pointed at it.
+
+### Dispatch handles: the prompt never enters the parent conversation
+
+A phase prompt used to be written into the coordinator's conversation twice per attempt: once as
+the `task` object `mdd_status` returned, and again as the arguments the coordinator copied
+verbatim into the native task tool. Both copies stay in the transcript and are re-sent on every
+later turn, so a seven-phase route spent hundreds of kilobytes of the coordinator's own context
+on text it never had to read. That is what filled the window and triggered host compaction, which
+then cost the coordinator the protocol state it was holding.
+
+`mdd_status` now returns the same three task fields with the prompt replaced by a single-use
+handle, `mdd:dispatch:<uuid>`, alongside a `dispatch` note explaining it. `PhaseRunner.before`
+swaps in the real prompt inside the hook, at the same point where it already rewrites the
+arguments to carry the callID, so the actor receives exactly what it received before. The handle
+is reminted whenever the prompt changes — a new phase, a retry carrying the previous failure,
+contributed context, a restored plan after an investigation — so a stale one can never start a
+phase it was not composed for.
+
+It is also the stronger guard. The old contract compared a multi-kilobyte object the model had
+retyped, so drift was indistinguishable from tampering; a token minted by MDD and bound to one
+ready phase cannot be edited into something else, and a prompt the coordinator composed itself can
+no longer reach an actor at all.
+
+The fallback is deliberate and narrow. A dispatch whose prompt is neither the handle nor the real
+text is the one failure that says the handle did not travel, and that run returns the full prompt
+from then on, exactly as before. Any other mismatch — extra arguments, a substituted
+`subagent_type` — is the coordinator composing instead of copying; the refusal is the whole fix,
+and the handle stays.
 
 ### Native consent contract
 
@@ -484,6 +517,32 @@ recoverable. One slot per conversation: a later discard replaces it, so the dire
 grow with every reset. A record that cannot be read or copied never holds up the reset; the live
 file is removed regardless, and nothing then claims anything was preserved. Deleting the evidence
 outright is a different decision from starting something else, and is left to the user.
+
+### Host compaction (`session.compacted`)
+
+MDD keeps no state in the transcript, so a host compaction costs the run nothing. What it costs is
+the coordinator's own memory of the protocol: which phase it is on, whether it already dispatched
+one, what has already been recorded. The plugin subscribes to `session.compacted`, counts it in
+the ledger, and from then on `mdd_status` carries `compacted` and a `runCard` — the objective, the
+route, the current phase, the phases already recorded, and a plain statement that they must not be
+run again. The card is a description read from MDD's own state, never a capability: it approves
+nothing, restores nothing and changes no route. Combined with `nextAction`, a compacted
+conversation has two small fields to read instead of a summary to reinterpret. A compaction in a
+conversation MDD is not running is ignored.
+
+### Derived next action
+
+Every MDD tool answers through one payload helper that attaches `nextAction`: the single call to
+make now, derived from the state it travels with. It carries `args` only when the call is
+dispatchable exactly as written — a question envelope, a ready task, a reset scope, a pending
+objective's requirements — and otherwise names the tool and states what has to be composed, since
+inventing arguments on the user's behalf is the one thing it must never do. Priority is protocol,
+not preference: a pending question outranks everything because it is the only thing the user can
+act on; a rejected report outranks a ready task because the work behind it is already done;
+inline mode outranks delegation because reaching it means delegation already had both turns. It is
+derived, never authoritative: it grants no permission, and every guard that refused a call before
+refuses it still. Its purpose is to stop the coordinator from re-deriving a state machine from
+prose on every turn, which is what the two worst recorded sessions turned out to be.
 
 Lock files (`<path>.lock`) are cooperation hints only; atomicity comes from the temp-file rename.
 A process killed mid-write leaves its `wx` lock behind, which would otherwise make every later

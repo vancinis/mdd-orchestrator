@@ -300,7 +300,7 @@ an undercount presented as a measurement is worse than none. Measurement never f
 an unreadable session yields a `usage-unavailable` diagnostic and the run continues.
 
 `.mdd/telemetry-rollup.json` holds fixed-key counters that outlive event retention: runs
-started/completed/blocked/reset, runs per route, failures per class, and per phase the starts,
+started/completed/blocked/reset/compacted, runs per route, failures per class, and per phase the starts,
 outcomes, retries, handovers, timed duration and summed usage. It contains no identity and no
 text, and nothing in it expires. A `retry` or `handover` row repeats the class of the attempt
 it follows, so only `phase-end` and `report` rows increment a failure counter. A rollup that
@@ -309,6 +309,23 @@ recorded, and a damaged rollup is never overwritten. `telemetry clear` deletes t
 the events it summarizes. `telemetry report` renders both locally with plain arithmetic: no
 model is asked what the numbers mean, and a workspace whose events predate its rollup is told
 exactly that instead of being reported as empty.
+
+A `compaction` row records that the host replaced a coordinator conversation with a summary
+mid-run. It is not a failure and costs MDD nothing directly, but it is the event behind a whole
+class of them — a coordinator that no longer remembers which phase it is on redispatches,
+re-reports or stops — and it was invisible until it was counted. A counter added after a
+workspace started keeping totals is read as zero rather than rejected, so an older rollup keeps
+the runs it had already counted.
+
+`.mdd/sessions.jsonl` is the earliest record in the workspace: one line the first time an
+`mdd-orchestrator` conversation calls any MDD tool here, holding the session identity, the agent,
+the workspace and a timestamp. It exists because the ledger used to learn that MDD had been used
+at all only once a phase had already produced an event, so every conversation that died earlier —
+at a question the host never delivered, at a stale marker, at setup — left the directory exactly
+as it found it. It is metadata only, never read by a run, written once per conversation, bounded
+to the most recent 500 rows, and governed by the same telemetry preference: with telemetry off,
+nothing is written. A damaged row is skipped rather than repaired, and a workspace that cannot be
+written to degrades silently, because instrumentation that can fail a run gets removed.
 
 `.mdd/telemetry.jsonl` is Git-ignored. Append/status prune rows at or older than 30 days;
 there is no background deletion for unused projects. Future timestamps are rejected on
