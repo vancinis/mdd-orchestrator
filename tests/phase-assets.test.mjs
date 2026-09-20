@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { test } from 'node:test';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { MDD_ASSETS, MDD_PACKAGED_ASSETS } from '../dist/project-assets.js';
 
 // Capability is the user's native decision, not MDD's. No packaged agent may ship its own
@@ -126,6 +128,18 @@ test('assets: the coordinator recovers an unanswered approval instead of losing 
   assert.match(text, /the same phase goes out again and its task\n\s+already carries what went wrong/);
 });
 
+// The prompt is the largest thing a run produces and the coordinator never needed to read it.
+// Carrying it here twice per attempt is what filled the window and got the conversation compacted.
+test('assets: the coordinator passes dispatch handles through and resumes after a compaction', () => {
+  const text = fs.readFileSync('assets/opencode/agents/mdd-orchestrator.md', 'utf8');
+  assert.match(text, /short dispatch handle/);
+  assert.match(text, /never ask MDD for the full prompt/);
+  assert.match(text, /spent once/);
+  assert.match(text, /It returns nextAction/);
+  assert.match(text, /Continue from runCard and nextAction/);
+  assert.match(text, /do not\n {2}tell the user that work was lost/);
+});
+
 // The coordinator once fetched a whole issue body, could not hand it over, and dropped it: the
 // only channel is mdd_start context or mdd_context, never an edited task prompt.
 test('assets: the coordinator hands gathered context to MDD instead of editing a task prompt', () => {
@@ -183,4 +197,22 @@ test('assets: PR template consistently retains all six sections and the per-file
   assert.match(skill, /one table row per changed file/);
   // The draft-only notice said something about MDD's permissions, not about the change.
   assert.match(skill, /Never add a notice saying the body is only a draft/);
+});
+
+// Setup refuses to install a package that does not match its assets, but nothing checked the
+// other direction while a run was live: an upgraded plugin next to an agent definition from an
+// older release is a coordinator reading instructions this adapter no longer speaks.
+test('assets: an installed actor definition that differs from the running package is named', async t => {
+  const { staleAssets } = await import('../dist/project-assets.js');
+  const home = fs.mkdtempSync(join(tmpdir(), 'mdd-stale-assets-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const environment = { home, env: {} };
+  const agents = join(home, '.config', 'opencode', 'agents');
+  fs.mkdirSync(agents, { recursive: true });
+  // Nothing installed proves nothing: running from source is ordinary, and installing is setup's job.
+  assert.deepEqual(staleAssets(environment), []);
+  fs.copyFileSync('assets/opencode/agents/mdd-plan.md', join(agents, 'mdd-plan.md'));
+  assert.deepEqual(staleAssets(environment), []);
+  fs.writeFileSync(join(agents, 'mdd-orchestrator.md'), '---\nmode: primary\n---\n\nAn older release.\n');
+  assert.deepEqual(staleAssets(environment), ['agents/mdd-orchestrator.md']);
 });

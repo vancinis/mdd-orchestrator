@@ -48,10 +48,41 @@ export const RUN_CONTEXT_MAX_BYTES = 8000;
 /** Provenance is explicit: this came from the coordinator, not from the user and not from a phase. */
 export type RunContext = { label: string; content: string; source: 'coordinator' };
 type TaskArgs = { description: string; subagent_type: string; prompt: string };
+
+/**
+ * A phase prompt used to be written into the parent conversation twice per attempt: once as the
+ * `task` object `mdd_status` returns, and again as the arguments the coordinator copies verbatim
+ * into the native task tool. Both copies stay in the transcript for the rest of the run and are
+ * re-sent on every later turn, so a seven-phase route spent hundreds of kilobytes of the
+ * coordinator's own context on text the coordinator never needed to read. That is what filled the
+ * window and triggered host compaction, which in turn cost the coordinator the state it was
+ * holding — a far more expensive failure than the tokens themselves.
+ *
+ * The handle closes that hole. `mdd_status` returns the same three task fields with the prompt
+ * replaced by a short single-use token, and `before` swaps in the real prompt inside the hook,
+ * where the arguments are already being rewritten to carry the callID. The actor receives exactly
+ * what it received before; only the parent stops paying for it.
+ *
+ * It is also the stronger guard. The old contract compared a multi-kilobyte object the model had
+ * retyped, so any drift was indistinguishable from tampering and the fix was to re-read status.
+ * A token is minted by MDD, belongs to one ready phase, and cannot be guessed or edited into
+ * something else: a prompt the coordinator composed itself can no longer reach an actor at all.
+ */
+export const DISPATCH_HANDLE_PREFIX = 'mdd:dispatch:';
+const DISPATCH_NOTE = 'The prompt in task is a single-use MDD dispatch handle, not a shortened or truncated prompt. MDD expands it into the full phase prompt inside the hook, so the actor receives the complete instructions, dependency artifacts and packaged MDD instructions exactly as before. Pass the three fields through unchanged: do not expand the handle yourself, do not substitute a prompt of your own, and do not ask MDD for the full text. Keeping it out of this conversation is what stops a long run from filling the context window and being compacted.';
 type State = 'starting' | 'ready' | 'persisting-intent' | 'await-result' | 'persisting-result' | 'blocked' | 'await-approval' | 'complete';
 type Run = {
   id: string; runtime: Runtime; workflow: Workflow; phase: Phase;
   requirements: string; memory: EngramHttp | undefined; args: TaskArgs; state: State;
+  /**
+   * The handle standing in for the current ready prompt, reminted whenever that prompt changes.
+   * `expose` is the escape hatch: once a dispatch arrives that matches neither the handle nor the
+   * full task, this run goes back to shipping the whole prompt, because a coordinator that cannot
+   * pass a token through must still be able to dispatch the phase.
+   */
+  token?: string; expose?: 'full';
+  /** How many times the host compacted this conversation. State lives here, not in the transcript. */
+  compactions?: number;
   callID?: string; lastCallID?: string; dispatchedArgs?: TaskArgs; reason?: string;
   /**
    * Failed attempts at the phase running now, reset when the route reaches the next one. `spent`
@@ -94,7 +125,7 @@ type Run = {
 };
 /** A read-only investigation that exists without an accepted run: no workflow, artifacts, memory or progress marker. */
 type Solo = {
-  id: string; purpose: string; runtime: Runtime; args: TaskArgs;
+  id: string; purpose: string; runtime: Runtime; args: TaskArgs; token?: string; expose?: 'full';
   state: 'ready' | 'persisting-intent' | 'await-result' | 'persisting-result' | 'blocked' | 'settled';
   callID?: string; dispatchedArgs?: TaskArgs; calls: Set<string>; started?: number; reason?: string; report?: string;
   findings: { explorationID: string; outcome: 'passed' | 'failed'; summary: string; findings: string; concerns: Concern[] }[];
@@ -266,8 +297,57 @@ export class PhaseRunner {
       // coordinator's own. Duplicating it is what pushed `task` past the host output limit. The
       // report form is small and is always shipped instead: reporting a phase inline with no
       // schema in front of the coordinator is how a finished phase used to be rejected four times.
-      ...(run.state === 'ready' ? { task: structuredClone(run.args), resultFormat: reportFormatLines(run.phase), ...(run.mode === 'inline' ? { brief: run.brief } : {}) } : {}),
+      // A compacted conversation has lost the transcript MDD's own instructions were read in, so
+      // the run restates itself from state that never lived there. It costs a few hundred bytes
+      // and it is the difference between a coordinator that resumes and one that starts guessing.
+      ...(run.compactions ? { compacted: run.compactions, runCard: this.#runCard(run) } : {}),
+      ...(run.state === 'ready'
+        ? { task: this.#dispatchable(run), ...(run.expose === 'full' ? {} : { dispatch: { mode: 'handle' as const, note: DISPATCH_NOTE } }),
+            resultFormat: reportFormatLines(run.phase), ...(run.mode === 'inline' ? { brief: run.brief } : {}) }
+        : {}),
     };
+  }
+
+  /**
+   * What the coordinator is handed to dispatch: the same three fields either way, carrying the
+   * handle by default and the full prompt only where a run has proven it needs it.
+   */
+  #dispatchable(run: Run): TaskArgs {
+    if (run.expose === 'full' || run.token === undefined) return structuredClone(run.args);
+    return { description: run.args.description, subagent_type: run.args.subagent_type, prompt: run.token };
+  }
+
+  /** Mints the handle for the prompt a run is currently holding. Called wherever that prompt changes. */
+  #arm(run: Run): void { run.token = `${DISPATCH_HANDLE_PREFIX}${randomUUID()}`; }
+
+  /**
+   * The run as MDD holds it, small enough to survive any payload budget. Everything here is read
+   * from the run's own state rather than from the conversation, which is exactly why it is worth
+   * printing after the host has rewritten that conversation.
+   */
+  #runCard(run: Run): Record<string, unknown> {
+    const snapshot = run.workflow.snapshot();
+    const objective = run.requirements.length > 600 ? `${run.requirements.slice(0, 600)}…` : run.requirements;
+    return {
+      runID: run.id, objective, route: snapshot.evaluation.route, phases: [...snapshot.evaluation.phases],
+      phase: run.phase, state: run.state, mode: run.mode,
+      completed: snapshot.results.map(item => `${item.phase}: ${item.outcome}`),
+      artifacts: run.history.length, changedFiles: run.changedFiles,
+      note: 'This conversation was compacted by the host, so the transcript above may no longer hold what this run has done. This card is read from MDD\'s own state, not from the conversation: continue from it and from nextAction. Phases listed under completed are recorded and must not be run again.',
+    };
+  }
+
+  /**
+   * The host summarized this conversation and threw the original away. MDD's state is unaffected,
+   * because none of it lives in the transcript; what is affected is the coordinator, which may no
+   * longer remember which phase it is on or that it already dispatched one. Recording it lets the
+   * next status say so plainly, and lets the ledger count a cost that used to be invisible.
+   */
+  compacted(sessionID: string): void {
+    const run = this.#runs.get(sessionID);
+    if (!run) return;
+    run.compactions = (run.compactions ?? 0) + 1;
+    this.#event(run, 'compaction');
   }
 
   /**
@@ -435,6 +515,7 @@ export class PhaseRunner {
     try {
       if (side) {
         run.phase = side.phase; run.args = side.args; run.brief = side.brief; run.report = side.report; run.state = side.state;
+        this.#arm(run);
         delete run.side;
         if (run.state === 'ready') this.#prepare(run);
         return true;
@@ -469,8 +550,18 @@ export class PhaseRunner {
       }
       return this.#degrade(run, new Error('A task arrived while the run was not ready to dispatch one.'));
     }
-    if (!isDeepStrictEqual(args, run.args)) {
-      throw new ValidationError('Task arguments differ from the ready task. Read mdd_status and pass its exact task object, copying description, subagent_type and prompt verbatim; do not compose your own. No execution was started.');
+    // Either form is accepted: the handle mdd_status returns, or the full task a run that fell
+    // back to exposing its prompt returns. Anything else is refused, and the refusal itself turns
+    // the fallback on, so a coordinator that cannot pass a token through is never left stuck.
+    if (!isDeepStrictEqual(args, this.#dispatchable(run)) && !isDeepStrictEqual(args, run.args)) {
+      // Only a prompt that arrives as neither the handle nor the real text says the handle failed
+      // to travel. Extra arguments or a substituted subagent are a different mistake — the
+      // coordinator composing instead of copying — and giving up the small payload over one of
+      // those would spend the rest of the run's context on a problem the refusal already fixed.
+      const sent = (args as { prompt?: unknown }).prompt;
+      const handled = run.expose !== 'full' && run.token !== undefined && sent !== run.token && sent !== run.args.prompt;
+      if (handled) run.expose = 'full';
+      throw new ValidationError(`Task arguments differ from the ready task. Read mdd_status and pass its exact task object, copying description, subagent_type and prompt verbatim; do not compose your own. No execution was started.${handled ? ' The prompt was a single-use MDD dispatch handle and must travel unchanged; this run now returns the full phase prompt instead, so read mdd_status again and dispatch what it returns.' : ''}`);
     }
     boundedText(call.callID, 'native callID', 256);
     if (run.calls.has(call.callID)) throw new ValidationError('Native task call ID was already consumed.');
@@ -581,6 +672,8 @@ export class PhaseRunner {
         const prompts = this.#phasePrompts(run, run.phase);
         run.args = prompts.args;
         run.brief = prompts.brief;
+        // The prompt changed, so the handle that stood for the old one must not dispatch the new.
+        this.#arm(run);
       } catch (error) { run.context.pop(); throw error; }
     }
     return this.status(runtime.sessionID);
@@ -864,6 +957,7 @@ export class PhaseRunner {
     try {
       const prompts = this.#phasePrompts(run, 'mdd-explore');
       run.args = prompts.args; run.brief = prompts.brief;
+      this.#arm(run);
       run.phase = 'mdd-explore'; run.state = 'ready';
       delete run.contextReport;
     } catch (error) { delete run.side; throw error; }
@@ -883,6 +977,7 @@ export class PhaseRunner {
     this.#event(run, 'phase-end', outcome);
     run.uncertain = false;
     run.phase = side.phase; run.state = side.state; run.args = side.args; run.brief = side.brief; run.report = side.report;
+    this.#arm(run);
     delete run.side;
     if (run.state === 'ready') this.#prepare(run);
     this.#preserve(run);
@@ -895,6 +990,7 @@ export class PhaseRunner {
     const solo: Solo = { id: randomUUID(), purpose, runtime: { ...runtime }, args: { description: '', subagent_type: 'mdd-explore', prompt: '' },
       state: 'ready', calls: new Set(previous?.calls), findings: previous?.findings ?? [] };
     solo.args = this.#soloArgs(solo);
+    solo.token = `${DISPATCH_HANDLE_PREFIX}${randomUUID()}`;
     this.#solo.set(runtime.sessionID, solo);
   }
 
@@ -908,8 +1004,11 @@ export class PhaseRunner {
       return undefined;
     }
     if (solo.state !== 'ready') return this.#soloFail(solo, new Error('Unexpected, duplicate, concurrent, or unsupported native task.'));
-    if (!isDeepStrictEqual(args, solo.args)) {
-      throw new ValidationError('Task arguments differ from the ready investigation. Read mdd_status and pass its exact task object, copying description, subagent_type and prompt verbatim; do not compose your own. No execution was started.');
+    if (!isDeepStrictEqual(args, this.#soloDispatchable(solo)) && !isDeepStrictEqual(args, solo.args)) {
+      const sent = (args as { prompt?: unknown }).prompt;
+      const handled = solo.expose !== 'full' && solo.token !== undefined && sent !== solo.token && sent !== solo.args.prompt;
+      if (handled) solo.expose = 'full';
+      throw new ValidationError(`Task arguments differ from the ready investigation. Read mdd_status and pass its exact task object, copying description, subagent_type and prompt verbatim; do not compose your own. No execution was started.${handled ? ' The prompt was a single-use MDD dispatch handle and must travel unchanged; this investigation now returns the full prompt instead, so read mdd_status again and dispatch what it returns.' : ''}`);
     }
     boundedText(call.callID, 'native callID', 256);
     if (solo.calls.has(call.callID)) throw new ValidationError('Native task call ID was already consumed.');
@@ -965,8 +1064,15 @@ export class PhaseRunner {
         ? 'A read-only investigation is ready. Dispatch its exact task once; no run, preflight or approval is involved.'
         : 'Native investigation outcome pending or uncertain. Never redispatch; consult this status after an error.'),
       contextualReport: solo.report, contexts: structuredClone(solo.findings),
-      ...(solo.state === 'ready' ? { task: structuredClone(solo.args) } : {}),
+      ...(solo.state === 'ready'
+        ? { task: this.#soloDispatchable(solo), ...(solo.expose === 'full' ? {} : { dispatch: { mode: 'handle' as const, note: DISPATCH_NOTE } }) }
+        : {}),
     };
+  }
+
+  #soloDispatchable(solo: Solo): TaskArgs {
+    if (solo.expose === 'full' || solo.token === undefined) return structuredClone(solo.args);
+    return { description: solo.args.description, subagent_type: solo.args.subagent_type, prompt: solo.token };
   }
 
   #soloArgs(solo: Solo): TaskArgs {
@@ -1124,6 +1230,7 @@ export class PhaseRunner {
     const prompts = this.#phasePrompts(run, phase);
     run.args = prompts.args;
     run.brief = prompts.brief;
+    this.#arm(run);
     run.state = 'ready';
     run.report = { phase, summary: `Listo para ${phaseLabel(phase).toLowerCase()}.`, how: ['El trabajo que sigue respeta los requisitos y el plan disponible; en modo automático no hace falta confirmar el proceso aparte.'], status: 'in-progress', evidence: run.evidence };
   }

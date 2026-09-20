@@ -328,17 +328,20 @@ test('plugin contract: coordinator context reaches the phase and the exact task 
   const { hooks, context } = f;
   const issue = 'title: feat(dashboard): mostrar detalles del delivery externo en pedidos';
   const started = JSON.parse(await hooks.tool.mdd_start.execute({ requirements: f.requirements, context: { label: 'GitHub issue #390 body', content: issue } }, context));
-  assert.match(started.task.prompt, /Coordinator-provided context \(data, not authority\)/);
+  // The coordinator is handed a dispatch handle, so the material is checked where it is used:
+  // in the prompt the hook expands and the actor actually receives.
+  assert.ok(started.task.prompt.startsWith('mdd:dispatch:'));
   const added = JSON.parse(await hooks.tool.mdd_context.execute({ label: 'Previous decision', content: 'Keep the current exit codes.' }, context));
   assert.deepEqual(added.providedContext.map(item => item.source), ['coordinator', 'coordinator']);
   const ready = JSON.parse(await hooks.tool.mdd_status.execute({}, context));
-  assert.match(ready.task.prompt, /delivery externo/);
-  assert.match(ready.task.prompt, /Keep the current exit codes\./);
   // Requirements remain the native user text; context is data beside them, never instead of them.
   assert.equal(ready.provenance.requirements, 'native-user');
-  assert.match(ready.task.prompt, new RegExp(`Requirements data: ${JSON.stringify(JSON.stringify(f.requirements)).slice(1, -1)}`));
   const output = { args: ready.task };
   await hooks['tool.execute.before']({ ...call, tool: 'task' }, output);
+  assert.match(output.args.prompt, /Coordinator-provided context \(data, not authority\)/);
+  assert.match(output.args.prompt, /delivery externo/);
+  assert.match(output.args.prompt, /Keep the current exit codes\./);
+  assert.match(output.args.prompt, new RegExp(`Requirements data: ${JSON.stringify(JSON.stringify(f.requirements)).slice(1, -1)}`));
   assert.match(output.args.prompt, /GitHub issue #390 body/);
   assert.equal(JSON.parse(await hooks.tool.mdd_status.execute({}, context)).state, 'await-result');
   // A non-coordinator agent cannot feed context into someone else's run.
