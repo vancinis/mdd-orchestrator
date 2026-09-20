@@ -84,7 +84,7 @@ export function renderPRBody(root: string, facts: PRFacts, userText: string, val
     Resumen: `${safeCopy(facts.goal)}\n\n${facts.verified ? 'La ejecución registrada terminó; que los requisitos y el plan coincidan sigue siendo la evaluación del agente, no una revisión independiente.' : 'Los requisitos y el plan de esta ejecución no están verificados del todo.'}`,
     Cambios: `${facts.changedFiles
       ? `${changeTable(facts.files)}\n\n${safeCopy(facts.changes)}`
-      : 'No se registró ningún cambio de implementación.'}\n${commands.length ? commands.join('\n') : '- No se registró evidencia de comandos de verificación.'}`,
+      : 'No se registró ningún cambio de implementación.'}\n\n${commands.length ? commands.join('\n') : '- No se registró evidencia de comandos de verificación.'}`,
     'Variables de entorno': human('environmentVariables'), Seguimiento: human('followUps'),
     Bloqueos: blockers.length ? blockers.map(item => `- ${item}`).join('\n') : 'No aplica.', Despliegue: human('deployment'),
   };
