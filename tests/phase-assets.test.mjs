@@ -101,7 +101,17 @@ test('assets: the coordinator writes to the user in Spanish and keeps the protoc
   assert.match(text, /Write to the user in Spanish, always/);
   assert.match(text, /phase task prompts, phase reports, tool\narguments and tool payloads are English/);
   assert.match(text, /translate its prose into Spanish and keep\nits structure exactly/);
-  assert.match(text, /quoted\nverbatim and never translated/);
+  assert.match(text, /quoted verbatim and never translated/);
+});
+
+// The record of what MDD does badly only works if both halves are reachable: the one that writes
+// an entry when the user says so, and the one that finds them again later.
+test('assets: the coordinator records improvements and reviews them without starting a run', () => {
+  const text = fs.readFileSync('assets/opencode/agents/mdd-orchestrator.md', 'utf8');
+  assert.match(text, /call mdd_improve with their actual latest\nnative text/);
+  assert.match(text, /Recording is not fixing/);
+  assert.match(text, /call\nmdd_improvements and present the returned report as it is/);
+  assert.match(text, /never turn a review into a run/);
 });
 
 // A user answered an approval question in their own words and the run was thrown away; the

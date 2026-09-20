@@ -7,6 +7,7 @@ import { ArtifactStore, ArtifactWriteError } from './artifacts.js';
 import type { ArtifactAttempt, ArtifactRef, ArtifactResult } from './artifacts.js';
 import type { Answers, Phase } from './policy.js';
 import { cleanupInstructions, cognitiveDocInstructions, docInstructions, mddInstructions } from './phase-assets.js';
+import type { LessonInput } from './lessons.js';
 import { changed, deliverables, executed } from './phase-evidence.js';
 import type { Check, Deliverable } from './phase-evidence.js';
 import { emptyEvidence, invalidateEvidence, renderReport, renderClosure, phaseLabel, evidenceCoverage } from './reporting.js';
@@ -198,7 +199,7 @@ export class PhaseRunner {
   readonly #previous = new Map<string, Run[]>();
   readonly #solo = new Map<string, Solo>();
   readonly #consent = new Map<string, Consent>();
-  constructor(readonly inspect: Inspect, readonly options: { now?: () => number; progress?: ProgressGuard; dossier?: RunDossierStore; telemetry?: (root: string, value: TelemetryEvent, now: number) => TelemetryResult } = {}) {}
+  constructor(readonly inspect: Inspect, readonly options: { now?: () => number; progress?: ProgressGuard; dossier?: RunDossierStore; telemetry?: (root: string, value: TelemetryEvent, now: number) => TelemetryResult; lessons?: (root: string, value: LessonInput, now: number) => void } = {}) {}
 
   status(sessionID: string) {
     const run = this.#runs.get(sessionID);
@@ -404,6 +405,18 @@ export class PhaseRunner {
     // here would leave attempts in the ledger and no blocked run to account for them.
     if (!recovered) this.#event(run, 'report', 'blocked', 'route-blocked');
     this.#settle(run);
+    // The moment the route broke is the only moment the reason is still exact, so the lesson is
+    // written here rather than reconstructed later from a rollup that holds no text. An
+    // investigation that failed is not one: it costs the main plan nothing and teaches nothing.
+    if (!side) {
+      this.#lesson(run, {
+        source: 'failure', kind: failure, phase,
+        title: handover
+          ? `${phase}: delegation used all ${DELEGATION_ATTEMPTS} attempts and the coordinator had to take the phase over`
+          : `${phase}: attempt ${run.attempts} of ${DELEGATION_ATTEMPTS} did not complete`,
+        detail: run.reason ?? 'The attempt ended without a recorded reason.',
+      });
+    }
     const left = Math.max(0, DELEGATION_ATTEMPTS - run.attempts);
     throw new Error(`MDD attempt ${run.attempts} of ${DELEGATION_ATTEMPTS} for ${phase} did not complete: ${run.reason} ${!recovered
       ? 'Read mdd_status, then use mdd_reset to retry this phase or start over. Nothing is locked.'
@@ -1064,6 +1077,14 @@ export class PhaseRunner {
 
   #prior(sessionID: string): RunDossier | undefined {
     try { return this.options.dossier?.read(sessionID); } catch { return undefined; }
+  }
+
+  /**
+   * Records what MDD just learned about itself. Never throws and never reports: a harness that
+   * could die while writing down why it died would be worse than one that forgets.
+   */
+  #lesson(run: Run, input: LessonInput): void {
+    try { this.options.lessons?.(run.runtime.directory, input, this.#now()); } catch { /* A lesson is never worth a route. */ }
   }
 
   #mark(run: Run, state: 'pending' | 'settled' | 'complete'): void {

@@ -1,5 +1,6 @@
 import { changeProfile, runTerminalConfig } from './config-ui.js';
 import { clearTelemetry, telemetryReport, telemetryStatus } from './telemetry.js';
+import { clearLessons, markLessons, readLessons, renderLessonsReport } from './lessons.js';
 import { ValidationError } from './validation.js';
 import { initProject } from './setup.js';
 import { doctor } from './doctor.js';
@@ -62,6 +63,29 @@ export async function settingsCommand(args: string[], root: string, write: (text
       saveGlobalSettings(changeProfile(loadGlobalSettings(), action, name));
       write(`Perfil global activo: ${name}. Reiniciá OpenCode para cargarlo.\n`);
     } else throw new ValidationError('Uso: mdd profile list | create <nombre> | use <nombre>');
+    return true;
+  }
+  if (command === 'lessons') {
+    if (args.length < 2 || args.length > 3 || !['list', 'report', 'clear', 'mark'].includes(action ?? '')) {
+      throw new ValidationError('Uso: mdd lessons report | list [texto] | mark <id> | clear');
+    }
+    if (action === 'clear') {
+      if (args.length !== 2) throw new ValidationError('Uso: mdd lessons clear');
+      const cleared = clearLessons(root);
+      if (!cleared.ok) throw new Error(cleared.diagnostic);
+      write('Se borraron las automejoras anotadas de este workspace.\n');
+    } else if (action === 'mark') {
+      if (!name) throw new ValidationError('Uso: mdd lessons mark <id>');
+      const marked = markLessons(root, [name], 'reviewed');
+      if (!marked.ok) throw new Error(marked.diagnostic);
+      write(marked.updated.length
+        ? `Marcada como revisada: ${marked.updated.join(', ')}\n`
+        : `No se encontró ninguna automejora con ese identificador: ${name}\n`);
+    } else {
+      const read = readLessons(root, name === undefined ? undefined : { text: name });
+      if (!read.ok) throw new Error(read.diagnostic);
+      write(action === 'report' ? renderLessonsReport(read.lessons, read.total) : `${JSON.stringify(read.lessons, null, 2)}\n`);
+    }
     return true;
   }
   if (command === 'telemetry') {

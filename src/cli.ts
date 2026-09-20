@@ -13,6 +13,7 @@ Uso:
   mdd-ai config | doctor | init | update
   mdd-ai profile list | create <nombre> | use <nombre>
   mdd-ai telemetry status | report | on | off | clear
+  mdd-ai lessons report | list [texto] | mark <id> | clear
   node dist/cli.js --answers <archivo.json> [--config <archivo.json>] [--explore]
   node dist/cli.js --profile <archivo.json> [--config <archivo.json>] [--explore]
   node dist/cli.js --help
@@ -36,6 +37,8 @@ falten heredan la selección nativa.
 La telemetría es solo local, viene activada y guarda 30 días al usar la API.
 El reporte de telemetría lee el registro del workspace: tiempo por fase,
 reintentos, fallos y tokens.
+Las automejoras anotan, con texto, qué salió mal: las escribe cada fase que falla
+y también vos cuando pedís que algo quede registrado. Son locales al workspace.
 
 Answers: los cinco campos del preflight. Profile: { "answers": { ... } }.
 Config: overrides opcionales de umbral y peso parcial. Ver docs/product-contract.md.

@@ -15,6 +15,8 @@ import { ProgressGuard } from './progress.js';
 import { RunDossierStore } from './run-dossier.js';
 import { renderPRBody } from './pr-body.js';
 import { statusPayload } from './status-budget.js';
+import { phaseName } from './phase-assets.js';
+import { recordLessonQuietly } from './lessons.js';
 
 function record(value: unknown, subject = 'response'): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`Unknown OpenCode ${subject} structure.`);
@@ -31,7 +33,7 @@ function record(value: unknown, subject = 'response'): Record<string, unknown> {
 export const TASK_ENVELOPE = /^<task id="[^"\r\n]*" state="completed">\r?\n(?:<summary>[^\r\n]*<\/summary>\r?\n)?<task_result>\r?\n([\s\S]*?)\r?\n?<\/task_result>\r?\n?<\/task>$/;
 
 /** MDD tools belong to the MDD coordinator. Other agents share the registry but not this state. */
-export const MDD_TOOLS = ['mdd_start', 'mdd_status', 'mdd_phase_result', 'mdd_reset', 'mdd_change_request', 'mdd_contextual_explore', 'mdd_context', 'mdd_pr_body'] as const;
+export const MDD_TOOLS = ['mdd_start', 'mdd_status', 'mdd_phase_result', 'mdd_reset', 'mdd_change_request', 'mdd_contextual_explore', 'mdd_context', 'mdd_pr_body', 'mdd_improve', 'mdd_improvements'] as const;
 export const COORDINATOR = 'mdd-orchestrator';
 function coordinatorOnly(agent: string, tool: string): void {
   if (agent !== COORDINATOR) {
@@ -359,7 +361,7 @@ const plugin: Plugin = async input => {
   const settings = (() => { try { return loadGlobalSettings(); } catch { throw new Error(setupDiagnostic(installationPaths().ownedRoot).action); } })();
   const profile = freezeProfile(settings);
   const inspector = createInspector(input);
-  const runner = new PhaseRunner(inspector, { telemetry: recordTelemetry, progress: new ProgressGuard(input.directory), dossier: new RunDossierStore(input.directory) });
+  const runner = new PhaseRunner(inspector, { telemetry: recordTelemetry, progress: new ProgressGuard(input.directory), dossier: new RunDossierStore(input.directory), lessons: recordLessonQuietly });
   const intake = new NativeIntake(runner, inspector, settings);
   return {
     config: async config => {
@@ -379,6 +381,44 @@ const plugin: Plugin = async input => {
           const facts = runner.prFacts(context.sessionID);
           if (facts.runID !== current.runID) throw new Error('The current run changed while drafting; no draft was produced.');
           return JSON.stringify(renderPRBody(context.directory, facts, args.userText, args.notes));
+        },
+      }),
+      mdd_improve: tool({
+        description: 'Record something MDD did badly so later sessions can find it and improve. Use it when the user says an error or behaviour should be remembered, quoting their actual latest text. Failed phases record themselves; this is the deliberate one. Recording is not fixing and changes no run.',
+        args: {
+          userText: tool.schema.string().min(1).describe('The exact latest native user text asking for this to be recorded, without rewriting.'),
+          title: tool.schema.string().min(1).describe('One short line naming what went wrong, in the user\'s language.'),
+          detail: tool.schema.string().min(1).describe('What happened, what should have happened instead, and anything a later session needs to act on it. Plain text.'),
+          phase: tool.schema.string().optional().describe('The MDD phase it concerns, when it concerns one.'),
+        },
+        async execute(args, context) {
+          coordinatorOnly(context.agent, 'mdd_improve');
+          if (context.abort.aborted) throw new Error('Recording the improvement was aborted.');
+          // The same proof mdd_pr_body requires: an improvement attributed to the user has to be
+          // one the user actually asked for, not one the model decided to write down for them.
+          await inspector.intake(context, boundedText(args.userText, 'actual user request', 12000), context.messageID);
+          return statusPayload(await intake.improve({
+            title: boundedText(args.title, 'improvement title', 200),
+            detail: boundedText(args.detail, 'improvement detail', 4000),
+            ...(args.phase === undefined ? {} : { phase: phaseName(args.phase) }),
+          }, context));
+        },
+      }),
+      mdd_improvements: tool({
+        description: 'List the improvements recorded for MDD in this workspace, and the ones memory holds from other conversations. Read-only: it starts nothing, changes no run and needs no approval. Present the returned report as it is and never invent an entry it does not contain.',
+        args: {
+          query: tool.schema.string().optional().describe('Optional text to filter by; omit for everything recorded.'),
+          state: tool.schema.enum(['open', 'reviewed', 'applied']).optional().describe('Optional lifecycle filter; omit for all of them.'),
+          limit: tool.schema.number().int().min(1).max(50).optional().describe('How many to return, newest first. Defaults to everything recorded.'),
+        },
+        async execute(args, context) {
+          coordinatorOnly(context.agent, 'mdd_improvements');
+          if (context.abort.aborted) throw new Error('Reading the improvements was aborted.');
+          return statusPayload(await intake.improvements({
+            ...(args.query === undefined ? {} : { text: boundedText(args.query, 'improvement query', 200) }),
+            ...(args.state === undefined ? {} : { state: args.state }),
+            ...(args.limit === undefined ? {} : { limit: args.limit }),
+          }, context));
         },
       }),
       mdd_start: tool({

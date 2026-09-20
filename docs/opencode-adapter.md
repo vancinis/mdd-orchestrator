@@ -415,6 +415,23 @@ default build. Cleanup completed in 14.865 seconds total. Preparation was a mate
 differentiator; the historical cause was not proven. Do not assume root node_modules alone
 guarantees offline startup. See [setup prerequisites](setup.md#startup-dependencies-are-a-prerequisite).
 
+## Recorded improvements
+
+`mdd_improve({ userText, title, detail, phase? })` records something MDD did badly. `userText`
+goes through the same `inspector.intake` check `mdd_pr_body` uses, so an entry attributed to the
+user is one the user actually asked for. `mdd_improvements({ query?, state?, limit? })` reads
+them back and returns a rendered Spanish report the coordinator presents as it is. Both are
+read/write against the local record only: they start nothing, change no run, alter no approval,
+and are refused for any agent other than the coordinator.
+
+Failed attempts record themselves. `PhaseRunner` writes an entry from its degrade path for every
+ended attempt of the main route — never for a contextual investigation, which costs the plan
+nothing and teaches nothing — carrying the adapter's own failure class, the phase and the exact
+reason, plus a distinct title when the attempt was the one that exhausted delegation. That write
+is best-effort and swallowed: a route that just broke must not break a second time because its
+own record could not be written. See [recorded improvements](configuration.md#recorded-improvements-lessonsts)
+for the file format, the retention rule and the optional memory index.
+
 ## PR-body drafts
 
 When requested, `mdd_pr_body({ userText, notes? })` checks the actual latest native user text

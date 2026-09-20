@@ -321,6 +321,43 @@ new writes; clear deletes even malformed logs. Disabled record returns count 0 w
 reading retained rows; status reports their retained count. Invalid settings/unsafe storage
 fail closed with bounded diagnostics, never raw data.
 
+### Recorded improvements (`lessons.ts`)
+
+```typescript
+type Lesson = {
+  id: string; timestamp: number;
+  source: 'user' | 'failure'; kind?: FailureClass; phase?: Phase;
+  title: string; detail: string;
+  state: 'open' | 'reviewed' | 'applied';
+};
+function recordLesson(root: string, value: LessonInput, now?: number): LessonResult;
+function recordLessonQuietly(root: string, value: LessonInput, now?: number): void;
+function readLessons(root: string, query?: { text?: string; state?: LessonState; limit?: number }): ...;
+function markLessons(root: string, ids: readonly string[], state: LessonState, now?: number): ...;
+function renderLessonsReport(lessons: readonly Lesson[], total: number): string;
+```
+
+What MDD has been told it does badly, in words. Telemetry counts what happened and holds no text
+by design, which is exactly what makes it useless for deciding what to change; this is the other
+half and it holds text on purpose. Two things write here: `PhaseRunner` records an entry from the
+failure path of every ended attempt, where the reason is still exact, and the coordinator records
+one deliberately through `mdd_improve` when the user says something should be remembered. An
+automatic entry carries the adapter's own `FailureClass` and phase; a deliberate one carries the
+user's words and is accepted only after `inspector.intake` proves they wrote them.
+
+`.mdd/lessons.jsonl` is Git-ignored with the rest of `.mdd`, is never exported, and holds at most
+500 entries within 512 KiB. When it fills, entries already `reviewed` or `applied` fall off first,
+oldest first, and only then an untouched `open` one. Nothing expires by time: a lesson from March
+is still what MDD learned. Marking changes state and never deletes. Recording is best-effort from
+the failure path — a route that broke must never break twice because its own record could not be
+written — and an unreadable file is reported rather than read as half a list.
+
+With optional memory enabled, each entry is additionally saved as an Engram observation of type
+`mdd-lesson` titled `MDD lesson v1: …`, and `mdd_improvements` searches that type through
+`GET /search`, which is the one provider read that answers with an array. Memory is an index over
+the local record, never the record: with memory off, or unavailable, the local file still answers
+and the tool reports `memory: 'off' | 'unavailable'` instead of claiming a complete review.
+
 ### Terminal seams (`config-ui.ts`, `settings-cli.ts`)
 
 ```typescript

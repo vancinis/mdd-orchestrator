@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import { EngramHttp } from './engram-http.js';
+import { EngramHttp, LESSON_TITLE_PREFIX } from './engram-http.js';
+import { readLessons, recordLesson, renderLessonsReport } from './lessons.js';
+import type { LessonState } from './lessons.js';
 import { boundedText, runContext } from './phase-runner.js';
 import type { PhaseRunner, Runtime, TaskCall } from './phase-runner.js';
 import { answersFromLabels, questionEnvelope } from './preflight.js';
@@ -250,6 +252,87 @@ export class NativeIntake {
       this.phaseRecorded(runtime.sessionID);
     }
     return { ...this.status(runtime.sessionID), reset: applied };
+  }
+
+  /**
+   * The memory client for work that is not a run. Lessons outlive runs by design, so they cannot
+   * depend on one existing: this binds the same conversation the same way `start` does, and every
+   * caller treats a failure as "memory is unavailable", never as a reason to lose the lesson.
+   */
+  async #memory(runtime: Runtime): Promise<EngramHttp | undefined> {
+    const engram = this.#settings.engram;
+    if (!engram) return undefined;
+    const endpoint = 'endpoint' in engram ? engram.endpoint : await this.#managed!.endpoint();
+    const client = new EngramHttp(endpoint, { id: runtime.sessionID, project: '', directory: runtime.directory });
+    await client.bootstrap();
+    return client;
+  }
+
+  /**
+   * Records something MDD did badly, in the user's own words, so a later session can find it. The
+   * local file is the record; memory is the index that makes it findable from another conversation
+   * months later. Writing the local copy first is deliberate: with memory off, which is the default
+   * and an ordinary way to run MDD, the improvement must still be kept.
+   */
+  async improve(input: { title: string; detail: string; phase?: Phase }, runtime: Runtime): Promise<unknown> {
+    const recorded = recordLesson(runtime.directory, {
+      source: 'user', title: input.title, detail: input.detail, ...(input.phase ? { phase: input.phase } : {}),
+    });
+    if (!recorded.ok) {
+      throw new Error(recorded.diagnostic === 'invalid-lesson'
+        ? 'The improvement needs a short title and a detail describing what went wrong, both plain text within their limits. Nothing was recorded.'
+        : 'The local improvements file could not be written, so nothing was recorded. Inspect the .mdd directory.');
+    }
+    let memory: 'saved' | 'unavailable' | 'off' = this.#settings.engram ? 'unavailable' : 'off';
+    try {
+      const client = await this.#memory(runtime);
+      if (client) {
+        await client.saveLesson(`${LESSON_TITLE_PREFIX} ${recorded.recorded.title}`.slice(0, 200),
+          JSON.stringify({ kind: 'mdd-improvement', ...recorded.recorded, workspace: runtime.directory }));
+        memory = 'saved';
+      }
+    } catch { /* The local record already holds it; memory is an index, not the record. */ }
+    return {
+      recorded: recorded.recorded, total: recorded.total, memory,
+      ...(recorded.pruned ? { pruned: recorded.pruned } : {}),
+      note: memory === 'saved'
+        ? 'Recorded locally in .mdd/lessons.jsonl and indexed in memory so a later session can find it.'
+        : memory === 'off'
+          ? 'Recorded locally in .mdd/lessons.jsonl. Optional memory is off, so it is findable in this workspace only.'
+          : 'Recorded locally in .mdd/lessons.jsonl. The memory service did not answer, so it was not indexed; say so rather than claiming it was.',
+    };
+  }
+
+  /**
+   * Answers "what have I been told I do badly". Local entries are the answer; memory adds the ones
+   * recorded in other conversations. A memory that does not answer degrades to the local list with
+   * that fact stated, because a review presented as complete when half of it is missing is worse
+   * than a short review that says so.
+   */
+  async improvements(query: { text?: string; state?: LessonState; limit?: number }, runtime: Runtime): Promise<unknown> {
+    const local = readLessons(runtime.directory, query);
+    if (!local.ok) throw new Error('The local improvements file could not be read. Inspect the .mdd directory.');
+    let memory: 'searched' | 'unavailable' | 'off' = this.#settings.engram ? 'unavailable' : 'off';
+    let remote: { id: number; title: string; content: string; created: string | undefined }[] = [];
+    try {
+      const client = await this.#memory(runtime);
+      if (client) {
+        remote = await client.searchLessons(query.text ?? '', Math.min(50, Math.max(1, query.limit ?? 20)));
+        memory = 'searched';
+      }
+    } catch { /* The local list is still the answer. */ }
+    // Memory holds the same entries this workspace already has, so only rows whose id is not local
+    // are reported separately: presenting a lesson twice makes a review look bigger than it is.
+    const known = new Set(local.lessons.map(lesson => lesson.id));
+    const elsewhere = remote.filter(row => {
+      try { return !known.has(String((JSON.parse(row.content) as { id?: unknown }).id ?? '')); } catch { return true; }
+    });
+    return {
+      lessons: local.lessons, total: local.total, memory,
+      ...(elsewhere.length ? { fromMemory: elsewhere } : {}),
+      report: renderLessonsReport(local.lessons, local.total),
+      instruction: 'Present report as it is: it is already written for the user. Never invent an improvement that is not listed here.',
+    };
   }
 
   status(sessionID: string) {

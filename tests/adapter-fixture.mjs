@@ -55,6 +55,14 @@ export async function memoryServer(t, change = () => {}) {
     } else if (req.url.startsWith('/observations/')) {
       const id = Number(req.url.split('/').at(-1));
       data = { id, ...writes[id - 1] };
+    } else if (req.url.startsWith('/search?')) {
+      // The real provider answers a search with a JSON array, which is a different shape from
+      // every other endpoint here. Recording improvements is the only read that uses it.
+      const query = new URLSearchParams(req.url.slice(req.url.indexOf('?') + 1));
+      data = writes.map((write, index) => ({ id: index + 1, ...write }))
+        .filter(row => (!query.get('type') || row.type === query.get('type')) &&
+          (!query.get('project') || row.project === query.get('project')))
+        .slice(0, Number(query.get('limit') ?? 20));
     }
     const reply = { status, data, headers: {} };
     change(req, reply, writes);

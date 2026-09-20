@@ -53,6 +53,10 @@ export function partOfProject(projectRoot: string, directory: string): boolean {
   return repository !== undefined && samePath(repository, projectRoot);
 }
 
+/** The observation type and title prefix that make an MDD improvement recognisable on the way back. */
+export const LESSON_TYPE = 'mdd-lesson';
+export const LESSON_TITLE_PREFIX = 'MDD lesson v1:';
+
 export class ArtifactObservationError extends Error {
   constructor(readonly observationID?: number) {
     super('Engram artifact write outcome is unknown; do not retry automatically.');
@@ -75,7 +79,7 @@ export class EngramHttp {
     this.#timeout = timeout;
   }
 
-  async #request(path: string, status: number, body?: unknown): Promise<Record<string, unknown>> {
+  async #request(path: string, status: number, body?: unknown, list = false): Promise<Record<string, unknown>> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.#timeout);
     try {
@@ -103,6 +107,10 @@ export class EngramHttp {
         chunks.push(value);
       }
       const data: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      if (list) {
+        if (!Array.isArray(data)) throw new Error('Invalid response list.');
+        return { items: data };
+      }
       if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('Invalid response object.');
       return data as Record<string, unknown>;
     } catch (error) {
@@ -114,6 +122,23 @@ export class EngramHttp {
       controller.abort();
       clearTimeout(timer);
     }
+  }
+
+  /**
+   * A list endpoint answers with an array, which `#request` refuses on purpose: every mutation and
+   * every readback here is a single object, and accepting either shape everywhere would make a
+   * malformed response look like an empty one. Search is the one read that is a list, so it gets
+   * its own bounded reader instead of loosening the one the writes depend on.
+   */
+  async #requestList(path: string): Promise<Record<string, unknown>[]> {
+    const wrapped = await this.#request(`${path}`, 200, undefined, true);
+    const items = wrapped.items;
+    if (!Array.isArray(items)) throw new Error('Engram returned an unknown list shape.');
+    if (items.length > 200) throw new Error('Engram returned more rows than this reader accepts.');
+    return items.map(item => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) throw new Error('Invalid response row.');
+      return item as Record<string, unknown>;
+    });
   }
 
   async bootstrap(): Promise<void> {
@@ -182,6 +207,43 @@ export class EngramHttp {
       if (await this.readArtifact(id, title) !== content) throw new Error('Readback mismatch.');
       return id;
     } catch { throw new ArtifactObservationError(id); }
+  }
+
+  /**
+   * Lessons are the one thing MDD writes to memory that is meant to be found again later, from a
+   * different conversation, possibly months afterwards. They are stored under their own type so a
+   * search for them cannot return workflow receipts, and under a title prefix so a row that is not
+   * MDD's own is rejected on the way back rather than presented as an improvement MDD recorded.
+   */
+  async saveLesson(title: string, content: string): Promise<number> {
+    if (!title.startsWith(LESSON_TITLE_PREFIX) || Buffer.byteLength(content) > 40000) {
+      throw new Error('Invalid lesson observation.');
+    }
+    await this.checkBinding();
+    const saved = await this.#request('/observations', 201, {
+      session_id: this.#binding.id, project: this.#binding.project,
+      scope: 'project', type: LESSON_TYPE, title, content,
+    });
+    if (!Number.isSafeInteger(saved.id) || (saved.id as number) <= 0 || saved.status !== 'saved') {
+      throw new Error('Engram returned an unknown save outcome; no retry is safe.');
+    }
+    return saved.id as number;
+  }
+
+  /**
+   * Reading is best-effort by design and the caller degrades to the local file: memory is optional
+   * in MDD, so an improvement review that only worked while a service answered would be a feature
+   * nobody could rely on. Rows are filtered again here rather than trusted, because the query
+   * parameters are a request and the type of a row is a fact.
+   */
+  async searchLessons(query: string, limit: number): Promise<{ id: number; title: string; content: string; created: string | undefined }[]> {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 50) throw new Error('Invalid lesson search limit.');
+    const search = new URLSearchParams({ q: query.slice(0, 200) || 'MDD', project: this.#binding.project, type: LESSON_TYPE, limit: String(limit) });
+    const rows = await this.#requestList(`/search?${search.toString()}`);
+    return rows.filter(row => row.type === LESSON_TYPE && row.project === this.#binding.project &&
+      row.deleted_at == null && typeof row.title === 'string' && row.title.startsWith(LESSON_TITLE_PREFIX) &&
+      typeof row.content === 'string' && Number.isSafeInteger(row.id))
+      .map(row => ({ id: row.id as number, title: row.title as string, content: (row.content as string).slice(0, 4000), created: typeof row.created_at === 'string' ? row.created_at : undefined }));
   }
 
   assertArtifactDirectory(directory: string): void {

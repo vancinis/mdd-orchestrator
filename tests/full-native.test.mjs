@@ -190,7 +190,7 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
     return status();
   }
   if (start) await hooks.tool.mdd_start.execute({ requirements }, context);
-  return { root, settings, hooks, status, phase, answer, user, change, input, context, parent, runtime, visited, requirements, writes: memory.writes, questions: () => questionCount };
+  return { root, settings, hooks, status, phase, answer, user, change, input, context, parent, runtime, visited, requirements, memory, writes: memory.writes, questions: () => questionCount };
 }
 
 for (const route of ['low', 'high']) for (const store of ['none', 'openspec']) for (const mode of ['automatic', 'interactive']) {
@@ -1029,8 +1029,8 @@ test('an MDD run dispatches only its own phase actors', async t => {
 test('MDD tools belong to the coordinator and are withdrawn from every other agent', async t => {
   const f = await fixture(t, { start: false });
   const foreign = { ...f.context, agent: 'gentle-ai' };
-  const args = { requirements: 'x', userText: 'x', purpose: 'x', kind: 'rerun', scope: 'run' };
-  for (const name of ['mdd_status', 'mdd_start', 'mdd_phase_result', 'mdd_reset', 'mdd_change_request', 'mdd_contextual_explore', 'mdd_pr_body']) {
+  const args = { requirements: 'x', userText: 'x', purpose: 'x', kind: 'rerun', scope: 'run', title: 'x', detail: 'x' };
+  for (const name of ['mdd_status', 'mdd_start', 'mdd_phase_result', 'mdd_reset', 'mdd_change_request', 'mdd_contextual_explore', 'mdd_pr_body', 'mdd_improve', 'mdd_improvements']) {
     await assert.rejects(f.hooks.tool[name].execute(args, foreign), /mdd-orchestrator/, `${name} answered a foreign agent`);
   }
   const config = { agent: { 'gentle-ai': {}, 'mdd-orchestrator': {} } };
@@ -1038,6 +1038,65 @@ test('MDD tools belong to the coordinator and are withdrawn from every other age
   assert.equal(config.agent['gentle-ai'].tools.mdd_status, false);
   assert.equal(config.agent['gentle-ai'].tools['mdd_*'], false);
   assert.equal(config.agent['mdd-orchestrator'].tools, undefined);
+});
+
+// A harness that cannot be told what it did badly can only be corrected by the person who
+// remembers. These two tools are the record, and the record is local first: memory indexes it so
+// another conversation can find it, and memory being off is an ordinary way to run MDD.
+test('a failed attempt records its own improvement, and the user can record one deliberately', async t => {
+  const f = await fixture(t);
+  await assert.rejects(f.phase({ badEnvelope: true }));
+  const automatic = JSON.parse(await f.hooks.tool.mdd_improvements.execute({}, f.context));
+  assert.equal(automatic.total, 1);
+  assert.equal(automatic.lessons[0].source, 'failure');
+  assert.equal(automatic.lessons[0].phase, 'mdd-plan');
+  assert.equal(automatic.lessons[0].kind, 'result-rejected');
+  assert.match(automatic.lessons[0].title, /attempt 1 of 3 did not complete/);
+  assert.match(automatic.report, /Automejoras anotadas de MDD/);
+
+  f.user('Quiero que guardes ese error para que te automejores.');
+  const recorded = JSON.parse(await f.hooks.tool.mdd_improve.execute({
+    userText: 'Quiero que guardes ese error para que te automejores.',
+    title: 'El reporte se presentó en inglés',
+    detail: 'Debía presentarse en español, traduciendo solo la prosa del subagente y conservando las secciones.',
+  }, f.context));
+  assert.equal(recorded.recorded.source, 'user');
+  assert.equal(recorded.total, 2);
+  // Memory is an index over the local record, so the entry is both on disk and in the provider.
+  assert.equal(recorded.memory, 'saved');
+  const saved = f.memory.writes.find(write => write.type === 'mdd-lesson');
+  assert.match(saved.title, /^MDD lesson v1:/);
+  assert.equal(JSON.parse(saved.content).kind, 'mdd-improvement');
+
+  const all = JSON.parse(await f.hooks.tool.mdd_improvements.execute({ query: 'inglés' }, f.context));
+  assert.equal(all.memory, 'searched');
+  assert.deepEqual(all.lessons.map(lesson => lesson.source), ['user']);
+  assert.match(all.report, /pedida por vos/);
+  // Recording is not fixing: nothing about the run moved.
+  const status = await f.status();
+  assert.equal(status.phase, 'mdd-plan');
+  assert.equal(status.state, 'ready');
+});
+
+test('an improvement is recorded with memory off, and only the user\'s own words record one', async t => {
+  const f = await fixture(t, { memoryEnabled: false });
+  await assert.rejects(f.hooks.tool.mdd_improve.execute({
+    userText: 'Something the user never wrote.', title: 'x', detail: 'y',
+  }, f.context), /latest native user text/);
+  f.user('Anotá que el PR salió en inglés.');
+  const recorded = JSON.parse(await f.hooks.tool.mdd_improve.execute({
+    userText: 'Anotá que el PR salió en inglés.',
+    title: 'El PR body salió en inglés',
+    detail: 'El cuerpo del PR debe ir en español y sin el aviso de borrador.',
+    phase: 'mdd-verify',
+  }, f.context));
+  assert.equal(recorded.memory, 'off');
+  assert.equal(recorded.recorded.phase, 'mdd-verify');
+  assert.match(recorded.note, /Optional memory is off/);
+  const listed = JSON.parse(await f.hooks.tool.mdd_improvements.execute({}, f.context));
+  assert.equal(listed.memory, 'off');
+  assert.equal(listed.total, 1);
+  assert.equal(listed.fromMemory, undefined);
 });
 
 test('mdd_reset releases a stopped phase and a whole run without a new conversation', async t => {
