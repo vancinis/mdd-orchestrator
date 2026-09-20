@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { test } from 'node:test';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 // Capability is the user's native decision, not MDD's. No packaged agent may ship its own
 // permission map: a phase that cannot act is exactly what made the workflow unusable.
@@ -138,4 +140,22 @@ test('assets: PR template consistently retains all six sections', () => {
   assert.deepEqual([...text.matchAll(/^## (.+)$/gm)].map(m => m[1]),
     ['Summary', 'Changes', 'Environment variables', 'Follow-ups', 'Blockers', 'Deployment']);
   assert.equal(text.match(/Not applicable\./g).length, 4);
+});
+
+// Setup refuses to install a package that does not match its assets, but nothing checked the
+// other direction while a run was live: an upgraded plugin next to an agent definition from an
+// older release is a coordinator reading instructions this adapter no longer speaks.
+test('assets: an installed actor definition that differs from the running package is named', async t => {
+  const { staleAssets } = await import('../dist/project-assets.js');
+  const home = fs.mkdtempSync(join(tmpdir(), 'mdd-stale-assets-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const environment = { home, env: {} };
+  const agents = join(home, '.config', 'opencode', 'agents');
+  fs.mkdirSync(agents, { recursive: true });
+  // Nothing installed proves nothing: running from source is ordinary, and installing is setup's job.
+  assert.deepEqual(staleAssets(environment), []);
+  fs.copyFileSync('assets/opencode/agents/mdd-plan.md', join(agents, 'mdd-plan.md'));
+  assert.deepEqual(staleAssets(environment), []);
+  fs.writeFileSync(join(agents, 'mdd-orchestrator.md'), '---\nmode: primary\n---\n\nAn older release.\n');
+  assert.deepEqual(staleAssets(environment), ['agents/mdd-orchestrator.md']);
 });

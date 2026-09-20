@@ -28,6 +28,9 @@ export const STATUS_PROTECTED_FIELDS: readonly string[] = Object.freeze([
   // A run restated for a conversation the host just rewrote. It is a few hundred bytes and it is
   // the only description of the run that survives losing the transcript, so it is never shed.
   'runCard', 'compacted',
+  // Names actor definitions that no longer match the plugin running them. Shedding a warning
+  // about following the wrong instructions would leave the run doing exactly that, silently.
+  'assets',
   // Both are small and both are protocol. `resultFormat` is what a phase reported inline must
   // look like, and `reportDetail` is the detail level the user chose; dropping either one puts
   // the coordinator back to guessing, which is the failure these fields exist to end.

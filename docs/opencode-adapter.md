@@ -530,6 +530,18 @@ nothing, restores nothing and changes no route. Combined with `nextAction`, a co
 conversation has two small fields to read instead of a summary to reinterpret. A compaction in a
 conversation MDD is not running is ignored.
 
+### Stale installed assets
+
+Setup already refuses to install a package that does not match its assets. Nothing checked the
+other direction while a run was live, so an upgraded plugin sitting next to an agent definition
+from an older release produced a coordinator reading instructions the adapter no longer speaks —
+a failure whose only symptom is a run behaving oddly for reasons nobody can see. At startup the
+plugin compares the digest of each installed actor asset against the one in the package running
+it, once, and every MDD tool payload then carries `assets: { stale, action }` naming the files and
+pointing at `mdd-ai update`. Only a file that exists and differs is reported: an absent one proves
+nothing, since running from source is ordinary and installing is setup's job. Nothing is blocked;
+the check reports and the user decides.
+
 ### Derived next action
 
 Every MDD tool answers through one payload helper that attaches `nextAction`: the single call to

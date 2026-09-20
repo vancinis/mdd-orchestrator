@@ -17,12 +17,16 @@ import { renderPRBody } from './pr-body.js';
 import { statusPayload } from './status-budget.js';
 import { withNextAction } from './next-action.js';
 import { recordSession } from './session-log.js';
+import { staleAssets } from './project-assets.js';
 
 /**
  * Every MDD tool answers through here, so the derived next call and the payload budget are
  * applied in one place rather than remembered at eight call sites.
  */
-function payload(value: unknown): string { return statusPayload(withNextAction(value)); }
+function payload(value: unknown, assets?: Record<string, unknown>): string {
+  const status = value && typeof value === 'object' && !Array.isArray(value) && assets ? { ...value, assets } : value;
+  return statusPayload(withNextAction(status));
+}
 
 function record(value: unknown, subject = 'response'): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`Unknown OpenCode ${subject} structure.`);
@@ -379,6 +383,18 @@ const plugin: Plugin = async input => {
    * Recorded once per conversation per process: the fact worth keeping does not change, and a
    * read-modify-write on every tool call would put local file IO on the hot path for nothing.
    */
+  /**
+   * Checked once at startup, because the answer cannot change while this process runs and the
+   * cost belongs to loading, not to every tool call. A plugin upgraded next to actor definitions
+   * from an older release is the failure this reports: the coordinator reads instructions the
+   * adapter no longer speaks, and nothing about the run itself looks wrong.
+   */
+  const stale = (() => { try { return staleAssets(); } catch { return []; } })();
+  const assets = stale.length
+    ? { stale, action: 'The installed MDD actor assets differ from the plugin running them, so this conversation may be following instructions this adapter no longer speaks. Run `mdd-ai update` and restart OpenCode. Nothing is blocked: report this to the user once and continue.' }
+    : undefined;
+  /** One exit for every MDD tool: derived next call, asset warning when there is one, and the budget. */
+  const reply = (value: unknown): string => payload(value, assets);
   const opened = new Set<string>();
   const enter = (context: { agent: string; sessionID: string; directory: string; worktree: string }, name: string): void => {
     coordinatorOnly(context.agent, name);
@@ -420,7 +436,7 @@ const plugin: Plugin = async input => {
           if (context.abort.aborted) throw new Error('MDD start was aborted.');
           const status = record(await intake.start(args, context, context.messageID), 'start status');
           if (status.setupOrigin) status.setupOrigin = { ...record(status.setupOrigin, 'setup origin'), projectID: input.project.id };
-          return payload(status);
+          return reply(status);
         },
       }),
       mdd_status: tool({
@@ -439,7 +455,7 @@ const plugin: Plugin = async input => {
               if (pending) recovery = { pendingStart: { requirements: pending.requirements } };
             } catch { recovery = { recovery: 'unavailable', reason: 'The original objective cannot be recovered safely from native history. Restate it in a fresh parent; do not resume uncertain execution.' }; }
           }
-          return payload({
+          return reply({
             ...status, ...recovery,
             runtime: { sessionID: context.sessionID, directory: context.directory, worktree: context.worktree, agent: context.agent },
           });
@@ -451,7 +467,7 @@ const plugin: Plugin = async input => {
         async execute(args, context) {
           enter(context, 'mdd_change_request');
           if (context.abort.aborted) throw new Error('Change request was aborted.');
-          return payload(await intake.changeRequest(args, context, context.messageID));
+          return reply(await intake.changeRequest(args, context, context.messageID));
         },
       }),
       mdd_phase_result: tool({
@@ -460,7 +476,7 @@ const plugin: Plugin = async input => {
         async execute(args, context) {
           enter(context, 'mdd_phase_result');
           if (context.abort.aborted) throw new Error('The phase report was aborted.');
-          return payload(await intake.submit(args, context));
+          return reply(await intake.submit(args, context));
         },
       }),
       mdd_reset: tool({
@@ -468,7 +484,7 @@ const plugin: Plugin = async input => {
         args: { scope: tool.schema.enum(['phase', 'run']).describe('phase releases the current attempt; run discards the run state for this conversation.') },
         async execute(args, context) {
           enter(context, 'mdd_reset');
-          return payload(intake.reset(context, args.scope));
+          return reply(intake.reset(context, args.scope));
         },
       }),
       mdd_context: tool({
@@ -480,7 +496,7 @@ const plugin: Plugin = async input => {
         async execute(args, context) {
           enter(context, 'mdd_context');
           if (context.abort.aborted) throw new Error('The context contribution was aborted.');
-          return payload(intake.contribute(args, context));
+          return reply(intake.contribute(args, context));
         },
       }),
       mdd_contextual_explore: tool({
@@ -489,7 +505,7 @@ const plugin: Plugin = async input => {
         async execute(args, context) {
           enter(context, 'mdd_contextual_explore');
           if (context.abort.aborted) throw new Error('Contextual exploration was aborted.');
-          return payload(await intake.explore(args, context));
+          return reply(await intake.explore(args, context));
         },
       }),
     },
