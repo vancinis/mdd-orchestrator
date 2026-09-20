@@ -1,0 +1,10 @@
+# Packaged assets are injected into prompts by value and compared by digest, so a checkout that
+# rewrote their line endings would change every digest and fail the asset tests. Normalizing the
+# whole tree to LF makes those digests a property of the repository rather than of the platform
+# the clone happened on.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.tgz binary
