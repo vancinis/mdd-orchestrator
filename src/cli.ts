@@ -4,36 +4,44 @@ import { evaluate } from './kernel.js';
 import { ValidationError } from './validation.js';
 import { settingsCommand } from './settings-cli.js';
 
-const usage = `MDD global setup and routing proof
-Proof flags are a dry run; no phases are executed by the CLI.
+const usage = `Instalación global de MDD y prueba de ruteo
+Las banderas de prueba son una simulación: la CLI no ejecuta ninguna fase.
 
-Usage:
-  mdd-ai                      open the install/update wizard
-  mdd-ai link                 put mdd-ai on your user PATH
+Uso:
+  mdd-ai                      abre el asistente de instalación/actualización
+  mdd-ai link                 agrega mdd-ai al PATH de tu usuario
   mdd-ai config | doctor | init | update
-  mdd-ai profile list | create <name> | use <name>
+  mdd-ai profile list | create <nombre> | use <nombre>
   mdd-ai telemetry status | report | on | off | clear
-  node dist/cli.js --answers <file.json> [--config <file.json>] [--explore]
-  node dist/cli.js --profile <file.json> [--config <file.json>] [--explore]
+  node dist/cli.js --answers <archivo.json> [--config <archivo.json>] [--explore]
+  node dist/cli.js --profile <archivo.json> [--config <archivo.json>] [--explore]
   node dist/cli.js --help
 
-The global command is installed as mdd-ai; the same commands work through
-node dist/cli.js from a source checkout. Setup offers to add its folder to
-your user PATH, and never edits the machine PATH.
+El comando global se instala como mdd-ai; los mismos comandos funcionan con
+node dist/cli.js desde un checkout del código. Setup ofrece agregar su carpeta
+al PATH de tu usuario, y nunca edita el PATH de la máquina.
 
-Setup: one interactive install/configure/check flow; optional Engram; explicit Apply.
-Update: replaces an outdated owned package and its assets after the same explicit Apply.
-Source checkout: npm run setup (offers missing dependencies/build before the wizard).
-Project settings: config opens an advanced terminal editor; Save is explicit, Cancel writes nothing.
-Named profiles live in mdd.config.json, separate from the proof's --profile file.
-Model/profile changes require native runtime restart. Missing models inherit native selection.
-Telemetry is local-only, enabled by default, with 30-day retention on API use.
-Telemetry report reads the workspace ledger: phase time, retries, failures and tokens.
+Setup: un único flujo interactivo de instalar, configurar y verificar; memoria
+opcional y un Aplicar explícito.
+Update: reemplaza un paquete propio desactualizado y sus assets tras el mismo
+Aplicar explícito.
+Checkout de código: npm run setup (ofrece instalar dependencias y compilar antes
+del asistente).
+Configuración del proyecto: config abre un editor de terminal avanzado; Guardar
+es explícito y Cancelar no escribe nada.
+Los perfiles con nombre viven en mdd.config.json, aparte del archivo --profile
+que usa la prueba.
+Cambiar modelo o perfil requiere reiniciar el entorno nativo. Los modelos que
+falten heredan la selección nativa.
+La telemetría es solo local, viene activada y guarda 30 días al usar la API.
+El reporte de telemetría lee el registro del workspace: tiempo por fase,
+reintentos, fallos y tokens.
 
-Answers: all five preflight fields. Profile: { "answers": { ... } }.
-Config: optional threshold and partial weight overrides. See docs/product-contract.md.
-Use exactly one source. Paths are relative to the current working directory.
-Exit codes: 0 success/help; 2 usage, JSON, or validation error; 1 file I/O or unexpected failure.
+Answers: los cinco campos del preflight. Profile: { "answers": { ... } }.
+Config: overrides opcionales de umbral y peso parcial. Ver docs/product-contract.md.
+Usá exactamente una fuente. Las rutas son relativas al directorio actual.
+Códigos de salida: 0 éxito o ayuda; 2 error de uso, JSON o validación; 1 error de
+E/S o falla inesperada.
 `;
 
 function parseArguments(args: string[]): Record<string, unknown> {
@@ -42,20 +50,20 @@ function parseArguments(args: string[]): Record<string, unknown> {
   for (let index = 0; index < args.length; index++) {
     const flag = args[index];
     if (flag === '--explore') {
-      if (explore) throw new ValidationError('Duplicate option: --explore.');
+      if (explore) throw new ValidationError('Opción duplicada: --explore.');
       explore = true;
       continue;
     }
     if (flag !== '--answers' && flag !== '--profile' && flag !== '--config') {
-      throw new ValidationError(`Unknown option: ${flag}. Run with --help for usage.`);
+      throw new ValidationError(`Opción desconocida: ${flag}. Ejecutá con --help para ver el uso.`);
     }
-    if (paths.has(flag)) throw new ValidationError(`Duplicate option: ${flag}.`);
+    if (paths.has(flag)) throw new ValidationError(`Opción duplicada: ${flag}.`);
     const path = args[++index];
-    if (!path || path.startsWith('--')) throw new ValidationError(`${flag} requires a JSON file path.`);
+    if (!path || path.startsWith('--')) throw new ValidationError(`${flag} requiere la ruta de un archivo JSON.`);
     paths.set(flag, path);
   }
   if (paths.has('--answers') === paths.has('--profile')) {
-    throw new ValidationError('Supply exactly one of --answers or --profile.');
+    throw new ValidationError('Pasá exactamente una de --answers o --profile.');
   }
   const request: Record<string, unknown> = { explore };
   for (const [flag, path] of paths) {
@@ -63,7 +71,7 @@ function parseArguments(args: string[]): Record<string, unknown> {
     try {
       request[flag.slice(2)] = JSON.parse(text.replace(/^\uFEFF/, ''));
     } catch {
-      throw new ValidationError(`${flag} file "${path}" contains malformed JSON. Use valid UTF-8 JSON.`);
+      throw new ValidationError(`El archivo ${flag} "${path}" tiene JSON mal formado. Usá JSON UTF-8 válido.`);
     }
   }
   return request;
@@ -78,7 +86,7 @@ try {
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   }
 } catch (error) {
-  const message = error instanceof Error ? error.message : 'Unexpected failure.';
-  process.stderr.write(`MDD error: ${message}\n`);
+  const message = error instanceof Error ? error.message : 'Falla inesperada.';
+  process.stderr.write(`Error de MDD: ${message}\n`);
   process.exitCode = error instanceof ValidationError ? 2 : 1;
 }

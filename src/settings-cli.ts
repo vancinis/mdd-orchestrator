@@ -12,36 +12,36 @@ import { COMMAND, commandPlan, registerPath, writeLaunchers } from './command-li
 export async function settingsCommand(args: string[], root: string, write: (text: string) => void): Promise<boolean> {
   const [command, action, name] = args;
   if (command === 'setup' || (args.length === 0 && process.stdin.isTTY)) {
-    if (args.length > 1) throw new ValidationError('Usage: mdd setup. Target directories are retired; setup installs once in the global OpenCode directory.');
+    if (args.length > 1) throw new ValidationError('Uso: mdd setup. Los directorios de destino ya no existen; setup instala una sola vez en el directorio global de OpenCode.');
     await runTerminalSetup(root);
     return true;
   }
   if (command === 'update') {
-    if (args.length > 1) throw new ValidationError('Usage: mdd update. Run it from the source checkout whose build should replace the installed package.');
+    if (args.length > 1) throw new ValidationError('Uso: mdd update. Ejecutalo desde el checkout de origen cuyo build debe reemplazar al paquete instalado.');
     await runTerminalSetup(root, 'update');
     return true;
   }
   if (command === 'link') {
-    if (args.length > 1) throw new ValidationError(`Usage: mdd link. It installs the ${COMMAND} launcher and adds only its own folder to your user PATH.`);
+    if (args.length > 1) throw new ValidationError(`Uso: mdd link. Instala el lanzador ${COMMAND} y agrega solo su propia carpeta al PATH de tu usuario.`);
     const paths = installationPaths();
     writeLaunchers(paths);
     const plan = commandPlan();
     if (plan.onPath) {
-      write(`${COMMAND} is already on your PATH: ${plan.binRoot}\n`);
+      write(`${COMMAND} ya está en tu PATH: ${plan.binRoot}\n`);
       return true;
     }
     if (registerPath(plan.binRoot) === 'registered') {
-      write(`Added to your user PATH: ${plan.binRoot}\nOpen a new terminal, then run ${COMMAND}.\nYour machine PATH was not touched.\n`);
+      write(`Se agregó al PATH de tu usuario: ${plan.binRoot}\nAbrí una terminal nueva y ejecutá ${COMMAND}.\nEl PATH de la máquina no se tocó.\n`);
     } else {
-      write(`Launcher installed in ${plan.binRoot}\nAdd it to your shell profile to use ${COMMAND} anywhere:\n  ${plan.manual}\n`);
+      write(`Lanzador instalado en ${plan.binRoot}\nAgregalo al perfil de tu shell para usar ${COMMAND} desde cualquier lado:\n  ${plan.manual}\n`);
     }
     return true;
   }
   if (command === 'init' || command === 'doctor') {
-    if (args.length > 1) throw new ValidationError(`Usage: mdd ${command}. Target directories are retired; installation is global.`);
+    if (args.length > 1) throw new ValidationError(`Uso: mdd ${command}. Los directorios de destino ya no existen; la instalación es global.`);
     const target = installationPaths().configRoot;
     if (command === 'init') {
-      write(`${JSON.stringify(initProject(target))}\nRestart OpenCode for new runs to load global assets. Do not restart uncertain work as a retry.\n`);
+      write(`${JSON.stringify(initProject(target))}\nReiniciá OpenCode para que las ejecuciones nuevas carguen los assets globales. No reinicies trabajo incierto como si fuera un reintento.\n`);
     } else {
       const report = await doctor(target);
       write(`${JSON.stringify(report, null, 2)}\n`);
@@ -50,7 +50,7 @@ export async function settingsCommand(args: string[], root: string, write: (text
     return true;
   }
   if (command === 'config') {
-    if (args.length !== 1) throw new ValidationError('Usage: mdd config');
+    if (args.length !== 1) throw new ValidationError('Uso: mdd config');
     await runTerminalConfig(root);
     return true;
   }
@@ -60,19 +60,19 @@ export async function settingsCommand(args: string[], root: string, write: (text
       write(Object.keys(settings.profiles).sort().map(key => `${key === settings.activeProfile ? '*' : ' '} ${key}`).join('\n') + '\n');
     } else if ((action === 'create' || action === 'use') && name && args.length === 3) {
       saveGlobalSettings(changeProfile(loadGlobalSettings(), action, name));
-      write(`Active global profile: ${name}. Restart OpenCode to load it.\n`);
-    } else throw new ValidationError('Usage: mdd profile list | create <name> | use <name>');
+      write(`Perfil global activo: ${name}. Reiniciá OpenCode para cargarlo.\n`);
+    } else throw new ValidationError('Uso: mdd profile list | create <nombre> | use <nombre>');
     return true;
   }
   if (command === 'telemetry') {
     if (args.length !== 2 || !['status', 'on', 'off', 'clear', 'report'].includes(action ?? '')) {
-      throw new ValidationError('Usage: mdd telemetry status | report | on | off | clear');
+      throw new ValidationError('Uso: mdd telemetry status | report | on | off | clear');
     }
     if (action === 'on' || action === 'off') {
       const settings = loadGlobalSettings();
       settings.telemetry.enabled = action === 'on';
       saveGlobalSettings(settings);
-      write(`Global telemetry preference ${action}. Event files remain workspace-local; clear affects only the current workspace.\n`);
+      write(`Preferencia global de telemetría: ${action === 'on' ? 'activada' : 'desactivada'}. Los archivos de eventos siguen siendo locales al workspace; clear afecta solo al workspace actual.\n`);
     } else if (action === 'report') {
       const report = telemetryReport(root);
       if (!report.ok) throw new Error(report.diagnostic);

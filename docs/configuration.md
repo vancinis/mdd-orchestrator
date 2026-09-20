@@ -243,8 +243,10 @@ function renderReport(detail: Answers['summary'], value: PhaseReport): string;
 points. The adapter corroborates them, never accepts model-selected percentages or
 infers confidence from phase counts. Failures invalidate affected flags; failed/blocked
 reports without invalidation are rejected. Unrelated confirmed evidence can remain earned.
-Detailed output has Summary/How/Status/Confidence labeled **percentage evidence coverage,
-not probability**; medium has Summary/How; low has the caller's actual phase work summary.
+Detailed output has `Resumen`/`Cómo`/`Estado`/`Cobertura` labeled **percentage evidence coverage,
+not probability**; medium has `Resumen`/`Cómo`; low has the caller's actual phase work summary.
+Those headings, the phase labels, the evidence flags and the statuses are rendered in Spanish for
+the reader; the keys they are stored and compared under stay the protocol's English ones.
 Reports generate neither receipts nor invented claims about implementation/checks.
 
 ### Local telemetry (`telemetry.ts`)

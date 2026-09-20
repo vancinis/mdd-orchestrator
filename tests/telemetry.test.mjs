@@ -167,9 +167,9 @@ test('the rollup accumulates runs, attempts and usage, and outlives the events i
   assert.equal(telemetryStatus(root, later).count, 0);
   assert.equal(fs.existsSync(log(root)), false);
   const report = telemetryReport(root, later);
-  assert.match(report.text, /Runs: 1 started, 1 completed/);
-  assert.match(report.text, /0 still inside the 30-day event window/);
-  assert.match(report.text, /result-rejected 1/);
+  assert.match(report.text, /Ejecuciones: 1 iniciadas, 1 completadas/);
+  assert.match(report.text, /0 siguen dentro de la ventana de 30 días/);
+  assert.match(report.text, /resultado rechazado 1/);
   assert.deepEqual(rollupOf(root).phases['mdd-plan'].input, 1200);
 });
 
@@ -179,7 +179,7 @@ test('clearing telemetry deletes the rollup with the events it summarizes', t =>
   assert.equal(fs.existsSync(rollupFile(root)), true);
   assert.equal(clearTelemetry(root).ok, true);
   assert.deepEqual(fs.readdirSync(join(root, '.mdd')), ['.gitignore']);
-  assert.match(telemetryReport(root, now).text, /No runs have been recorded yet/);
+  assert.match(telemetryReport(root, now).text, /Todavía no se registró ninguna ejecución/);
 });
 
 test('a damaged rollup is reported instead of overwritten, and the event is still recorded', t => {
@@ -195,21 +195,21 @@ test('a damaged rollup is reported instead of overwritten, and the event is stil
 
 test('the report reads the local ledger only, and says so when telemetry is off', t => {
   const root = fixture(t);
-  assert.match(telemetryReport(root, now).text, /No runs have been recorded yet/);
+  assert.match(telemetryReport(root, now).text, /Todavía no se registró ninguna ejecución/);
   recordTelemetry(root, { ...event(), runID, usage: usage() }, now);
   const text = telemetryReport(root, now).text;
-  assert.match(text, /local only, never exported/);
+  assert.match(text, /local, nunca se exporta/);
   assert.match(text, /^plan\s+0\s+1\s+0\s+0\s+0\s+0s\s+1\.2k\s+340\s+100\s+0\.0125$/m);
-  assert.match(text, /Usage measured for 1 of 0 phase run\(s\)/);
+  assert.match(text, /Se midió el consumo de 1 de 0 fase\(s\)/);
   // A log written before this workspace kept totals is still evidence, and reading it must not
   // rebuild anything: the report is the one command that only ever reads.
   fs.rmSync(rollupFile(root));
-  assert.match(telemetryReport(root, now).text, /No totals have been kept in this workspace yet, and 1 event\(s\)/);
+  assert.match(telemetryReport(root, now).text, /Todavía no hay totales acumulados en este workspace y hay 1 evento\(s\)/);
   assert.equal(fs.existsSync(rollupFile(root)), false);
   const settings = defaultSettings();
   settings.telemetry.enabled = false;
   saveGlobalSettings(settings);
-  assert.match(telemetryReport(root, now).text, /Telemetry is currently off/);
+  assert.match(telemetryReport(root, now).text, /La telemetría está apagada/);
 });
 
 test('row bounds prune oldest insertion and oversized storage fails without overwrite', t => {

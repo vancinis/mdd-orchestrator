@@ -14,10 +14,32 @@ export type PhaseReport = {
   status: ReportStatus;
   evidence: Evidence;
 };
+/**
+ * The rendered report is the one MDD artefact the user reads directly, so its scaffolding is
+ * Spanish like the installer, the config wizard and the preflight. The prose inside it is written
+ * by the phase actor in English and translated by the coordinator; only the frame is fixed here,
+ * which is what keeps the sections the user chose from being rewritten into whatever a model felt
+ * like producing. `phaseLabel` is part of that frame and is therefore Spanish too.
+ */
 export function phaseLabel(phase: Phase): string {
-  return { 'mdd-explore': 'Exploration', 'mdd-plan': 'Planning', 'mdd-propose': 'Scope', 'mdd-spec': 'Requirements',
-    'mdd-design': 'Design', 'mdd-tasks': 'Implementation steps', 'mdd-apply': 'Implementation', 'mdd-verify': 'Verification' }[phase];
+  return { 'mdd-explore': 'Exploración', 'mdd-plan': 'Planificación', 'mdd-propose': 'Alcance', 'mdd-spec': 'Requisitos',
+    'mdd-design': 'Diseño', 'mdd-tasks': 'Pasos de implementación', 'mdd-apply': 'Implementación', 'mdd-verify': 'Verificación' }[phase];
 }
+
+/**
+ * The vocabulary of the rendered frame. Keeping these as labels rather than inlining the words
+ * means the flag names, the states and the statuses stay the protocol's own English keys wherever
+ * they are compared, matched or written to a ledger, and only the presentation is translated.
+ */
+const EVIDENCE_LABELS: Record<EvidenceFlag, string> = {
+  requirements: 'requisitos', plan: 'plan', implementation: 'implementación', checks: 'chequeos',
+};
+const STATE_LABELS: Record<EvidenceState, string> = {
+  unearned: 'sin acreditar', confirmed: 'confirmada', invalidated: 'invalidada',
+};
+const STATUS_LABELS: Record<ReportStatus, string> = {
+  'in-progress': 'en curso', passed: 'completado', failed: 'fallido', blocked: 'detenido',
+};
 
 export function emptyEvidence(): Evidence {
   return { requirements: 'unearned', plan: 'unearned', implementation: 'unearned', checks: 'unearned' };
@@ -74,23 +96,23 @@ export function renderReport(detail: Answers['summary'], value: PhaseReport): st
   if ((input.status === 'failed' || input.status === 'blocked') && !Object.values(evidence).includes('invalidated')) {
     throw new ValidationError('Failed or blocked work must invalidate affected evidence before reporting.');
   }
-  const heading = `Summary (${phaseLabel(input.phase as Phase)})\n${summary}`;
+  const heading = `Resumen (${phaseLabel(input.phase as Phase)})\n${summary}`;
   if (detail === 'low') return `${heading}\n`;
-  const medium = `${heading}\n\nHow\n${how.length ? how.map(item => `- ${item}`).join('\n') : 'No performed-work details supplied.'}`;
+  const medium = `${heading}\n\nCómo\n${how.length ? how.map(item => `- ${item}`).join('\n') : 'No se informaron detalles del trabajo realizado.'}`;
   if (detail === 'medium') return `${medium}\n`;
   if (detail !== 'detailed') throw new ValidationError('Unknown report detail.');
   const breakdown = (Object.keys(EVIDENCE_WEIGHTS) as EvidenceFlag[]).map(flag =>
-    `- ${flag}: ${evidence[flag]} (${evidence[flag] === 'confirmed' ? EVIDENCE_WEIGHTS[flag] : 0}/${EVIDENCE_WEIGHTS[flag]})`,
+    `- ${EVIDENCE_LABELS[flag]}: ${STATE_LABELS[evidence[flag]]} (${evidence[flag] === 'confirmed' ? EVIDENCE_WEIGHTS[flag] : 0}/${EVIDENCE_WEIGHTS[flag]})`,
   ).join('\n');
-  return `${medium}\n\nStatus\n${input.status}\n\nConfidence\n${evidenceCoverage(evidence)}% evidence coverage (not probability).\n${breakdown}\n`;
+  return `${medium}\n\nEstado\n${STATUS_LABELS[input.status as ReportStatus]}\n\nCobertura\n${evidenceCoverage(evidence)}% de cobertura de evidencia (no es una probabilidad de acierto).\n${breakdown}\n`;
 }
 
 export function renderClosure(detail: Answers['summary'], input: { goal: string; changes: string; matched: boolean; checks: string[]; limits: string[]; status: ReportStatus; evidence: Evidence }): string {
   if (input.status === 'passed' && (!input.matched || !input.checks.length || input.evidence.checks !== 'confirmed')) throw new ValidationError('Successful closure requires matched acceptance and confirmed executed checks.');
   if (input.matched && input.status !== 'passed') throw new ValidationError('An incomplete closure cannot claim requirements and plan matched.');
-  const summary = `${text(input.goal)} ${text(input.changes)} ${input.matched ? 'Agent assessment: requirements and plan matched.' : 'Not complete: requirements and plan are not fully verified.'} ${input.checks.length} check command(s) recorded.${input.limits.length ? `\nRemaining: ${input.limits.map(text).join(' ')}` : ''}`;
+  const summary = `${text(input.goal)} ${text(input.changes)} ${input.matched ? 'Evaluación del agente: los requisitos y el plan coinciden con lo implementado.' : 'Sin completar: los requisitos y el plan no están verificados del todo.'} Se registraron ${input.checks.length} comando(s) de chequeo.${input.limits.length ? `\nPendiente: ${input.limits.map(text).join(' ')}` : ''}`;
   return renderReport(detail, { phase: 'mdd-verify', summary, how: [
-    ...input.checks.map(command => `Executed ${text(command)}.`),
-    'Requirement and plan matching is the agent’s source-based interpretation; command executions are checked independently by the adapter.',
-  ], status: input.status, evidence: input.evidence }).replace('Summary (Verification)', 'Summary');
+    ...input.checks.map(command => `Se ejecutó ${text(command)}.`),
+    'Que los requisitos y el plan coincidan es la interpretación del agente a partir de las fuentes; la ejecución de los comandos la verifica el adaptador por su cuenta.',
+  ], status: input.status, evidence: input.evidence }).replace(`Resumen (${phaseLabel('mdd-verify')})`, 'Resumen');
 }

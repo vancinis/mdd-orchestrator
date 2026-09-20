@@ -235,7 +235,7 @@ export class PhaseRunner {
       // present the report the user actually asked for instead of improvising its own.
       reportDetail: run.workflow.snapshot().answers.summary,
       evidence: { ...run.evidence }, coverage: evidenceCoverage(run.evidence),
-      report: run.side ? `Summary\nContextual exploration ${run.state === 'blocked' ? 'could not be confirmed' : run.state === 'ready' ? 'is ready' : 'is in progress'}. The main plan and approval are unchanged.\n` : run.state === 'complete' || run.state === 'blocked' ? this.#closure(run) : renderReport(run.workflow.snapshot().answers.summary, { ...run.report, evidence: run.evidence }),
+      report: run.side ? `Resumen\nLa exploración de contexto ${run.state === 'blocked' ? 'no pudo confirmarse' : run.state === 'ready' ? 'está lista' : 'está en curso'}. El plan principal y su aprobación no cambian.\n` : run.state === 'complete' || run.state === 'blocked' ? this.#closure(run) : renderReport(run.workflow.snapshot().answers.summary, { ...run.report, evidence: run.evidence }),
       acceptance: structuredClone(run.acceptance), decisions: structuredClone(run.decisions), planned: structuredClone(run.planned), verification: structuredClone(run.verification),
       uncertain: run.uncertain, attempts: run.attempts, runAttempts: run.spent, recoverable: true, mode: run.mode,
       // How many dispatches this phase still has before it becomes the coordinator's own. Reported
@@ -315,7 +315,7 @@ export class PhaseRunner {
       history: [], calls: new Set(previous?.calls ?? inherited), planned: [], evidence: { ...emptyEvidence(), requirements: trusted?.requirementsConfirmed ? 'confirmed' : 'unearned' },
       uncertain: false, userMessageID: trusted?.userMessageID ?? '', concerns: [], contexts: [], context, malformed: 0,
       decisions: [], executedChecks: [], changedFiles: 0, attempts: 0, spent: 0, mode: 'delegate', brief: '',
-      report: { phase: first.phase, summary: `Preparing ${phaseLabel(first.phase).toLowerCase()}.`, how: [], status: 'in-progress', evidence: emptyEvidence() },
+      report: { phase: first.phase, summary: `Preparando ${phaseLabel(first.phase).toLowerCase()}.`, how: [], status: 'in-progress', evidence: emptyEvidence() },
     };
     this.#runs.set(runtime.sessionID, run);
     try {
@@ -431,7 +431,7 @@ export class PhaseRunner {
       // The route itself cannot continue, so the current phase claims nothing.
       run.state = 'blocked';
       run.evidence = invalidateEvidence(run.evidence, this.#affected(run.phase));
-      run.report = { phase: run.phase, summary: 'The attempt stopped and this route needs attention.', how: [], status: 'blocked', evidence: run.evidence };
+      run.report = { phase: run.phase, summary: 'El intento se detuvo y esta ruta necesita atención.', how: [], status: 'blocked', evidence: run.evidence };
       return false;
     }
   }
@@ -482,7 +482,7 @@ export class PhaseRunner {
       }));
       if (run.state !== 'persisting-intent') throw new Error('Dispatch became uncertain during persistence.');
       run.state = 'await-result';
-      run.report = { phase: run.phase, summary: `${phaseLabel(run.phase)} is in progress.`, how: ['Using the agreed requirements and available plan evidence.'], status: 'in-progress', evidence: run.evidence };
+      run.report = { phase: run.phase, summary: `${phaseLabel(run.phase)} en curso.`, how: ['Con los requisitos acordados y la evidencia de plan disponible.'], status: 'in-progress', evidence: run.evidence };
       run.started = this.#now();
       run.attempt = run.attempts + 1;
       this.#event(run, 'phase-start');
@@ -739,7 +739,7 @@ export class PhaseRunner {
       return;
     }
     if (!run.side) run.evidence = invalidateEvidence(run.evidence, this.#affected(run.phase));
-    run.report = { phase: run.phase, summary: 'Execution stopped; affected evidence was withdrawn.', how: [], status: 'blocked', evidence: run.evidence };
+    run.report = { phase: run.phase, summary: 'La ejecución se detuvo; la evidencia afectada quedó retirada.', how: [], status: 'blocked', evidence: run.evidence };
     if (run.state !== 'blocked') this.#event(run, 'phase-end', 'blocked', 'stopped');
     run.state = 'blocked';
     run.reason = reason;
@@ -789,7 +789,7 @@ export class PhaseRunner {
     // as discarding the whole run.
     if (next.kind === 'approve') {
       run.state = 'await-approval';
-      run.report = { phase: run.phase, summary: `${phaseLabel(run.phase)} is recorded; the next phase is waiting for approval.`, how: [], status: 'in-progress', evidence: run.evidence };
+      run.report = { phase: run.phase, summary: `Quedó registrada la fase de ${phaseLabel(run.phase).toLowerCase()}; la siguiente espera aprobación.`, how: [], status: 'in-progress', evidence: run.evidence };
       this.#settle(run);
       return { scope: 'phase', phase: next.phase, approval: true };
     }
@@ -1099,7 +1099,7 @@ export class PhaseRunner {
     run.args = prompts.args;
     run.brief = prompts.brief;
     run.state = 'ready';
-    run.report = { phase, summary: `Ready for ${phaseLabel(phase).toLowerCase()}.`, how: ['The next work follows the requirements and available plan; no extra process confirmation is needed in automatic mode.'], status: 'in-progress', evidence: run.evidence };
+    run.report = { phase, summary: `Listo para ${phaseLabel(phase).toLowerCase()}.`, how: ['El trabajo que sigue respeta los requisitos y el plan disponible; en modo automático no hace falta confirmar el proceso aparte.'], status: 'in-progress', evidence: run.evidence };
   }
 
   /**
@@ -1197,9 +1197,9 @@ export class PhaseRunner {
   #closure(run: Run): string {
     const checked = run.verification;
     const gap = checked ? [...checked.scenarios, ...checked.steps, ...checked.decisions].find(item => item.status !== 'verified') : undefined;
-    return renderClosure(run.workflow.snapshot().answers.summary, { goal: run.acceptance?.goal ?? 'Complete the requested change.',
-      changes: run.changedFiles ? checked?.changes ?? `${run.changedFiles} scoped file(s) changed; the outcome is not fully verified.` : 'No implementation change was recorded.', matched: run.state === 'complete' && checked?.matched === true,
-      checks: run.executedChecks, limits: [...(gap ? [`Acceptance or plan gap: ${gap.assessment}`] : []), ...(checked?.limits ?? []), ...(run.state === 'blocked' && !gap ? ['Completion could not be confirmed. Inspect the detailed evidence before further work.'] : [])],
+    return renderClosure(run.workflow.snapshot().answers.summary, { goal: run.acceptance?.goal ?? 'Completar el cambio pedido.',
+      changes: run.changedFiles ? checked?.changes ?? `Cambiaron ${run.changedFiles} archivo(s) del alcance; el resultado no está verificado del todo.` : 'No se registró ningún cambio de implementación.', matched: run.state === 'complete' && checked?.matched === true,
+      checks: run.executedChecks, limits: [...(gap ? [`Brecha de criterios o de plan: ${gap.assessment}`] : []), ...(checked?.limits ?? []), ...(run.state === 'blocked' && !gap ? ['No se pudo confirmar que esté completo. Revisá la evidencia detallada antes de seguir.'] : [])],
       status: run.state === 'complete' ? 'passed' : run.report.status === 'failed' ? 'failed' : 'blocked', evidence: run.evidence });
   }
 

@@ -184,9 +184,12 @@ OpenSpec is used only when requested; no automatic folders are authorized. The u
 
 | Level | Implemented report fields |
 |---|---|
-| Detailed | Summary (understood request/current phase outcome), How, Status, Confidence percentage |
-| Medium | Summary, How |
+| Detailed | `Resumen` (understood request/current phase outcome), `Cómo`, `Estado`, `Cobertura` percentage |
+| Medium | `Resumen`, `Cómo` |
 | Low | Completed-work summary only |
+
+The rendered frame is Spanish because it is read by the user. The prose inside it is written by
+the phase actor in English and translated by the coordinator, which keeps the sections intact.
 
 Reports evolve with evidence rather than phase counts. **Implemented:** coverage is 20 points for accepted native requirements/profile intake, 20 for validated planning deliverables, 25 for reported implementation changes, and 35 for reported Verify checks that passed. The flags describe what each phase reported; MDD records the claim as a claim and never re-runs a command, so coverage is not correctness probability. A recorded failure loses its points; an attempt that never completed loses nothing because it claimed nothing. A no-change Apply earns no implementation points. No confidence is fabricated in the kernel.
 

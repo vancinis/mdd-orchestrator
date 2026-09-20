@@ -363,8 +363,10 @@ Verify also requires `verification: { scenarios, steps, decisions, changes, limi
 
 `mdd_status` exposes detached `acceptance`, `decisions`, `planned` and `verification` for
 drilldown. Terminal `report` leads with the goal, recorded changes, requirement/plan match,
-checks and material gaps. Low remains concise; medium adds How; detailed adds Status and
-evidence-coverage Confidence. Default reports omit internal routing, calls and receipts.
+checks and material gaps. Low remains concise; medium adds `Cómo`; detailed adds `Estado` and
+evidence-coverage `Cobertura`. The frame is rendered in Spanish for the reader while the phase
+prose inside it arrives in English and is translated by the coordinator, section for section.
+Default reports omit internal routing, calls and receipts.
 The map and assessments are agent interpretations of the user request, not a parser's proof
 of semantic correctness. Code checks reference integrity and native execution evidence.
 `verification.matched` describes the assessment map; successful route completion additionally

@@ -69,7 +69,7 @@ test('doctor reports missing setup read-only without creating settings or metada
   const root = fixture(t, false); const before = snapshot(root);
   const report = await doctor(root);
   assert.equal(report.ready, false); assert.deepEqual(snapshot(root), before);
-  assert.ok(report.checks.some(check => check.check === 'engram' && check.status === 'ok' && check.message.includes('off')));
+  assert.ok(report.checks.some(check => check.check === 'engram' && check.status === 'ok' && check.message.includes('apagada')));
   assert.ok(report.checks.some(check => check.check === 'installed-package' && check.status === 'action'));
 });
 
@@ -115,7 +115,7 @@ test('doctor probes only configured loopback health with GET and never registers
   const settings = defaultSettings(); settings.engram = { endpoint: `http://127.0.0.1:${server.address().port}`, project: 'fixture' }; saveSettings(root, settings);
   const before = snapshot(root); const report = await doctor(root);
   assert.equal(report.ready, true, JSON.stringify(report)); assert.deepEqual(requests, [['GET', '/health']]); assert.deepEqual(snapshot(root), before);
-  assert.ok(report.checks.some(check => check.check === 'native-binding' && check.message.includes('actual parent')));
+  assert.ok(report.checks.some(check => check.check === 'native-binding' && check.message.includes('la conversación real')));
 });
 test('doctor does not echo malformed configuration or raw transport details', async t => {
   const root = fixture(t); initProject(root); fs.writeFileSync(join(root, 'mdd/mdd.config.json'), '{"secret":"do-not-print"');
@@ -128,7 +128,7 @@ test('CLI init and doctor use fake global roots and reject retired target argume
   const report = spawnSync(process.execPath, [cli, 'doctor'], { cwd: root, encoding: 'utf8' }); assert.equal(report.status, 0, report.stderr);
   assert.equal(JSON.parse(report.stdout).ready, true);
   const usage = spawnSync(process.execPath, [cli, 'init', '--force'], { encoding: 'utf8' }); assert.equal(usage.status, 2);
-  const retired = spawnSync(process.execPath, [cli, 'setup', root], { encoding: 'utf8' }); assert.equal(retired.status, 2); assert.match(retired.stderr, /Target directories are retired/);
+  const retired = spawnSync(process.execPath, [cli, 'setup', root], { encoding: 'utf8' }); assert.equal(retired.status, 2); assert.match(retired.stderr, /Los directorios de destino ya no existen/);
 });
 for (const fault of ['redirect', 'oversized', 'wrong-service']) {
   test(`doctor rejects ${fault} health without following it or exposing response data`, async t => {

@@ -56,8 +56,8 @@ test('help is standalone, succeeds, and identifies dry-run and exit semantics', 
   const result = invoke('--help');
   assert.equal(result.status, 0);
   assert.equal(result.stderr, '');
-  assert.match(result.stdout, /dry run/);
-  assert.match(result.stdout, /Exit codes: 0/);
+  assert.match(result.stdout, /simulación: la CLI no ejecuta ninguna fase/);
+  assert.match(result.stdout, /Códigos de salida: 0/);
 });
 
 for (const args of [
@@ -73,7 +73,7 @@ for (const args of [
     const result = invoke(...args);
     assert.equal(result.status, 2);
     assert.equal(result.stdout, '');
-    assert.match(result.stderr, /^MDD error:/);
+    assert.match(result.stderr, /^Error de MDD:/);
   });
 }
 

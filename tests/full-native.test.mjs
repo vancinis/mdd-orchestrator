@@ -321,7 +321,7 @@ for (const [name, exit] of Object.entries({ nonzero: 1, interrupted: null })) {
 test('Apply no-change result earns no implementation credit; executable checks remain required', async t => {
   const f = await fixture(t); await f.phase(); await f.phase({ noChange: true }); await f.phase();
   assert.equal((await f.status()).state, 'complete'); assert.equal((await f.status()).coverage, 75);
-  assert.match((await f.status()).report, /No implementation change was recorded/);
+  assert.match((await f.status()).report, /No se registró ningún cambio de implementación/);
 });
 for (const summary of ['low', 'medium', 'detailed']) {
   test(`live report ${summary} and disabled telemetry`, async t => {
@@ -329,10 +329,10 @@ for (const summary of ['low', 'medium', 'detailed']) {
     for (let current = await f.status(); current.task; current = await f.status()) await f.phase();
     const status = await f.status();
     assert.match(status.report, /Make the requested feature usable/);
-    assert.match(status.report, /requirements and plan matched/);
+    assert.match(status.report, /los requisitos y el plan coinciden con lo implementado/);
     assert.doesNotMatch(status.report, /mdd-|task-\d|bash-\d|receipt/i);
-    assert.equal(status.report.includes('\nHow\n'), summary !== 'low');
-    assert.equal(status.report.includes('evidence coverage (not probability)'), summary === 'detailed');
+    assert.equal(status.report.includes('\nCómo\n'), summary !== 'low');
+    assert.equal(status.report.includes('de cobertura de evidencia (no es una probabilidad de acierto)'), summary === 'detailed');
     // The level the user chose is named in the payload, not buried in a droppable snapshot: the
     // coordinator cannot present the report they asked for if it has to guess which one that is.
     assert.equal(status.reportDetail, summary);
@@ -369,8 +369,8 @@ for (const fault of ['missing', 'invented', 'drift', 'partial']) {
       await f.phase({ coverageFault: fault });
       const status = await f.status();
       assert.equal(status.state, 'blocked'); assert.equal(status.coverage, 40);
-      assert.match(status.report, /Not complete: requirements and plan are not fully verified/);
-      assert.doesNotMatch(status.report, /100%|requirements and plan matched/);
+      assert.match(status.report, /Sin completar: los requisitos y el plan no están verificados del todo/);
+      assert.doesNotMatch(status.report, /100%|los requisitos y el plan coinciden con lo implementado/);
       assert.equal(status.verification.decisions[0].status, 'deviation');
       assert.match(status.report, /diverges from the planned boundary/);
       return;
@@ -378,7 +378,7 @@ for (const fault of ['missing', 'invented', 'drift', 'partial']) {
     await assert.rejects(f.phase({ coverageFault: fault }));
     const status = await f.status();
     assert.equal(status.state, 'ready'); assert.equal(status.coverage, 65);
-    assert.doesNotMatch(status.report, /100%|requirements and plan matched/);
+    assert.doesNotMatch(status.report, /100%|los requisitos y el plan coinciden con lo implementado/);
   });
 }
 

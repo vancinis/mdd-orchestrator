@@ -210,8 +210,8 @@ test('new command validation and help are deterministic and preserve exit semant
   const first = invoke(root, '--help');
   assert.equal(first.status, 0);
   assert.equal(first.stdout, invoke(root, '--help').stdout);
-  assert.match(first.stdout, /dry run/);
+  assert.match(first.stdout, /simulación: la CLI no ejecuta ninguna fase/);
   assert.match(first.stdout, /profile list/);
-  assert.match(first.stdout, /Exit codes: 0/);
+  assert.match(first.stdout, /Códigos de salida: 0/);
   assert.deepEqual(readdirSync(root), []);
 });

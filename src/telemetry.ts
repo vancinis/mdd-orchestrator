@@ -341,10 +341,20 @@ function elapsed(value: number): string {
 }
 
 const COLUMNS: { head: string; width: number }[] = [
-  { head: 'phase', width: 12 }, { head: 'runs', width: 6 }, { head: 'pass', width: 6 }, { head: 'fail', width: 6 },
-  { head: 'retry', width: 6 }, { head: 'hand', width: 6 }, { head: 'avg', width: 8 },
-  { head: 'in', width: 9 }, { head: 'out', width: 8 }, { head: 'cache', width: 9 }, { head: 'cost', width: 9 },
+  { head: 'fase', width: 12 }, { head: 'corr.', width: 6 }, { head: 'ok', width: 6 }, { head: 'falla', width: 6 },
+  { head: 'reint.', width: 7 }, { head: 'asume', width: 7 }, { head: 'prom.', width: 8 },
+  { head: 'entr.', width: 9 }, { head: 'sal.', width: 8 }, { head: 'caché', width: 9 }, { head: 'costo', width: 9 },
 ];
+/**
+ * The failure taxonomy stays English everywhere it is recorded, compared or stored: a ledger whose
+ * keys change with the reader's language is a ledger nobody can grep. Only this table, used once
+ * at the moment of printing, speaks to the person reading the report.
+ */
+const FAILURE_LABELS: Record<FailureClass, string> = {
+  'phase-failed': 'la fase falló', 'result-rejected': 'resultado rechazado',
+  'result-malformed': 'reporte ilegible', 'dispatch-mismatch': 'despacho no coincidente',
+  'native-error': 'error nativo', 'route-blocked': 'ruta detenida', stopped: 'detenido',
+};
 const row = (cells: string[]) => cells.map((cell, index) => cell.padEnd(COLUMNS[index]!.width)).join('').trimEnd();
 
 /**
@@ -353,20 +363,20 @@ const row = (cells: string[]) => cells.map((cell, index) => cell.padEnd(COLUMNS[
  * first thing to cut on a slow day, and then nothing would be read at all.
  */
 export function renderTelemetryReport(rollup: TelemetryRollup | undefined, recent: number, enabled: boolean): string {
-  const lines = ['MDD run ledger — local only, never exported.'];
-  if (!enabled) lines.push('Telemetry is currently off, so nothing new is being recorded.');
+  const lines = ['Registro de ejecuciones de MDD — local, nunca se exporta.'];
+  if (!enabled) lines.push('La telemetría está apagada, así que no se está registrando nada nuevo.');
   if (!rollup || !rollup.events) {
     // Events written before this workspace had an aggregate are still events. Reporting them as
     // nothing would be wrong, and rebuilding the aggregate here would make reading a write.
     lines.push(recent
-      ? `No totals have been kept in this workspace yet, and ${recent} event(s) from the last 30 days are on file. Totals start accumulating with the next recorded phase.`
-      : `No runs have been recorded yet in this workspace.${enabled ? ' The ledger fills as phases run.' : ''}`);
+      ? `Todavía no hay totales acumulados en este workspace y hay ${recent} evento(s) de los últimos 30 días en el archivo. Los totales empiezan a acumularse con la próxima fase registrada.`
+      : `Todavía no se registró ninguna ejecución en este workspace.${enabled ? ' El registro se llena a medida que corren las fases.' : ''}`);
     return `${lines.join('\n')}\n`;
   }
   const days = Math.max(1, Math.round((rollup.updated - rollup.since) / 86400000));
-  lines.push(`${rollup.events} event(s) since ${new Date(rollup.since).toISOString().slice(0, 10)} (${days} day(s)); ${recent} still inside the 30-day event window.`,
+  lines.push(`${rollup.events} evento(s) desde ${new Date(rollup.since).toISOString().slice(0, 10)} (${days} día(s)); ${recent} siguen dentro de la ventana de 30 días.`,
     '',
-    `Runs: ${rollup.runs.started} started, ${rollup.runs.completed} completed, ${rollup.runs.blocked} blocked, ${rollup.runs.reset} reset. Routes: ${rollup.routes.low} low, ${rollup.routes.high} high.`,
+    `Ejecuciones: ${rollup.runs.started} iniciadas, ${rollup.runs.completed} completadas, ${rollup.runs.blocked} detenidas, ${rollup.runs.reset} reiniciadas. Rutas: ${rollup.routes.low} corta, ${rollup.routes.high} larga.`,
     '',
     row(COLUMNS.map(column => column.head)));
   const totals = emptyPhase();
@@ -381,10 +391,10 @@ export function renderTelemetryReport(rollup: TelemetryRollup | undefined, recen
   lines.push(row(['total', String(totals.starts), String(totals.passed), String(totals.failed + totals.blocked),
     String(totals.retries), String(totals.handovers), totals.timed ? elapsed(totals.duration / totals.timed) : '-',
     tokens(totals.input), tokens(totals.output), tokens(totals.cacheRead + totals.cacheWrite), totals.cost.toFixed(4)]));
-  const failures = FAILURE_CLASSES.filter(name => rollup.failures[name]).map(name => `${name} ${rollup.failures[name]}`);
-  lines.push('', failures.length ? `Failures: ${failures.join(', ')}.` : 'No failed attempt has been recorded.');
-  lines.push(`Usage measured for ${totals.measured} of ${totals.starts} phase run(s)${totals.partial ? `, ${totals.partial} of them incomplete` : ''}. A phase the coordinator carries out itself reports no separate usage, because its tokens belong to the conversation.`,
-    'Counts are what the provider reported, and cost is in the provider\u2019s own units. Coverage is not correctness.');
+  const failures = FAILURE_CLASSES.filter(name => rollup.failures[name]).map(name => `${FAILURE_LABELS[name]} ${rollup.failures[name]}`);
+  lines.push('', failures.length ? `Fallos: ${failures.join(', ')}.` : 'No se registró ningún intento fallido.');
+  lines.push(`Se midió el consumo de ${totals.measured} de ${totals.starts} fase(s) ejecutada(s)${totals.partial ? `, ${totals.partial} de ellas de forma incompleta` : ''}. Una fase que el coordinador hace por su cuenta no reporta consumo aparte, porque sus tokens son los de la conversación.`,
+    'Los números son los que informó el proveedor y el costo va en sus propias unidades. La cobertura no es una medida de acierto.');
   return `${lines.join('\n')}\n`;
 }
 

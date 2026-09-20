@@ -25,19 +25,21 @@ test('failure invalidates named affected evidence without mutating caller data',
   assert.throws(() => invalidateEvidence(all, []));
   assert.throws(() => invalidateEvidence(all, ['arbitrary']));
   assert.throws(() => renderReport('detailed', { ...report(), status: 'failed' }), /invalidate/);
-  assert.match(renderReport('detailed', { ...report(), evidence: failed, status: 'failed' }), /40% evidence coverage/);
+  assert.match(renderReport('detailed', { ...report(), evidence: failed, status: 'failed' }), /40% de cobertura de evidencia/);
 });
 
-test('detailed report has deterministic Summary/How/Status/Confidence and explicit coverage label', () => {
+// The frame the user reads is Spanish, like the installer, the config wizard and the preflight.
+// The prose inside it is the actor's, in English, and the coordinator translates that part.
+test('detailed report has deterministic Resumen/Cómo/Estado/Cobertura and explicit coverage label', () => {
   assert.equal(renderReport('detailed', report()),
-    'Summary (Implementation)\nImplemented the requested scoped change.\n\nHow\n- Updated the parser.\n- Ran scoped parser checks.\n\nStatus\npassed\n\nConfidence\n100% evidence coverage (not probability).\n- requirements: confirmed (20/20)\n- plan: confirmed (20/20)\n- implementation: confirmed (25/25)\n- checks: confirmed (35/35)\n');
+    'Resumen (Implementación)\nImplemented the requested scoped change.\n\nCómo\n- Updated the parser.\n- Ran scoped parser checks.\n\nEstado\ncompletado\n\nCobertura\n100% de cobertura de evidencia (no es una probabilidad de acierto).\n- requisitos: confirmada (20/20)\n- plan: confirmada (20/20)\n- implementación: confirmada (25/25)\n- chequeos: confirmada (35/35)\n');
   assert.equal(renderReport('detailed', report()), renderReport('detailed', report()));
 });
 
-test('medium contains Summary/How only; low contains actual phase-specific summary only', () => {
-  assert.equal(renderReport('medium', report()), 'Summary (Implementation)\nImplemented the requested scoped change.\n\nHow\n- Updated the parser.\n- Ran scoped parser checks.\n');
+test('medium contains Resumen/Cómo only; low contains actual phase-specific summary only', () => {
+  assert.equal(renderReport('medium', report()), 'Resumen (Implementación)\nImplemented the requested scoped change.\n\nCómo\n- Updated the parser.\n- Ran scoped parser checks.\n');
   const exploration = { ...report(), phase: 'mdd-explore', summary: 'Identified two unresolved requirements.', status: 'in-progress', evidence: emptyEvidence() };
-  assert.equal(renderReport('low', exploration), 'Summary (Exploration)\nIdentified two unresolved requirements.\n');
+  assert.equal(renderReport('low', exploration), 'Resumen (Exploración)\nIdentified two unresolved requirements.\n');
   assert.equal(evidenceCoverage(exploration.evidence), 0);
 });
 
@@ -45,12 +47,29 @@ for (const detail of ['low', 'medium', 'detailed']) {
   test(`plain ${detail} closure keeps material gaps visible without routing or receipt details`, () => {
     const output = renderClosure(detail, { goal: 'Accept valid orders and explain invalid ones.', changes: 'Order validation was added.', matched: false,
       checks: ['npm test'], limits: ['Invalid-order behavior remains unverified.'], status: 'blocked', evidence: invalidateEvidence(all, ['implementation', 'checks']) });
-    assert.match(output, /Accept valid orders/); assert.match(output, /Not complete/); assert.match(output, /Invalid-order behavior remains unverified/);
-    assert.equal(output.includes('\nHow\n'), detail !== 'low');
-    assert.equal(output.includes('40% evidence coverage (not probability)'), detail === 'detailed');
+    assert.match(output, /Accept valid orders/); assert.match(output, /Sin completar/); assert.match(output, /Invalid-order behavior remains unverified/);
+    assert.equal(output.includes('\nCómo\n'), detail !== 'low');
+    assert.equal(output.includes('40% de cobertura de evidencia (no es una probabilidad de acierto)'), detail === 'detailed');
     assert.doesNotMatch(output, /mdd-|callID|receipt|100%/);
   });
 }
+
+// The frame is the half of the report MDD owns, and it is the half the user reads without anyone
+// translating it. A heading that drifts back to English is not a cosmetic regression: it puts the
+// coordinator back to deciding which language each section is in, one report at a time.
+test('every rendered frame the user reads is Spanish, in all three detail levels', () => {
+  for (const detail of ['low', 'medium', 'detailed']) {
+    const output = renderReport(detail, report());
+    assert.doesNotMatch(output, /^(Summary|How|Status|Confidence)\b/m, detail);
+    assert.match(output, /^Resumen \(Implementación\)$/m, detail);
+    if (detail !== 'low') assert.match(output, /^Cómo$/m, detail);
+    if (detail === 'detailed') {
+      assert.match(output, /^Estado\ncompletado$/m);
+      assert.match(output, /^Cobertura$/m);
+      assert.match(output, /^- requisitos: confirmada/m);
+    }
+  }
+});
 
 test('reports reject unsupported fields/status/phase and terminal escapes', () => {
   for (const change of [{ phase: 'orchestrator' }, { phase: 'bogus' }, { status: 'done' }, { summary: '' }, { how: 'checks' }, { summary: '\x1b[31munsafe' }, { percentage: 50 }]) {

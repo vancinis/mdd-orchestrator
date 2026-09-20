@@ -108,6 +108,6 @@ test('the wizard installs the launcher and the command runs the real CLI', async
   const output = windows
     ? execFileSync('cmd', ['/d', '/c', launcher, '--help'], { encoding: 'utf8', timeout: 60000, windowsHide: true })
     : execFileSync(launcher, ['--help'], { encoding: 'utf8', timeout: 60000 });
-  assert.match(output, /MDD global setup and routing proof/);
+  assert.match(output, /Instalación global de MDD y prueba de ruteo/);
   assert.match(output, new RegExp(`${COMMAND} link`));
 });
