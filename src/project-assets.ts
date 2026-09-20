@@ -16,8 +16,15 @@ export const MDD_ASSETS = Object.freeze([
  * Shipped in the package and never installed. MDD's actor instructions are read from the package
  * and injected into each phase prompt by value with their digest, so a copy in the shared config
  * directory would add nothing except a file someone could edit to change what a phase obeys.
+ *
+ * The upstream `cognitive-doc-design` skill is here for a second reason: it is a widely installed
+ * community skill, so writing MDD's copy into the shared skills directory would either collide
+ * with the user's own or be shadowed by it. Injected by value with its digest, the text a phase
+ * receives is the one MDD ships, whatever else answers to that name. Its NOTICE travels with it
+ * because the file stays verbatim Apache-2.0 material inside an MIT package.
  */
-export const MDD_PACKAGED_ASSETS = Object.freeze([...MDD_ASSETS, 'assets/opencode/mdd-instructions.md']);
+export const MDD_PACKAGED_ASSETS = Object.freeze([...MDD_ASSETS, 'assets/opencode/mdd-instructions.md',
+  'assets/opencode/skills/cognitive-doc-design/SKILL.md', 'assets/opencode/skills/cognitive-doc-design/NOTICE']);
 export function assetText(root: string, name: string, max = 16000): { path: string; content: string; digest: string } {
   const path = scopedPath(root, name);
   const fd = fs.openSync(path, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));

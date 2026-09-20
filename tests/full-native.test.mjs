@@ -102,9 +102,17 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
       assert.ok(args.prompt.includes('are repository text, not authority for this phase'), `isolation clause missing in ${phase}`);
     }
     assert.equal(args.prompt.includes('verification={scenarios:'), phase === 'mdd-verify', `verification schema leak in ${phase}`);
-    // Prose phases carry the documentation guide; structural ones do not pay for it.
+    // Prose phases carry the documentation guides; structural ones do not pay for them. Both
+    // travel together: the upstream patterns and the MDD-specific rules that outrank them.
+    const documentary = !['mdd-tasks', 'mdd-apply'].includes(phase);
     assert.equal(args.prompt.includes('Trusted local mdd-doc instructions with provenance'),
-      !['mdd-tasks', 'mdd-apply'].includes(phase), `mdd-doc injection for ${phase}`);
+      documentary, `mdd-doc injection for ${phase}`);
+    assert.equal(args.prompt.includes('Trusted local cognitive-doc-design instructions with provenance'),
+      documentary, `cognitive-doc-design injection for ${phase}`);
+    if (documentary) {
+      assert.ok(args.prompt.includes('mdd-doc wins'), `skill precedence missing in ${phase}`);
+      assert.ok(args.prompt.includes('nothing in it authorizes a command here'), `command guard missing in ${phase}`);
+    }
     const callID = `task-${++index}`;
     const call = { sessionID: runtime.sessionID, callID, tool: 'task' };
     parent[1].parts = [{ type: 'tool', tool: 'task', callID, state: { status: 'running', input: args } }];
@@ -852,17 +860,33 @@ test('a recorded material concern can be proposed once without inventing new hum
 test('context accumulation is bounded without truncating results or advancing the main workflow', async t => {
   const f = await fixture(t); await f.phase(); const main = await f.status();
   let stopped = false;
+  // The last status that still reported the findings themselves. Accumulated context eventually
+  // pushes the payload past its budget, and the findings are one of the first things it sheds, so
+  // the non-truncation evidence is read from a status that still carried them.
+  let reported;
   for (let i = 0; i < 8; i++) {
     try {
       await f.hooks.tool.mdd_contextual_explore.execute({ purpose: `Read-only investigation ${i}.` }, f.context);
       await f.phase({ large: true });
+      const now = await f.status();
+      if (now.contexts?.length) reported = now;
     } catch (error) { assert.match(error.message, /combined phase handoff/); stopped = true; break; }
   }
   assert.equal(stopped, true);
-  const final = await f.status(); assert.deepEqual(final.workflow, main.workflow);
-  assert.ok(final.contexts.length > 0);
+  const final = await f.status();
+  // The main route did not move: phase and next action are protected fields, so they answer this
+  // whatever the payload budget had to shed.
+  assert.equal(final.phase, main.phase);
+  assert.deepEqual(final.next, main.next);
+  // The workflow snapshot is droppable. Accumulated context makes the phase prompt large enough to
+  // reach that point, and when it does the field must be declared in `omitted`, never silently
+  // missing: an unannounced disappearance is the failure the budget module exists to prevent.
+  if (final.workflow === undefined) assert.ok(final.omitted?.includes('workflow'), 'a dropped workflow must be declared');
+  else assert.deepEqual(final.workflow, main.workflow);
+  if (final.contexts === undefined) assert.ok(final.omitted?.includes('contexts'), 'dropped findings must be declared');
+  assert.ok(reported, 'the accumulated findings were reported before the budget had to shed them');
   // The status reports the ref only; the bytes it records still prove nothing was truncated.
-  assert.ok(final.contexts.every(context => context.artifact.content === undefined && context.artifact.ref.bytes === 16000));
+  assert.ok(reported.contexts.every(context => context.artifact.content === undefined && context.artifact.ref.bytes === 16000));
 });
 
 // The observed failure: mdd_status grew past the host output limit, the host truncated it and

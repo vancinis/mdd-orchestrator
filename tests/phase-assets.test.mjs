@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { test } from 'node:test';
+import { MDD_ASSETS, MDD_PACKAGED_ASSETS } from '../dist/project-assets.js';
 
 // Capability is the user's native decision, not MDD's. No packaged agent may ship its own
 // permission map: a phase that cannot act is exactly what made the workflow unusable.
@@ -119,6 +120,27 @@ test('assets: mdd-doc shapes prose only and never widens a read-only phase', () 
   // Injected into read-only phases: it must not name a command runner or a delivery verb.
   assert.doesNotMatch(text, /\b(gh|git|npm|curl|bash) \w/);
   assert.ok(Buffer.byteLength(text) < 6000, 'stays a small share of the phase context budget');
+});
+
+// Shipped verbatim on purpose: it is upstream Apache-2.0 material, and the whole point of carrying
+// it by value is that the text a phase reads is this one rather than whatever else owns that name.
+test('assets: cognitive-doc-design stays verbatim upstream, attributed, and is never installed', () => {
+  const text = fs.readFileSync('assets/opencode/skills/cognitive-doc-design/SKILL.md', 'utf8');
+  assert.match(text, /^---\nname: cognitive-doc-design\n/);
+  assert.match(text, /license: Apache-2\.0/);
+  assert.match(text, /author: gentleman-programming/);
+  assert.match(text, /## Critical Patterns/);
+  assert.ok(Buffer.byteLength(text) < 6000, 'stays a small share of the phase context budget');
+  const notice = fs.readFileSync('assets/opencode/skills/cognitive-doc-design/NOTICE', 'utf8');
+  assert.match(notice, /Apache License, Version 2\.0/);
+  assert.match(notice, /redistributed verbatim/);
+  // Installing it would either overwrite a copy the user already keeps under that name or be
+  // refused by setup, which is why it is packaged and injected instead.
+  assert.equal(MDD_ASSETS.some(name => name.includes('cognitive-doc-design')), false);
+  for (const name of ['assets/opencode/skills/cognitive-doc-design/SKILL.md', 'assets/opencode/skills/cognitive-doc-design/NOTICE']) {
+    assert.ok(MDD_PACKAGED_ASSETS.includes(name), name);
+  }
+  assert.match(fs.readFileSync('AGENTS.md', 'utf8'), /skills\/cognitive-doc-design\/SKILL\.md/);
 });
 
 test('assets: PR template consistently retains all six sections', () => {

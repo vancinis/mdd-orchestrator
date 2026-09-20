@@ -27,6 +27,15 @@ function packagedSkill(name: string): PackagedSkill {
 }
 export function cleanupInstructions(): PackagedSkill { return packagedSkill('mdd-cleanup'); }
 export function docInstructions(): PackagedSkill { return packagedSkill('mdd-doc'); }
+/**
+ * The upstream community skill, shipped verbatim under its own Apache-2.0 notice and delivered
+ * beside `mdd-doc` rather than instead of it. `mdd-doc` holds the rules that are specific to an
+ * MDD artifact — the appended links section, the artifact byte limit, the read-only phases — and
+ * this one holds the general cognitive-load patterns a reader of any document benefits from. Both
+ * travel by value: resolving either by name would reach the shared registry, where a same-named
+ * skill from another tool answers first.
+ */
+export function cognitiveDocInstructions(): PackagedSkill { return packagedSkill('cognitive-doc-design'); }
 
 /**
  * MDD's own actor instructions. The host prepends whatever `AGENTS.md` and `instructions` files
