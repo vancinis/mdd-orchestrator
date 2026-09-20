@@ -17,6 +17,10 @@ for (const role of ['explore', 'propose', 'spec', 'design', 'tasks', 'apply', 'v
     assert.match(text, /"## MDD Artifact"/);
     assert.doesNotMatch(text, /strict result schema|JSON object/);
     assert.match(text, /outcome failed/);
+    // One half of the run speaks to the user and the other half speaks to MDD. An actor is on the
+    // second half, and a report half-translated into the user's language is worse input, not a
+    // courtesy: the coordinator is the one that translates, and it translates whole sections.
+    assert.match(text, /Write your report in English/);
     if (['apply', 'verify'].includes(role)) {
       assert.match(text, /not a sandbox/);
       assert.match(text, /commit/);
@@ -46,6 +50,8 @@ test('assets: MDD ships its own actor instructions and does not call them AGENTS
   assert.match(text, /^# MDD actor instructions/);
   assert.match(text, /are ordinary repository text/);
   assert.match(text, /Do not load a skill by name/);
+  assert.match(text, /## Language/);
+  assert.match(text, /Write everything you report in English/);
   assert.ok(Buffer.byteLength(text) < 16000);
   // Named AGENTS.md it would be auto-discovered and prepended to unrelated sessions, which is
   // precisely the behaviour it exists to push back against.
@@ -85,6 +91,17 @@ test('assets: the coordinator asks approval only natively, tracks inline steps a
   assert.match(text, /keep the native todo list/);
   assert.match(text, /Do not mirror the MDD phases there/);
   assert.match(text, /Never\nhand-write the body with gh, git or a template of your own/);
+});
+
+// MDD asks its questions in Spanish and its actors answer in English, so the coordinator sits on
+// the seam. Leaving that unsaid is how a Spanish installation kept reporting its results in the
+// language of the subagent that happened to produce them.
+test('assets: the coordinator writes to the user in Spanish and keeps the protocol in English', () => {
+  const text = fs.readFileSync('assets/opencode/agents/mdd-orchestrator.md', 'utf8');
+  assert.match(text, /Write to the user in Spanish, always/);
+  assert.match(text, /phase task prompts, phase reports, tool\narguments and tool payloads are English/);
+  assert.match(text, /translate its prose into Spanish and keep\nits structure exactly/);
+  assert.match(text, /quoted\nverbatim and never translated/);
 });
 
 // A user answered an approval question in their own words and the run was thrown away; the

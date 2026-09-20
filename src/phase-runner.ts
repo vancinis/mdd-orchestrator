@@ -959,6 +959,7 @@ export class PhaseRunner {
       'Optional concerns: [{category,evidence,impact}], at most eight, with category objective/integrations/sensitive-data/permissions. These are advisory only; never change scores or request governance for ordinary implementation choices.',
       'Keep user-facing summaries simple; evidenceSummary must avoid internal call IDs or routing details. The artifact carries the readable findings shown to the user.',
       'Use whatever tools and commands answer the question: reading, searching, running commands, fetching documentation. Native permission requests still apply and are the real boundary. This is an investigation, so do not change the project to answer it.',
+      'Report in English — summary and artifact — whatever language the question was asked in. The coordinator translates your findings for the user; reproduce quoted material exactly as it is.',
       'Return exactly one JSON object, no fences: phase, runID, callID, outcome (passed or failed), evidenceSummary (1–2000 bytes), artifact (1–16000 bytes). Never emit confidence percentages.',
       `phase=mdd-explore; runID=${solo.id}. Native callID is appended by the hook.`,
       `Investigation purpose data: ${JSON.stringify(solo.purpose)}`,
@@ -1134,6 +1135,10 @@ export class PhaseRunner {
       // Phase actors sit at the native subagent depth limit, so a task they dispatch fails. Saying
       // so costs one line and saves an attempt spent discovering it.
       'You are the actor for this phase: carry it out with your own tools. Dispatching another subagent is refused by the native depth limit, so do not delegate any part of it.',
+      // The user-facing half of MDD speaks Spanish; this half does not. Saying so here is what
+      // keeps a Spanish objective from producing a Spanish report that the coordinator then has
+      // to translate back before it can present it in the form the renderer expects.
+      'Report in English — summary, artifact, concerns and data — whatever language the requirements, the repository or the conversation use. This report is read by MDD and by the coordinator, never by the user directly; the coordinator translates it for them. Reproduce quoted requirements, error messages, file names and identifiers exactly as they are.',
       ...(run.lastFailure ? [`A previous attempt at this exact phase did not complete: ${JSON.stringify(run.lastFailure)}. This attempt is a retry, not a repeat: where that is what failed, take a different route to the same outcome, and do not redo work whose result is already listed below.`] : []),
       phase === 'mdd-apply' ? 'This phase implements: edit the sources the plan calls for.' : 'This phase produces understanding or a plan, so change sources only if the phase genuinely requires it.',
       ...reportFormatLines(phase),

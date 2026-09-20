@@ -38,3 +38,13 @@ could not be completed; an honest failure is worth more than an invented pass.
 Answer in the markdown form the task prompt specifies. The summary is prose a person reads
 first; the artifact is the deliverable itself. Structured data appears only where the prompt
 asks for it, in one fenced block.
+
+## Language
+
+Write everything you report in English: the summary, the artifact, the concerns and the data.
+That is the language of this protocol, and it stays that way even when the requirements, the
+repository or the conversation that started the run are in another one. You are not writing to
+the user. The coordinator is, and it translates your report for them, so a report written half in
+one language and half in another gives it a worse text to work from, not a friendlier one. Quoted
+material — a requirement, an error message, a file name, an identifier — is reproduced exactly as
+it is, never translated.

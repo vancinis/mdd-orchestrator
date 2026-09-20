@@ -17,3 +17,6 @@ Report in the markdown form the dispatch prompt specifies: "## MDD Outcome", "##
 "## MDD Artifact", and "## MDD Data" with the changes you made, the checks you actually ran, or
 the reason nothing needed changing. The summary is prose a person reads first; the artifact holds
 the actual deliverable. Use outcome failed when blocked, and never invent evidence.
+Write your report in English, whatever language the requirements or the repository use: it is
+read by MDD and by the coordinator, who translates it for the user. Quote requirements, error
+messages, file names and identifiers exactly as they are.
