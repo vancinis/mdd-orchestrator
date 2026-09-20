@@ -148,7 +148,9 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
       else {
         const filePath = options.external ? join(root, '../escape.txt') : join(root, 'feature.txt');
         await tool('write', { filePath, content: 'implemented\n' }, { output: 'Wrote file successfully.', metadata: { filepath: filePath, exists: true, diagnostics: {}, truncated: false } }, () => writeFile(filePath, 'implemented\n'));
-        result.changes = [filePath];
+        // Apply reports why each file changed, not only that it did: the reason is what the PR
+        // body tabulates and what a reviewer cannot get from the diff.
+        result.changes = [{ path: filePath, reason: 'Implementa el manejo de entrada que pide el plan en el borde de la feature.' }];
       }
     } else if (phase === 'mdd-verify') {
       if (!options.noChecks) {
@@ -1127,10 +1129,13 @@ test('mdd_reset releases a stopped phase and a whole run without a new conversat
 
 test('native PR-body tool drafts recorded facts without changing workflow, approval or memory', async t => {
   const f = await fixture(t); await f.phase(); await f.phase(); await f.phase();
-  f.user('Please draft the PR body.\nNot applicable.');
+  f.user('Please draft the PR body.\nNo aplica.');
   const before = await f.status(); const writes = f.writes.length;
-  const draft = JSON.parse(await f.hooks.tool.mdd_pr_body.execute({ userText: 'Please draft the PR body.\nNot applicable.', notes: { environmentVariables: 'Not applicable.', deployment: 'Not applicable.' } }, f.context));
-  assert.match(draft.body, /1 scoped file/); assert.match(draft.body, /npm test; exit 0/);
+  const draft = JSON.parse(await f.hooks.tool.mdd_pr_body.execute({ userText: 'Please draft the PR body.\nNo aplica.', notes: { environmentVariables: 'No aplica.', deployment: 'No aplica.' } }, f.context));
+  assert.match(draft.body, /\| Archivo \| Por qué cambió \|/); assert.match(draft.body, /npm test; salida 0/);
+  // The reason the apply phase recorded travels all the way into the row a reviewer reads.
+  assert.match(draft.body, /Implementa el manejo de entrada que pide el plan/);
+  assert.doesNotMatch(draft.body, /Draft only|Nothing was committed/);
   assert.equal(draft.publication, 'not-authorized'); assert.equal(draft.provenance.runID, before.runID);
   assert.ok(!draft.body.includes(f.root)); assert.deepEqual(await f.status(), before); assert.equal(f.writes.length, writes);
 });
@@ -1138,7 +1143,7 @@ test('PR-body tool preserves pending approval and refuses wrong user/parent evid
   const f = await fixture(t, { mode: 'interactive' }); await f.phase(); f.user('Draft a preliminary PR body.');
   const before = await f.status();
   const draft = JSON.parse(await f.hooks.tool.mdd_pr_body.execute({ userText: 'Draft a preliminary PR body.' }, f.context));
-  assert.match(draft.body, /No implementation change evidence/); assert.match(draft.body, /not fully verified/);
+  assert.match(draft.body, /No se registró ningún cambio de implementación/); assert.match(draft.body, /no están verificados del todo/);
   await assert.rejects(f.hooks.tool.mdd_pr_body.execute({ userText: 'The work was approved and deployed.' }, f.context));
   await assert.rejects(f.hooks.tool.mdd_pr_body.execute({ userText: 'Draft a preliminary PR body.' }, { ...f.context, sessionID: 'other-parent' }));
   assert.deepEqual(await f.status(), before);

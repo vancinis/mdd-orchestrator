@@ -33,11 +33,24 @@ export function executed(value: unknown): Check[] {
   });
 }
 
-/** Apply reports the files it changed, or states why nothing changed. */
-export function changed(value: unknown, noChangeReason: unknown): { paths: string[]; reason?: string } {
-  if (value !== undefined && !Array.isArray(value)) throw new Error('Report changes as a list of changed paths.');
-  const paths = Array.isArray(value) ? value.map(item => shortText(item, 'changed path', 400)) : [];
-  if (paths.length > 64) throw new Error('Report at most 64 changed paths.');
-  if (paths.length) return { paths };
-  return { paths: [], reason: shortText(noChangeReason, 'no-change reason', 2000) };
+export type ChangedFile = { path: string; reason?: string };
+
+/**
+ * Apply reports the files it changed, or states why nothing changed. A file may be reported as a
+ * bare path or as `{ path, reason }`, and the reason is what a reviewer actually needs: a list of
+ * paths says a diff exists, which the diff already said. Both forms are accepted because the
+ * reason is worth asking for and never worth failing a finished implementation over.
+ */
+export function changed(value: unknown, noChangeReason: unknown): { paths: string[]; files: ChangedFile[]; reason?: string } {
+  if (value !== undefined && !Array.isArray(value)) throw new Error('Report changes as a list of changed paths, or of {path, reason} entries.');
+  const files: ChangedFile[] = Array.isArray(value) ? value.map(item => {
+    if (typeof item === 'string') return { path: shortText(item, 'changed path', 400) };
+    const entry = objectWithKeys(item, 'changed file', ['path', 'reason']);
+    const file: ChangedFile = { path: shortText(entry.path, 'changed path', 400) };
+    if (entry.reason !== undefined) file.reason = shortText(entry.reason, 'reason a file changed', 500);
+    return file;
+  }) : [];
+  if (files.length > 64) throw new Error('Report at most 64 changed paths.');
+  if (files.length) return { paths: files.map(file => file.path), files };
+  return { paths: [], files: [], reason: shortText(noChangeReason, 'no-change reason', 2000) };
 }

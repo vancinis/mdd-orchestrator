@@ -9,7 +9,7 @@ import type { Answers, Phase } from './policy.js';
 import { cleanupInstructions, cognitiveDocInstructions, docInstructions, mddInstructions } from './phase-assets.js';
 import type { LessonInput } from './lessons.js';
 import { changed, deliverables, executed } from './phase-evidence.js';
-import type { Check, Deliverable } from './phase-evidence.js';
+import type { ChangedFile, Check, Deliverable } from './phase-evidence.js';
 import { emptyEvidence, invalidateEvidence, renderReport, renderClosure, phaseLabel, evidenceCoverage } from './reporting.js';
 import type { Evidence, EvidenceFlag, PhaseReport } from './reporting.js';
 import type { FailureClass, TelemetryEvent, TelemetryResult, TelemetryUsage } from './telemetry.js';
@@ -86,6 +86,8 @@ type Run = {
   history: ArtifactResult[]; calls: Set<string>; planned: Deliverable[]; evidence: Evidence;
   report: PhaseReport; started?: number; readyAt?: number; telemetryDiagnostic?: string;
   acceptance?: Acceptance; decisions: Decision[]; verification?: Verification; executedChecks: string[]; changedFiles: number;
+  /** What Apply reported it changed and why, kept so a PR body can say more than a file count. */
+  changedList: ChangedFile[];
   uncertain: boolean; userMessageID: string; concerns: Concern[]; contextReport?: string; context: RunContext[]; dossierDiagnostic?: string;
   contexts: { explorationID: string; outcome: 'passed' | 'failed'; artifact: ArtifactResult; summary: string; concerns: Concern[] }[];
   side?: { id: string; purpose: string; phase: Phase; state: State; args: TaskArgs; report: PhaseReport; brief: string };
@@ -315,7 +317,7 @@ export class PhaseRunner {
       args: { description: '', subagent_type: first.phase, prompt: '' }, state: 'starting',
       history: [], calls: new Set(previous?.calls ?? inherited), planned: [], evidence: { ...emptyEvidence(), requirements: trusted?.requirementsConfirmed ? 'confirmed' : 'unearned' },
       uncertain: false, userMessageID: trusted?.userMessageID ?? '', concerns: [], contexts: [], context, malformed: 0,
-      decisions: [], executedChecks: [], changedFiles: 0, attempts: 0, spent: 0, mode: 'delegate', brief: '',
+      decisions: [], executedChecks: [], changedFiles: 0, changedList: [], attempts: 0, spent: 0, mode: 'delegate', brief: '',
       report: { phase: first.phase, summary: `Preparando ${phaseLabel(first.phase).toLowerCase()}.`, how: [], status: 'in-progress', evidence: emptyEvidence() },
     };
     this.#runs.set(runtime.sessionID, run);
@@ -625,7 +627,7 @@ export class PhaseRunner {
     let choices = run.decisions;
     let nextEvidence = { ...run.evidence };
     let ran: Check[] = [];
-    let applied: { paths: string[]; reason?: string } | undefined;
+    let applied: { paths: string[]; files: ChangedFile[]; reason?: string } | undefined;
     {
       // The traceability fields are still validated link by link, and a mistake in them is still a
       // report that has to be restated. It is not a reason to re-run the phase that produced them.
@@ -696,7 +698,10 @@ export class PhaseRunner {
       if (accepted) run.acceptance = accepted;
       run.decisions = choices;
       run.concerns.push(...advisory);
-      if (applied) run.changedFiles = new Set(applied.paths).size;
+      if (applied) {
+        run.changedFiles = new Set(applied.paths).size;
+        run.changedList = applied.files;
+      }
       if (run.phase === 'mdd-verify') run.executedChecks = ran.filter(check => check.exit === 0).map(check => check.command);
       run.evidence = nextEvidence;
       run.report = { phase: run.phase, summary: evidenceSummary, how, status: outcome, evidence: run.evidence };
@@ -818,7 +823,7 @@ export class PhaseRunner {
     if (!run) throw new Error('No recorded MDD run is available for this parent. A draft cannot claim implementation evidence.');
     return { runID: run.id, goal: run.acceptance?.goal ?? 'Unverified: a requested outcome has not been recorded.',
       changes: run.verification?.changes ?? 'Implementation details remain unverified; inspect the recorded artifact.',
-      changedFiles: run.changedFiles, checks: [...run.executedChecks],
+      changedFiles: run.changedFiles, files: run.changedList.map(file => ({ ...file })), checks: [...run.executedChecks],
       verified: run.state === 'complete' && run.verification?.matched === true && run.evidence.checks === 'confirmed',
       uncertain: run.uncertain, limits: [...(run.verification?.limits ?? [])] };
   }
@@ -1136,7 +1141,7 @@ export class PhaseRunner {
       'mdd-spec': 'Supply acceptance with a concise A-to-B goal and stable requirement/scenario IDs reflecting the user request. Include concrete happy/error scenarios where applicable. Supply domain="project", the fixed storage namespace.',
       'mdd-design': 'Use held acceptance IDs to define only relevant decisions, boundaries and test seams. Supply decisions; do not redefine requirements or invent extra process.',
       'mdd-tasks': 'Supply ordered deliverables linked to held scenarios and decisions. Keep check commands applicable to acceptance; no extra unrelated checks. Preserve ID and dependency consistency.',
-      'mdd-apply': 'Implement the applicable planned deliverables. Supply changes as the list of file paths you changed, or noChangeReason when nothing needed changing. Report the checks you actually ran as checks [{command,exit}]; they are recorded as your claim, and an empty list is the honest answer when you ran none.',
+      'mdd-apply': 'Implement the applicable planned deliverables. Supply changes as [{path,reason}], one entry per file you changed, where reason says in one sentence why that file had to change — a reviewer reads it beside the diff, so "updated the file" is not a reason. A bare path is still accepted when there is genuinely nothing to add. Use noChangeReason instead when nothing needed changing. Report the checks you actually ran as checks [{command,exit}]; they are recorded as your claim, and an empty list is the honest answer when you ran none.',
       'mdd-verify': 'Check requirements AND the held plan against the implementation, running the planned checks. Supply checks [{command,exit}] for what you actually ran and verification for EVERY scenario-step pair, step and decision. Give source-based semantic assessments naming the check they rely on; use not-verified/deviation and outcome failed for gaps. An exit code is not semantic proof; never report a check you did not run.',
     };
     const cleanup = phase === 'mdd-apply' ? cleanupInstructions() : undefined;

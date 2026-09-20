@@ -441,9 +441,16 @@ merely to draft a body. Optional notes contain `environmentVariables`, `followUp
 `deployment`, each quoting a whole user-provided line. They stay attributed and unverified.
 No model-callable parameter can replace recorded changes, checks or completion evidence.
 
-The six sections always remain Summary / Changes / Environment variables / Follow-ups /
-Blockers / Deployment. Missing optional facts are explicitly unverified; an explicit user
-`Not applicable.` line is retained. Obvious credential assignments, paths and code excerpts
+The six sections always remain Resumen / Cambios / Variables de entorno / Seguimiento /
+Bloqueos / Despliegue, rendered in Spanish because a pull request body is read by a reviewer.
+`Cambios` leads with one table row per changed file, holding the reason the apply phase recorded
+for that file; a file reported without one says so rather than being given an invented motive,
+and a reason containing a pipe or a newline is escaped instead of breaking the row. The body
+carries no draft-only notice: publication authority is reported to the caller as
+`publication: not-authorized`, which is who can act on it, and repeating it at the top of every
+body spent the reviewer's attention on MDD's permissions instead of on the change. Missing
+optional facts are explicitly unverified; an explicit user
+`No aplica.` line is retained. Obvious credential assignments, paths and code excerpts
 are omitted; only conservative simple check commands are shown exactly. This is not a
 general secret scanner or a fresh Git diff review. Inspect the draft before publication.
 The tool returns `publication: not-authorized`; it does not create branches, commits or PRs.

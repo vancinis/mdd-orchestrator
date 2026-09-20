@@ -169,8 +169,8 @@ repair sources or upgrade dependencies. No actor receives default commit/push/PR
 
 Explicitly load exported project skills `mdd-pr-body` for user PR requests and
 `mdd-cleanup` for scoped simplification. `AGENTS.md` registers their exact local paths.
-The PR skill retains Summary/Changes/Environment variables/Follow-ups/Blockers/Deployment,
-using `Not applicable.` consistently for absent information. Drafting grants no publication
+The PR skill retains Resumen/Cambios/Variables de entorno/Seguimiento/Bloqueos/Despliegue,
+using `No aplica.` consistently for absent information and one `Cambios` row per changed file. Drafting grants no publication
 authority. Apply receives the local cleanup instructions; the coordinator invokes the
 `mdd_pr_body` renderer when the user asks for a body. No publication is performed.
 Quit and restart OpenCode to discover changed agent/skill configuration.

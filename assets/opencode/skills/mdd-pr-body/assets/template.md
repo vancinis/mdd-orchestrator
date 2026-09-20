@@ -1,23 +1,24 @@
-## Summary
+## Resumen
 
-Describe the purpose and user-visible outcome.
+Describe el propósito y el resultado visible para quien lo use.
 
-## Changes
+## Cambios
 
-- Describe scoped changes and observed verification commands/outcomes.
+| Archivo | Por qué cambió |
+|---|---|
 
-## Environment variables
+## Variables de entorno
 
-Not applicable.
+No aplica.
 
-## Follow-ups
+## Seguimiento
 
-Not applicable.
+No aplica.
 
-## Blockers
+## Bloqueos
 
-Not applicable.
+No aplica.
 
-## Deployment
+## Despliegue
 
-Not applicable.
+No aplica.
