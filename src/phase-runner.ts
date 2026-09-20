@@ -51,10 +51,17 @@ type State = 'starting' | 'ready' | 'persisting-intent' | 'await-result' | 'pers
 type Run = {
   id: string; runtime: Runtime; workflow: Workflow; phase: Phase;
   requirements: string; memory: EngramHttp | undefined; args: TaskArgs; state: State;
-  callID?: string; lastCallID?: string; dispatchedArgs?: TaskArgs; reason?: string; attempts: number;
+  callID?: string; lastCallID?: string; dispatchedArgs?: TaskArgs; reason?: string;
   /**
-   * Delegation is the default route. One failed attempt is retried by the same actor with the
-   * failure in its prompt; a second hands the phase back to the coordinator.
+   * Failed attempts at the phase running now, reset when the route reaches the next one. `spent`
+   * is the same count for the whole run and only ever grows, so a ledger reader can still tell a
+   * route that struggled once from one that struggled everywhere.
+   */
+  attempts: number; spent: number;
+  /**
+   * Delegation is the default route. A failed attempt is retried by the same actor with the
+   * failure in its prompt, and only after DELEGATION_ATTEMPTS of them does the phase become the
+   * coordinator's own.
    */
   mode: 'delegate' | 'inline'; brief: string; lastFailure?: string;
   /**
@@ -107,6 +114,16 @@ const RECOVERY_LIMITS: readonly string[] = Object.freeze([
 ]);
 const RECOVERY_REASON = 'A previous run in this conversation ended without being recorded as finished, and the evidence it produced was preserved as read-only data under priorRun. MDD does not resume it: the way forward is mdd_start with the original objective as actual new native user text, which still requires a fresh preflight, or mdd_reset with scope run to discard this record. Read limits before continuing.';
 const CONTROL_CHARACTERS = /[\x00-\x08\x0b-\x1f\x7f]/;
+/**
+ * How many times one phase is delegated before the coordinator carries it out itself. Counted per
+ * phase, not per run: a route whose exploration needed three tries has learned nothing about
+ * whether its implementation can be delegated, and counting them together meant one bad phase
+ * moved every later phase into the coordinator's own conversation — which is precisely the context
+ * that delegating exists to protect. Three is the point where a transient cause stops being the
+ * likely one: a dropped connection, a rejected result or an actor that misread the form all
+ * usually clear inside three, and a fourth against the same failure is not resilience.
+ */
+export const DELEGATION_ATTEMPTS = 3;
 /** Phases whose artifact is prose a person reads. Tasks and Apply carry structure, not narrative. */
 const DOC_PHASES: readonly Phase[] = ['mdd-explore', 'mdd-plan', 'mdd-propose', 'mdd-spec', 'mdd-design', 'mdd-verify'];
 /**
@@ -220,7 +237,11 @@ export class PhaseRunner {
       evidence: { ...run.evidence }, coverage: evidenceCoverage(run.evidence),
       report: run.side ? `Summary\nContextual exploration ${run.state === 'blocked' ? 'could not be confirmed' : run.state === 'ready' ? 'is ready' : 'is in progress'}. The main plan and approval are unchanged.\n` : run.state === 'complete' || run.state === 'blocked' ? this.#closure(run) : renderReport(run.workflow.snapshot().answers.summary, { ...run.report, evidence: run.evidence }),
       acceptance: structuredClone(run.acceptance), decisions: structuredClone(run.decisions), planned: structuredClone(run.planned), verification: structuredClone(run.verification),
-      uncertain: run.uncertain, attempts: run.attempts, recoverable: true, mode: run.mode,
+      uncertain: run.uncertain, attempts: run.attempts, runAttempts: run.spent, recoverable: true, mode: run.mode,
+      // How many dispatches this phase still has before it becomes the coordinator's own. Reported
+      // rather than derived, because a coordinator that has to work the threshold out from a
+      // counter guesses, and the guess it made was to take the phase over early.
+      attemptsLeft: Math.max(0, DELEGATION_ATTEMPTS - run.attempts),
       contextual: !!run.side, contexts: this.#contexts(run.contexts), concerns: structuredClone(run.concerns),
       // Labels and sizes only: the text itself is already visible inside the phase prompt, so
       // repeating it here would spend the payload budget twice on the same bytes.
@@ -293,7 +314,7 @@ export class PhaseRunner {
       args: { description: '', subagent_type: first.phase, prompt: '' }, state: 'starting',
       history: [], calls: new Set(previous?.calls ?? inherited), planned: [], evidence: { ...emptyEvidence(), requirements: trusted?.requirementsConfirmed ? 'confirmed' : 'unearned' },
       uncertain: false, userMessageID: trusted?.userMessageID ?? '', concerns: [], contexts: [], context, malformed: 0,
-      decisions: [], executedChecks: [], changedFiles: 0, attempts: 0, mode: 'delegate', brief: '',
+      decisions: [], executedChecks: [], changedFiles: 0, attempts: 0, spent: 0, mode: 'delegate', brief: '',
       report: { phase: first.phase, summary: `Preparing ${phaseLabel(first.phase).toLowerCase()}.`, how: [], status: 'in-progress', evidence: emptyEvidence() },
     };
     this.#runs.set(runtime.sessionID, run);
@@ -355,6 +376,7 @@ export class PhaseRunner {
       throw new Error(`MDD could not read the ${phase} report, so no attempt was spent and nothing was re-run: ${run.reason} The report is kept verbatim in mdd_status under rejected, and the exact form it must take is under brief. Restate it with mdd_phase_result, preserving the work it describes. ${MALFORMED_RESTATEMENTS - run.malformed} restatement(s) remain before this counts as a failed attempt.`);
     }
     run.attempts += 1;
+    run.spent += 1;
     run.uncertain = false;
     delete run.callID;
     delete run.dispatchedArgs;
@@ -368,10 +390,11 @@ export class PhaseRunner {
     // actor; it needs another try that knows it is one.
     if (!side) run.lastFailure = run.reason;
     const recovered = this.#recover(run);
-    // One retry belongs to delegation, because handing the phase back to the coordinator costs
-    // exactly the context isolation that delegating it was for. After that the coordinator takes
-    // it: retrying forever against the same failure is not resilience.
-    const handover = !side && run.attempts >= 2;
+    // Retrying belongs to delegation, because handing the phase back to the coordinator costs
+    // exactly the context isolation that delegating it was for. Only after this phase has spent
+    // all of its dispatches does the coordinator take it, and the next phase starts from
+    // delegation again with a full count.
+    const handover = !side && run.attempts >= DELEGATION_ATTEMPTS;
     if (recovered && !side) {
       run.mode = handover ? 'inline' : 'delegate';
       this.#event(run, handover ? 'handover' : 'retry', undefined, failure);
@@ -381,13 +404,14 @@ export class PhaseRunner {
     // here would leave attempts in the ledger and no blocked run to account for them.
     if (!recovered) this.#event(run, 'report', 'blocked', 'route-blocked');
     this.#settle(run);
-    throw new Error(`MDD attempt ${run.attempts} for ${phase} did not complete: ${run.reason} ${!recovered
+    const left = Math.max(0, DELEGATION_ATTEMPTS - run.attempts);
+    throw new Error(`MDD attempt ${run.attempts} of ${DELEGATION_ATTEMPTS} for ${phase} did not complete: ${run.reason} ${!recovered
       ? 'Read mdd_status, then use mdd_reset to retry this phase or start over. Nothing is locked.'
       : side
         ? 'The investigation stopped; the main plan, its task and its approval are unchanged. Nothing is locked.'
         : handover
-          ? 'The phase is ready again and is now yours: read mdd_status and carry it out directly, reporting it with mdd_phase_result. Delegating again is still allowed. Nothing is locked.'
-          : 'The phase is ready again and its task now carries what failed: read mdd_status and dispatch that updated task once more. If it fails again the phase becomes yours. Nothing is locked.'}`);
+          ? `This phase has now used all ${DELEGATION_ATTEMPTS} of its dispatches and is yours: read mdd_status and carry it out directly, reporting it with mdd_phase_result. That applies to this phase only — the next one starts from delegation again with a full count. Nothing is locked.`
+          : `The phase is ready again and its task now carries what failed: read mdd_status and dispatch that updated task once more. ${left} dispatch(es) remain before this phase becomes yours. Nothing is locked.`}`);
   }
 
   /** Puts the route back on a runnable step. Contextual work restores the main plan it paused. */
@@ -1054,14 +1078,21 @@ export class PhaseRunner {
     const next = run.workflow.nextAction();
     if (next.kind !== 'execute') throw new Error('Only an authorized phase can be prepared.');
     const phase = next.phase;
+    // Preparing the same phase again is a retry; preparing a different one is the route moving on.
+    // Only the second restores the dispatch count, because a retry that restored it would never
+    // reach the threshold and the phase would be delegated forever.
+    const advanced = phase !== run.phase;
     run.phase = phase;
     delete run.started;
     // A delegated phase is timed from its dispatch, which a phase carried out inline never has.
     // Timing that one from the report instead measured the report, so every inline phase looked
     // like it took three seconds. Ready is the moment the work could actually begin.
     run.readyAt = this.#now();
-    // Every phase starts from delegation; only a failed attempt hands this one back.
+    // Every phase starts from delegation with its own full count. Attempts are a fact about the
+    // phase that spent them, so carrying them forward punished the phases that had not failed yet:
+    // one three-try exploration used to send the whole rest of the route inline on first contact.
     run.mode = 'delegate';
+    if (advanced) run.attempts = 0;
     const prompts = this.#phasePrompts(run, phase);
     run.args = prompts.args;
     run.brief = prompts.brief;

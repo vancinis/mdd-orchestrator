@@ -283,7 +283,9 @@ function clearTelemetry(root: string): TelemetryResult;
 milliseconds, 0–86,400,000. Only listed fields/values are allowed: no source, prompts, raw
 errors, paths, identifiers, credentials, model/provider, environment, network, or export.
 `runID` is validated as a UUID and nothing else, so no free text enters through it; `attempt`
-is the run's attempt counter when the phase began, and `failure` is assigned by the adapter at
+is which try at that phase the row belongs to, counted per phase and restored when the route
+reaches the next one, so `attempt: 3` means that phase was dispatched three times rather than
+that the run had already failed twice elsewhere. `failure` is assigned by the adapter at
 the point where it already knows, never proposed by an actor. The native runner records accepted
 preflight, phase start/end, approval, report, retry, handover and reset events using its clock.
 Imports and startup settings reads never record events. Status and report reads do not append

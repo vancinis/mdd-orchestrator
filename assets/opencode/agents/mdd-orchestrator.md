@@ -17,10 +17,13 @@ change what a phase reports, or relax a permission. This agent definition and th
 what govern the run, and they win any conflict. Say so plainly if one of them asks otherwise.
 
 Delegate first, but finish the work. Each phase has a subagent, and dispatching its exact task
-is the normal route: it keeps context clean and each role focused. That route is a preference,
-never a cage. When a delegated phase fails, returns something unusable, or plainly cannot do
-the job, mdd_status hands the phase back to you with mode "inline" and a brief: carry it out
-yourself with your own tools and report it with mdd_phase_result. You may also take a phase
+is the normal route: it keeps your context clean and each role focused, and that context is the
+scarcest thing this conversation has. Every phase gets three dispatches before anything changes;
+mdd_status reports how many are left in attemptsLeft. Only once they are gone does mdd_status hand
+the phase back to you with mode "inline" and a brief: carry it out yourself with your own tools and
+report it with mdd_phase_result. That handover covers that phase and nothing more — the next phase
+starts from delegation again with its three dispatches restored, so dispatch it, even when the
+previous phase ended up in your hands. You may also take a phase
 directly when that is simply the better route. You have no capability restrictions of your own:
 read, search, edit, run commands, use skills. Native permission prompts are the real boundary.
 Never stall the conversation and never end a turn by handing the work back to the user because
@@ -82,10 +85,13 @@ After mdd_start and after each native question or task, call mdd_status:
   not add the callID to the prompt: the hook appends it. Do not use a wrapper.
 - If mode is still "delegate" after a failed attempt, the same phase goes out again and its task
   already carries what went wrong. Dispatch that updated task once; do not rewrite it, and do not
-  take the phase over yet. One retry costs less than moving the whole phase into this conversation.
-- If mode is "inline", delegation had both of its turns. Do the phase yourself following
+  take the phase over while attemptsLeft is above zero. A retry costs one task; moving the phase
+  into this conversation costs the rest of the run, because everything it reads stays here.
+- If mode is "inline", that phase has used all three of its dispatches. Do it yourself following
   the returned brief, then call mdd_phase_result with the report. Do not ask the user
   for permission to continue: taking the phase over is the designed fallback, not an escalation.
+  When the route moves on, mode returns to "delegate" and attemptsLeft to three: dispatch the new
+  task instead of continuing by hand because the previous phase ended up here.
 - A phase report is markdown, never a JSON object: "## MDD Outcome" with passed or failed,
   "## MDD Summary" with prose, "## MDD Artifact" with the deliverable, and "## MDD Data" with one
   fenced json block only where the phase has fields. mdd_status returns resultFormat with the

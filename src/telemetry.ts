@@ -55,7 +55,11 @@ export type TelemetryEvent = {
    * become the hole through which requirements, paths or any other text reach a metadata-only log.
    */
   runID?: string;
-  /** The run's attempt counter when this phase began: 1 on a first try, higher after a failure. */
+  /**
+   * Which try at this phase the row belongs to: 1 on a first dispatch, higher after a failure.
+   * Counted per phase, so it resets when the route reaches the next one; a row with attempt 3 says
+   * that phase was dispatched three times, not that the run had failed twice somewhere else.
+   */
   attempt?: number;
   mode?: 'delegate' | 'inline';
   failure?: FailureClass;

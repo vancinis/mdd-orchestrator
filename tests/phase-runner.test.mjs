@@ -146,7 +146,7 @@ for (const kind of ['intent-write', 'intent-read', 'result-write', 'result-read'
     assert.equal(stopped.attempts, 1);
     assert.equal(stopped.workflow.nextAction.kind, 'execute');
     assert.equal(stopped.workflow.results.length, 0);
-    // The same phase, dispatched to the same actor, now carrying what just failed: one failure
+    // The same phase, dispatched to the same actor, now carrying what just failed: a failure
     // buys a retry, not a handover, because handing it over costs the isolation it exists for.
     assert.equal(stopped.mode, 'delegate');
     assert.equal(stopped.task.description, ready.task.description);

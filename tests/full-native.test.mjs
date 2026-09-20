@@ -908,20 +908,24 @@ test('a failed delegation hands the phase to the coordinator, which finishes it 
   const initial = await f.status();
   assert.equal(initial.mode, 'delegate');
   assert.ok(initial.task, 'delegation is offered first');
-  // One failure buys another delegated attempt that knows what went wrong: handing the phase over
+  assert.equal(initial.attemptsLeft, 3, 'the phase is told how many dispatches it has');
+  // A failure buys another delegated attempt that knows what went wrong: handing the phase over
   // immediately spends the parent's context on work that was delegated to keep it out of there.
-  await assert.rejects(f.phase({ badEnvelope: true }), /dispatch that updated task once more/);
-  const retry = await f.status();
-  assert.equal(retry.state, 'ready');
-  assert.equal(retry.mode, 'delegate');
-  assert.equal(retry.attempts, 1);
-  assert.equal(retry.brief, undefined);
-  assert.match(retry.task.prompt, /previous attempt at this exact phase did not complete/);
-  await assert.rejects(f.phase({ badEnvelope: true }), /now yours/);
+  for (const left of [2, 1]) {
+    await assert.rejects(f.phase({ badEnvelope: true }), /dispatch that updated task once more/);
+    const retry = await f.status();
+    assert.equal(retry.state, 'ready');
+    assert.equal(retry.mode, 'delegate');
+    assert.equal(retry.attemptsLeft, left);
+    assert.equal(retry.brief, undefined);
+    assert.match(retry.task.prompt, /previous attempt at this exact phase did not complete/);
+  }
+  await assert.rejects(f.phase({ badEnvelope: true }), /is yours/);
   const handed = await f.status();
   assert.equal(handed.state, 'ready');
   assert.equal(handed.mode, 'inline');
-  assert.equal(handed.attempts, 2);
+  assert.equal(handed.attempts, 3);
+  assert.equal(handed.attemptsLeft, 0);
   assert.match(handed.brief, /carrying this phase out yourself/);
   assert.match(handed.brief, /Perform only mdd-plan/);
   assert.match(handed.brief, /Requirements data/);
@@ -937,6 +941,11 @@ test('a failed delegation hands the phase to the coordinator, which finishes it 
   assert.equal(done.evidence.plan, 'confirmed');
   assert.equal(done.task.subagent_type, 'mdd-apply');
   assert.equal(done.mode, 'delegate', 'the next phase starts from delegation again');
+  // The failures belonged to the phase that spent them. Carrying them into the next phase is what
+  // made one struggling phase send the whole rest of the route into the coordinator's context.
+  assert.equal(done.attempts, 0, 'the next phase starts with its own count');
+  assert.equal(done.attemptsLeft, 3);
+  assert.equal(done.runAttempts, 3, 'the run-wide total still records what was spent');
   assert.equal(JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context)).artifacts.length, 1);
 });
 
@@ -1015,6 +1024,7 @@ test('mdd_reset releases a stopped phase and a whole run without a new conversat
   assert.deepEqual(released.reset, { scope: 'phase', phase: 'mdd-plan' });
   assert.equal(released.state, 'ready');
   assert.equal(released.attempts, 0);
+  assert.equal(released.attemptsLeft, 3, 'releasing a phase restores its dispatches');
   assert.equal(released.reason, '');
   await f.phase();
   assert.equal((await f.status()).workflow.results.length, 1);
