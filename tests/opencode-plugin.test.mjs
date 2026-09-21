@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import plugin, { createInspector, AGENTS_MAX, PERMISSION_MAX } from '../dist/opencode-plugin.js';
 import { NativeIntake } from '../dist/native-intake.js';
-import { memoryServer, request, result, runtime, call, answers, installCleanup, isolateHome } from './adapter-fixture.mjs';
+import { memoryServer, request, result, runtime, call, answers, installCleanup, isolateHome, SUMMARY_TEXT } from './adapter-fixture.mjs';
 import { MODEL_ROLES } from '../dist/settings.js';
 import { defaultSettings, saveSettings } from '../dist/settings.js';
 import { saveGlobalSettings } from '../dist/global-settings.js';
@@ -302,7 +302,7 @@ test('OpenCode SDK contract: bounded callback even if injected client ignores ab
 test('plugin contract: scoped tools, in-place native args, result gating, no native override', async t => {
   const f = await pluginFixture(t);
   const { hooks, context, writes } = f;
-  assert.deepEqual(Object.keys(hooks.tool).sort(), ['mdd_change_request', 'mdd_context', 'mdd_contextual_explore', 'mdd_improve', 'mdd_improvements', 'mdd_phase_result', 'mdd_pr_body', 'mdd_reset', 'mdd_start', 'mdd_status']);
+  assert.deepEqual(Object.keys(hooks.tool).sort(), ['mdd_change_request', 'mdd_check_report', 'mdd_context', 'mdd_contextual_explore', 'mdd_improve', 'mdd_improvements', 'mdd_phase_result', 'mdd_pr_body', 'mdd_reset', 'mdd_start', 'mdd_status']);
   assert.deepEqual(Object.keys(hooks.tool.mdd_start.args), ['requirements', 'context']);
   const ready = JSON.parse(await hooks.tool.mdd_start.execute({ requirements: f.requirements }, context));
   const nativeArgs = ready.task;
@@ -319,6 +319,34 @@ test('plugin contract: scoped tools, in-place native args, result gating, no nat
   assert.equal(status.workflow.results.length, 1);
   assert.equal(writes.length, 2);
   await hooks['tool.execute.before']({ tool: 'read', sessionID: 'other', callID: 'other' }, { args: {} });
+});
+
+test('plugin contract: a phase actor may check its own report, and nobody else may call in', async t => {
+  const f = await pluginFixture(t);
+  const { hooks, context } = f;
+  const report = result({ phase: 'mdd-explore' });
+
+  // The actor's own session is the point: it is the last place the report can still be fixed.
+  const actor = { ...context, agent: 'mdd-explore', sessionID: 'ses_child' };
+  const clean = JSON.parse(await hooks.tool.mdd_check_report.execute({ phase: 'mdd-explore', result: report }, actor));
+  assert.equal(clean.ok, true);
+  assert.deepEqual(clean.problems, []);
+  assert.match(clean.note, /not an acceptance/);
+
+  const broken = JSON.parse(await hooks.tool.mdd_check_report.execute(
+    { phase: 'mdd-explore', result: report.replace(SUMMARY_TEXT, 'x'.repeat(2100)) }, actor));
+  assert.equal(broken.ok, false);
+  assert.ok(broken.problems.some(problem => /summary must be nonempty text/.test(problem)));
+
+  // Checking spends nothing and starts nothing: the run is exactly where it was.
+  assert.equal(JSON.parse(await hooks.tool.mdd_status.execute({}, context)).state, 'not-started');
+
+  // The coordinator may check too, because a phase it takes over inline is still a phase.
+  await hooks.tool.mdd_check_report.execute({ phase: 'mdd-explore', result: report }, context);
+  // Everyone else is told plainly that this says nothing about their session.
+  await assert.rejects(
+    hooks.tool.mdd_check_report.execute({ phase: 'mdd-explore', result: report }, { ...context, agent: 'build' }),
+    /belongs to MDD phase actors/);
 });
 
 // The coordinator holds the issue body it already fetched; the only legitimate way in is to hand
@@ -498,8 +526,10 @@ test('plugin config contract: settings frozen at startup; only explicit model ov
   // meaningless, and misleading, anywhere else.
   const denied = { mdd_start: false, mdd_status: false, mdd_phase_result: false, mdd_reset: false, mdd_change_request: false, mdd_contextual_explore: false, mdd_context: false, mdd_pr_body: false, mdd_improve: false, mdd_improvements: false, 'mdd_*': false };
   // And every phase actor loses `task` and `skill`: it is the actor, and the skills it needs are
-  // already inlined in its prompt by value, so a name lookup can only reach someone else's.
-  const pinned = { task: false, skill: false };
+  // already inlined in its prompt by value, so a name lookup can only reach someone else's. It
+  // gains exactly one MDD tool back, which reads nothing and only tells it whether the report it
+  // is about to return can be read — the question its own session is the last place to answer.
+  const pinned = { task: false, skill: false, mdd_check_report: true };
   assert.deepEqual(config, {
     default_agent: 'build', permission: { bash: 'ask' },
     agent: {

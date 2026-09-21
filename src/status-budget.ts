@@ -57,21 +57,123 @@ export const STATUS_DROP_ORDER: readonly string[] = Object.freeze([
   'handoff', 'workflow',
 ]);
 
+/**
+ * Droppable fields the compact view still ships. The drop order exists to survive the host output
+ * limit, where the only question is size; the compact view asks a different one — what the
+ * coordinator acts on — and a few fields are cheap enough that dropping them saves nothing and
+ * costs the run its evidence trail.
+ *
+ * `rejected` is the document waiting to be restated. `report` is the rendered prose the user
+ * reads when a run closes. `providedContext` and `artifacts` are already reduced to labels,
+ * byte counts and refs rather than content. `handoff` is a handful of refs that explains why a
+ * phase prompt carries summaries. `workflow` is the state machine itself, shipped in the
+ * projected form below.
+ *
+ * `priorRun` is kept for a different reason, and it is the one worth stating: the compact view
+ * targets what a healthy run re-reads on every turn, and a preserved run is not that. It appears
+ * only after a route was lost mid-run, it is already bounded on its own, and the recovery reason
+ * sends the coordinator to read it. Shedding it by default would answer a recovery with a
+ * pointer to evidence the same payload had just withheld.
+ *
+ * Everything else in the drop order is reference material that a later phase re-reports, that
+ * the artifact store still holds, or that detail="full" returns.
+ */
+export const STATUS_COMPACT_KEEP: readonly string[] = Object.freeze([
+  'rejected', 'report', 'providedContext', 'artifacts', 'handoff', 'workflow', 'priorRun',
+]);
+
+/**
+ * Where the run has got to, without the prose of how it got there. A recorded result carries an
+ * `evidenceSummary` written for a person, and every one of them is re-read on every later turn:
+ * in a seven-phase run they were the single largest field in the payload. The phase and its
+ * outcome are what the coordinator acts on, so the compact view keeps those and drops the rest.
+ * Nothing is lost — the run still holds every summary, and detail="full" returns them.
+ */
+function compactWorkflow(value: unknown): { workflow: unknown; omitted: boolean } {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return { workflow: value, omitted: false };
+  const snapshot = value as Record<string, unknown>;
+  if (!Array.isArray(snapshot.results) || !snapshot.results.length) return { workflow: value, omitted: false };
+  let omitted = false;
+  const results = snapshot.results.map(item => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return item;
+    const { evidenceSummary, ...rest } = item as Record<string, unknown>;
+    if (evidenceSummary !== undefined) omitted = true;
+    return rest;
+  });
+  return { workflow: { ...snapshot, results }, omitted };
+}
+
 const OMITTED_NOTE = 'These fields were left out to keep this payload under the host output limit, so that task and question stay readable and copyable. Nothing was deleted: artifacts remain in the configured artifact store and every omitted field is still held by the run.';
+const COMPACT_NOTE = 'This is the compact view: the state machine, the next call, and what that call needs. Nothing was deleted — reference material the run still holds, such as acceptance, decisions, the plan, concerns, recorded evidence summaries, run history and the inline brief, was left out because a long run re-reads every payload on every later turn, and each phase re-reports what it needs. Call mdd_status with detail="full" to get any of it, including brief when a phase is yours to carry out.';
+
+/**
+ * A brief short enough to cost less than the pointer replacing it is simply shipped. The threshold
+ * is deliberately low: anything above it is a composed phase prompt, not a sentence.
+ */
+const BRIEF_POINTER_BYTES = 2000;
 
 for (const key of STATUS_DROP_ORDER) {
   if (STATUS_PROTECTED_FIELDS.includes(key)) throw new Error(`Status field ${key} cannot be both protected and droppable.`);
 }
+for (const key of STATUS_COMPACT_KEEP) {
+  if (!STATUS_DROP_ORDER.includes(key)) throw new Error(`Compact-kept status field ${key} must be droppable under budget pressure.`);
+}
 
 function bytes(text: string): number { return Buffer.byteLength(text); }
 
+/**
+ * Which view of a run a payload carries. `full` is the whole snapshot and stays the answer for a
+ * coordinator that explicitly asks to inspect one; `compact` is the state machine plus what the
+ * next call needs.
+ *
+ * The budget below already proved these fields are sheddable: it drops them whenever a payload
+ * would be truncated, and the run keeps holding them either way. What it could not see is the
+ * cost they carry when nothing is oversized — a status is read once but re-read on every later
+ * turn, so a 40 KB snapshot returned thirteen times is paid for hundreds of times over. The
+ * compact view spends the same classification on that, rather than only on the host limit.
+ */
+export type StatusView = 'full' | 'compact';
+
 /** Serialize an MDD tool payload, degrading in a fixed order rather than letting the host truncate it. */
-export function statusPayload(value: unknown): string {
-  const first = JSON.stringify(value) ?? 'null';
-  if (bytes(first) <= STATUS_BUDGET_BYTES || !value || typeof value !== 'object' || Array.isArray(value)) return first;
+export function statusPayload(value: unknown, view: StatusView = 'full'): string {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return JSON.stringify(value) ?? 'null';
   const payload: Record<string, unknown> = { ...(value as Record<string, unknown>) };
   const omitted: string[] = [];
-  const render = () => JSON.stringify(omitted.length ? { ...payload, omitted, omittedNote: OMITTED_NOTE } : payload) ?? 'null';
+  const render = () => JSON.stringify(omitted.length
+    ? { ...payload, omitted, omittedNote: view === 'compact' ? COMPACT_NOTE : OMITTED_NOTE }
+    : payload) ?? 'null';
+  if (view === 'compact') {
+    const whole = JSON.stringify(payload) ?? 'null';
+    for (const key of STATUS_DROP_ORDER) {
+      if (STATUS_COMPACT_KEEP.includes(key) || !Object.hasOwn(payload, key) || payload[key] === undefined) continue;
+      delete payload[key];
+      omitted.push(key);
+    }
+    if (Object.hasOwn(payload, 'workflow') && payload.workflow !== undefined) {
+      const projected = compactWorkflow(payload.workflow);
+      payload.workflow = projected.workflow;
+      if (projected.omitted) omitted.push('workflow.results[].evidenceSummary');
+    }
+    // `brief` is the whole phase prompt again, shipped once a phase becomes the coordinator's own.
+    // It is protected against the budget because an inline phase cannot be carried out without it,
+    // but it is needed once — to do the work — and not on every later read of a run that stays in
+    // inline mode. Measured on a real seven-phase run it was 27-30 KB, four fifths of the payload,
+    // re-read on every turn after the handover. The compact view names it and its size; the
+    // derived next action sends the coordinator to detail="full" to fetch it.
+    if (typeof payload.brief === 'string' && bytes(payload.brief) > BRIEF_POINTER_BYTES) {
+      payload.briefBytes = bytes(payload.brief);
+      delete payload.brief;
+      omitted.push('brief');
+    }
+    // Declaring what was left out costs a few hundred bytes of note, which is more than a run
+    // holding almost no reference material had to shed in the first place. A view that makes the
+    // payload bigger is not a compact view, so that case answers with the whole thing instead.
+    if (omitted.length && bytes(render()) >= bytes(whole)) {
+      return bytes(whole) <= STATUS_BUDGET_BYTES ? whole : statusPayload(value, 'full');
+    }
+  }
+  const first = render();
+  if (bytes(first) <= STATUS_BUDGET_BYTES) return first;
   let text = first;
   for (const key of STATUS_DROP_ORDER) {
     if (bytes(text) <= STATUS_BUDGET_BYTES) break;

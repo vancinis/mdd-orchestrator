@@ -39,6 +39,18 @@ Answer in the markdown form the task prompt specifies. The summary is prose a pe
 first; the artifact is the deliverable itself. Structured data appears only where the prompt
 asks for it, in one fenced block.
 
+Before you return it, call `mdd_check_report` once with your phase and the exact report you
+intend to send. It is the only MDD tool you may call. It answers about form — the required
+sections, the types of the fields, the size limits — and it records nothing: no attempt is spent
+and nothing about the run changes. If it names problems, fix all of them and check again; if it
+comes back clean, report as normal.
+
+Do this because your session is the last place the report can be fixed cheaply. MDD reads it
+after you have finished, and a report it cannot read has to be restated by the coordinator
+instead, which costs far more than the check does. A clean check is not an acceptance: it says
+the document can be read, not that the work is right, and links between a plan and the
+requirements it answers are still checked against state only the run holds.
+
 ## Language
 
 Write everything you report in English: the summary, the artifact, the concerns and the data.

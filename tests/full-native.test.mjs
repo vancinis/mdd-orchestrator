@@ -9,7 +9,7 @@ import { saveGlobalSettings } from '../dist/global-settings.js';
 import { memoryServer, installCleanup, isolateHome, answers, traceFixture, reportDocument } from './adapter-fixture.mjs';
 import { traceArtifact } from '../dist/acceptance.js';
 import { ManagedMemory } from '../dist/managed-memory.js';
-import { STATUS_BUDGET_BYTES } from '../dist/status-budget.js';
+import { STATUS_BUDGET_BYTES, STATUS_COMPACT_KEEP, STATUS_DROP_ORDER, STATUS_PROTECTED_FIELDS } from '../dist/status-budget.js';
 
 // Native SDK/hook contract fixtures. No model or real shell execution is performed.
 async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', partial = false, summary = 'low', telemetry = true, memoryEnabled = true, memoryFault, start = true } = {}) {
@@ -46,7 +46,10 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
   } };
   const hooks = await plugin(input);
   const context = { ...runtime, messageID: 'msg_parent', abort: new AbortController().signal };
-  const status = async () => JSON.parse(await hooks.tool.mdd_status.execute({}, context));
+  // These tests inspect the run itself — its route, held plan, coverage and recorded evidence —
+  // so they read the inspection view. The compact default that every other tool returns has its
+  // own contract tests; asserting run semantics through it would only test the projection twice.
+  const status = async () => JSON.parse(await hooks.tool.mdd_status.execute({ detail: 'full' }, context));
   let questionCount = 0;
   async function answer(selection) {
     const current = await status();
@@ -937,7 +940,8 @@ test('a large history keeps mdd_status within budget and the task byte-identical
   await f.phase({ large: true });
   const previous = await f.status();
   assert.ok(previous.previousRuns === undefined || previous.previousRuns.length === 1);
-  const raw = await f.hooks.tool.mdd_status.execute({}, f.context);
+  // The full view is the one that can reach the budget at all, so it is the one this guards.
+  const raw = await f.hooks.tool.mdd_status.execute({ detail: 'full' }, f.context);
   assert.ok(Buffer.byteLength(raw) <= STATUS_BUDGET_BYTES, `mdd_status was ${Buffer.byteLength(raw)} bytes`);
   const status = JSON.parse(raw);
   assert.equal(status.budget, undefined, 'the task fits without an unresolved budget problem');
@@ -955,6 +959,106 @@ test('a large history keeps mdd_status within budget and the task byte-identical
   const after = await f.status();
   assert.notEqual(after.phase, status.phase, 'the delegated phase actually advanced');
   assert.ok(after.task, 'the next phase stays dispatchable');
+});
+
+test('a settled dispatch stops being re-read, while the run still dispatches the next phase', async t => {
+  const f = await fixture(t, { route: 'high' });
+  await f.phase({ large: true });
+
+  // This is the real mechanism, not a stand-in: `before` expanded the handle by mutating the very
+  // args object the host recorded in the part, so the transcript now holds the whole phase prompt.
+  const recorded = f.parent[1].parts[0];
+  assert.equal(recorded.tool, 'task');
+  assert.ok(Buffer.byteLength(recorded.state.input.prompt) > 2000, 'the fixture must hold a real expanded prompt');
+  const expanded = recorded.state.input.prompt;
+  recorded.state.status = 'completed';
+
+  const outgoing = structuredClone(f.parent);
+  await f.hooks['experimental.chat.messages.transform']({}, { messages: outgoing });
+  const sent = outgoing[1].parts[0].state.input.prompt;
+  assert.notEqual(sent, expanded);
+  assert.ok(Buffer.byteLength(sent) < Buffer.byteLength(expanded) / 4, `collapsed to ${Buffer.byteLength(sent)} of ${Buffer.byteLength(expanded)}`);
+  assert.match(sent, /omitted from the transcript/);
+  // The run's own record is untouched: only what travels to the model changed.
+  assert.equal(f.parent[1].parts[0].state.input.prompt, expanded);
+
+  // And the protocol still works: the next phase dispatches normally through the same hooks.
+  await f.phase({ large: true });
+  const next = await f.status();
+  assert.ok(next.task || next.state === 'complete');
+});
+
+test('the compact view keeps the protocol and sheds what a later turn would only re-read', async t => {
+  const f = await fixture(t, { route: 'high' });
+  await f.phase({ large: true });
+  await f.phase({ large: true });
+
+  const compactRaw = await f.hooks.tool.mdd_status.execute({}, f.context);
+  const fullRaw = await f.hooks.tool.mdd_status.execute({ detail: 'full' }, f.context);
+  const compact = JSON.parse(compactRaw);
+  const full = JSON.parse(fullRaw);
+
+  // The point of the view: the same run, materially cheaper to carry through a long conversation.
+  assert.ok(Buffer.byteLength(compactRaw) < Buffer.byteLength(fullRaw),
+    `compact ${Buffer.byteLength(compactRaw)} should be smaller than full ${Buffer.byteLength(fullRaw)}`);
+
+  // Dispatch is the invariant that must survive any projection: the coordinator copies this
+  // object verbatim, and PhaseRunner.before compares it with isDeepStrictEqual.
+  assert.deepEqual(compact.task, full.task);
+  assert.equal(compact.state, full.state);
+  assert.equal(compact.phase, full.phase);
+  assert.deepEqual(compact.next, full.next);
+  assert.deepEqual(compact.nextAction, full.nextAction);
+  assert.deepEqual(compact.resultFormat, full.resultFormat);
+
+  // Reference material is gone from compact, still there in full, and never silently missing.
+  const shed = STATUS_DROP_ORDER.filter(key => !STATUS_COMPACT_KEEP.includes(key) && full[key] !== undefined);
+  assert.ok(shed.length > 0, 'the fixture must actually hold reference material to shed');
+  for (const key of shed) {
+    assert.equal(compact[key], undefined, `${key} should not ride along in the compact view`);
+    assert.ok(compact.omitted.includes(key), `${key} should be declared as omitted`);
+  }
+  assert.match(compact.omittedNote, /Nothing was deleted/);
+  assert.match(compact.omittedNote, /detail="full"/);
+
+  // Progress survives without the prose: which phases are recorded is protocol, the summary a
+  // person reads about a phase that already closed is not.
+  assert.equal(compact.workflow.results.length, full.workflow.results.length);
+  assert.deepEqual(compact.workflow.results.map(item => item.phase), full.workflow.results.map(item => item.phase));
+  assert.deepEqual(compact.workflow.results.map(item => item.outcome), full.workflow.results.map(item => item.outcome));
+  assert.ok(full.workflow.results.every(item => typeof item.evidenceSummary === 'string'));
+  assert.ok(compact.workflow.results.every(item => item.evidenceSummary === undefined));
+  assert.ok(compact.omitted.includes('workflow.results[].evidenceSummary'));
+
+  // A protected field is protected in both views, or the projection would be shedding protocol.
+  for (const key of STATUS_PROTECTED_FIELDS) {
+    if (full[key] === undefined) continue;
+    assert.deepEqual(compact[key], full[key], `protected field ${key} must survive the compact view`);
+  }
+
+  // The phase still dispatches from the compact payload, which is the whole reason it may ship.
+  const call = { sessionID: f.context.sessionID, callID: 'compact-dispatch', tool: 'task' };
+  await f.hooks['tool.execute.before'](call, { args: compact.task });
+});
+
+test('every MDD tool but an explicit full status answers compactly', async t => {
+  const f = await fixture(t, { route: 'high' });
+  await f.phase({ large: true });
+  const held = JSON.parse(await f.hooks.tool.mdd_status.execute({ detail: 'full' }, f.context));
+  const heavy = STATUS_DROP_ORDER.filter(key => !STATUS_COMPACT_KEEP.includes(key) && held[key] !== undefined);
+  assert.ok(heavy.length > 0, 'the fixture must hold reference material for this to mean anything');
+
+  // mdd_reset returned a whole snapshot on every call, which made releasing a phase one of the
+  // most expensive things a run could do. It reports where the run stands, not what it holds.
+  const released = JSON.parse(await f.hooks.tool.mdd_reset.execute({ scope: 'phase' }, f.context));
+  assert.deepEqual(released.reset, { scope: 'phase', phase: held.phase });
+  for (const key of heavy) assert.equal(released[key], undefined, `mdd_reset should not carry ${key}`);
+
+  // Contributing context answers with the updated task, not with the run's reference material.
+  const added = JSON.parse(await f.hooks.tool.mdd_context.execute(
+    { label: 'Prior decision', content: 'Keep the current exit codes.' }, f.context));
+  assert.ok(added.task, 'the recomposed task still comes back');
+  for (const key of heavy) assert.equal(added[key], undefined, `mdd_context should not carry ${key}`);
 });
 
 // Delegation is the default route, never the only one: a subagent that cannot finish the work

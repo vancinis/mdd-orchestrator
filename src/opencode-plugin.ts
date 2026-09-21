@@ -15,9 +15,13 @@ import { ProgressGuard } from './progress.js';
 import { RunDossierStore } from './run-dossier.js';
 import { renderPRBody } from './pr-body.js';
 import { statusPayload } from './status-budget.js';
+import type { StatusView } from './status-budget.js';
 import { phaseName } from './phase-assets.js';
 import { recordLessonQuietly } from './lessons.js';
 import { withNextAction } from './next-action.js';
+import { collapseDispatchPrompts } from './dispatch-transcript.js';
+import { checkReportForm } from './report-check.js';
+import type { Phase } from './policy.js';
 import { recordSession } from './session-log.js';
 import { staleAssets } from './project-assets.js';
 
@@ -25,9 +29,9 @@ import { staleAssets } from './project-assets.js';
  * Every MDD tool answers through here, so the derived next call and the payload budget are
  * applied in one place rather than remembered at eight call sites.
  */
-function payload(value: unknown, assets?: Record<string, unknown>): string {
+function payload(value: unknown, assets?: Record<string, unknown>, view: StatusView = 'compact'): string {
   const status = value && typeof value === 'object' && !Array.isArray(value) && assets ? { ...value, assets } : value;
-  return statusPayload(withNextAction(status));
+  return statusPayload(withNextAction(status), view);
 }
 
 function record(value: unknown, subject = 'response'): Record<string, unknown> {
@@ -46,6 +50,13 @@ export const TASK_ENVELOPE = /^<task id="[^"\r\n]*" state="completed">\r?\n(?:<s
 
 /** MDD tools belong to the MDD coordinator. Other agents share the registry but not this state. */
 export const MDD_TOOLS = ['mdd_start', 'mdd_status', 'mdd_phase_result', 'mdd_reset', 'mdd_change_request', 'mdd_contextual_explore', 'mdd_context', 'mdd_pr_body', 'mdd_improve', 'mdd_improvements'] as const;
+/**
+ * The one MDD tool that is not the coordinator's alone. It is kept out of `MDD_TOOLS` because
+ * that list is what `restrictTools` switches off everywhere else, and this one has to reach the
+ * phase actors. It carries no authority to compensate: it reads no run, writes nothing, and
+ * answers a question about a document it is handed.
+ */
+export const CHECK_TOOL = 'mdd_check_report';
 export const COORDINATOR = 'mdd-orchestrator';
 function coordinatorOnly(agent: string, tool: string): void {
   if (agent !== COORDINATOR) {
@@ -87,7 +98,12 @@ export function pinPhaseAgents(config: { agent?: Record<string, Record<string, u
   config.agent ??= {};
   for (const name of PHASE_AGENTS) {
     const agent = { ...config.agent[name] };
-    agent.tools = { ...(agent.tools as Record<string, boolean> | undefined), task: false, skill: false };
+    // `mdd_check_report` is the one MDD tool a phase actor may call, and it runs after the
+    // blanket `mdd_*: false` that `restrictTools` writes, so the explicit entry is what grants
+    // it. It reads nothing and records nothing; it only tells the actor whether the document it
+    // is about to return can be read. That question has to be answerable here, because the
+    // session that can still fix the document is gone by the time MDD validates it.
+    agent.tools = { ...(agent.tools as Record<string, boolean> | undefined), task: false, skill: false, [CHECK_TOOL]: true };
     config.agent[name] = agent;
   }
 }
@@ -395,8 +411,14 @@ const plugin: Plugin = async input => {
   const assets = stale.length
     ? { stale, action: 'The installed MDD actor assets differ from the plugin running them, so this conversation may be following instructions this adapter no longer speaks. Run `mdd-ai update` and restart OpenCode. Nothing is blocked: report this to the user once and continue.' }
     : undefined;
-  /** One exit for every MDD tool: derived next call, asset warning when there is one, and the budget. */
-  const reply = (value: unknown): string => payload(value, assets);
+  /**
+   * One exit for every MDD tool: derived next call, asset warning when there is one, and the
+   * budget. The compact view is the default because every tool but `mdd_status` answers a call
+   * the coordinator made to *act* — dispatch, reset, report, contribute — and the reference half
+   * of a snapshot is not what it acts on. Only an explicit `mdd_status` with detail="full" asks
+   * to inspect the run, and only that call pays for the whole thing.
+   */
+  const reply = (value: unknown, view: StatusView = 'compact'): string => payload(value, assets, view);
   const opened = new Set<string>();
   const enter = (context: { agent: string; sessionID: string; directory: string; worktree: string }, name: string): void => {
     coordinatorOnly(context.agent, name);
@@ -479,10 +501,24 @@ const plugin: Plugin = async input => {
           return reply(status);
         },
       }),
+      mdd_check_report: tool({
+        description: 'Check that the phase report you are about to return can be read, before you return it. Answers about form only — required sections, field types and size limits — and records nothing: no attempt is spent, no run changes, and a clean answer is not an acceptance. Use it once your report is written; if it names problems, fix them all and check again. This is the only MDD tool a phase actor may call.',
+        args: {
+          phase: tool.schema.enum(PHASE_AGENTS as unknown as [string, ...string[]]).describe('The phase this report answers, exactly as it appears in your prompt.'),
+          result: tool.schema.string().min(1).describe('The full report markdown you intend to return, exactly as you would return it.'),
+        },
+        async execute(args, context) {
+          // Phase actors and the coordinator carrying a phase itself; nobody else has a report.
+          if (context.agent !== COORDINATOR && !PHASE_AGENTS.includes(context.agent)) {
+            throw new Error(`${CHECK_TOOL} belongs to MDD phase actors and the ${COORDINATOR} agent. This session is not carrying out an MDD phase; continue with your own tools.`);
+          }
+          return statusPayload(checkReportForm(args.phase as Phase, args.result));
+        },
+      }),
       mdd_status: tool({
-        description: 'Read this actual parent session MDD state; never retries, resets, or approves a phase.',
-        args: {},
-        async execute(_args, context) {
+        description: 'Read this actual parent session MDD state; never retries, resets, or approves a phase. Returns the compact view: the state machine, the next call, the task to dispatch, the report form, and any rejected report waiting to be restated. Pass detail="full" only when you actually have to inspect the held acceptance map, decisions, plan, concerns, artifacts or run history — a full snapshot is re-read on every later turn of this conversation.',
+        args: { detail: tool.schema.enum(['compact', 'full']).optional().describe('compact (default) returns protocol fields and what the next call needs; full adds the held workflow snapshot, acceptance, decisions, plan, concerns, artifacts and previous runs.') },
+        async execute(args, context) {
           enter(context, 'mdd_status');
           const status = record(intake.status(context.sessionID), 'status');
           let recovery = {};
@@ -498,7 +534,7 @@ const plugin: Plugin = async input => {
           return reply({
             ...status, ...recovery,
             runtime: { sessionID: context.sessionID, directory: context.directory, worktree: context.worktree, agent: context.agent },
-          });
+          }, args.detail ?? 'compact');
         },
       }),
       mdd_change_request: tool({
@@ -574,6 +610,14 @@ const plugin: Plugin = async input => {
         await runner.after(input, input.args, output);
         intake.phaseRecorded(input.sessionID);
       }
+    },
+    // The handle keeps the phase prompt out of the message the coordinator writes; this keeps it
+    // out of every message the coordinator reads afterwards. See src/dispatch-transcript.ts for
+    // why both halves are needed, and why only settled dispatches are touched.
+    'experimental.chat.messages.transform': async (_input, output) => {
+      try { collapseDispatchPrompts(output.messages, PHASE_AGENTS); }
+      // A transcript optimization that can fail a turn is worse than the tokens it saves.
+      catch { /* the untouched messages are still correct, only larger */ }
     },
     event: async ({ event }) => {
       if (event.type === 'server.instance.disposed' && event.properties.directory === input.directory) { await intake.close(); return; }

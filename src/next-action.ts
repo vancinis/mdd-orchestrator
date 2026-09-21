@@ -58,7 +58,7 @@ export function nextAction(status: unknown): NextAction | undefined {
 
   if (state === 'ready' && value.mode === 'inline') {
     return { tool: 'mdd_phase_result',
-      why: 'This phase has used every dispatch it had, so it is yours. Carry it out with your own tools following brief, then report it with mdd_phase_result in the form resultFormat states. This is the designed fallback, not an escalation: do not ask permission to continue. It applies to this phase only: the next one starts from delegation again.' };
+      why: 'This phase has used every dispatch it had, so it is yours. Read mdd_status with detail="full" once to get brief, the full phase instructions; carry the phase out with your own tools following it, then report it with mdd_phase_result in the form resultFormat states. Brief is the whole phase prompt, so it is returned when you ask for it rather than repeated in every payload for the rest of the run. This is the designed fallback, not an escalation: do not ask permission to continue. It applies to this phase only: the next one starts from delegation again.' };
   }
 
   const task = object(value.task);

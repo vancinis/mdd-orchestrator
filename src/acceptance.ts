@@ -105,32 +105,66 @@ export function decisions(value: unknown, accepted: Acceptance): Decision[] {
     return { id: key, description: shortText(decision.description, `decision ${key} description`), requirements: required };
   });
 }
+/**
+ * How many problems one rejection carries. Enough that a plan is normally fixed in a single pass;
+ * bounded because a message the actor cannot hold is no more useful than the one-at-a-time
+ * rejections this replaces.
+ */
+export const MAX_REPORTED_PROBLEMS = 8;
+/**
+ * Raises everything wrong with a report at once.
+ *
+ * These checks are independent: none of them depends on an earlier one holding, so stopping at
+ * the first only hid the rest. What that cost is not abstract — a plan rejected for an unlinked
+ * decision was rewritten in full, re-sent, and rejected for the next unlinked decision, three
+ * times in a row on one observed run, each round re-emitting the whole document. Reporting them
+ * together turns that into one correction.
+ *
+ * A single problem is still phrased exactly as it always was: it is the common case, and wrapping
+ * one complaint in a list of one makes the message harder to act on, not easier.
+ */
+function raise(problems: readonly string[], subject: string): void {
+  if (!problems.length) return;
+  if (problems.length === 1) throw new Error(problems[0]!);
+  const shown = problems.slice(0, MAX_REPORTED_PROBLEMS);
+  const more = problems.length - shown.length;
+  throw new Error(`${subject} has ${problems.length} problem(s), and they are all in the links rather than in the work. Fix them together and restate the report once: ${shown.map((problem, index) => `(${index + 1}) ${problem}`).join(' ')}${more ? ` ...and ${more} more of the same kind.` : ''}`);
+}
 export function validatePlan(accepted: Acceptance, choices: Decision[], steps: Deliverable[]): void {
   const scenarios = accepted.requirements.flatMap(requirement => requirement.scenarios.map(scenario => ({ id: scenario.id, requirement: requirement.id })));
   const previous = new Set<string>();
+  const problems: string[] = [];
   // Every rejection names the step, the reference and why it does not hold: a plan is remapped by
   // hand after this message, and an unnamed ID forces the actor to guess the whole remapping.
   for (const step of steps) {
     const unknownScenario = step.scenarios.find(key => !scenarios.some(item => item.id === key));
-    if (unknownScenario !== undefined) throw new Error(`Plan deliverable ${step.id} references unknown scenario ${unknownScenario}. Accepted scenarios: ${scenarios.map(item => item.id).join(', ')}.`);
+    if (unknownScenario !== undefined) problems.push(`Plan deliverable ${step.id} references unknown scenario ${unknownScenario}. Accepted scenarios: ${scenarios.map(item => item.id).join(', ')}.`);
     const unordered = step.dependsOn.find(key => !previous.has(key));
-    if (unordered !== undefined) throw new Error(`Plan deliverable ${step.id} depends on ${unordered}, which is not an earlier deliverable. Dependencies may only name steps listed before it.`);
+    if (unordered !== undefined) problems.push(`Plan deliverable ${step.id} depends on ${unordered}, which is not an earlier deliverable. Dependencies may only name steps listed before it.`);
     for (const key of step.decisions) {
       const decision = choices.find(item => item.id === key);
-      if (!decision) throw new Error(`Plan deliverable ${step.id} references unknown decision ${key}. Plan decisions: ${choices.length ? choices.map(item => item.id).join(', ') : 'none'}.`);
+      if (!decision) { problems.push(`Plan deliverable ${step.id} references unknown decision ${key}. Plan decisions: ${choices.length ? choices.map(item => item.id).join(', ') : 'none'}.`); continue; }
+      // Applicability is only answerable once every scenario on this step is one that exists.
+      // Asking it of an unknown scenario would report a second, invented problem for one mistake.
+      if (unknownScenario !== undefined) continue;
       if (!step.scenarios.some(key => decision.requirements.includes(scenarios.find(item => item.id === key)!.requirement))) {
-        throw new Error(`Plan deliverable ${step.id} references decision ${key}, which is not applicable to its scenarios (${step.scenarios.map(scenario => `${scenario} belongs to requirement ${scenarios.find(item => item.id === scenario)!.requirement}`).join('; ')}; ${key} covers ${decision.requirements.join(', ')}).`);
+        problems.push(`Plan deliverable ${step.id} references decision ${key}, which is not applicable to its scenarios (${step.scenarios.map(scenario => `${scenario} belongs to requirement ${scenarios.find(item => item.id === scenario)!.requirement}`).join('; ')}; ${key} covers ${decision.requirements.join(', ')}).`);
       }
     }
     previous.add(step.id);
   }
-  if (steps.reduce((count, step) => count + step.scenarios.length, 0) > 64) throw new Error('Plan exceeds 64 scenario-to-step links.');
-  const uncovered = scenarios.find(scenario => !steps.some(step => step.scenarios.includes(scenario.id)));
-  if (uncovered) throw new Error(`Plan omits accepted scenario ${uncovered.id} of requirement ${uncovered.requirement}: no deliverable covers it.`);
-  for (const decision of choices) {
-    const missing = decision.requirements.find(required => !steps.some(step => step.decisions.includes(decision.id) && step.scenarios.some(key => scenarios.find(item => item.id === key)?.requirement === required)));
-    if (missing !== undefined) throw new Error(`Plan omits decision ${decision.id} on requirement ${missing}: no deliverable both references ${decision.id} and covers a scenario of ${missing}.`);
+  if (steps.reduce((count, step) => count + step.scenarios.length, 0) > 64) problems.push('Plan exceeds 64 scenario-to-step links.');
+  for (const scenario of scenarios) {
+    if (!steps.some(step => step.scenarios.includes(scenario.id))) problems.push(`Plan omits accepted scenario ${scenario.id} of requirement ${scenario.requirement}: no deliverable covers it.`);
   }
+  for (const decision of choices) {
+    for (const required of decision.requirements) {
+      if (!steps.some(step => step.decisions.includes(decision.id) && step.scenarios.some(key => scenarios.find(item => item.id === key)?.requirement === required))) {
+        problems.push(`Plan omits decision ${decision.id} on requirement ${required}: no deliverable both references ${decision.id} and covers a scenario of ${required}.`);
+      }
+    }
+  }
+  raise(problems, 'The plan');
 }
 export function verification(value: unknown, accepted: Acceptance, choices: Decision[], planned: Deliverable[], reported: string[] = [], passed: string[] = reported): Verification {
   const input = objectWithKeys(value, 'verification', ['scenarios', 'steps', 'decisions', 'changes', 'limits']);
@@ -155,10 +189,12 @@ export function verification(value: unknown, accepted: Acceptance, choices: Deci
     if (!link) throw new Error(`Verification invents the link ${preview(entry.requirementID)}/${preview(entry.scenarioID)}/${preview(entry.stepID)}. Held links: ${expected.map(item => `${item.requirementID}/${item.scenarioID}/${item.step.id}`).join(', ')}.`);
     return { requirementID: link.requirementID, scenarioID: link.scenarioID, stepID: link.step.id, ...assess(entry, `scenario ${link.scenarioID} on deliverable ${link.step.id}`) };
   });
+  const coverage: string[] = [];
   const missingLinks = expected.filter(item => !scenarios.some(covered => covered.scenarioID === item.scenarioID && covered.stepID === item.step.id));
   const repeatedLink = scenarios.find((item, index) => scenarios.findIndex(other => other.scenarioID === item.scenarioID && other.stepID === item.stepID) !== index);
-  if (missingLinks.length) throw new Error(`Verification omits scenario coverage for ${missingLinks.map(item => `${item.scenarioID} on ${item.step.id}`).join(', ')}.`);
-  if (repeatedLink) throw new Error(`Verification covers scenario ${repeatedLink.scenarioID} on deliverable ${repeatedLink.stepID} more than once.`);
+  if (missingLinks.length) coverage.push(`Verification omits scenario coverage for ${missingLinks.map(item => `${item.scenarioID} on ${item.step.id}`).join(', ')}.`);
+  if (repeatedLink) coverage.push(`Verification covers scenario ${repeatedLink.scenarioID} on deliverable ${repeatedLink.stepID} more than once.`);
+  raise(coverage, 'The verification report');
   const steps = items(input.steps, 'step coverage').map(value => {
     const entry = objectWithKeys(value, 'step coverage', ['stepID', 'status', 'checks', 'assessment']);
     const step = planned.find(item => item.id === entry.stepID);
@@ -170,14 +206,16 @@ export function verification(value: unknown, accepted: Acceptance, choices: Deci
     if (!choices.some(item => item.id === entry.decisionID)) throw new Error(`Verification invents plan decision ${preview(entry.decisionID)}. Plan decisions: ${choices.length ? choices.map(item => item.id).join(', ') : 'none'}.`);
     return { decisionID: id(entry.decisionID, 'decision coverage ID'), ...assess(entry, `decision ${String(entry.decisionID)}`) };
   });
+  const closing: string[] = [];
   const uncoveredStep = planned.find(step => !steps.some(item => item.stepID === step.id));
   const repeatedStep = steps.find((item, index) => steps.findIndex(other => other.stepID === item.stepID) !== index);
-  if (uncoveredStep) throw new Error(`Verification omits coverage of planned deliverable ${uncoveredStep.id}.`);
-  if (repeatedStep) throw new Error(`Verification covers planned deliverable ${repeatedStep.stepID} more than once.`);
+  if (uncoveredStep) closing.push(`Verification omits coverage of planned deliverable ${uncoveredStep.id}.`);
+  if (repeatedStep) closing.push(`Verification covers planned deliverable ${repeatedStep.stepID} more than once.`);
   const uncoveredDecision = choices.find(decision => !decisionCoverage.some(item => item.decisionID === decision.id));
   const repeatedDecision = decisionCoverage.find((item, index) => decisionCoverage.findIndex(other => other.decisionID === item.decisionID) !== index);
-  if (uncoveredDecision) throw new Error(`Verification omits coverage of plan decision ${uncoveredDecision.id}.`);
-  if (repeatedDecision) throw new Error(`Verification covers plan decision ${repeatedDecision.decisionID} more than once.`);
+  if (uncoveredDecision) closing.push(`Verification omits coverage of plan decision ${uncoveredDecision.id}.`);
+  if (repeatedDecision) closing.push(`Verification covers plan decision ${repeatedDecision.decisionID} more than once.`);
+  raise(closing, 'The verification report');
   const limits = items(input.limits, 'remaining limits', true).map(value => shortText(value, 'remaining limit', 250));
   if (limits.length > 4) throw new Error('Summarize material limits in at most four concise items.');
   return { scenarios, steps, decisions: decisionCoverage, changes: shortText(input.changes, 'what changed'), limits, matched: [...scenarios, ...steps, ...decisionCoverage].every(item => item.status === 'verified') };
