@@ -47,6 +47,29 @@ function addNativeUser(f, requirements) {
     parts: [{ type: 'text', text: requirements, sessionID: f.runtime.sessionID, messageID: 'msg_user' }] });
 }
 
+test('child termination requires correlated host metadata, a terminal message and idle status', async () => {
+  const f = sdkFixture();
+  const state = f.parentMessages[0].parts[0].state;
+  state.status = 'error';
+  state.metadata = { sessionId: f.child.id };
+  f.input.client.session.status = async () => ({ data: {} });
+  const inspector = createInspector(f.input);
+  assert.equal(await inspector.stopped(runtime, call), true);
+  f.input.client.session.status = async () => ({ data: { [f.child.id]: { type: 'busy' } } });
+  assert.equal(await inspector.stopped(runtime, call), false);
+  f.input.client.session.status = async () => ({ data: {} });
+  f.childMessages[0].info.finish = 'tool-calls';
+  assert.equal(await inspector.stopped(runtime, call), false);
+  f.childMessages[0].info.finish = 'stop';
+  state.status = 'running';
+  assert.equal(await inspector.stopped(runtime, call), false, 'an executing task is not released by a snapshot');
+  assert.equal(await inspector.stopped(runtime, call, f.output), true, 'after-hook execution returned and the child is terminal');
+  f.child.parentID = 'unrelated';
+  assert.equal(await inspector.stopped(runtime, call, f.output), false);
+  delete state.metadata;
+  await assert.rejects(inspector.stopped(runtime, call, f.output), /metadata/);
+});
+
 async function setupFixture(t) {
   isolateHome(t);
   const root = await mkdtemp(join(tmpdir(), 'mdd-setup-intake-'));
@@ -222,7 +245,7 @@ test('invalid setup names actual file without exposing values or claiming tools 
 test('informational_request_does_not_start_implementation: shipped instruction contract only', async () => {
   const asset = await readFile(new URL('../assets/opencode/agents/mdd-orchestrator.md', import.meta.url), 'utf8');
   assert.match(asset, /Information-only requests[\s\S]*MUST NOT use mdd_start/);
-  assert.match(asset, /Never stall the conversation/);
+  assert.match(asset, /Follow the available safe step; surface a blocked state/);
   assert.match(asset, /works with or without an\naccepted run/);
   assert.doesNotMatch(asset, /no standalone read-only investigation route/);
   assert.match(asset, /Never end a phase report with an approval question of your own/);

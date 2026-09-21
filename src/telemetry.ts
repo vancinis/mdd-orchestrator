@@ -67,7 +67,8 @@ export type TelemetryEvent = {
    * that phase was dispatched three times, not that the run had failed twice somewhere else.
    */
   attempt?: number;
-  mode?: 'delegate' | 'inline';
+  mode?: 'delegate' | 'native' | 'inline';
+  executor?: Phase | 'explore' | 'general' | 'coordinator';
   failure?: FailureClass;
   usage?: TelemetryUsage;
 };
@@ -103,12 +104,14 @@ function parseUsage(value: unknown): TelemetryUsage {
 }
 
 function parseEvent(value: unknown): TelemetryEvent {
-  const input = objectWithKeys(value, 'event', ['timestamp', 'event', 'phase', 'duration', 'route', 'outcome', 'runID', 'attempt', 'mode', 'failure', 'usage']);
+  const input = objectWithKeys(value, 'event', ['timestamp', 'event', 'phase', 'duration', 'route', 'outcome', 'runID', 'attempt', 'mode', 'executor', 'failure', 'usage']);
+  if (input.executor !== undefined && ![...MODEL_ROLES, 'explore', 'general', 'coordinator'].includes(input.executor as string)) throw new ValidationError('Invalid executor.');
   if (!Number.isSafeInteger(input.timestamp) || (input.timestamp as number) < 0 || (input.timestamp as number) > 8640000000000000 ||
       !['preflight', 'phase-start', 'phase-end', 'approval', 'report', 'retry', 'handover', 'reset', 'compaction'].includes(input.event as string)) {
     throw new ValidationError('Invalid telemetry event.');
   }
   const result: TelemetryEvent = { timestamp: input.timestamp as number, event: input.event as TelemetryEvent['event'] };
+  if (input.executor !== undefined) result.executor = input.executor as NonNullable<TelemetryEvent['executor']>;
   if (Object.hasOwn(input, 'phase')) {
     if (!MODEL_ROLES.includes(input.phase as Phase) || input.phase === 'orchestrator') throw new ValidationError('Invalid phase.');
     result.phase = input.phase as Phase;
@@ -133,7 +136,7 @@ function parseEvent(value: unknown): TelemetryEvent {
   }
   if (Object.hasOwn(input, 'attempt')) result.attempt = counter(input.attempt, 1000);
   if (Object.hasOwn(input, 'mode')) {
-    if (input.mode !== 'delegate' && input.mode !== 'inline') throw new ValidationError('Invalid mode.');
+    if (input.mode !== 'delegate' && input.mode !== 'native' && input.mode !== 'inline') throw new ValidationError('Invalid mode.');
     result.mode = input.mode;
   }
   if (Object.hasOwn(input, 'failure')) {

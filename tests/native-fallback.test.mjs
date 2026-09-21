@@ -1,0 +1,140 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { PhaseRunner } from '../dist/phase-runner.js';
+import { nextAction } from '../dist/next-action.js';
+import { collapseDispatchPrompts } from '../dist/dispatch-transcript.js';
+import { memoryServer, request, result, runtime } from './adapter-fixture.mjs';
+
+async function fixture(t, explore = false) {
+  const { endpoint } = await memoryServer(t);
+  const events = [];
+  const inspect = { parent: async () => {}, result: async (_r, _c, _p, output) => output, stopped: async () => true };
+  const runner = new PhaseRunner(inspect, { telemetry: (_root, event) => {
+    events.push(event); return { ok: true, enabled: true, count: events.length, retentionDays: 30 };
+  } });
+  await runner.start(request(endpoint, explore), runtime);
+  return { runner, inspect, events };
+}
+
+async function fail(runner, ordinal) {
+  const call = { sessionID: runtime.sessionID, callID: `failed_${ordinal}` };
+  await runner.before(call, runner.status(runtime.sessionID).task);
+  await runner.nativeError(call.sessionID, call.callID);
+}
+
+for (const explore of [false, true]) {
+  test(`three settled attempts select one native ${explore ? 'explore' : 'general'} and reset at the next phase`, async t => {
+    const { runner, events } = await fixture(t, explore);
+    const initial = runner.status(runtime.sessionID);
+    for (let i = 0; i < 3; i++) await fail(runner, i);
+    const fallback = runner.status(runtime.sessionID);
+    assert.equal(fallback.mode, 'native');
+    assert.equal(fallback.phase, initial.phase);
+    assert.equal(fallback.task.subagent_type, explore ? 'explore' : 'general');
+    assert.deepEqual(fallback.workflow.answers, initial.workflow.answers);
+    assert.deepEqual(fallback.workflow.evaluation, initial.workflow.evaluation);
+    await assert.rejects(runner.before({ sessionID: runtime.sessionID, callID: 'forged' }, { ...fallback.task, prompt: 'Do arbitrary work' }), /arguments differ/);
+    const call = { sessionID: runtime.sessionID, callID: 'native' };
+    const args = await runner.before(call, runner.status(runtime.sessionID).task);
+    assert.match(args.prompt, /inspect git status and git diff and preserve partial work/);
+    assert.match(args.prompt, /Do not delegate, load skills, or call any MDD tools/);
+    assert.doesNotMatch(args.prompt, /report it with mdd_phase_result/);
+    await runner.after(call, args, result(fallback));
+    const next = runner.status(runtime.sessionID);
+    assert.equal(next.mode, 'delegate');
+    assert.equal(next.attempts, 0);
+    assert.notEqual(next.phase, fallback.phase);
+    assert.equal(next.task.subagent_type, next.phase);
+    assert.equal(events.findLast(event => event.event === 'phase-end').executor, fallback.task.subagent_type);
+  });
+}
+
+test('native fallback failure blocks instead of issuing a fifth attempt or inline work', async t => {
+  const { runner } = await fixture(t);
+  for (let i = 0; i < 4; i++) await fail(runner, i);
+  const status = runner.status(runtime.sessionID);
+  assert.equal(status.state, 'blocked');
+  assert.equal(status.task, undefined);
+  assert.equal(status.fallbackExhausted, true);
+  assert.match(nextAction(status).why, /do not automatically reset/);
+  await assert.rejects(runner.submit({ result: result(status) }, runtime), /not waiting/);
+});
+
+test('unknown liveness keeps the writer slot; stale results do not release or degrade it', async t => {
+  const { runner, inspect } = await fixture(t);
+  inspect.stopped = async () => false;
+  const ready = runner.status(runtime.sessionID);
+  const call = { sessionID: runtime.sessionID, callID: 'live' };
+  const args = await runner.before(call, ready.task);
+  await runner.nativeError(call.sessionID, call.callID);
+  assert.equal(runner.status(call.sessionID).state, 'await-result');
+  assert.throws(() => runner.reset(call.sessionID, 'run'), /may still be running/);
+  await assert.rejects(runner.before({ ...call, callID: 'overlap' }, ready.task), /in flight/);
+  await assert.rejects(runner.after({ ...call, callID: 'stale' }, args, result(ready)), /discarded/);
+  assert.equal(runner.status(call.sessionID).attempts, 0);
+  await runner.after(call, args, result(ready));
+  assert.equal(runner.status(call.sessionID).workflow.results.length, 1);
+});
+
+test('direct submission selects native work; rejected reports remain report-only repairs', async t => {
+  const { runner, events } = await fixture(t);
+  const selected = await runner.submit({ result: 'This must not be accepted as phase work.' }, runtime);
+  assert.equal(selected.task.subagent_type, 'general');
+  assert.equal(selected.workflow.results.length, 0);
+  const call = { sessionID: runtime.sessionID, callID: 'repair' };
+  const args = await runner.before(call, selected.task);
+  await assert.rejects(runner.after(call, args, 'A malformed but completed report'), /no attempt was spent/);
+  const rejected = runner.status(runtime.sessionID);
+  assert.equal(rejected.task, undefined);
+  assert.equal(nextAction(rejected).tool, 'mdd_phase_result');
+  await assert.rejects(runner.before({ ...call, callID: 'rerun' }, args), /restatement/);
+  await runner.submit({ result: result(selected) }, runtime);
+  assert.equal(runner.status(runtime.sessionID).workflow.results.length, 1);
+  assert.equal(events.findLast(event => event.event === 'phase-end').executor, 'general', 'restating the report does not transfer execution provenance to the coordinator');
+});
+
+test('context investigation gets its own budget and restores an exhausted main phase', async t => {
+  const { runner } = await fixture(t);
+  for (let i = 0; i < 4; i++) await fail(runner, i);
+  const main = runner.status(runtime.sessionID);
+  await runner.explore({ purpose: 'Inspect the reason for failure without changing files.' }, runtime);
+  const ready = runner.status(runtime.sessionID);
+  assert.equal(ready.attempts, 0);
+  assert.equal(ready.fallbackExhausted, undefined);
+  assert.equal(nextAction(ready).tool, 'task');
+  const call = { sessionID: runtime.sessionID, callID: 'context' };
+  const args = await runner.before(call, ready.task);
+  await runner.after(call, args, result({ phase: 'mdd-explore' }));
+  const restored = runner.status(runtime.sessionID);
+  assert.equal(restored.fallbackExhausted, true);
+  assert.equal(restored.reason, main.reason);
+  assert.equal(restored.attempts, main.attempts);
+  assert.deepEqual(restored.workflow, main.workflow);
+});
+
+test('standalone investigation has a bounded native explore fallback and report-only repair', async () => {
+  const runner = new PhaseRunner({ parent: async () => {}, result: async (_r, _c, _p, output) => output, stopped: async () => true });
+  await runner.explore({ purpose: 'Inspect the CLI' }, runtime);
+  for (let i = 0; i < 3; i++) await fail(runner, i);
+  const ready = runner.status(runtime.sessionID);
+  assert.equal(ready.task.subagent_type, 'explore');
+  const call = { sessionID: runtime.sessionID, callID: 'solo' };
+  const args = await runner.before(call, ready.task);
+  await assert.rejects(runner.after(call, args, 'Unreadable'), /restatement/);
+  assert.equal(nextAction(runner.status(runtime.sessionID)).tool, 'mdd_phase_result');
+  await runner.submit({ result: result({ phase: 'mdd-explore' }) }, runtime);
+  assert.equal(runner.status(runtime.sessionID).state, 'not-started');
+});
+
+test('only owned native prompts are collapsed; unrelated native sessions are untouched', async t => {
+  const { runner } = await fixture(t);
+  const selected = await runner.submit({ result: 'Select native execution' }, runtime);
+  const call = { sessionID: runtime.sessionID, callID: 'owned' };
+  const args = await runner.before(call, selected.task);
+  const part = { type: 'tool', tool: 'task', ...call, state: { status: 'completed', input: args } };
+  const other = structuredClone(part); other.sessionID = 'unrelated';
+  const messages = [{ parts: [part, other] }];
+  assert.equal(collapseDispatchPrompts(messages, [], (sessionID, callID, input) => runner.ownsNativePrompt(sessionID, callID, input)), 1);
+  assert.equal(messages[0].parts[1].state.input.prompt, args.prompt);
+  assert.equal(part.state.input.prompt, args.prompt);
+});

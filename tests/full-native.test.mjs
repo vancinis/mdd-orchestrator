@@ -41,6 +41,7 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
   const histories = new Map([[runtime.sessionID, parent]]);
   const input = { directory: root, worktree: root, project: { id: 'project' }, client: {
     app: { agents: async () => ({ data: agents }) }, session: {
+      status: async () => ({ data: {} }),
       get: async ({ path }) => ({ data: sessions.get(path.id) }), messages: async ({ path }) => ({ data: histories.get(path.id) }),
     },
   } };
@@ -83,7 +84,7 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
     const current = await status();
     const args = current.task;
     assert.ok(args, `Expected task, got ${current.state}`);
-    const phase = args.subagent_type;
+    const phase = current.phase ?? 'mdd-explore';
     // The parent conversation is handed a dispatch handle, never the prompt itself. That is the
     // contract: the prompt is what fills a coordinator's context window and gets it compacted,
     // and the actor receives it all the same because the hook expands the handle below.
@@ -136,6 +137,7 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
     const childID = `child-${index}`;
     parent[1].parts[0].state.metadata = { sessionId: childID, parentSessionId: runtime.sessionID, model };
     sessions.set(childID, { id: childID, parentID: runtime.sessionID, directory: root, projectID: 'project', agent: phase, permission: [{ permission: 'task', pattern: '*', action: 'deny' }] });
+    await hooks.event({ event: { type: 'session.created', properties: { info: sessions.get(childID) } } });
     const child = [{ info: { id: `msg-${index}`, sessionID: childID, role: 'assistant', agent: phase, ...model, path: { cwd: root, root }, time: { completed: 10 }, finish: 'stop', ...(options.spent ?? {}) }, parts: [] }];
     histories.set(childID, child);
     if (options.beforeMismatch) child[0].info.modelID = 'substituted';
@@ -199,7 +201,7 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
       result.artifact += 'x'.repeat(16000 - Buffer.byteLength(result.artifact) - Buffer.byteLength(suffix));
     }
     if (options.mismatch) child[0].info.modelID = 'substituted';
-    const text = reportDocument(result);
+    const text = options.reportText ?? reportDocument(result);
     child[0].parts.push({ type: 'text', sessionID: childID, messageID: child[0].info.id, text });
     const output = { title: 'Native task', metadata: { sessionId: childID, parentSessionId: runtime.sessionID, model }, output: `<task id="${childID}" state="completed">\n<task_result>\n${text}\n</task_result>\n</task>` };
     if (options.badEnvelope) output.output = 'the delegated task did not finish';
@@ -250,7 +252,8 @@ for (const fault of [{ noChecks: true }, { coverageFault: 'missing' }]) {
     assert.equal(after.attempts, 0);
     assert.equal(after.mode, 'inline');
     assert.ok(after.rejected, 'the refused report is handed back to be corrected');
-    assert.ok(after.task, 'a rejected report leaves the phase runnable');
+    assert.equal(after.task, undefined, 'a rejected report authorizes repair, not another execution');
+    assert.equal(after.nextAction.tool, 'mdd_phase_result');
     assert.equal(after.workflow.results.length, 2);
   });
 }
@@ -323,7 +326,8 @@ test('Verify rejects an assessment citing a check it never reported, keeping ear
   await assert.rejects(f.phase({ noChecks: true }), /did not report running/);
   const after = await f.status();
   assert.equal(after.state, 'ready'); assert.equal(after.coverage, 65);
-  assert.equal(after.task.subagent_type, 'mdd-verify'); assert.equal(after.workflow.results.length, 2);
+  assert.equal(after.phase, 'mdd-verify'); assert.equal(after.workflow.results.length, 2);
+  assert.equal(after.task, undefined);
 });
 
 for (const [name, exit] of Object.entries({ nonzero: 1, interrupted: null })) {
@@ -456,10 +460,11 @@ test('a refused native write leaves the file untouched and the dispatch still aw
   const waiting = await f.status();
   assert.equal(waiting.state, 'await-result');
   assert.equal(waiting.coverage, 40);
-  // When that task ends without a result, the phase is released rather than lost.
+  // A tool error without terminal child evidence cannot release the writer.
   await f.hooks.event({ event: { type: 'message.part.updated', properties: { part: { type: 'tool', tool: 'task', sessionID: f.runtime.sessionID, callID: 'task-2', state: { status: 'error' } } } } });
   const released = await f.status();
-  assert.equal(released.state, 'ready'); assert.equal(released.task.subagent_type, 'mdd-apply');
+  assert.equal(released.state, 'await-result'); assert.equal(released.task, undefined);
+  await assert.rejects(f.hooks.tool.mdd_reset.execute({ scope: 'phase' }, f.context), /may still be running/);
 });
 
 test('confirmed rerun asks every field once despite complete profile and preserves old run evidence', async t => {
@@ -586,7 +591,8 @@ test('a failed intake can be replaced by a fresh request instead of stranding th
   assert.equal((await f.status()).state, 'blocked');
   // A stopped standalone investigation must not keep the parent looking busy either.
   await f.hooks.tool.mdd_contextual_explore.execute({ purpose: 'Mirar el issue.' }, f.context);
-  await assert.rejects(f.phase({ badEnvelope: true }));
+  for (let i = 0; i < 4; i++) await assert.rejects(f.phase({ badEnvelope: true }));
+  await f.hooks.tool.mdd_reset.execute({ scope: 'run' }, f.context);
   f.user('Trabajemos en el issue 389.');
   await f.hooks.tool.mdd_start.execute({ requirements: 'Trabajemos en el issue 389.' }, f.context);
   const started = await f.status();
@@ -703,15 +709,15 @@ test('read-only investigation answers without an accepted run and leaves impleme
   assert.equal(started.contextual, false);
 });
 {
-  test('a standalone investigation that does not complete is finished, not in flight', async t => {
+  test('a standalone investigation exhausts bounded fallback before explicit recovery', async t => {
     const f = await fixture(t, { start: false, memoryEnabled: false });
     await f.hooks.tool.mdd_contextual_explore.execute({ purpose: 'Read project context only.' }, f.context);
-    await assert.rejects(f.phase({ badEnvelope: true }));
+    for (let i = 0; i < 4; i++) await assert.rejects(f.phase({ badEnvelope: true }));
     const stopped = await f.status();
     // A stopped investigation is finished, not in flight: it must not look like main work.
-    assert.equal(stopped.state, 'not-started');
-    assert.equal(stopped.contextual, false);
-    assert.ok(stopped.contextualReason, 'the rejection stays visible');
+    assert.equal(stopped.state, 'blocked');
+    assert.equal(stopped.fallbackExhausted, true);
+    assert.ok(stopped.reason, 'the rejection stays visible');
     assert.equal(await readFile(join(f.root, 'feature.txt'), 'utf8'), 'pending\n');
     await f.hooks.tool.mdd_contextual_explore.execute({ purpose: 'Ask a different read-only question.' }, f.context);
     assert.equal((await f.status()).task.subagent_type, 'mdd-explore');
@@ -838,9 +844,10 @@ test('restart detects pending work without repeating memory writes', async t => 
   const writes = f.writes.length;
   await assert.rejects(restarted.tool.mdd_start.execute({ requirements: 'Rerun while still pending.' }, f.context), /mdd_reset/);
   assert.equal(f.writes.length, writes);
-  // The conversation is not sealed: an explicit reset releases it in place.
-  JSON.parse(await restarted.tool.mdd_reset.execute({ scope: 'run' }, f.context));
-  assert.equal(JSON.parse(await restarted.tool.mdd_status.execute({}, f.context)).state, 'not-started');
+  // Reset cannot manufacture evidence that the old child stopped.
+  await assert.rejects(restarted.tool.mdd_reset.execute({ scope: 'run' }, f.context), /unconfirmed liveness/);
+  assert.equal(JSON.parse(await restarted.tool.mdd_status.execute({}, f.context)).state, 'recovery-blocked');
+  assert.equal(f.writes.length, writes);
 });
 
 for (const stage of ['confirmation', 'preflight']) {
@@ -861,10 +868,10 @@ test('stale change confirmation cannot approve a later phase or erase the old ru
   await assert.rejects(f.hooks['tool.execute.after']({ ...used.call, args: used.args }, { title: 'Approved', output: 'approved', metadata: { answers: [['Confirmar el cambio']], truncated: false } }));
   const blocked = await f.status(); assert.equal(blocked.runID, next.runID); assert.equal(blocked.previousRuns.length, 1); assert.equal(blocked.workflow.results.length, 0);
 });
-test('a side exploration that does not complete restores the main plan untouched', async t => {
+test('a side exploration exhausts its own fallback then restores the main plan untouched', async t => {
   const f = await fixture(t); const main = await f.status();
   await f.hooks.tool.mdd_contextual_explore.execute({ purpose: 'Read context only.' }, f.context);
-  await assert.rejects(f.phase({ badEnvelope: true }));
+  for (let i = 0; i < 4; i++) await assert.rejects(f.phase({ badEnvelope: true }));
   const status = await f.status();
   assert.deepEqual(status.workflow, main.workflow); assert.deepEqual(status.evidence, main.evidence);
   assert.equal(status.contextual, false);
@@ -1063,7 +1070,7 @@ test('every MDD tool but an explicit full status answers compactly', async t => 
 
 // Delegation is the default route, never the only one: a subagent that cannot finish the work
 // must not be able to stop the user. The phase comes back to the coordinator instead.
-test('a failed delegation hands the phase to the coordinator, which finishes it inline', async t => {
+test('three settled failures select native fallback and the next phase delegates normally', async t => {
   const f = await fixture(t);
   const initial = await f.status();
   assert.equal(initial.mode, 'delegate');
@@ -1072,7 +1079,7 @@ test('a failed delegation hands the phase to the coordinator, which finishes it 
   // A failure buys another delegated attempt that knows what went wrong: handing the phase over
   // immediately spends the parent's context on work that was delegated to keep it out of there.
   for (const left of [2, 1]) {
-    await assert.rejects(f.phase({ badEnvelope: true }), /dispatch that updated task once more/);
+    await assert.rejects(f.phase({ badEnvelope: true }), /dispatch its updated task/);
     const retry = await f.status();
     assert.equal(retry.state, 'ready');
     assert.equal(retry.mode, 'delegate');
@@ -1082,22 +1089,15 @@ test('a failed delegation hands the phase to the coordinator, which finishes it 
   // Each retry is dispatched carrying what the previous attempt failed at. The parent only ever
   // holds a handle now, so what the actor received is read from the delivered prompt.
   assert.match(f.delivered(), /previous attempt at this exact phase did not complete/);
-  await assert.rejects(f.phase({ badEnvelope: true }), /is yours/);
+  await assert.rejects(f.phase({ badEnvelope: true }), /single tracked native fallback/);
   const handed = await f.status();
   assert.equal(handed.state, 'ready');
-  assert.equal(handed.mode, 'inline');
+  assert.equal(handed.mode, 'native');
   assert.equal(handed.attempts, 3);
   assert.equal(handed.attemptsLeft, 0);
-  assert.match(handed.brief, /carrying this phase out yourself/);
-  assert.match(handed.brief, /Perform only mdd-plan/);
-  assert.match(handed.brief, /Requirements data/);
-  assert.ok(handed.task, 'delegating again stays allowed');
-  const done = JSON.parse(await f.hooks.tool.mdd_phase_result.execute({ result: {
-    phase: 'mdd-plan', runID: handed.runID, outcome: 'passed',
-    evidenceSummary: 'The coordinator planned the work directly after the subagent failed.',
-    artifact: 'Plan: implement the scoped feature and check it.',
-    ...traceFixture(join(f.root, 'feature.txt'), 'feature'),
-  } }, f.context));
+  assert.equal(handed.brief, undefined);
+  assert.equal(handed.task.subagent_type, 'general');
+  const done = await f.phase();
   assert.equal(done.workflow.results.length, 1);
   assert.equal(done.workflow.results[0].phase, 'mdd-plan');
   assert.equal(done.evidence.plan, 'confirmed');
@@ -1114,28 +1114,27 @@ test('a failed delegation hands the phase to the coordinator, which finishes it 
 test('an inline report is refused when no phase is waiting for one', async t => {
   const f = await fixture(t, { start: false, memoryEnabled: false });
   await assert.rejects(f.hooks.tool.mdd_phase_result.execute({ result: { phase: 'mdd-plan', runID: 'invented', outcome: 'passed', evidenceSummary: 'x', artifact: 'y' } }, f.context),
-    /No MDD run is waiting/);
+    /No rejected investigation report/);
   f.user(f.requirements);
   await f.hooks.tool.mdd_start.execute({ requirements: f.requirements }, f.context);
   const ready = await f.status();
-  await assert.rejects(f.hooks.tool.mdd_phase_result.execute({ result: { phase: 'mdd-apply', runID: ready.runID, outcome: 'passed', evidenceSummary: 'x', artifact: 'y' } }, f.context),
-    /names a different phase, run or call/);
+  await f.hooks.tool.mdd_phase_result.execute({ result: 'Select native execution instead of coordinator work.' }, f.context);
   // A report MDD could not read costs no attempt: the work it describes may already be done, so
   // the phase stays runnable, the text comes back, and the coordinator restates it.
   const after = await f.status();
   assert.equal(after.state, 'ready');
   assert.equal(after.attempts, 0, 'a malformed report must not spend an attempt');
-  assert.equal(after.mode, 'inline', 'restating a report is the coordinator\'s, not a fresh dispatch');
-  assert.match(after.rejected.text, /mdd-apply/);
-  assert.equal(after.rejected.restatementsLeft, 2);
-  assert.ok(after.resultFormat.some(line => line.includes('## MDD Summary')), 'the form to restate in must travel with the rejection');
+  assert.equal(after.mode, 'native');
+  assert.equal(after.task.subagent_type, 'general');
+  assert.equal(after.workflow.results.length, 0);
+  assert.equal(after.rejected, undefined);
 });
 
 test('a phase whose report only needs restating is not run again', async t => {
   const f = await fixture(t, { memoryEnabled: false });
   const ready = await f.status();
   // The actor did the work and described it in a shape MDD cannot read.
-  await assert.rejects(f.hooks.tool.mdd_phase_result.execute({ result: 'I finished the plan. Everything looks good.' }, f.context), /needs the headings/);
+  await assert.rejects(f.phase({ reportText: 'I finished the plan. Everything looks good.' }), /needs the headings/);
   const held = await f.status();
   assert.equal(held.attempts, 0);
   assert.equal(held.workflow.results.length, 0);
@@ -1156,7 +1155,7 @@ test('an MDD run dispatches only its own phase actors', async t => {
   await assert.rejects(
     f.hooks['tool.execute.before']({ sessionID: f.runtime.sessionID, callID: 'foreign-1', tool: 'task' },
       { args: { description: 'Do the thing', subagent_type: 'gentle-ai', prompt: 'anything' } }),
-    /dispatches only its own phase actors/);
+    /Task arguments differ/);
   // The refusal changes nothing: the real phase is still exactly where it was.
   const held = await f.status();
   assert.equal(held.state, 'ready');
@@ -1176,6 +1175,39 @@ test('MDD tools belong to the coordinator and are withdrawn from every other age
   assert.equal(config.agent['gentle-ai'].tools.mdd_status, false);
   assert.equal(config.agent['gentle-ai'].tools['mdd_*'], false);
   assert.equal(config.agent['mdd-orchestrator'].tools, undefined);
+});
+
+test('tracked native children cannot recurse or use MDD tools; unrelated native sessions are unchanged', async t => {
+  const f = await fixture(t, { memoryEnabled: false });
+  await f.hooks.tool.mdd_phase_result.execute({ result: 'Select native work.' }, f.context);
+  await f.phase();
+  for (const tool of ['task', 'skill', 'mdd_check_report', 'mdd_start']) {
+    await assert.rejects(f.hooks['tool.execute.before']({ sessionID: 'child-1', callID: `nested-${tool}`, tool }, { args: {} }), /tracked native fallback/);
+  }
+  await assert.rejects(f.hooks.tool.mdd_check_report.execute({ phase: 'mdd-plan', result: 'anything' }, { ...f.context, sessionID: 'child-1', agent: 'general' }), /belongs to MDD phase actors/);
+  const args = { subagent_type: 'general', description: 'Unrelated work', prompt: 'Independent native task' };
+  const before = structuredClone(args);
+  await f.hooks['tool.execute.before']({ sessionID: 'unrelated-parent', callID: 'unrelated', tool: 'task' }, { args });
+  assert.deepEqual(args, before);
+});
+
+test('native fallback cannot skip interactive approval and preserves partial writes', async t => {
+  const f = await fixture(t, { mode: 'interactive', memoryEnabled: false });
+  await f.hooks.tool.mdd_phase_result.execute({ result: 'Use native planning.' }, f.context);
+  await f.phase();
+  const approval = await f.status();
+  assert.equal(approval.state, 'question-ready');
+  assert.equal(approval.task, undefined);
+  await assert.rejects(f.hooks.tool.mdd_phase_result.execute({ result: 'Skip approval.' }, f.context), /approval|question|not waiting|active/);
+  await f.answer();
+  for (let i = 0; i < 3; i++) await assert.rejects(f.phase({ badEnvelope: true }));
+  assert.equal(await readFile(join(f.root, 'feature.txt'), 'utf8'), 'implemented\n');
+  const fallback = await f.status();
+  assert.equal(fallback.phase, 'mdd-apply');
+  assert.equal(fallback.task.subagent_type, 'general');
+  await f.phase();
+  assert.match(f.delivered(), /inspect git status and git diff and preserve partial work/);
+  assert.equal((await f.status()).state, 'question-ready');
 });
 
 // A harness that cannot be told what it did badly can only be corrected by the person who

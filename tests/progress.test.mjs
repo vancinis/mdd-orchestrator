@@ -43,16 +43,23 @@ test('work that ended frees the conversation; only the same request cannot silen
     assert.equal((await runner().start(request(endpoint), runtime, { requirementsConfirmed: true, userMessageID: 'new-user' })).state, 'ready');
   }
 });
-test('an attempt that never reported an outcome is recoverable in place with reset', async t => {
+test('reset after restart requires host evidence that the previous child stopped', async t => {
   const path = root(t); const guard = new ProgressGuard(path); const { endpoint, binding } = await memoryServer(t);
   binding.directory = path;
   const runtime = { sessionID: 'ses_parent', agent: 'mdd-orchestrator', directory: path, worktree: path };
-  const runner = new PhaseRunner({ parent: async () => {}, result: async () => '{}' }, { progress: guard });
+  let stopped = false;
+  const runner = new PhaseRunner({ parent: async () => {}, result: async () => '{}', stopped: async () => stopped }, { progress: guard });
   guard.write(runtime.sessionID, marker);
   const status = runner.status(runtime.sessionID);
   assert.equal(status.state, 'recovery-blocked');
   assert.equal(status.recoverable, true);
   await assert.rejects(runner.start(request(endpoint), runtime, { requirementsConfirmed: true, userMessageID: 'new-user' }), /mdd_reset/);
+  await runner.confirmStopped(runtime.sessionID, runtime);
+  assert.throws(() => runner.reset(runtime.sessionID, 'run'), /unconfirmed liveness/);
+  await assert.rejects(runner.explore({ purpose: 'Inspect while a writer may still be live.' }, runtime), /unconfirmed liveness/);
+  assert.deepEqual(guard.read(runtime.sessionID), marker);
+  stopped = true;
+  await runner.confirmStopped(runtime.sessionID, runtime);
   assert.deepEqual(runner.reset(runtime.sessionID, 'run'), { scope: 'run' });
   assert.equal(guard.read(runtime.sessionID), undefined);
   assert.equal(runner.status(runtime.sessionID).state, 'not-started');

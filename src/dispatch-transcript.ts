@@ -32,6 +32,7 @@ import { DISPATCH_HANDLE_PREFIX } from './phase-runner.js';
 export const COLLAPSE_MIN_BYTES = 2000;
 
 type ToolPart = {
+  sessionID?: unknown; callID?: unknown;
   type?: unknown; tool?: unknown;
   state?: { status?: unknown; input?: { prompt?: unknown; subagent_type?: unknown } | null };
 };
@@ -52,7 +53,7 @@ export function collapsedPrompt(subagent: string, bytes: number): string {
  * Collapses settled MDD phase prompts in the messages about to be sent to the model. Returns how
  * many were collapsed, which is what the tests assert on and what a caller may log.
  */
-export function collapseDispatchPrompts(messages: unknown, agents: readonly string[]): number {
+export function collapseDispatchPrompts(messages: unknown, agents: readonly string[], ownsNative?: (sessionID: unknown, callID: unknown, args: unknown) => boolean): number {
   if (!Array.isArray(messages)) return 0;
   let collapsed = 0;
   for (const message of messages) {
@@ -67,7 +68,7 @@ export function collapseDispatchPrompts(messages: unknown, agents: readonly stri
       const input = state.input;
       if (!input || typeof input !== 'object') continue;
       const { prompt, subagent_type: subagent } = input;
-      if (typeof prompt !== 'string' || typeof subagent !== 'string' || !agents.includes(subagent)) continue;
+      if (typeof prompt !== 'string' || typeof subagent !== 'string' || (!agents.includes(subagent) && !ownsNative?.(part.sessionID, part.callID, input))) continue;
       if (prompt.startsWith(DISPATCH_HANDLE_PREFIX)) continue;
       const bytes = Buffer.byteLength(prompt);
       if (bytes <= COLLAPSE_MIN_BYTES) continue;

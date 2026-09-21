@@ -85,13 +85,13 @@ test('assets: the coordinator ships the consent channel and nothing else', () =>
 
 // Each rule below replaces a real failure: a prose approval asked twice, 53 inline tool calls with
 // no visible progress, and a PR body hand-written next to the tool that ships the local template.
-test('assets: the coordinator asks approval only natively, tracks inline steps and drafts PRs with the tool', () => {
+test('assets: the coordinator asks approval natively, delegates fallback and drafts PRs with the tool', () => {
   const text = fs.readFileSync('assets/opencode/agents/mdd-orchestrator.md', 'utf8');
   assert.match(text, /Never end a phase report with an approval question of your own/);
   assert.match(text, /only approval is the native question[\s\S]*same turn as the report/);
   assert.match(text, /affirmative typed in the\nchat approves nothing/);
-  assert.match(text, /keep the native todo list/);
-  assert.match(text, /Do not mirror the MDD phases there/);
+  assert.match(text, /one tracked fallback: explore for/);
+  assert.match(text, /Never do\n  substantive phase work in this conversation/);
   assert.match(text, /Never\nhand-write the body with gh, git or a template of your own/);
 });
 
@@ -124,7 +124,8 @@ test('assets: the coordinator recovers an unanswered approval instead of losing 
   assert.match(text, /mdd_status still holds the same question/);
   assert.match(text, /ask it yourself with the native question tool while no MDD question is pending/);
   assert.match(text, /While one is pending, it is the only question/);
-  assert.match(text, /scope phase[\s\S]*re-opens exactly\nthat question/);
+  assert.match(text, /scope phase retries settled work or reopens the existing approval/);
+  assert.ok(Buffer.byteLength(text) <= 16000, 'the coordinator must fit the installer asset limit');
   assert.match(text, /the same phase goes out again and its task\n\s+already carries what went wrong/);
 });
 

@@ -50,15 +50,13 @@ export function nextAction(status: unknown): NextAction | undefined {
       why: 'A native question is pending. Ask it once, exactly as it is here, and answer nothing on the user\'s behalf. While it is pending it is the only question the user should see.' };
   }
 
+  if (value.fallbackExhausted === true) return { tool: 'mdd_status', why: 'Native fallback is exhausted. Present the blocked reason and request explicit recovery; do not automatically reset, redispatch, or perform the work inline.' };
+  if (value.reportRepairExhausted === true) return { tool: 'mdd_status', why: 'Report repair is exhausted. Present the retained report and request explicit recovery; never rerun substantive work to repair its wording.' };
+
   const rejected = object(value.rejected);
   if (rejected) {
     return { tool: 'mdd_phase_result',
       why: 'The work is done and only its wording was refused. Take rejected.text, fix exactly what rejected.reason names, and send it back with mdd_phase_result. Do not re-dispatch and do not redo the work: this costs no attempt.' };
-  }
-
-  if (state === 'ready' && value.mode === 'inline') {
-    return { tool: 'mdd_phase_result',
-      why: 'This phase has used every dispatch it had, so it is yours. Read mdd_status with detail="full" once to get brief, the full phase instructions; carry the phase out with your own tools following it, then report it with mdd_phase_result in the form resultFormat states. Brief is the whole phase prompt, so it is returned when you ask for it rather than repeated in every payload for the rest of the run. This is the designed fallback, not an escalation: do not ask permission to continue. It applies to this phase only: the next one starts from delegation again.' };
   }
 
   const task = object(value.task);

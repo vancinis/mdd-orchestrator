@@ -343,6 +343,29 @@ export function createInspector(input: PluginInput, timeout = 5000): Inspect & I
       if (!match) throw new Error('The delegated phase did not return a completed task result.');
       return boundedText(match[1], 'delegated phase result', 20000);
     },
+    async stopped(runtime, call, returned) {
+      const history = await messages(runtime.sessionID, runtime.directory);
+      const matches = history.flatMap(message => list(message.parts, 'message parts', PARTS_MAX))
+        .filter(part => part.type === 'tool' && part.tool === 'task' && part.callID === call.callID);
+      if (matches.length !== 1) return false;
+      const state = record(matches[0]!.state, 'task state');
+      if (state.status === 'completed' && typeof state.output === 'string' && TASK_ENVELOPE.test(state.output.trim())) return true;
+      if (state.status !== 'error' && state.status !== 'completed' && returned === undefined) return false;
+      const metadata = record(state.metadata, 'task metadata');
+      if (typeof metadata.sessionId !== 'string') return false;
+      const child = await session(metadata.sessionId, runtime.directory);
+      if (child.parentID !== runtime.sessionID) return false;
+      const childHistory = await messages(metadata.sessionId, runtime.directory);
+      const last = childHistory.at(-1);
+      if (!last) return false;
+      const info = record(last.info, 'child message');
+      if (info.role !== 'assistant' || !record(info.time, 'child time').completed) return false;
+      if (!info.error && (typeof info.finish !== 'string' || ['tool-calls', 'unknown'].includes(info.finish))) return false;
+      if (list(last.parts, 'child message parts', PARTS_MAX).some(part => part.type === 'tool' && ['pending', 'running'].includes(String(record(part.state, 'child tool state').status)))) return false;
+      const statuses = await readSdk(signal => input.client.session.status({ query: { directory: runtime.directory }, signal, throwOnError: true }), timeout);
+      const current = record(statuses.data, 'session statuses')[metadata.sessionId];
+      return current === undefined || record(current, 'child status').type === 'idle';
+    },
     /**
      * What the phase cost, taken from the child session the task envelope already names in its
      * `id`. Reading that session directly is what makes the number the phase's own: enumerating
@@ -420,6 +443,7 @@ const plugin: Plugin = async input => {
    */
   const reply = (value: unknown, view: StatusView = 'compact'): string => payload(value, assets, view);
   const opened = new Set<string>();
+  const nativeChildren = new Set<string>();
   const enter = (context: { agent: string; sessionID: string; directory: string; worktree: string }, name: string): void => {
     coordinatorOnly(context.agent, name);
     if (opened.has(context.sessionID)) return;
@@ -547,7 +571,7 @@ const plugin: Plugin = async input => {
         },
       }),
       mdd_phase_result: tool({
-        description: 'Report a phase you carried out yourself, or restate one whose report MDD could not read. Same markdown report a delegated phase returns, without a callID; mdd_status.resultFormat states the exact headings. Use it when delegation failed, when a rejected report only needs restating, or when doing the work directly is simply the better route.',
+        description: 'Restate a rejected report without redoing its work. Without a rejected report, this selects a tracked native fallback task instead of accepting coordinator execution. Read the returned task and dispatch it exactly; never perform substantive phase work inline.',
         args: { result: tool.schema.string().min(1).describe('The phase report as markdown: "## MDD Outcome" with passed or failed, "## MDD Summary" with prose a person reads, "## MDD Artifact" with the deliverable, and "## MDD Data" with one fenced json block when the phase has fields. mdd_status.resultFormat states the exact form for the current phase.') },
         async execute(args, context) {
           enter(context, 'mdd_phase_result');
@@ -560,6 +584,7 @@ const plugin: Plugin = async input => {
         args: { scope: tool.schema.enum(['phase', 'run']).describe('phase releases the current attempt; run discards the run state for this conversation.') },
         async execute(args, context) {
           enter(context, 'mdd_reset');
+          await runner.confirmStopped(context.sessionID, context);
           return reply(intake.reset(context, args.scope));
         },
       }),
@@ -588,18 +613,16 @@ const plugin: Plugin = async input => {
     // Actors work with their own tools under native permissions. MDD only observes the two calls
     // that carry its own state: the phase task and the consent question.
     'tool.execute.before': async (input, output) => {
+      if (nativeChildren.has(input.sessionID) && (['task', 'skill', CHECK_TOOL].includes(input.tool) || input.tool.startsWith('mdd_'))) {
+        throw new Error('A tracked native fallback must work directly and return its report to the parent. Recursive orchestration, skill loading, and MDD tools are not allowed.');
+      }
       if (input.tool === 'question') return intake.beforeQuestion(input, output.args);
       if (input.tool !== 'task') return;
       // An MDD conversation dispatches MDD phases. Reaching past them into the shared registry is
       // refused here rather than discouraged in a prompt, because the agent that answers an
       // unrelated name runs under instructions MDD never wrote and reports evidence MDD cannot
       // account for. Conversations MDD is not running are untouched: this only speaks for its own.
-      if (runner.governs(input.sessionID)) {
-        const subagent = (output.args as { subagent_type?: unknown }).subagent_type;
-        if (typeof subagent !== 'string' || !PHASE_AGENTS.includes(subagent)) {
-          throw new Error(`An MDD run dispatches only its own phase actors (${PHASE_AGENTS.join(', ')}); ${typeof subagent === 'string' ? JSON.stringify(subagent) : 'this task'} is not one of them. Nothing was started. Read mdd_status and dispatch the task it returns, or carry the phase out yourself with your own tools.`);
-        }
-      }
+      // Exact runner-issued arguments authorize a fallback, never the native agent name alone.
       intake.guardTask(input.sessionID);
       const args = await runner.before(input, output.args);
       if (args) Object.assign(output.args, args);
@@ -615,11 +638,15 @@ const plugin: Plugin = async input => {
     // out of every message the coordinator reads afterwards. See src/dispatch-transcript.ts for
     // why both halves are needed, and why only settled dispatches are touched.
     'experimental.chat.messages.transform': async (_input, output) => {
-      try { collapseDispatchPrompts(output.messages, PHASE_AGENTS); }
+      try { collapseDispatchPrompts(output.messages, PHASE_AGENTS, (sessionID, callID, args) => runner.ownsNativePrompt(sessionID, callID, args)); }
       // A transcript optimization that can fail a turn is worse than the tokens it saves.
       catch { /* the untouched messages are still correct, only larger */ }
     },
     event: async ({ event }) => {
+      if (event.type === 'session.created') {
+        const child = event.properties.info;
+        if (child.parentID && runner.nativePending(child.parentID)) nativeChildren.add(child.id);
+      }
       if (event.type === 'server.instance.disposed' && event.properties.directory === input.directory) { await intake.close(); return; }
       // The host replaced this conversation with a summary. MDD's own state is untouched, because
       // none of it was ever kept in the transcript; the coordinator's memory of the protocol is
@@ -629,7 +656,7 @@ const plugin: Plugin = async input => {
       if (event.type !== 'message.part.updated') return;
       const part = event.properties.part;
       if (part.type === 'tool' && part.tool === 'task' && part.state.status === 'error') {
-        runner.nativeError(part.sessionID, part.callID);
+        await runner.nativeError(part.sessionID, part.callID);
       }
       if (part.type === 'tool' && part.tool === 'question' && part.state.status === 'error') intake.nativeError(part);
     },

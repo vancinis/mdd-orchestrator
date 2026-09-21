@@ -18,7 +18,7 @@ function legacyResult(status, outcome = 'passed') {
 
 async function fixture(t, fault) {
   const memory = await memoryServer(t, fault);
-  const inspect = { parent: async () => {}, result: async (_runtime, _call, _phase, output) => output };
+  const inspect = { parent: async () => {}, result: async (_runtime, _call, _phase, output) => output, stopped: async () => true };
   const runner = new PhaseRunner(inspect);
   return { ...memory, inspect, runner };
 }
@@ -130,16 +130,12 @@ test('runner contract: racing dispatches never both admit, and the phase stays r
   const first = runner.before(call, ready.task);
   await assert.rejects(runner.before({ ...call, callID: 'two' }, ready.task));
   release();
-  await assert.rejects(first);
+  const admitted = await first;
   const after = runner.status(runtime.sessionID);
-  assert.equal(after.state, 'ready');
-  assert.equal(after.workflow.nextAction.kind, 'execute');
+  assert.equal(after.state, 'await-result');
   assert.equal(after.workflow.results.length, 0);
-  assert.equal(after.task.description, ready.task.description);
-  assert.equal(after.task.subagent_type, ready.task.subagent_type);
-  // The retry carries what failed, and that text lives in the prompt the actor receives.
-  inspect.parent = async () => {};
-  assert.match((await runner.before({ ...call, callID: 'retry' }, after.task)).prompt, /previous attempt at this exact phase did not complete/);
+  await runner.after(call, admitted, result(ready));
+  assert.equal(runner.status(runtime.sessionID).workflow.results.length, 1);
 });
 
 for (const kind of ['intent-write', 'intent-read', 'result-write', 'result-read']) {
@@ -215,17 +211,21 @@ for (const invalid of [
 }
 
 // Four unreadable reports in a row is no longer only a transcription problem.
-test('runner contract: restatements are bounded and then spend the attempt', async t => {
+test('runner contract: exhausted restatements block without rerunning substantive work', async t => {
   const { runner, endpoint } = await fixture(t);
   const ready = await runner.start(request(endpoint), runtime);
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const args = await runner.before({ ...call, callID: `call_${attempt}` }, runner.status(runtime.sessionID).task);
-    await assert.rejects(runner.after({ ...call, callID: `call_${attempt}` }, args, 'nothing readable here'));
+  const args = await runner.before(call, ready.task);
+  await assert.rejects(runner.after(call, args, 'nothing readable here'));
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    await assert.rejects(runner.submit({ result: 'nothing readable here' }, runtime));
     assert.equal(runner.status(runtime.sessionID).attempts, 0);
   }
-  const args = await runner.before({ ...call, callID: 'call_last' }, runner.status(runtime.sessionID).task);
-  await assert.rejects(runner.after({ ...call, callID: 'call_last' }, args, 'still nothing readable'));
-  assert.equal(runner.status(runtime.sessionID).attempts, 1);
+  await assert.rejects(runner.submit({ result: 'still nothing readable' }, runtime));
+  const blocked = runner.status(runtime.sessionID);
+  assert.equal(blocked.attempts, 0);
+  assert.equal(blocked.state, 'blocked');
+  assert.equal(blocked.reportRepairExhausted, true);
+  assert.equal(blocked.task, undefined);
 });
 
 // Stated binding is checked when it is stated. It can only reject a mismatch, never allow one.
@@ -256,10 +256,10 @@ test('runner contract: missing after remains pending; only the matching native e
   const { runner, endpoint } = await fixture(t);
   const ready = await runner.start(request(endpoint), runtime);
   await runner.before(call, ready.task);
-  runner.nativeError('other', call.callID);
-  runner.nativeError(call.sessionID, 'other');
+  await runner.nativeError('other', call.callID);
+  await runner.nativeError(call.sessionID, 'other');
   assert.equal(runner.status(runtime.sessionID).state, 'await-result');
-  runner.nativeError(call.sessionID, call.callID);
+  await runner.nativeError(call.sessionID, call.callID);
   const released = runner.status(runtime.sessionID);
   assert.equal(released.state, 'ready');
   assert.equal(released.uncertain, false);
@@ -273,8 +273,9 @@ test('runner contract: mismatched and duplicate after cannot record a result', a
   await runner.after({ ...call, sessionID: 'other' }, args, result(ready));
   assert.equal(runner.status(runtime.sessionID).state, 'await-result');
   await assert.rejects(runner.after({ ...call, callID: 'other' }, args, result(ready)));
+  await runner.after(call, args, result(ready));
   await assert.rejects(runner.after(call, args, result(ready)));
-  assert.equal(runner.status(runtime.sessionID).workflow.results.length, 0);
+  assert.equal(runner.status(runtime.sessionID).workflow.results.length, 1);
 });
 
 test('runner contract: failed initialization remains blocked and repeated start cannot reset it', async t => {
@@ -295,9 +296,9 @@ test('runner contract: concurrent result callbacks cannot both persist or advanc
   const first = runner.after(call, args, result(ready));
   await assert.rejects(runner.after(call, args, result(ready)));
   release(result(ready));
-  await assert.rejects(first);
-  assert.equal(runner.status(runtime.sessionID).workflow.results.length, 0);
-  assert.equal(writes.length, 1);
+  await first;
+  assert.equal(runner.status(runtime.sessionID).workflow.results.length, 1);
+  assert.equal(writes.length, 2);
 });
 
 for (const store of ['none', 'engram', 'openspec', 'both']) {
@@ -376,17 +377,15 @@ test('runner telemetry exceptions remain bounded diagnostics without changing su
   assert.ok(!JSON.stringify(ready).includes('secret raw storage error'));
 });
 
-test('a stopped investigation names its real reason and can be asked again', async t => {
+test('a receipt failure does not prove an investigation stopped', async t => {
   const { runner } = await fixture(t);
   await runner.explore({ purpose: 'Buscar el issue 389.' }, runtime);
   await runner.before(call, runner.status(runtime.sessionID).task);
   runner.block(runtime.sessionID, 'A tool in the delegated phase failed or was interrupted.');
-  // A stopped investigation is finished, not in flight: it must not make the parent look busy.
   const stopped = runner.status(runtime.sessionID);
-  assert.equal(stopped.state, 'not-started');
-  assert.match(stopped.contextualReason, /failed or was interrupted/);
-  await runner.explore({ purpose: 'Preguntar otra cosa.' }, runtime);
-  assert.equal(runner.status(runtime.sessionID).task.subagent_type, 'mdd-explore');
+  assert.equal(stopped.state, 'await-result');
+  assert.match(stopped.reason, /termination is unconfirmed/);
+  await assert.rejects(runner.explore({ purpose: 'Ask another question.' }, runtime), /already in progress/);
 });
 
 test('the adapter-owned trace section cannot be written by the actor', async t => {

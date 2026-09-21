@@ -19,10 +19,11 @@ test('next action: a rejected report is restated, never re-dispatched', () => {
   assert.match(action.why, /costs no attempt/);
 });
 
-test('next action: inline mode asks the coordinator for the work, not for permission', () => {
-  const action = nextAction({ state: 'ready', task, mode: 'inline' });
-  assert.equal(action.tool, 'mdd_phase_result');
-  assert.match(action.why, /not an escalation/);
+test('next action: native fallback dispatches exact child work, never coordinator execution', () => {
+  const native = { ...task, subagent_type: 'general' };
+  const action = nextAction({ state: 'ready', task: native, mode: 'native' });
+  assert.equal(action.tool, 'task');
+  assert.deepEqual(action.args, native);
 });
 
 test('next action: a ready delegated phase carries the exact dispatchable task', () => {

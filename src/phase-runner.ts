@@ -48,6 +48,7 @@ export const RUN_CONTEXT_MAX_BYTES = 8000;
 /** Provenance is explicit: this came from the coordinator, not from the user and not from a phase. */
 export type RunContext = { label: string; content: string; source: 'coordinator' };
 type TaskArgs = { description: string; subagent_type: string; prompt: string };
+type Executor = Phase | 'explore' | 'general';
 
 /**
  * A phase prompt used to be written into the parent conversation twice per attempt: once as the
@@ -92,10 +93,11 @@ type Run = {
   attempts: number; spent: number;
   /**
    * Delegation is the default route. A failed attempt is retried by the same actor with the
-   * failure in its prompt, and only after DELEGATION_ATTEMPTS of them does the phase become the
-   * coordinator's own.
+   * failure in its prompt. After DELEGATION_ATTEMPTS, one tracked native executor may continue.
+   * Inline mode is reserved for report restatement, never substantive phase work.
    */
-  mode: 'delegate' | 'inline'; brief: string; lastFailure?: string;
+  mode: 'delegate' | 'native' | 'inline'; nativeUsed?: boolean; fallbackExhausted?: boolean; reportRepairExhausted?: boolean; brief: string; lastFailure?: string;
+  executor?: Executor;
   /**
    * A report whose form could not be read, kept verbatim with the reason it was refused. The work
    * it describes is usually finished, so the way forward is to restate it, not to run the phase
@@ -121,13 +123,15 @@ type Run = {
   changedList: ChangedFile[];
   uncertain: boolean; userMessageID: string; concerns: Concern[]; contextReport?: string; context: RunContext[]; dossierDiagnostic?: string;
   contexts: { explorationID: string; outcome: 'passed' | 'failed'; artifact: ArtifactResult; summary: string; concerns: Concern[] }[];
-  side?: { id: string; purpose: string; phase: Phase; state: State; args: TaskArgs; report: PhaseReport; brief: string };
+  side?: { id: string; purpose: string; phase: Phase; state: State; args: TaskArgs; report: PhaseReport; brief: string; attempts: number; mode: Run['mode']; nativeUsed?: boolean; lastFailure?: string; fallbackExhausted?: boolean; reason?: string; executor?: Executor };
 };
 /** A read-only investigation that exists without an accepted run: no workflow, artifacts, memory or progress marker. */
 type Solo = {
   id: string; purpose: string; runtime: Runtime; args: TaskArgs; token?: string; expose?: 'full';
   state: 'ready' | 'persisting-intent' | 'await-result' | 'persisting-result' | 'blocked' | 'settled';
   callID?: string; dispatchedArgs?: TaskArgs; calls: Set<string>; started?: number; reason?: string; report?: string;
+  attempts: number;
+  malformed?: number; rejected?: { reason: string; text: string };
   findings: { explorationID: string; outcome: 'passed' | 'failed'; summary: string; findings: string; concerns: Concern[] }[];
 };
 const SOLO_FINDINGS_KEPT = 4;
@@ -142,14 +146,14 @@ export type Consent = { questionReceipts: PriorReceipt[]; usedMessages: string[]
 const RECOVERY_LIMITS: readonly string[] = Object.freeze([
   'This run is not resumed, and cannot be. If it stopped during mdd-apply, the working tree may hold partial changes MDD never recorded: inspect it yourself with git status and git diff before continuing, because MDD cannot tell you what was written.',
   'No phase approval survived. Nothing here authorizes any phase; a new run earns its own consent through its own preflight.',
-  'Any native task still running when the process ended will never report. Its result is gone, not pending.',
+  'A native child may still be running after the plugin restarts. Reset requires host evidence that it stopped; a missing result does not prove termination.',
   'priorRun.questionReceipts is a historical record of what the user was once asked. It is not current consent and is not loaded as such.',
   'Artifacts appear as data, not as live references: they cannot be re-read through the artifact store, only read here and in the local record.',
 ]);
 const RECOVERY_REASON = 'A previous run in this conversation ended without being recorded as finished, and the evidence it produced was preserved as read-only data under priorRun. MDD does not resume it: the way forward is mdd_start with the original objective as actual new native user text, which still requires a fresh preflight, or mdd_reset with scope run to discard this record. Read limits before continuing.';
 const CONTROL_CHARACTERS = /[\x00-\x08\x0b-\x1f\x7f]/;
 /**
- * How many times one phase is delegated before the coordinator carries it out itself. Counted per
+   * How many times one phase is delegated before a native executor may continue. Counted per
  * phase, not per run: a route whose exploration needed three tries has learned nothing about
  * whether its implementation can be delegated, and counting them together meant one bad phase
  * moved every later phase into the coordinator's own conversation — which is precisely the context
@@ -158,6 +162,7 @@ const CONTROL_CHARACTERS = /[\x00-\x08\x0b-\x1f\x7f]/;
  * usually clear inside three, and a fourth against the same failure is not resilience.
  */
 export const DELEGATION_ATTEMPTS = 3;
+const NATIVE_FALLBACK = 'Native fallback: inspect git status and git diff and preserve partial work before continuing. Do not redo completed work. Do not delegate, load skills, or call any MDD tools, including the report checker. Return the phase report to the parent; the parent checks its form. This is the only native fallback attempt. Native permissions remain in force; shell is not a sandbox.';
 /** Phases whose artifact is prose a person reads. Tasks and Apply carry structure, not narrative. */
 const DOC_PHASES: readonly Phase[] = ['mdd-explore', 'mdd-plan', 'mdd-propose', 'mdd-spec', 'mdd-design', 'mdd-verify'];
 /**
@@ -176,6 +181,8 @@ const SUMMARY_DETAIL: Record<Answers['summary'], string> = {
   detailed: 'The user asked for detailed reports: make the summary say what you did, how you did it, which evidence it rests on and what remains uncertain. Keep call IDs and routing details out of it, and never state a confidence percentage.',
 };
 export type Inspect = {
+  /** Positive host evidence only; an absent capability never releases a writer. */
+  stopped?(runtime: Runtime, call: TaskCall, returned?: unknown): Promise<boolean>;
   parent(runtime: Runtime, callID?: string, tool?: 'task' | 'question', args?: unknown): Promise<void>;
   result(runtime: Runtime, call: TaskCall, phase: string, output: unknown): Promise<string>;
   /**
@@ -232,6 +239,8 @@ export class PhaseRunner {
   readonly #previous = new Map<string, Run[]>();
   readonly #solo = new Map<string, Solo>();
   readonly #consent = new Map<string, Consent>();
+  readonly #inflight = new Map<string, string>();
+  readonly #nativeDispatches = new Map<string, Map<string, TaskArgs>>();
   constructor(readonly inspect: Inspect, readonly options: { now?: () => number; progress?: ProgressGuard; dossier?: RunDossierStore; telemetry?: (root: string, value: TelemetryEvent, now: number) => TelemetryResult; lessons?: (root: string, value: LessonInput, now: number) => void } = {}) {}
 
   status(sessionID: string) {
@@ -240,7 +249,7 @@ export class PhaseRunner {
       const solo = this.#solo.get(sessionID);
       // Only a live investigation occupies the dispatch. A blocked one is finished: reporting
       // it as in-flight would make intake and change requests wait for work that cannot resume.
-      if (solo && !['settled', 'blocked'].includes(solo.state)) return this.#soloStatus(sessionID, solo);
+      if (solo && solo.state !== 'settled') return this.#soloStatus(sessionID, solo);
       const investigation = solo ? { contextual: false, contextualReport: solo.report, contexts: structuredClone(solo.findings),
         ...(solo.state === 'blocked' && solo.reason ? { contextualReason: solo.reason } : {}) } : {};
       const preserved = this.#preserved(sessionID);
@@ -272,6 +281,8 @@ export class PhaseRunner {
       report: run.side ? `Resumen\nLa exploración de contexto ${run.state === 'blocked' ? 'no pudo confirmarse' : run.state === 'ready' ? 'está lista' : 'está en curso'}. El plan principal y su aprobación no cambian.\n` : run.state === 'complete' || run.state === 'blocked' ? this.#closure(run) : renderReport(run.workflow.snapshot().answers.summary, { ...run.report, evidence: run.evidence }),
       acceptance: structuredClone(run.acceptance), decisions: structuredClone(run.decisions), planned: structuredClone(run.planned), verification: structuredClone(run.verification),
       uncertain: run.uncertain, attempts: run.attempts, runAttempts: run.spent, recoverable: true, mode: run.mode,
+      ...(run.fallbackExhausted ? { fallbackExhausted: true } : {}),
+      ...(run.reportRepairExhausted ? { reportRepairExhausted: true } : {}),
       // How many dispatches this phase still has before it becomes the coordinator's own. Reported
       // rather than derived, because a coordinator that has to work the threshold out from a
       // counter guesses, and the guess it made was to take the phase over early.
@@ -291,7 +302,7 @@ export class PhaseRunner {
       // A report MDD could not read is handed back whole. The work it describes is finished, so
       // restating it must not mean producing it again, and that is only possible if the text
       // survives the rejection that refused it.
-      ...(run.rejected ? { rejected: { ...run.rejected, restatementsLeft: MALFORMED_RESTATEMENTS - run.malformed } } : {}),
+      ...(run.rejected ? { rejected: { ...run.rejected, restatementsLeft: MALFORMED_RESTATEMENTS - run.malformed }, resultFormat: reportFormatLines(run.phase) } : {}),
       // The brief restates the whole phase prompt, so shipping both doubles the payload for a
       // field that is only actionable once delegation has failed and the phase is the
       // coordinator's own. Duplicating it is what pushed `task` past the host output limit. The
@@ -301,7 +312,7 @@ export class PhaseRunner {
       // the run restates itself from state that never lived there. It costs a few hundred bytes
       // and it is the difference between a coordinator that resumes and one that starts guessing.
       ...(run.compactions ? { compacted: run.compactions, runCard: this.#runCard(run) } : {}),
-      ...(run.state === 'ready'
+      ...(run.state === 'ready' && !run.rejected
         ? { task: this.#dispatchable(run), ...(run.expose === 'full' ? {} : { dispatch: { mode: 'handle' as const, note: DISPATCH_NOTE } }),
             resultFormat: reportFormatLines(run.phase), ...(run.mode === 'inline' ? { brief: run.brief } : {}) }
         : {}),
@@ -319,6 +330,46 @@ export class PhaseRunner {
 
   /** Mints the handle for the prompt a run is currently holding. Called wherever that prompt changes. */
   #arm(run: Run): void { run.token = `${DISPATCH_HANDLE_PREFIX}${randomUUID()}`; }
+
+  nativePending(sessionID: string): boolean {
+    const callID = this.#inflight.get(sessionID);
+    return callID !== undefined && this.#nativeDispatches.get(sessionID)?.has(callID) === true;
+  }
+
+  /** Explicit reset may recheck a child stopped through the host; it never cancels one. */
+  async confirmStopped(sessionID: string, runtime?: Runtime): Promise<void> {
+    const callID = this.#inflight.get(sessionID);
+    const pending = this.#runs.get(sessionID) ?? this.#solo.get(sessionID);
+    if (!pending && runtime) {
+      const marker = this.options.progress?.read(sessionID);
+      if (marker?.state !== 'pending' || !marker.callID) return;
+      let stopped = false;
+      try { stopped = await this.inspect.stopped?.(runtime, { sessionID, callID: marker.callID }) === true; } catch { /* Unknown after restart still reserves the writer. */ }
+      if (stopped && !this.#runs.has(sessionID) && !this.#solo.has(sessionID) && isDeepStrictEqual(this.options.progress?.read(sessionID), marker)) {
+        this.options.progress?.write(sessionID, { ...marker, state: 'settled' });
+      }
+      return;
+    }
+    if (!callID || !pending || pending.state !== 'await-result') return;
+    let stopped = false;
+    try { stopped = await this.inspect.stopped?.(pending.runtime, { sessionID, callID }) === true; } catch { /* Fail closed. */ }
+    if (stopped && this.#inflight.get(sessionID) === callID && pending.state === 'await-result') {
+      this.#inflight.delete(sessionID);
+      this.block(sessionID, 'The host confirmed the child stopped. Partial changes remain and must be inspected before continuing.');
+    }
+  }
+
+  ownsNativePrompt(sessionID: unknown, callID: unknown, args: unknown): boolean {
+    return typeof sessionID === 'string' && typeof callID === 'string' &&
+      isDeepStrictEqual(this.#nativeDispatches.get(sessionID)?.get(callID), args) && args !== undefined;
+  }
+
+  #trackNative(call: TaskCall, args: TaskArgs): void {
+    if (!['explore', 'general'].includes(args.subagent_type)) return;
+    let calls = this.#nativeDispatches.get(call.sessionID);
+    if (!calls) { calls = new Map(); this.#nativeDispatches.set(call.sessionID, calls); }
+    calls.set(call.callID, { ...args });
+  }
 
   /**
    * The run as MDD holds it, small enough to survive any payload budget. Everything here is read
@@ -435,14 +486,26 @@ export class PhaseRunner {
    * cleared so change requests, investigation and reset all stay reachable.
    */
   #degrade(run: Run, error: unknown, failure: FailureClass = 'result-rejected', reported?: string): never {
+    if (this.#inflight.has(run.runtime.sessionID)) {
+      run.state = 'await-result';
+      run.uncertain = true;
+      run.reason = 'Child termination is unconfirmed. Do not retry, reset, or perform the work inline. Wait for the native task to finish or stop it in OpenCode; preserve and inspect partial changes before continuation.';
+      throw new Error(run.reason);
+    }
     if (error instanceof ArtifactWriteError) run.artifactAttempts = error.attempts;
     run.reason = error instanceof Error ? error.message : 'Unknown attempt outcome.';
+    if (error instanceof MalformedReport && run.malformed >= MALFORMED_RESTATEMENTS) {
+      run.reportRepairExhausted = true;
+      if (reported !== undefined) run.rejected = { reason: run.reason, text: reported };
+      this.block(run.runtime.sessionID, `Report repair is exhausted: ${run.reason}. The work must not be rerun automatically; inspect the retained report and request explicit recovery.`);
+      throw new Error(run.reason);
+    }
     // A report MDD could not read is not a phase that failed. The actor did the work and described
     // it in a shape this adapter does not accept, and the cheapest correct route is to restate the
     // document that already exists. Spending an attempt on that is how a finished implementation
     // used to be thrown away and asked for again, so the first few restatements are free and the
     // text is kept for whoever restates it.
-    if (error instanceof MalformedReport && run.malformed < MALFORMED_RESTATEMENTS && !run.side) {
+    if (error instanceof MalformedReport && run.malformed < MALFORMED_RESTATEMENTS) {
       run.malformed += 1;
       run.uncertain = false;
       delete run.callID;
@@ -458,6 +521,8 @@ export class PhaseRunner {
       this.#settle(run);
       throw new Error(`MDD could not read the ${phase} report, so no attempt was spent and nothing was re-run: ${run.reason} The report is kept verbatim in mdd_status under rejected, and the exact form it must take is under brief. Restate it with mdd_phase_result, preserving the work it describes. ${MALFORMED_RESTATEMENTS - run.malformed} restatement(s) remain before this counts as a failed attempt.`);
     }
+    delete run.rejected;
+    run.malformed = 0;
     run.attempts += 1;
     run.spent += 1;
     run.uncertain = false;
@@ -471,15 +536,29 @@ export class PhaseRunner {
     // The next attempt is told what just failed, so retrying is a different attempt rather than
     // the same one again. A dropped connection or a rejected result rarely needs a different
     // actor; it needs another try that knows it is one.
-    if (!side) run.lastFailure = run.reason;
-    const recovered = this.#recover(run);
+    run.lastFailure = run.reason;
+    const exhausted = run.nativeUsed === true;
+    let recovered = !exhausted && this.#recover(run);
+    if (exhausted && run.side) {
+      const reason = run.reason;
+      this.#restoreSide(run);
+      run.contextReport = `Contextual investigation exhausted its native fallback: ${reason}. The main workflow and approvals are unchanged. Do not retry the investigation automatically.`;
+      recovered = true;
+    } else if (exhausted) {
+      run.fallbackExhausted = true;
+      run.state = 'blocked';
+      run.evidence = invalidateEvidence(run.evidence, this.#affected(run.phase));
+      run.report = { ...run.report, status: 'blocked', evidence: run.evidence };
+      run.reason = `The single native fallback did not complete: ${run.reason}. Inspect the task failure and partial changes; explicit recovery is required. Do not retry automatically or work inline.`;
+    }
     // Retrying belongs to delegation, because handing the phase back to the coordinator costs
     // exactly the context isolation that delegating it was for. Only after this phase has spent
     // all of its dispatches does the coordinator take it, and the next phase starts from
     // delegation again with a full count.
-    const handover = !side && run.attempts >= DELEGATION_ATTEMPTS;
-    if (recovered && !side) {
-      run.mode = handover ? 'inline' : 'delegate';
+    const handover = run.attempts >= DELEGATION_ATTEMPTS;
+    if (recovered && !exhausted) {
+      run.mode = handover ? 'native' : 'delegate';
+      if (handover) this.#native(run);
       this.#event(run, handover ? 'handover' : 'retry', undefined, failure);
     }
     // Recovery failing is a different fact from the attempt that ended: the run itself stopped.
@@ -494,7 +573,7 @@ export class PhaseRunner {
       this.#lesson(run, {
         source: 'failure', kind: failure, phase,
         title: handover
-          ? `${phase}: delegation used all ${DELEGATION_ATTEMPTS} attempts and the coordinator had to take the phase over`
+          ? `${phase}: delegation used all ${DELEGATION_ATTEMPTS} attempts and selected native fallback`
           : `${phase}: attempt ${run.attempts} of ${DELEGATION_ATTEMPTS} did not complete`,
         detail: run.reason ?? 'The attempt ended without a recorded reason.',
       });
@@ -505,8 +584,8 @@ export class PhaseRunner {
       : side
         ? 'The investigation stopped; the main plan, its task and its approval are unchanged. Nothing is locked.'
         : handover
-          ? `This phase has now used all ${DELEGATION_ATTEMPTS} of its dispatches and is yours: read mdd_status and carry it out directly, reporting it with mdd_phase_result. That applies to this phase only — the next one starts from delegation again with a full count. Nothing is locked.`
-          : `The phase is ready again and its task now carries what failed: read mdd_status and dispatch that updated task once more. ${left} dispatch(es) remain before this phase becomes yours. Nothing is locked.`}`);
+          ? 'Read mdd_status and dispatch its single tracked native fallback. Do not carry out substantive work in the coordinator.'
+          : `Read mdd_status and dispatch its updated task. ${left} phase-actor dispatch(es) remain before native fallback.`}`);
   }
 
   /** Puts the route back on a runnable step. Contextual work restores the main plan it paused. */
@@ -514,10 +593,9 @@ export class PhaseRunner {
     const side = run.side;
     try {
       if (side) {
-        run.phase = side.phase; run.args = side.args; run.brief = side.brief; run.report = side.report; run.state = side.state;
+        const prompts = this.#phasePrompts(run, 'mdd-explore');
+        run.args = prompts.args; run.brief = prompts.brief; run.state = 'ready';
         this.#arm(run);
-        delete run.side;
-        if (run.state === 'ready') this.#prepare(run);
         return true;
       }
       run.workflow.retry();
@@ -542,13 +620,14 @@ export class PhaseRunner {
   async before(call: TaskCall, args: unknown): Promise<TaskArgs | undefined> {
     const run = this.#runs.get(call.sessionID);
     if (!run) return this.#soloBefore(call, args);
+    if (run.rejected) throw new ValidationError('Only report restatement is pending; do not rerun the work.');
     if (run.state !== 'ready') {
       // A task that arrives while one is already running is a duplicate, not a failure: refusing
       // it changes nothing, so the running attempt keeps its slot and can still report a result.
       if (run.state === 'await-result') {
         throw new ValidationError('This phase already has a task in flight. Read mdd_status and wait for its result; nothing was started and nothing is locked.');
       }
-      return this.#degrade(run, new Error('A task arrived while the run was not ready to dispatch one.'));
+      throw new ValidationError('The run is not ready for another task. Wait for the current operation; nothing was changed.');
     }
     // Either form is accepted: the handle mdd_status returns, or the full task a run that fell
     // back to exposing its prompt returns. Anything else is refused, and the refusal itself turns
@@ -591,9 +670,15 @@ export class PhaseRunner {
       run.report = { phase: run.phase, summary: `${phaseLabel(run.phase)} en curso.`, how: ['Con los requisitos acordados y la evidencia de plan disponible.'], status: 'in-progress', evidence: run.evidence };
       run.started = this.#now();
       run.attempt = run.attempts + 1;
+      run.executor = run.args.subagent_type as Executor;
       this.#event(run, 'phase-start');
+      this.#inflight.set(call.sessionID, call.callID);
+      this.#trackNative(call, run.dispatchedArgs);
       return { ...run.dispatchedArgs };
-    } catch (error) { return this.#degrade(run, error); }
+    } catch (error) {
+      if (this.#runs.get(call.sessionID) !== run || run.callID !== call.callID) throw new ValidationError('A stale dispatch callback was discarded without changing the current attempt.');
+      return this.#degrade(run, error);
+    }
   }
 
   async after(call: TaskCall, args: unknown, output: unknown): Promise<void> {
@@ -602,7 +687,7 @@ export class PhaseRunner {
     if (run.state !== 'await-result' || run.callID !== call.callID || !isDeepStrictEqual(args, run.dispatchedArgs)) {
       // Nothing here is read, not even to measure it: a result this run did not dispatch is not
       // its own, and following the session it names would be following a stranger's.
-      return this.#degrade(run, new Error('This result does not match the task this phase dispatched, so it was discarded.'), 'dispatch-mismatch');
+      throw new ValidationError('This result does not match the current dispatch; it was discarded without changing the attempt.');
     }
     run.state = 'persisting-result';
     // Measured before the result is judged, because an attempt whose result is rejected still
@@ -613,8 +698,16 @@ export class PhaseRunner {
     let reported: string | undefined;
     try {
       reported = await this.inspect.result(run.runtime, call, run.phase, output);
+      this.#inflight.delete(call.sessionID);
       await this.#record(run, reported, call.callID);
-    } catch (error) { return this.#degrade(run, error, 'result-rejected', reported); }
+    } catch (error) {
+      if (this.#inflight.get(call.sessionID) === call.callID) {
+        try {
+          if (await this.inspect.stopped?.(run.runtime, call, output) === true && this.#inflight.get(call.sessionID) === call.callID) this.#inflight.delete(call.sessionID);
+        } catch { /* Receipt failure is not proof that a child exited. */ }
+      }
+      return this.#degrade(run, error, 'result-rejected', reported);
+    }
   }
 
   /**
@@ -624,10 +717,24 @@ export class PhaseRunner {
   async submit(value: unknown, runtime: Runtime): Promise<unknown> {
     if (runtime.agent !== 'mdd-orchestrator') throw new ValidationError('Only mdd-orchestrator may report a phase it carried out.');
     const run = this.#runs.get(runtime.sessionID);
-    if (!run) throw new ValidationError('No MDD run is waiting for a phase result in this conversation. Read mdd_status.');
+    if (!run) {
+      const solo = this.#solo.get(runtime.sessionID);
+      if (!solo?.rejected || solo.state !== 'ready') throw new ValidationError('No rejected investigation report is waiting to be restated. Read mdd_status.');
+      const input = objectWithKeys(value, 'phase submission', ['result']);
+      const text = boundedText(input.result, 'investigation report', 20000);
+      solo.state = 'persisting-result';
+      try { this.#soloRecord(solo, text, { sessionID: runtime.sessionID, callID: solo.callID! }); }
+      catch (error) { this.#soloFail(solo, error, text); }
+      return this.status(runtime.sessionID);
+    }
     if (run.state !== 'ready') throw new ValidationError(`This run is not waiting for a phase result right now (${run.state}). Read mdd_status.`);
+    if (!run.rejected) {
+      if (run.mode !== 'native') this.#native(run);
+      return this.status(runtime.sessionID);
+    }
     const input = objectWithKeys(value, 'phase submission', ['result']);
     const text = typeof input.result === 'string' ? input.result : JSON.stringify(input.result);
+    run.mode = 'inline';
     run.state = 'persisting-result';
     run.started = run.readyAt ?? this.#now();
     try {
@@ -773,7 +880,7 @@ export class PhaseRunner {
       if (await run.artifacts.read(run.artifact.ref) !== artifact) throw new Error('Artifact readback differs from phase output.');
       if (run.state !== 'persisting-result') throw new Error('Result became uncertain during artifact readback.');
       await run.memory?.save(`MDD result ${run.id}`, JSON.stringify({
-        kind: 'agent-evidence', phase: run.phase, runID: run.id, ...(callID ? { callID } : { carriedOut: 'coordinator' }),
+        kind: 'agent-evidence', phase: run.phase, runID: run.id, ...(callID ? { callID } : { restatedBy: 'coordinator', executor: run.executor ?? run.args.subagent_type }),
         outcome: result.outcome, evidenceSummary, artifactRef: run.artifact.ref,
         artifactStore: run.workflow.snapshot().answers.artifactStore,
         ...(run.verification ? { acceptanceMatched: run.verification.matched } : {}),
@@ -803,7 +910,11 @@ export class PhaseRunner {
       delete run.rejected;
       run.malformed = 0;
       this.#event(run, 'phase-end', outcome, outcome === 'failed' ? 'phase-failed' : undefined);
-      if (outcome === 'failed') { run.state = 'blocked'; run.reason = 'The phase reported failure. Nothing is repaired automatically: inspect the evidence, then use mdd_reset to run this phase again or request a change.'; }
+      if (outcome === 'failed') {
+        run.state = 'blocked';
+        if (run.nativeUsed) run.fallbackExhausted = true;
+        run.reason = 'The phase reported failure. Nothing is repaired automatically: inspect the evidence and partial changes, then request explicit recovery. Do not reset or retry automatically.';
+      }
       else {
         const next = run.workflow.nextAction();
         if (next.kind === 'finished') run.state = 'complete';
@@ -816,10 +927,19 @@ export class PhaseRunner {
     }
   }
 
-  nativeError(sessionID: string, callID: string): void {
+  async nativeError(sessionID: string, callID: string): Promise<void> {
     const run = this.#runs.get(sessionID);
     const pending = run ?? this.#solo.get(sessionID);
-    if (pending?.callID !== callID || !['await-result', 'persisting-result'].includes(pending.state)) return;
+    if (pending?.callID !== callID || pending.state !== 'await-result') return;
+    let stopped = false;
+    try { stopped = await this.inspect.stopped?.(pending.runtime, { sessionID, callID }) === true; } catch { /* Unknown means still reserved. */ }
+    if (this.#inflight.get(sessionID) !== callID || pending.state !== 'await-result') return;
+    if (!stopped) {
+      pending.state = 'await-result';
+      pending.reason = 'Child termination is unconfirmed. Wait for the task or stop it in OpenCode. No retry, reset, fallback, or inline work is safe yet.';
+      return;
+    }
+    this.#inflight.delete(sessionID);
     this.attemptRejected(sessionID, 'The dispatched task failed or was interrupted before reporting a result.', 'native-error');
   }
 
@@ -829,7 +949,11 @@ export class PhaseRunner {
    */
   attemptRejected(sessionID: string, reason: string, failure: FailureClass = 'result-rejected'): void {
     const run = this.#runs.get(sessionID);
-    if (!run) { this.block(sessionID, reason); return; }
+    if (!run) {
+      const solo = this.#solo.get(sessionID);
+      if (solo) { try { this.#soloFail(solo, new Error(reason)); } catch { /* Status carries the outcome. */ } }
+      return;
+    }
     try { this.#degrade(run, new Error(reason), failure); }
     catch { /* The caller reports its own failure to the actor; the run is already released. */ }
   }
@@ -843,6 +967,11 @@ export class PhaseRunner {
   }
 
   block(sessionID: string, reason: string): void {
+    if (this.#inflight.has(sessionID)) {
+      const pending = this.#runs.get(sessionID) ?? this.#solo.get(sessionID);
+      if (pending) { pending.state = 'await-result'; pending.reason = `${reason} Child termination is unconfirmed; no new work or reset is allowed.`; }
+      return;
+    }
     const run = this.#runs.get(sessionID);
     if (!run) {
       const solo = this.#solo.get(sessionID);
@@ -867,7 +996,11 @@ export class PhaseRunner {
    * again; run scope discards the run, its investigation and the local marker so new work can start.
    */
   reset(sessionID: string, scope: 'phase' | 'run'): { scope: 'phase' | 'run'; phase?: Phase; approval?: true; preserved?: { file: string; runID: string } } {
+    if (this.#inflight.has(sessionID)) throw new ValidationError('The child may still be running. Stop or await it in OpenCode before resetting; reset does not cancel a child.');
     const run = this.#runs.get(sessionID);
+    const pending = run ?? this.#solo.get(sessionID);
+    if (!pending && this.options.progress?.read(sessionID)?.state === 'pending') throw new ValidationError('A previous child has unconfirmed liveness. Stop or await it in OpenCode; reset cannot clear the pending marker without host evidence.');
+    if (pending && ['persisting-intent', 'persisting-result'].includes(pending.state)) throw new ValidationError('Wait for the current persistence operation before resetting.');
     if (run) this.#event(run, 'reset');
     if (scope === 'run' || !run) {
       this.#runs.delete(sessionID);
@@ -883,7 +1016,7 @@ export class PhaseRunner {
       catch { throw new Error('The preserved run record could not be set aside. Inspect the .mdd directory.'); }
       return { scope: 'run', ...(preserved ? { preserved } : {}) };
     }
-    delete run.side;
+    if (run.side) this.#restoreSide(run);
     delete run.callID;
     delete run.dispatchedArgs;
     delete run.reason;
@@ -891,6 +1024,10 @@ export class PhaseRunner {
     run.uncertain = false;
     run.attempts = 0;
     run.mode = 'delegate';
+    delete run.nativeUsed;
+    delete run.fallbackExhausted;
+    delete run.reportRepairExhausted;
+    run.malformed = 0;
     delete run.lastFailure;
     run.workflow.retry();
     const next = run.workflow.nextAction();
@@ -947,20 +1084,28 @@ export class PhaseRunner {
     const purpose = boundedText(input.purpose, 'exploration purpose', 2000);
     if (runtime.agent !== 'mdd-orchestrator') throw new Error('Only mdd-orchestrator may request read-only investigation.');
     const run = this.#runs.get(runtime.sessionID);
-    if (!run) return this.#soloStart(runtime, purpose);
+    if (!run) {
+      if (this.options.progress?.read(runtime.sessionID)?.state === 'pending') throw new ValidationError('A previous child has unconfirmed liveness. Resolve it in OpenCode before starting another investigation.');
+      return this.#soloStart(runtime, purpose);
+    }
     if (run.side) throw new Error('A read-only investigation is already in progress for this run; wait for its result.');
+    if (run.rejected) throw new Error('Restate the pending report before requesting another investigation.');
     // Investigation only waits for a task that is actually running; a stopped or failed run must
     // still be able to answer questions about the project.
     if (runtime.directory !== run.runtime.directory || runtime.worktree !== run.runtime.worktree || !['ready', 'await-approval', 'complete', 'blocked'].includes(run.state)) throw new Error('A native task is in flight. Wait for its result before requesting investigation; nothing is locked.');
-    const side = { id: randomUUID(), purpose, phase: run.phase, state: run.state, args: run.args, report: run.report, brief: run.brief };
+    const side = { id: randomUUID(), purpose, phase: run.phase, state: run.state, args: run.args, report: run.report, brief: run.brief,
+      attempts: run.attempts, mode: run.mode, ...(run.nativeUsed ? { nativeUsed: true } : {}), ...(run.lastFailure ? { lastFailure: run.lastFailure } : {}),
+      ...(run.fallbackExhausted ? { fallbackExhausted: true } : {}), ...(run.reason ? { reason: run.reason } : {}), ...(run.executor ? { executor: run.executor } : {}) };
     run.side = side;
+    run.attempts = 0; run.mode = 'delegate'; delete run.nativeUsed; delete run.lastFailure;
+    delete run.fallbackExhausted; delete run.reason;
     try {
       const prompts = this.#phasePrompts(run, 'mdd-explore');
       run.args = prompts.args; run.brief = prompts.brief;
       this.#arm(run);
       run.phase = 'mdd-explore'; run.state = 'ready';
       delete run.contextReport;
-    } catch (error) { delete run.side; throw error; }
+    } catch (error) { this.#restoreSide(run); throw error; }
   }
 
   async #sideResult(run: Run, outcome: 'passed' | 'failed', content: string, summary: string, advisory: Concern[]): Promise<void> {
@@ -976,19 +1121,35 @@ export class PhaseRunner {
     run.concerns.push(...advisory);
     this.#event(run, 'phase-end', outcome);
     run.uncertain = false;
-    run.phase = side.phase; run.state = side.state; run.args = side.args; run.brief = side.brief; run.report = side.report;
-    this.#arm(run);
-    delete run.side;
-    if (run.state === 'ready') this.#prepare(run);
+    const restored = this.#restoreSide(run);
+    if (restored === 'ready') {
+      const prompts = this.#phasePrompts(run, run.phase);
+      run.args = prompts.args; run.brief = prompts.brief;
+      this.#arm(run);
+    }
     this.#preserve(run);
-    this.#mark(run, run.state === 'complete' ? 'complete' : 'settled');
+    this.#mark(run, restored === 'complete' ? 'complete' : 'settled');
+  }
+
+  #restoreSide(run: Run): State {
+    const side = run.side!;
+    run.phase = side.phase; run.state = side.state; run.args = side.args; run.brief = side.brief; run.report = side.report;
+    run.attempts = side.attempts; run.mode = side.mode;
+    if (side.nativeUsed) run.nativeUsed = true; else delete run.nativeUsed;
+    if (side.lastFailure) run.lastFailure = side.lastFailure; else delete run.lastFailure;
+    if (side.fallbackExhausted) run.fallbackExhausted = true; else delete run.fallbackExhausted;
+    if (side.reason) run.reason = side.reason; else delete run.reason;
+    if (side.executor) run.executor = side.executor; else delete run.executor;
+    delete run.side; delete run.rejected; run.malformed = 0;
+    this.#arm(run);
+    return run.state;
   }
 
   #soloStart(runtime: Runtime, purpose: string): void {
     const previous = this.#solo.get(runtime.sessionID);
     if (previous && !['settled', 'blocked'].includes(previous.state)) throw new Error('A read-only investigation is already in progress; wait for its result.');
     const solo: Solo = { id: randomUUID(), purpose, runtime: { ...runtime }, args: { description: '', subagent_type: 'mdd-explore', prompt: '' },
-      state: 'ready', calls: new Set(previous?.calls), findings: previous?.findings ?? [] };
+      state: 'ready', calls: new Set(previous?.calls), findings: previous?.findings ?? [], attempts: 0 };
     solo.args = this.#soloArgs(solo);
     solo.token = `${DISPATCH_HANDLE_PREFIX}${randomUUID()}`;
     this.#solo.set(runtime.sessionID, solo);
@@ -996,14 +1157,16 @@ export class PhaseRunner {
 
   async #soloBefore(call: TaskCall, args: unknown): Promise<TaskArgs | undefined> {
     const solo = this.#solo.get(call.sessionID);
-    if (!solo || solo.state === 'settled' || solo.state === 'blocked') {
+    if (solo?.rejected) throw new ValidationError('Only report restatement is pending; do not rerun the investigation.');
+    if (solo?.state === 'blocked') throw new ValidationError('The investigation is blocked; explicit recovery is required.');
+    if (!solo || solo.state === 'settled') {
       if (args && typeof args === 'object' && 'subagent_type' in args &&
           typeof args.subagent_type === 'string' && args.subagent_type.startsWith('mdd-')) {
         throw new ValidationError('MDD tasks require a registered parent run or an issued read-only investigation.');
       }
       return undefined;
     }
-    if (solo.state !== 'ready') return this.#soloFail(solo, new Error('Unexpected, duplicate, concurrent, or unsupported native task.'));
+    if (solo.state !== 'ready') throw new ValidationError('An investigation is already in flight; nothing was changed.');
     if (!isDeepStrictEqual(args, this.#soloDispatchable(solo)) && !isDeepStrictEqual(args, solo.args)) {
       const sent = (args as { prompt?: unknown }).prompt;
       const handled = solo.expose !== 'full' && solo.token !== undefined && sent !== solo.token && sent !== solo.args.prompt;
@@ -1022,6 +1185,8 @@ export class PhaseRunner {
       solo.state = 'await-result';
       solo.started = this.#now();
       this.#soloEvent(solo, 'phase-start');
+      this.#inflight.set(call.sessionID, call.callID);
+      this.#trackNative(call, solo.dispatchedArgs);
       return { ...solo.dispatchedArgs };
     } catch (error) { return this.#soloFail(solo, error); }
   }
@@ -1030,11 +1195,25 @@ export class PhaseRunner {
     const solo = this.#solo.get(call.sessionID);
     if (!solo || ['settled', 'blocked'].includes(solo.state)) return;
     if (solo.state !== 'await-result' || solo.callID !== call.callID || !isDeepStrictEqual(args, solo.dispatchedArgs)) {
-      return this.#soloFail(solo, new Error('Native result does not match the pending parent and call.'));
+      throw new ValidationError('Native result does not match the pending parent and call; nothing was changed.');
     }
     solo.state = 'persisting-result';
+    let text: string | undefined;
     try {
-      const text = await this.inspect.result(solo.runtime, call, 'mdd-explore', output);
+      text = await this.inspect.result(solo.runtime, call, 'mdd-explore', output);
+      this.#inflight.delete(call.sessionID);
+      this.#soloRecord(solo, text, call);
+    } catch (error) {
+      if (this.#inflight.get(call.sessionID) === call.callID) {
+        try {
+          if (await this.inspect.stopped?.(solo.runtime, call, output) === true && this.#inflight.get(call.sessionID) === call.callID) this.#inflight.delete(call.sessionID);
+        } catch { /* Unknown liveness keeps the investigation reserved. */ }
+      }
+      return this.#soloFail(solo, error, text);
+    }
+  }
+
+  #soloRecord(solo: Solo, text: string, call: TaskCall): void {
       boundedText(text, 'investigation report', 20000);
       const result = parsePhaseReport(text, 'mdd-explore');
       // Stated binding is checked, never required: this result already matched the exact task and
@@ -1052,19 +1231,22 @@ export class PhaseRunner {
       solo.report = `Summary\nRead-only investigation ${outcome === 'passed' ? 'completed' : 'did not complete'}. ${summary} No MDD run was started and nothing was changed.\n\nFindings\n${findings}\n`;
       solo.state = 'settled';
       delete solo.reason;
+      delete solo.rejected;
       this.#soloEvent(solo, 'phase-end', outcome);
-    } catch (error) { return this.#soloFail(solo, error); }
   }
 
   #soloStatus(sessionID: string, solo: Solo) {
     return {
       state: solo.state === 'ready' ? 'ready' : solo.state === 'blocked' ? 'blocked' : 'await-result',
       sessionID, contextual: true, explorationID: solo.id,
+      attempts: solo.attempts, attemptsLeft: Math.max(0, DELEGATION_ATTEMPTS - solo.attempts), mode: solo.args.subagent_type === 'explore' ? 'native' : 'delegate',
+      ...(solo.state === 'blocked' ? { fallbackExhausted: true } : {}),
       reason: solo.reason ?? (solo.state === 'ready'
         ? 'A read-only investigation is ready. Dispatch its exact task once; no run, preflight or approval is involved.'
         : 'Native investigation outcome pending or uncertain. Never redispatch; consult this status after an error.'),
       contextualReport: solo.report, contexts: structuredClone(solo.findings),
-      ...(solo.state === 'ready'
+      ...(solo.rejected ? { rejected: solo.rejected, resultFormat: reportFormatLines('mdd-explore') } : {}),
+      ...(solo.state === 'ready' && !solo.rejected
         ? { task: this.#soloDispatchable(solo), ...(solo.expose === 'full' ? {} : { dispatch: { mode: 'handle' as const, note: DISPATCH_NOTE } }) }
         : {}),
     };
@@ -1094,12 +1276,35 @@ export class PhaseRunner {
     return { description: 'MDD read-only investigation', subagent_type: 'mdd-explore', prompt };
   }
 
-  #soloFail(solo: Solo, error: unknown): never {
+  #soloFail(solo: Solo, error: unknown, reported?: string): never {
+    if (this.#inflight.has(solo.runtime.sessionID)) {
+      solo.state = 'await-result';
+      solo.reason = 'Child termination is unconfirmed. Wait for it or stop it in OpenCode; do not reset or redispatch.';
+      throw new Error(solo.reason);
+    }
+    if (reported !== undefined) {
+      solo.malformed = (solo.malformed ?? 0) + 1;
+      solo.reason = error instanceof Error ? error.message : 'Unknown report form.';
+      solo.rejected = { reason: solo.reason, text: reported };
+      solo.state = solo.malformed <= MALFORMED_RESTATEMENTS ? 'ready' : 'blocked';
+      throw new Error(`The investigation report needs restatement, not re-execution: ${solo.reason}. Read mdd_status. ${solo.state === 'blocked' ? 'Report repair is exhausted; explicit recovery is required.' : ''}`);
+    }
     const blocked = solo.state === 'blocked';
     solo.state = 'blocked';
     solo.reason = error instanceof Error ? error.message : 'Unknown read-only investigation outcome.';
     if (!blocked) this.#soloEvent(solo, 'phase-end', 'blocked');
-    throw new Error(`MDD read-only investigation did not complete: ${solo.reason} Request it again with mdd_contextual_explore, or answer from what you can read directly; the main route is unaffected.`);
+    solo.attempts += 1;
+    if (solo.attempts <= DELEGATION_ATTEMPTS) {
+      solo.state = 'ready';
+      solo.args = this.#soloArgs(solo);
+      solo.args.prompt += `\nPrevious attempt: ${JSON.stringify(solo.reason)}. Preserve existing work.`;
+      if (solo.attempts === DELEGATION_ATTEMPTS) {
+        solo.args.subagent_type = 'explore';
+        solo.args.prompt += `\n${NATIVE_FALLBACK}`;
+      }
+      solo.token = `${DISPATCH_HANDLE_PREFIX}${randomUUID()}`;
+    }
+    throw new Error(`MDD read-only investigation did not complete: ${solo.reason} ${solo.state === 'ready' ? 'Read mdd_status and dispatch its exact task.' : 'The bounded fallback is exhausted. Inspect the failure; explicit recovery is required. Do not retry automatically or work inline.'}`);
   }
 
   #soloEvent(solo: Solo, event: TelemetryEvent['event'], outcome?: TelemetryEvent['outcome']): void {
@@ -1108,6 +1313,7 @@ export class PhaseRunner {
     const duration = solo.started === undefined ? undefined : now - solo.started;
     try {
       this.options.telemetry(solo.runtime.directory, { timestamp: now, event, phase: 'mdd-explore', ...(outcome ? { outcome } : {}),
+        ...(solo.args.subagent_type === 'explore' ? { mode: 'native' as const, executor: 'explore' as const } : {}),
         ...(event === 'phase-end' && duration !== undefined && duration >= 0 && duration <= 86400000 ? { duration } : {}) }, now);
     } catch { /* Telemetry never alters a read-only investigation outcome. */ }
   }
@@ -1225,14 +1431,23 @@ export class PhaseRunner {
     // Every phase starts from delegation with its own full count. Attempts are a fact about the
     // phase that spent them, so carrying them forward punished the phases that had not failed yet:
     // one three-try exploration used to send the whole rest of the route inline on first contact.
-    run.mode = 'delegate';
-    if (advanced) run.attempts = 0;
+    run.mode = run.nativeUsed && !advanced ? 'native' : 'delegate';
+    if (advanced) { run.attempts = 0; delete run.nativeUsed; delete run.executor; }
     const prompts = this.#phasePrompts(run, phase);
     run.args = prompts.args;
     run.brief = prompts.brief;
     this.#arm(run);
     run.state = 'ready';
     run.report = { phase, summary: `Listo para ${phaseLabel(phase).toLowerCase()}.`, how: ['El trabajo que sigue respeta los requisitos y el plan disponible; en modo automático no hace falta confirmar el proceso aparte.'], status: 'in-progress', evidence: run.evidence };
+  }
+
+  /** Change executor, never semantic phase, approval, dependencies, or report contract. */
+  #native(run: Run): void {
+    run.mode = 'native';
+    run.nativeUsed = true;
+    const prompts = this.#phasePrompts(run, run.phase);
+    run.args = prompts.args; run.brief = prompts.brief;
+    this.#arm(run);
   }
 
   /**
@@ -1257,6 +1472,7 @@ export class PhaseRunner {
     const detail = run.workflow.snapshot().answers.summary;
     const instructions = [
       `Perform only ${phase}. ${roles[phase]}`,
+      ...(run.nativeUsed ? [NATIVE_FALLBACK] : []),
       ...(run.side ? [`Contextual exploration only: ${JSON.stringify(run.side.purpose)}. explorationID=${run.side.id}. Do not change the main plan, answers or approvals.`] : []),
       // The actor inherits whatever instruction files the host prepends to every agent it runs.
       // MDD cannot remove them, so it says plainly which text governs this phase: silence there is
@@ -1294,7 +1510,7 @@ export class PhaseRunner {
       summary: results.find(result => result.phase === item.ref.phase)?.evidenceSummary ?? 'This phase recorded no summary.' });
     const closings = [
       `phase=${phase}; runID=${run.id}. Native callID is appended by the hook.`,
-      `phase=${phase}; runID=${run.id}. You are carrying this phase out yourself: report it with mdd_phase_result({ result }), which needs no callID.`,
+       `phase=${phase}; runID=${run.id}. Restate only the rejected report with mdd_phase_result({ result }); do not carry out substantive phase work.`,
     ];
     const compose = (closing: string, handoff: readonly unknown[], compacted: readonly ArtifactRef[]) =>
       [...instructions, closing, ...data(handoff, compacted)].join('\n').replaceAll('@', '\\u0040');
@@ -1324,7 +1540,7 @@ export class PhaseRunner {
     boundedText(brief, 'combined phase handoff', PHASE_CONTEXT_MAX_BYTES);
     if (compacted.length) run.handoff = { inlined, summarized: compacted.map(ref => ({ phase: ref.phase, recordID: ref.recordID })) };
     else delete run.handoff;
-    return { args: { description: run.side ? 'MDD contextual exploration' : `MDD ${phase.slice(4)} phase`, subagent_type: phase, prompt }, brief };
+    return { args: { description: run.side ? 'MDD contextual exploration' : `MDD ${phase.slice(4)} phase`, subagent_type: run.nativeUsed ? phase === 'mdd-explore' ? 'explore' : 'general' : phase, prompt }, brief };
   }
 
   #closure(run: Run): string {
@@ -1349,7 +1565,7 @@ export class PhaseRunner {
     const duration = run.started === undefined ? undefined : now - run.started;
     try {
       const result = this.options.telemetry(run.runtime.directory, { timestamp: now, event, phase: run.phase, route: run.workflow.snapshot().evaluation.route,
-        runID: run.id, mode: run.mode, ...(run.attempt !== undefined ? { attempt: run.attempt } : {}),
+        runID: run.id, mode: run.mode, ...(run.mode === 'native' || run.mode === 'inline' ? { executor: run.executor ?? run.args.subagent_type as Executor } : {}), ...(run.attempt !== undefined ? { attempt: run.attempt } : {}),
         ...(outcome ? { outcome } : {}), ...(failure ? { failure } : {}), ...(usage ? { usage } : {}),
         ...(event === 'phase-end' && duration !== undefined && duration >= 0 && duration <= 86400000 ? { duration } : {}) }, now);
       if (!result.ok) run.telemetryDiagnostic = result.diagnostic;
