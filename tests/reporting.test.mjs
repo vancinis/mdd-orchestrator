@@ -46,7 +46,7 @@ test('medium contains Resumen/Cómo only; low contains actual phase-specific sum
 for (const detail of ['low', 'medium', 'detailed']) {
   test(`plain ${detail} closure keeps material gaps visible without routing or receipt details`, () => {
     const output = renderClosure(detail, { goal: 'Accept valid orders and explain invalid ones.', changes: 'Order validation was added.', matched: false,
-      checks: ['npm test'], limits: ['Invalid-order behavior remains unverified.'], status: 'blocked', evidence: invalidateEvidence(all, ['implementation', 'checks']) });
+      checks: [{ command: 'npm test', exit: 0 }], limits: ['Invalid-order behavior remains unverified.'], status: 'blocked', evidence: invalidateEvidence(all, ['implementation', 'checks']) });
     assert.match(output, /Accept valid orders/); assert.match(output, /Sin completar/); assert.match(output, /Invalid-order behavior remains unverified/);
     assert.equal(output.includes('\nCómo\n'), detail !== 'low');
     assert.equal(output.includes('40% de cobertura de evidencia (no es una probabilidad de acierto)'), detail === 'detailed');
@@ -79,6 +79,17 @@ test('reports reject unsupported fields/status/phase and terminal escapes', () =
 });
 
 test('closure refuses a success label or full-confidence display without matched acceptance', () => {
-  const input = { goal: 'Deliver the requested outcome.', changes: 'Scoped changes made.', matched: true, checks: ['npm test'], limits: [], status: 'passed', evidence: all };
+  const input = { goal: 'Deliver the requested outcome.', changes: 'Scoped changes made.', matched: true, checks: [{ command: 'npm test', exit: 0 }], limits: [], status: 'passed', evidence: all };
   for (const change of [{ matched: false }, { checks: [] }, { evidence: { ...all, checks: 'unearned' } }, { status: 'blocked' }]) assert.throws(() => renderClosure('detailed', { ...input, ...change }));
+});
+
+// A closure that counts a failed command among the successful ones tells the user the run went
+// better than it did. The exit code is the whole point of recording the command.
+test('closure counts and names the checks that exited nonzero', () => {
+  const output = renderClosure('medium', { goal: 'Deliver the requested outcome.', changes: 'Scoped changes made.', matched: false,
+    checks: [{ command: 'npm test', exit: 0 }, { command: 'npm run lint', exit: 1 }, { command: 'npm run build', exit: null }],
+    limits: [], status: 'blocked', evidence: invalidateEvidence(all, ['checks']) });
+  assert.match(output, /3 comando\(s\) de chequeo, 2 de ellos con salida distinta de 0/);
+  assert.match(output, /Se ejecutó npm run lint; salida 1\./);
+  assert.match(output, /Se ejecutó npm run build; salida desconocida\./);
 });

@@ -187,15 +187,19 @@ test('assets: cognitive-doc-design stays verbatim upstream, attributed, and is n
 
 // The body is read by a reviewer, so it is Spanish like every other user-facing surface, and the
 // Changes section leads with a table because a list of paths repeats what the diff already says.
-test('assets: PR template consistently retains all six sections and the per-file table', () => {
+test('assets: PR template consistently retains all seven sections and the per-file table', () => {
   const text = fs.readFileSync('assets/opencode/skills/mdd-pr-body/assets/template.md', 'utf8');
   assert.deepEqual([...text.matchAll(/^## (.+)$/gm)].map(m => m[1]),
-    ['Resumen', 'Cambios', 'Variables de entorno', 'Seguimiento', 'Bloqueos', 'Despliegue']);
+    ['Resumen', 'Cambios', 'Verificación', 'Variables de entorno', 'Seguimiento', 'Bloqueos', 'Despliegue']);
   assert.equal(text.match(/No aplica\./g).length, 4);
   assert.match(text, /\| Archivo \| Por qué cambió \|/);
   const skill = fs.readFileSync('assets/opencode/skills/mdd-pr-body/SKILL.md', 'utf8');
   assert.match(skill, /The body is written in Spanish/);
   assert.match(skill, /one table row per changed file/);
+  // Check evidence under its own heading: appended to Cambios it denied the table above it.
+  assert.match(skill, /Verification prose belongs here and never under `Cambios`/);
+  // Translated before rendering, because recorded prose is English and the reviewer is not.
+  assert.match(skill, /drafting takes two calls/);
   // The draft-only notice said something about MDD's permissions, not about the change.
   assert.match(skill, /Never add a notice saying the body is only a draft/);
 });

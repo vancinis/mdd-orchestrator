@@ -40,11 +40,15 @@ accepted run and needs no preflight, approval or user permission to investigate.
 a prompt is context, not the loaded workspace or permission to access another root.
 When the user asks for a PR body, call mdd_pr_body with their actual latest native text. Never
 hand-write the body with gh, git or a template of your own while that tool is available: it loads
-the exact local PR skill and template. Optional environment/follow-up/deployment notes must quote
-complete user-provided lines; do not invent facts or ask for a special JSON form. A note the user
-did not mention is omitted and its section renders "No aplica." by itself. Print the returned body
-verbatim, without translating it: it is already rendered in Spanish from recorded evidence against
-the packaged template, so rewriting it can only make it wrong. Keep provenance in drilldown
+the exact local PR skill and template. It takes two calls: the first returns the recorded English
+entries plus a digest, and the second sends that digest with one Spanish translation per key.
+Translate only — keep every number, path, identifier, quoted code and command exactly, add no fact
+and drop none, and write no prose of your own. A rejected set names each fault; fix them together,
+and after three refusals tell the user instead of retrying. Optional environment/follow-up/
+deployment notes must quote complete user-provided lines; do not invent facts or ask for a special
+JSON form. A note the user did not mention is omitted and its section renders "No aplica." by
+itself. Print the returned body verbatim, without translating it again: its prose was translated
+before rendering and its frame is MDD's own, so rewriting it can only make it wrong. Keep provenance in drilldown
 evidence. Without a recorded run, explain the missing evidence; do not start implementation merely
 to produce a body. Drafting never grants permission to commit, push, create a PR or publish; those
 need a separate explicit decision. Unknowns must stay visible.

@@ -1,8 +1,39 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { test } from 'node:test';
-import { EngramHttp } from '../dist/engram-http.js';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { EngramHttp, mddDataRoot } from '../dist/engram-http.js';
 import { memoryServer } from './adapter-fixture.mjs';
+
+// A linked git worktree is deleted the moment its task is done. Everything MDD persists locally is
+// anchored through this, so a worktree's records land in — and outlive it in — the repository.
+test('mddDataRoot anchors a linked worktree at its repository and leaves other checkouts in place', t => {
+  const base = mkdtempSync(join(tmpdir(), 'mdd-data-root-'));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+
+  // A linked worktree, written exactly as git lays it out: a `.git` file naming the administrative
+  // directory, which names the shared git directory one level up.
+  const main = join(base, 'MainRepo');
+  const administrative = join(main, '.git', 'worktrees', 'linked');
+  mkdirSync(administrative, { recursive: true });
+  writeFileSync(join(administrative, 'commondir'), '../..\n');
+  const worktree = join(base, 'linked');
+  mkdirSync(worktree);
+  writeFileSync(join(worktree, '.git'), `gitdir: ${administrative.replaceAll('\\', '/')}\n`);
+  assert.equal(mddDataRoot(worktree), resolve(main));
+
+  // The main checkout keeps its `.git` as a directory, so it is already its own data root.
+  const plainMain = join(base, 'PlainMain');
+  mkdirSync(join(plainMain, '.git'), { recursive: true });
+  assert.equal(mddDataRoot(plainMain), resolve(plainMain));
+
+  // A directory that is not a git checkout at all is returned unchanged, exactly as before.
+  const plain = join(base, 'plain');
+  mkdirSync(plain);
+  assert.equal(mddDataRoot(plain), resolve(plain));
+});
 
 test('Engram HTTP: exact bound observation round trip on real loopback transport', async t => {
   const { endpoint, binding, writes } = await memoryServer(t);

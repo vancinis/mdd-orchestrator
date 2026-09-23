@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtemp, rm, writeFile, readFile, readdir, cp } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile, readFile, readdir, cp } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import plugin from '../dist/opencode-plugin.js';
@@ -10,12 +10,28 @@ import { memoryServer, installCleanup, isolateHome, answers, traceFixture, repor
 import { traceArtifact } from '../dist/acceptance.js';
 import { ManagedMemory } from '../dist/managed-memory.js';
 import { STATUS_BUDGET_BYTES, STATUS_COMPACT_KEEP, STATUS_DROP_ORDER, STATUS_PROTECTED_FIELDS } from '../dist/status-budget.js';
+import { retroReport } from '../dist/retro.js';
 
 // Native SDK/hook contract fixtures. No model or real shell execution is performed.
-async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', partial = false, summary = 'low', telemetry = true, memoryEnabled = true, memoryFault, start = true } = {}) {
+async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', partial = false, summary = 'low', telemetry = true, memoryEnabled = true, memoryFault, start = true, worktree: worktreeLayout = false } = {}) {
   isolateHome(t);
-  const root = await mkdtemp(join(tmpdir(), 'mdd-full-native-'));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  // When asked, the session runs inside a linked git worktree laid out as git does on disk — a
+  // `.git` file pointing at the administrative directory, which names the shared git directory. It
+  // is where entrecuadras runs, and where MDD used to bury a run's records so the worktree could
+  // delete them. `mainRoot` is the repository those records must land in instead.
+  const base = await mkdtemp(join(tmpdir(), 'mdd-full-native-'));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  let root = base;
+  let mainRoot = base;
+  if (worktreeLayout) {
+    mainRoot = join(base, 'MainRepo');
+    const administrative = join(mainRoot, '.git', 'worktrees', 'linked');
+    await mkdir(administrative, { recursive: true });
+    await writeFile(join(administrative, 'commondir'), '../..\n');
+    root = join(base, 'linked');
+    await mkdir(root);
+    await writeFile(join(root, '.git'), `gitdir: ${administrative.replaceAll('\\', '/')}\n`);
+  }
   installCleanup(root);
   await writeFile(join(root, 'feature.txt'), 'pending\n');
   const memory = memoryEnabled ? await memoryServer(t, memoryFault) : { binding: {}, writes: [] };
@@ -112,7 +128,7 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
     // A standalone read-only investigation has its own prompt and no phase result fields at all.
     const standalone = args.prompt.includes('Standalone read-only investigation only');
     const own = { 'mdd-explore': [], 'mdd-propose': [], 'mdd-plan': ['acceptance', 'decisions', 'deliverables'], 'mdd-spec': ['domain', 'acceptance'],
-      'mdd-design': ['decisions'], 'mdd-tasks': ['deliverables'], 'mdd-apply': ['changes', 'noChangeReason', 'checks'], 'mdd-verify': ['checks', 'verification'] }[phase];
+      'mdd-design': ['decisions'], 'mdd-tasks': ['deliverables'], 'mdd-apply': ['changes', 'noChangeReason', 'checks', 'delivered'], 'mdd-verify': ['checks', 'verification'] }[phase];
     if (!standalone) {
       assert.equal(args.prompt.includes(own.length ? `exactly these keys: ${own.join(', ')}.` : 'This phase reports no structured data'), true, `own field list in ${phase}`);
       // The report is prose with one structured block, never a serialized object.
@@ -169,6 +185,9 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
         // Apply reports why each file changed, not only that it did: the reason is what the PR
         // body tabulates and what a reviewer cannot get from the diff.
         result.changes = [{ path: filePath, reason: 'Implementa el manejo de entrada que pide el plan en el borde de la feature.' }];
+        // And what the change delivers, which is what the body opens with. Malformed here on
+        // purpose in one case: a summary must never be able to fail a finished implementation.
+        result.delivered = options.badSummary ? { what: '' } : { what: 'Invalid input is now rejected at the feature boundary.', implies: 'Whoever uses the feature gets a clear error instead of an unintended change.' };
       }
     } else if (phase === 'mdd-verify') {
       if (!options.noChecks) {
@@ -210,7 +229,7 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
     return status();
   }
   if (start) await hooks.tool.mdd_start.execute({ requirements }, context);
-  return { root, settings, hooks, status, phase, answer, user, change, input, context, parent, runtime, visited, requirements, memory,
+  return { root, mainRoot, settings, hooks, status, phase, answer, user, change, input, context, parent, runtime, visited, requirements, memory,
     delivered: () => delivered, writes: memory.writes, questions: () => questionCount };
 }
 
@@ -1295,17 +1314,74 @@ test('mdd_reset releases a stopped phase and a whole run without a new conversat
   assert.equal(JSON.parse(await f.hooks.tool.mdd_start.execute({ requirements: 'An entirely different objective.' }, f.context)).state, 'ready');
 });
 
+/**
+ * The Spanish a coordinator would send back for this fixture's recorded prose. Anything it does
+ * not name is returned as recorded, which is how a text that is already Spanish passes unchanged.
+ */
+const PR_SPANISH = {
+  'delivered.what': 'Ahora la entrada inválida se rechaza en el borde de la feature.',
+  'delivered.implies': 'Quien usa la feature recibe un error claro en lugar de un cambio no buscado.',
+  goal: 'Dejar la feature pedida usable, con un manejo de entrada claro.',
+  verification: 'El manejo de entrada pedido quedó implementado.',
+};
+async function prBody(f, userText, notes, spanish = PR_SPANISH) {
+  const args = { userText, ...(notes ? { notes } : {}) };
+  const request = JSON.parse(await f.hooks.tool.mdd_pr_body.execute(args, f.context));
+  assert.equal(request.render, 'pending-translation');
+  const translations = request.entries.map(entry => ({ key: entry.key, text: spanish[entry.key] ?? entry.text }));
+  return { request, draft: JSON.parse(await f.hooks.tool.mdd_pr_body.execute({ ...args, digest: request.digest, translations }, f.context)) };
+}
+
 test('native PR-body tool drafts recorded facts without changing workflow, approval or memory', async t => {
   const f = await fixture(t); await f.phase(); await f.phase(); await f.phase();
   f.user('Please draft the PR body.\nNo aplica.');
   const before = await f.status(); const writes = f.writes.length;
-  const draft = JSON.parse(await f.hooks.tool.mdd_pr_body.execute({ userText: 'Please draft the PR body.\nNo aplica.', notes: { environmentVariables: 'No aplica.', deployment: 'No aplica.' } }, f.context));
-  assert.match(draft.body, /\| Archivo \| Por qué cambió \|/); assert.match(draft.body, /npm test; salida 0/);
+  const { draft } = await prBody(f, 'Please draft the PR body.\nNo aplica.', { environmentVariables: 'No aplica.', deployment: 'No aplica.' });
+  assert.match(draft.body, /\| Archivo \| Por qué cambió \|/); assert.match(draft.body, /Comandos registrados: 1 en total, 1 con salida 0\./);
+  assert.match(draft.body, /Con salida 0: `npm test`\./);
   // The reason the apply phase recorded travels all the way into the row a reviewer reads.
   assert.match(draft.body, /Implementa el manejo de entrada que pide el plan/);
+  // What the change delivers opens the body; how it was built stays in the table below it.
+  assert.match(draft.body, /## Resumen\n\nAhora la entrada inválida se rechaza en el borde de la feature\./);
   assert.doesNotMatch(draft.body, /Draft only|Nothing was committed/);
   assert.equal(draft.publication, 'not-authorized'); assert.equal(draft.provenance.runID, before.runID);
   assert.ok(!draft.body.includes(f.root)); assert.deepEqual(await f.status(), before); assert.equal(f.writes.length, writes);
+});
+
+// Every sentence of substance in the body was recorded in English by a phase. Rendering it as it
+// was recorded is what put "Verified the implementation" under a Spanish heading for a reviewer.
+test('a body cannot be rendered from prose that was never translated, and drafting stops asking', async t => {
+  const f = await fixture(t); await f.phase(); await f.phase(); await f.phase();
+  f.user('Please draft the PR body.');
+  const args = { userText: 'Please draft the PR body.' };
+  const request = JSON.parse(await f.hooks.tool.mdd_pr_body.execute(args, f.context));
+  const untranslated = request.entries.map(entry => ({ key: entry.key, text: entry.text }));
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await assert.rejects(f.hooks.tool.mdd_pr_body.execute({ ...args, digest: request.digest, translations: untranslated }, f.context), /no parece estar en español/);
+  }
+  // Bounded: a model that failed three times at translating a paragraph is not one try away.
+  await assert.rejects(f.hooks.tool.mdd_pr_body.execute({ ...args, digest: request.digest, translations: untranslated }, f.context), /failed its checks 3 times/);
+  // Asking again for the recorded text is the way out, and it restores the budget.
+  const { draft } = await prBody(f, 'Please draft the PR body.');
+  assert.match(draft.body, /## Resumen\n\nAhora la entrada inválida/);
+  // Translations alone prove nothing: without the digest they could answer any evidence at all.
+  await assert.rejects(f.hooks.tool.mdd_pr_body.execute({ ...args, translations: untranslated }, f.context), /digest/);
+});
+
+// A summary is the least important thing a phase reports and the easiest to get wrong. Losing a
+// finished implementation over one would trade real work for a paragraph.
+test('a malformed change summary is named back to the phase without failing the implementation', async t => {
+  const f = await fixture(t); await f.phase(); await f.phase({ badSummary: true });
+  // Named in the recorded result, so the phase is told what was dropped, and nothing else lost.
+  assert.match(f.writes.map(write => JSON.stringify(write)).join(''), /ignoredFields.{0,16}delivered/);
+  assert.equal((await f.status()).evidence.implementation, 'confirmed');
+  await f.phase();
+  assert.equal((await f.status()).state, 'complete');
+  f.user('Please draft the PR body.');
+  const { request, draft } = await prBody(f, 'Please draft the PR body.');
+  assert.deepEqual(request.entries.map(entry => entry.key), ['goal', 'file.0', 'verification']);
+  assert.match(draft.body, /## Resumen\n\nDejar la feature pedida usable/);
+  assert.match(draft.body, /No se registró un resumen del cambio/);
 });
 // The coordinator's context window is a resource the protocol spends. It used to spend it twice
 // per attempt on a prompt the coordinator never reads, which is what filled it and got the
@@ -1407,10 +1483,62 @@ test('the workspace records that a coordinator opened MDD here, before any run e
   assert.equal((await readFile(join(f.root, '.mdd/sessions.jsonl'), 'utf8')).trimEnd().split('\n').length, 1);
 });
 
+// The dossier keeps one slot per conversation and telemetry counts events without saying which
+// run they belonged to, so a repository could run MDD for months and still have nothing to review.
+test('a finished run leaves a row a later review can read, and the retro reads it', async t => {
+  const f = await fixture(t, { memoryEnabled: false });
+  await f.phase(); await f.phase(); await f.phase();
+  assert.equal((await f.status()).state, 'complete');
+
+  const rows = (await readFile(join(f.root, '.mdd/runs.jsonl'), 'utf8')).trimEnd().split('\n').map(line => JSON.parse(line));
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].state, 'complete');
+  assert.equal(rows[0].phase, 'mdd-verify');
+  assert.deepEqual(rows[0].route, ['mdd-plan', 'mdd-apply', 'mdd-verify']);
+  assert.equal(rows[0].coverage, 100);
+  assert.equal(rows[0].changedFiles, 1);
+  assert.deepEqual(rows[0].checks, { total: 1, passed: 1, failed: 0 });
+  assert.equal(rows[0].directory, f.root);
+  assert.match(rows[0].goal, /Make the requested feature usable/);
+
+  const { text } = retroReport(f.root);
+  assert.match(text, /Retrospectiva de MDD/);
+  assert.match(text, /completa en mdd-verify · 100% de cobertura · 1 archivo\(s\)/);
+  assert.match(text, /Make the requested feature usable/);
+});
+
+// entrecuadras runs MDD inside a linked worktree that is deleted the moment its task is done.
+// Anchored there, every record the run produced went down with it — the dossier a later run could
+// have restarted from, and the lessons the repository was meant to accumulate across its worktrees.
+// They belong to the repository now, and the worktree keeps no .mdd of its own to lose.
+test('a run in a linked worktree keeps its records in the repository, not the worktree', async t => {
+  const f = await fixture(t, { worktree: true, memoryEnabled: false });
+  await f.phase(); await f.phase(); await f.phase();
+  assert.equal((await f.status()).state, 'complete');
+  f.user('Guardá este aprendizaje para que te automejores.');
+  await f.hooks.tool.mdd_improve.execute({ userText: 'Guardá este aprendizaje para que te automejores.',
+    title: 'Un aprendizaje deliberado', detail: 'Anotado a mano para comprobar dónde queda el archivo local de lecciones.' }, f.context);
+
+  // The repository holds everything the run and the coordinator produced.
+  const repo = await readdir(join(f.mainRoot, '.mdd'));
+  assert.ok(repo.some(name => /^run-[a-f0-9]{64}\.json$/.test(name)), `dossier missing from repo: ${repo}`);
+  assert.ok(repo.includes('sessions.jsonl'), `session ledger missing from repo: ${repo}`);
+  assert.ok(repo.includes('telemetry.jsonl'), `telemetry missing from repo: ${repo}`);
+  assert.ok(repo.includes('lessons.jsonl'), `lessons missing from repo: ${repo}`);
+  assert.ok(repo.includes('runs.jsonl'), `run ledger missing from repo: ${repo}`);
+
+  // The worktree that will be deleted has no .mdd of its own to take down with it.
+  await assert.rejects(readdir(join(f.root, '.mdd')), /ENOENT/);
+
+  // The improvements reader resolves the same repository from inside the worktree.
+  const listed = JSON.parse(await f.hooks.tool.mdd_improvements.execute({}, f.context));
+  assert.equal(listed.total, 1);
+});
+
 test('PR-body tool preserves pending approval and refuses wrong user/parent evidence claims', async t => {
   const f = await fixture(t, { mode: 'interactive' }); await f.phase(); f.user('Draft a preliminary PR body.');
   const before = await f.status();
-  const draft = JSON.parse(await f.hooks.tool.mdd_pr_body.execute({ userText: 'Draft a preliminary PR body.' }, f.context));
+  const { draft } = await prBody(f, 'Draft a preliminary PR body.');
   assert.match(draft.body, /No se registró ningún cambio de implementación/); assert.match(draft.body, /no están verificados del todo/);
   await assert.rejects(f.hooks.tool.mdd_pr_body.execute({ userText: 'The work was approved and deployed.' }, f.context));
   await assert.rejects(f.hooks.tool.mdd_pr_body.execute({ userText: 'Draft a preliminary PR body.' }, { ...f.context, sessionID: 'other-parent' }));

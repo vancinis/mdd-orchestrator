@@ -8,8 +8,9 @@ import type { ArtifactAttempt, ArtifactRef, ArtifactResult } from './artifacts.j
 import type { Answers, Phase } from './policy.js';
 import { cleanupInstructions, cognitiveDocInstructions, docInstructions, mddInstructions } from './phase-assets.js';
 import type { LessonInput } from './lessons.js';
-import { changed, deliverables, executed } from './phase-evidence.js';
-import type { ChangedFile, Check, Deliverable } from './phase-evidence.js';
+import type { RunLedgerInput } from './run-ledger.js';
+import { changed, deliverables, delivered, executed } from './phase-evidence.js';
+import type { ChangedFile, Check, Deliverable, Delivered } from './phase-evidence.js';
 import { emptyEvidence, invalidateEvidence, renderReport, renderClosure, phaseLabel, evidenceCoverage } from './reporting.js';
 import type { Evidence, EvidenceFlag, PhaseReport } from './reporting.js';
 import type { FailureClass, TelemetryEvent, TelemetryResult, TelemetryUsage } from './telemetry.js';
@@ -118,9 +119,13 @@ type Run = {
   artifacts: ArtifactStore; artifact?: ArtifactResult; artifactAttempts?: readonly ArtifactAttempt[];
   history: ArtifactResult[]; calls: Set<string>; planned: Deliverable[]; evidence: Evidence;
   report: PhaseReport; started?: number; readyAt?: number; telemetryDiagnostic?: string;
-  acceptance?: Acceptance; decisions: Decision[]; verification?: Verification; executedChecks: string[]; changedFiles: number;
+  acceptance?: Acceptance; decisions: Decision[]; verification?: Verification; executedChecks: Check[]; changedFiles: number;
   /** What Apply reported it changed and why, kept so a PR body can say more than a file count. */
   changedList: ChangedFile[];
+  /** Apply's own summary of the finished change, for the reader of the pull request it becomes. */
+  delivered?: Delivered;
+  /** The terminal state already written to the run ledger, so one run occupies one row. */
+  ledgered?: 'complete' | 'blocked';
   uncertain: boolean; userMessageID: string; concerns: Concern[]; contextReport?: string; context: RunContext[]; dossierDiagnostic?: string;
   contexts: { explorationID: string; outcome: 'passed' | 'failed'; artifact: ArtifactResult; summary: string; concerns: Concern[] }[];
   side?: { id: string; purpose: string; phase: Phase; state: State; args: TaskArgs; report: PhaseReport; brief: string; attempts: number; mode: Run['mode']; nativeUsed?: boolean; lastFailure?: string; fallbackExhausted?: boolean; reason?: string; executor?: Executor };
@@ -241,7 +246,7 @@ export class PhaseRunner {
   readonly #consent = new Map<string, Consent>();
   readonly #inflight = new Map<string, string>();
   readonly #nativeDispatches = new Map<string, Map<string, TaskArgs>>();
-  constructor(readonly inspect: Inspect, readonly options: { now?: () => number; progress?: ProgressGuard; dossier?: RunDossierStore; telemetry?: (root: string, value: TelemetryEvent, now: number) => TelemetryResult; lessons?: (root: string, value: LessonInput, now: number) => void } = {}) {}
+  constructor(readonly inspect: Inspect, readonly options: { now?: () => number; progress?: ProgressGuard; dossier?: RunDossierStore; telemetry?: (root: string, value: TelemetryEvent, now: number) => TelemetryResult; lessons?: (root: string, value: LessonInput, now: number) => void; ledger?: (root: string, value: RunLedgerInput, now: number) => void } = {}) {}
 
   status(sessionID: string) {
     const run = this.#runs.get(sessionID);
@@ -828,6 +833,7 @@ export class PhaseRunner {
     let nextEvidence = { ...run.evidence };
     let ran: Check[] = [];
     let applied: { paths: string[]; files: ChangedFile[]; reason?: string } | undefined;
+    let summary: Delivered | undefined;
     {
       // The traceability fields are still validated link by link, and a mistake in them is still a
       // report that has to be restated. It is not a reason to re-run the phase that produced them.
@@ -859,6 +865,10 @@ export class PhaseRunner {
             // Apply may report the checks it ran; they are its claim and are shown as one. Only
             // Verify's checks earn the evidence flag, so reporting them here proves nothing extra.
             ran = executed(result.checks);
+            // The phase that did the work is the one that can say what the work delivered. A
+            // malformed summary is named back to it rather than failing the implementation.
+            summary = delivered(result.delivered);
+            if (result.delivered !== undefined && !summary) ignored.push('delivered');
           }
           if (run.phase === 'mdd-verify' && ran.some(check => check.exit === 0)) nextEvidence.checks = 'confirmed';
         } else nextEvidence = invalidateEvidence(nextEvidence, this.#affected(run.phase));
@@ -902,7 +912,11 @@ export class PhaseRunner {
         run.changedFiles = new Set(applied.paths).size;
         run.changedList = applied.files;
       }
-      if (run.phase === 'mdd-verify') run.executedChecks = ran.filter(check => check.exit === 0).map(check => check.command);
+      if (summary) run.delivered = summary;
+      // Every check Verify ran, with the exit it reported — not only the ones that succeeded.
+      // Keeping the successes alone made a PR body that listed seven green commands next to a
+      // failure it never mentioned: the reader saw a cleaner run than the one that happened.
+      if (run.phase === 'mdd-verify') run.executedChecks = ran.map(check => ({ ...check }));
       run.evidence = nextEvidence;
       run.report = { phase: run.phase, summary: evidenceSummary, how, status: outcome, evidence: run.evidence };
       run.rendered = rendered;
@@ -1052,8 +1066,11 @@ export class PhaseRunner {
     const run = this.#runs.get(sessionID);
     if (!run) throw new Error('No recorded MDD run is available for this parent. A draft cannot claim implementation evidence.');
     return { runID: run.id, goal: run.acceptance?.goal ?? 'Unverified: a requested outcome has not been recorded.',
-      changes: run.verification?.changes ?? 'Implementation details remain unverified; inspect the recorded artifact.',
-      changedFiles: run.changedFiles, files: run.changedList.map(file => ({ ...file })), checks: [...run.executedChecks],
+      ...(run.delivered ? { delivered: { ...run.delivered } } : {}),
+      // Verify's own account of what it found. It belongs under the verification heading: printed
+      // under Cambios it read as a description of the change, which is what it is not.
+      verification: run.verification?.changes ?? 'Implementation details remain unverified; inspect the recorded artifact.',
+      changedFiles: run.changedFiles, files: run.changedList.map(file => ({ ...file })), checks: run.executedChecks.map(check => ({ ...check })),
       verified: run.state === 'complete' && run.verification?.matched === true && run.evidence.checks === 'confirmed',
       uncertain: run.uncertain, limits: [...(run.verification?.limits ?? [])] };
   }
@@ -1333,11 +1350,38 @@ export class PhaseRunner {
   }
 
   /**
+   * One row per finished run, written where the dossier is replaced. The dossier keeps a single
+   * slot per conversation, so the evidence that a run ever happened was deleted by the next
+   * objective started in the same conversation; telemetry survived but counts events without
+   * saying which run they belonged to. This is the part a later review actually reads.
+   *
+   * Recorded once per state: a run that was blocked and then finished replaces its own row rather
+   * than adding a second one, so the ledger counts runs and not transitions.
+   */
+  #ledger(run: Run): void {
+    if (!this.options.ledger || (run.state !== 'complete' && run.state !== 'blocked') || run.ledgered === run.state) return;
+    const checks = run.executedChecks;
+    try {
+      this.options.ledger(run.runtime.directory, {
+        runID: run.id, state: run.state, directory: run.runtime.directory,
+        route: run.workflow.snapshot().evaluation.phases, phase: run.phase,
+        evidence: { ...run.evidence }, changedFiles: run.changedFiles,
+        checks: { total: checks.length, passed: checks.filter(check => check.exit === 0).length, failed: checks.filter(check => check.exit !== 0).length },
+        concerns: run.concerns.length,
+        ...(run.acceptance?.goal ? { goal: run.acceptance.goal } : {}),
+        limits: [...(run.verification?.limits ?? [])],
+      }, this.#now());
+      run.ledgered = run.state;
+    } catch { /* A ledger row is never worth a route. */ }
+  }
+
+  /**
    * Writes the record after a transition that is already committed, never during a `persisting-*`
    * step: only settled facts are preserved. A failed write must not re-block a run that already
    * finished, so it degrades to a visible diagnostic rather than throwing.
    */
   #preserve(run: Run): void {
+    this.#ledger(run);
     if (!this.options.dossier) return;
     try { this.options.dossier.write(run.runtime.sessionID, this.#dossier(run)); delete run.dossierDiagnostic; }
     catch (error) { run.dossierDiagnostic = `This run's evidence could not be preserved locally, so a restart may not find it: ${error instanceof Error ? error.message : 'unknown local storage outcome'}. Execution itself was unaffected.`; }
@@ -1363,7 +1407,8 @@ export class PhaseRunner {
       ...(run.acceptance ? { acceptance: structuredClone(run.acceptance) } : {}),
       decisions: structuredClone(run.decisions), planned: structuredClone(run.planned),
       ...(run.verification ? { verification: structuredClone(run.verification) } : {}),
-      executedChecks: [...run.executedChecks], changedFiles: run.changedFiles, concerns: structuredClone(run.concerns),
+      executedChecks: structuredClone(run.executedChecks), changedFiles: run.changedFiles,
+      ...(run.delivered ? { delivered: { ...run.delivered } } : {}), concerns: structuredClone(run.concerns),
       artifacts: run.history.map(item => ({ ref: structuredClone(item.ref), content: item.content })),
       contexts: run.contexts.map(item => ({ explorationID: item.explorationID, outcome: item.outcome, summary: item.summary,
         concerns: structuredClone(item.concerns), artifact: { ref: structuredClone(item.artifact.ref), content: item.artifact.content } })),

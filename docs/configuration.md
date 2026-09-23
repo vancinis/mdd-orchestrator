@@ -252,8 +252,10 @@ Reports generate neither receipts nor invented claims about implementation/check
 ### Local telemetry (`telemetry.ts`)
 
 The preference is global. `telemetry on/off` changes only global settings. Status, retention,
-`report` and `clear` address only the active workspace's `.mdd/telemetry.jsonl` and
-`.mdd/telemetry-rollup.json`; there is no cross-project archive or deletion. Telemetry and
+`report` and `clear` address the repository's `.mdd/telemetry.jsonl` and
+`.mdd/telemetry-rollup.json` — resolved from a linked worktree to the repository it belongs to, so
+a run's metrics accumulate with the repository's rather than dying with the worktree — and there is
+no cross-project archive or deletion. Telemetry and
 progress lazily create private `.mdd` storage with its own ignore file on first runtime write,
 never during installation. API helpers accept an optional final `InstallationEnvironment`
 argument for isolated global preference tests.
@@ -374,6 +376,50 @@ With optional memory enabled, each entry is additionally saved as an Engram obse
 `GET /search`, which is the one provider read that answers with an array. Memory is an index over
 the local record, never the record: with memory off, or unavailable, the local file still answers
 and the tool reports `memory: 'off' | 'unavailable'` instead of claiming a complete review.
+
+### Run ledger and retrospective (`run-ledger.ts`, `retro.ts`)
+
+```typescript
+type RunRecord = {
+  version: 1; runID: string; timestamp: number;
+  state: 'complete' | 'blocked'; directory: string;
+  route: Phase[]; phase: Phase; coverage: number; evidence: Evidence;
+  changedFiles: number; checks: { total: number; passed: number; failed: number };
+  concerns: number; goal?: string; limits: string[];
+};
+function recordRun(root: string, value: RunLedgerInput, now?: number): RunLedgerResult;
+function recordRunQuietly(root: string, value: RunLedgerInput, now?: number): void;
+function readRuns(root: string, query?: { limit?: number }): ...;
+function retroReport(root: string, limit?: number): { ok: true; text: string };
+```
+
+One compact row per finished run, written where the dossier is replaced. The dossier preserves a
+run in full but keeps a single slot per conversation and is overwritten by that conversation's next
+objective, so it answers "can this run be picked up again" and nothing about the repository. The
+rollup survives but counts events without saying which run they belonged to or what it was trying
+to do. Between them sat the question nobody could ask — how the work has been going — and its
+evidence was being deleted on every new start.
+
+`PhaseRunner` writes a row when a run reaches `complete` or `blocked`, replacing that run's own row
+if it reaches a further state, so one run occupies one row and a blocked-then-finished run is not
+counted twice. Rows hold outcome, route, phase reached, evidence coverage, changed-file count,
+check totals with the failed ones counted apart, concern count, the recorded goal and up to four
+verification limits — no artifacts, prompts or source. `.mdd/runs.jsonl` is Git-ignored with the
+rest of `.mdd`, bounded to 200 rows within 512 KiB, dropping oldest first. Overlong prose is
+trimmed rather than refused: losing the record that a run happened, because its goal was long,
+would trade the fact for the footnote. Recording is best-effort and never fails a run.
+
+`mdd retro` reads the three records that already existed and were never read together — the run
+ledger, the accumulated counters and the improvements nobody reviewed — and renders one Spanish
+report. It leads with **Señales**: runs started that reached no recorded ending, blocked and reset
+counts, mid-run compactions, the most frequent failure class, the most retried and most interrupted
+phase, runs that changed nothing, runs whose checks exited nonzero, runs called complete below full
+coverage, and how many checkouts of the repository the recent runs came from. Every line is a count
+of something recorded; the report names the number and leaves the cause to the reader, because MDD
+knows that eleven explorations stopped and not why. It is strictly read-only — it uses a
+non-pruning event count rather than `telemetryStatus`, which rewrites the file it reads — and a
+workspace holding events but no aggregate is reported as exactly that rather than as an empty
+record.
 
 ### Terminal seams (`config-ui.ts`, `settings-cli.ts`)
 

@@ -3,7 +3,7 @@ import { LocalFiles } from './local-files.js';
 import type { ArtifactRef } from './artifacts.js';
 import type { Acceptance, Decision, Verification } from './acceptance.js';
 import type { Concern } from './concerns.js';
-import type { Deliverable } from './phase-evidence.js';
+import type { Check, Deliverable, Delivered } from './phase-evidence.js';
 import type { Answers, Phase } from './policy.js';
 import type { Evidence } from './reporting.js';
 import type { PhaseResult } from './workflow.js';
@@ -59,8 +59,11 @@ export type RunDossier = {
   decisions: Decision[];
   planned: Deliverable[];
   verification?: Verification;
-  executedChecks: string[];
+  /** Every check Verify reported, with its exit code: a failed one is evidence too. */
+  executedChecks: Check[];
   changedFiles: number;
+  /** Apply's summary of the finished change, kept so a later reader knows what was delivered. */
+  delivered?: Delivered;
   concerns: Concern[];
   artifacts: PriorArtifact[];
   contexts: PriorContext[];
@@ -120,7 +123,7 @@ export function priorRunView(dossier: RunDossier, file: string): Record<string, 
     route: dossier.route, phase: dossier.phase, lastState: dossier.lastState, results: dossier.results,
     evidence: dossier.evidence, acceptance: dossier.acceptance, decisions: dossier.decisions,
     planned: dossier.planned, verification: dossier.verification, executedChecks: dossier.executedChecks,
-    changedFiles: dossier.changedFiles, concerns: dossier.concerns, contexts: dossier.contexts,
+    changedFiles: dossier.changedFiles, delivered: dossier.delivered, concerns: dossier.concerns, contexts: dossier.contexts,
     artifacts: dossier.artifacts, questionReceipts: dossier.questionReceipts,
     ...(dossier.artifactContentOmitted ? { artifactContentOmitted: true as const } : {}),
   };

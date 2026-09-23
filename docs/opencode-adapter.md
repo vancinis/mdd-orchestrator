@@ -396,7 +396,8 @@ Verify also requires `verification: { scenarios, steps, decisions, changes, limi
 
 `mdd_status` exposes detached `acceptance`, `decisions`, `planned` and `verification` for
 drilldown. Terminal `report` leads with the goal, recorded changes, requirement/plan match,
-checks and material gaps. Low remains concise; medium adds `Cómo`; detailed adds `Estado` and
+checks and material gaps. Checks are recorded with the exit code Verify reported, so a command
+that failed is counted apart and named apart instead of disappearing among the successful ones. Low remains concise; medium adds `Cómo`; detailed adds `Estado` and
 evidence-coverage `Cobertura`. The frame is rendered in Spanish for the reader while the phase
 prose inside it arrives in English and is translated by the coordinator, section for section.
 Default reports omit internal routing, calls and receipts.
@@ -467,24 +468,48 @@ for the file format, the retention rule and the optional memory index.
 
 ## PR-body drafts
 
-When requested, `mdd_pr_body({ userText, notes? })` checks the actual latest native user text
-and current parent, then renders the shared local template without changing workflow,
-approval, artifacts or memory. It requires a recorded run; it never starts implementation
-merely to draft a body. Optional notes contain `environmentVariables`, `followUps`, and/or
-`deployment`, each quoting a whole user-provided line. They stay attributed and unverified.
-No model-callable parameter can replace recorded changes, checks or completion evidence.
+When requested, `mdd_pr_body({ userText, notes?, digest?, translations? })` checks the actual
+latest native user text and current parent, then renders the shared local template without
+changing workflow, approval, artifacts or memory. It requires a recorded run; it never starts
+implementation merely to draft a body. Optional notes contain `environmentVariables`,
+`followUps`, and/or `deployment`, each quoting a whole user-provided line. They stay attributed
+and unverified. No model-callable parameter can replace recorded changes, checks or completion
+evidence.
 
-The six sections always remain Resumen / Cambios / Variables de entorno / Seguimiento /
-Bloqueos / Despliegue, rendered in Spanish because a pull request body is read by a reviewer.
-`Cambios` leads with one table row per changed file, holding the reason the apply phase recorded
+Drafting takes two calls, because every sentence of substance in a body was written by a phase
+actor in English and a body is read by a reviewer in Spanish. Rendering the recorded prose as it
+was recorded is what produced Spanish headings over English paragraphs. The first call returns
+`render: 'pending-translation'` with one keyed entry per recorded string and a digest over them;
+the second returns the rendered body. The coordinator translates — it does not author — and the
+translations are checked before anything is rendered: every key exactly once, numbers, paths,
+identifiers, quoted code and command names preserved verbatim and none invented, a length within
+half to two and a half times the source, and Spanish function words in any entry long enough for
+their absence to mean something. The digest binds the set to the evidence it came from, so a run
+that advanced mid-draft is refused rather than described with older prose. The checks are
+structural: they cannot tell whether the Spanish means what the English meant, and they do not
+claim to. A conversation gets `PR_TRANSLATION_ATTEMPTS` rejected sets before drafting refuses
+outright; asking again for the recorded text restarts it. `provenance.translated` names the keys
+that reached the reviewer through a translation.
+
+The seven sections always remain Resumen / Cambios / Verificación / Variables de entorno /
+Seguimiento / Bloqueos / Despliegue. `Resumen` is Apply's `delivered` summary — what the change
+makes possible and what it implies — and falls back to the recorded goal, saying so, when Apply
+recorded none; it never describes how the work was done, because the table below it already does.
+`Cambios` is one table row per changed file, holding the reason the apply phase recorded
 for that file; a file reported without one says so rather than being given an invented motive,
-and a reason containing a pipe or a newline is escaped instead of breaking the row. The body
+and a reason containing a pipe or a newline is escaped instead of breaking the row.
+`Verificación` holds the verification state, Verify's own account of what it found, and the check
+evidence aggregated into counts: total, exited zero, exited nonzero, and how many commands could
+not be printed. It is aggregated because one line per command produced six identical redaction
+notices in a real body, which reads as a malfunction and tells the reviewer nothing. A command is
+printed only when it is a plain package-manager invocation whose whole string survives the safety
+filter, so arguments are allowed as a shape and never as trust. The body
 carries no draft-only notice: publication authority is reported to the caller as
 `publication: not-authorized`, which is who can act on it, and repeating it at the top of every
 body spent the reviewer's attention on MDD's permissions instead of on the change. Missing
 optional facts are explicitly unverified; an explicit user
 `No aplica.` line is retained. Obvious credential assignments, paths and code excerpts
-are omitted; only conservative simple check commands are shown exactly. This is not a
+are omitted. This is not a
 general secret scanner or a fresh Git diff review. Inspect the draft before publication.
 The tool returns `publication: not-authorized`; it does not create branches, commits or PRs.
 
@@ -503,6 +528,35 @@ replayed. Other parent IDs use independent marker files, so an old pending or co
 never blocks unrelated conversations.
 The marker remains a replay guard and an authorization source for nothing at all. It is not the
 workflow ledger either; that role belongs to the separate run dossier described next.
+
+### Where `.mdd` lives
+
+Everything the adapter persists locally — this progress marker, the run dossier, the run ledger,
+the session ledger, telemetry and the lessons file — is anchored at the **repository**, not the
+checkout a run happens in. A linked git worktree is deleted the moment its task is done, and anchoring the records
+inside it deleted them too: the dossier a later run could have restarted from, and the lessons a
+repository was meant to accumulate across every one of its worktrees, both vanished with the
+worktree that produced them, which is why a repository could ship many MDD runs and still hold no
+`.mdd` at all. The adapter resolves the anchor by reading git's own layout — a worktree's `.git`
+file names an administrative directory whose `commondir` names the shared git directory, whose
+parent is the repository — the same read that proves a worktree belongs to a memory project. For an
+ordinary checkout, a subdirectory of one, or a directory that is not a git repository, the anchor
+is that directory unchanged, so nothing about the single-checkout case moves. Records from
+concurrent worktrees of one repository share the anchor safely: per-run files are keyed by
+`SHA256(parentID)`, and the append-only ledgers serialize through the existing lock. The readers
+resolve the same anchor, so `mdd_improvements` and the `lessons`/`telemetry` CLI commands run from
+inside a worktree report the repository's records rather than an empty local directory.
+
+### Finished runs (`.mdd/runs.jsonl`)
+
+The dossier below keeps one slot per conversation and is replaced by that conversation's next
+objective, so a repository could run MDD for months and hold no evidence that any of it happened.
+When a run reaches `complete` or `blocked` the adapter appends a compact row — outcome, route,
+phase reached, coverage, changed-file count, check totals with failures counted apart, concerns,
+the recorded goal and up to four verification limits. A run that reaches a further state replaces
+its own row, so one run is one row. It is bounded to 200 rows, holds no artifacts, prompts or
+source, and is written best-effort: a row is never worth a route. `mdd retro` reads it together
+with the accumulated counters and the unreviewed improvements.
 
 ### Preserved runs (`.mdd/run-<SHA256(parentID)>.json`)
 

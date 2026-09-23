@@ -1,14 +1,23 @@
 import { assetText, PACKAGE_ROOT } from './project-assets.js';
-import type { ChangedFile } from './phase-evidence.js';
+import type { ChangedFile, Check, Delivered } from './phase-evidence.js';
+import { checkTranslations, TranslationError, translationDigest } from './pr-translation.js';
+import type { Translatable, Translation } from './pr-translation.js';
 import { objectWithKeys } from './validation.js';
 
-export type PRFacts = { runID: string; goal: string; changes: string; changedFiles: number; files: ChangedFile[]; checks: string[]; verified: boolean; uncertain: boolean; limits: string[] };
+export type PRFacts = {
+  runID: string; goal: string; delivered?: Delivered; verification: string;
+  changedFiles: number; files: ChangedFile[]; checks: Check[]; verified: boolean; uncertain: boolean; limits: string[];
+};
 /**
  * The body is read by whoever reviews the pull request, so it is written in Spanish like every
  * other user-facing surface. The headings are the template's own and are matched against it, so
  * changing one here without changing the packaged template fails loudly rather than drifting.
+ *
+ * `Verificación` is its own section because the evidence of checking the work is not the work.
+ * It used to be appended to `Cambios`, which put "verified without modifying sources" directly
+ * under a table of modified sources and read as a contradiction of the section it closed.
  */
-const HEADINGS = ['Resumen', 'Cambios', 'Variables de entorno', 'Seguimiento', 'Bloqueos', 'Despliegue'];
+const HEADINGS = ['Resumen', 'Cambios', 'Verificación', 'Variables de entorno', 'Seguimiento', 'Bloqueos', 'Despliegue'];
 /** Text a reader must not be shown: credentials, URLs, absolute paths, control characters. */
 const UNSAFE = /[\x00-\x1f\x7f`]|\b[a-z][a-z0-9+.-]*:\/\/|[a-z]:[\\/]|(?:^|[\s('"=])(?:\/|~[\\/])|\\\\/i;
 /**
@@ -37,23 +46,95 @@ function cell(value: string): string {
 }
 
 /**
+ * A check command may be printed only when it is a plain package-manager invocation. The pattern
+ * used to end at the script name, which meant that in a real repository almost every command —
+ * `pnpm test -- src/orders`, `npx tsc --noEmit` — fell outside it and collapsed into the same
+ * redaction notice, repeated once per command. Seven identical lines saying nothing is worse than
+ * no lines at all: it looks like a malfunction and it spends the reviewer's attention. Arguments
+ * are allowed here as shapes, not as trust — `safeCopy` still has the last word on the whole
+ * string, so a path, a URL or a credential keeps the command out regardless of how it is written.
+ */
+const RUNNER = /^(?:npm|pnpm|yarn|bun|npx)(?: run)? [a-z0-9][a-z0-9:_-]*(?:\s+(?:--|--?[a-z0-9][a-z0-9:._-]*(?:=[a-z0-9._\/-]+)?|[a-z0-9][a-z0-9._\/-]*))*$/i;
+function printable(check: Check): boolean {
+  return check.command.length <= 120 && RUNNER.test(check.command) && safeCopy(check.command) === check.command;
+}
+
+/**
+ * One aggregated account of what ran, instead of one line per command. The counts come first and
+ * include every check: a command that exited nonzero is evidence, and a body that lists only the
+ * successful ones describes a calmer run than the one that happened. Commands that cannot be
+ * shown are counted rather than described, so the reviewer knows what is missing and how much.
+ */
+function commands(checks: readonly Check[]): string {
+  if (!checks.length) return '- No se registró evidencia de comandos de verificación.';
+  const passed = checks.filter(check => check.exit === 0);
+  const failed = checks.filter(check => check.exit !== 0);
+  const lines = [`- Comandos registrados: ${checks.length} en total, ${passed.length} con salida 0${failed.length ? ` y ${failed.length} con salida distinta de 0` : ''}.`];
+  const shown = [...new Set(passed.filter(printable).map(check => check.command))];
+  if (shown.length) lines.push(`- Con salida 0: ${shown.map(command => `\`${command}\``).join(', ')}.`);
+  const broken = [...new Map(failed.filter(printable).map(check => [`${check.command}#${check.exit}`, check])).values()];
+  if (broken.length) lines.push(`- Con salida distinta de 0: ${broken.map(check => `\`${check.command}\` (${check.exit === null ? 'sin salida registrada' : `salida ${check.exit}`})`).join(', ')}.`);
+  const hidden = checks.filter(check => !printable(check)).length;
+  if (hidden) lines.push(`- Se omiten ${hidden} comando(s) para no exponer argumentos ni rutas; revisá la evidencia local.`);
+  return lines.join('\n');
+}
+
+/**
  * One row per file, with the reason that file had to change. A reviewer already has the list of
  * paths — the diff is the list of paths — so a Changes section that only repeats them spends the
  * reviewer's attention without answering the one question they opened the PR with. The reason is
  * the phase actor's own, recorded when it reported the change; where it did not give one, the row
  * says so instead of inventing a plausible motive.
  */
-function changeTable(files: readonly ChangedFile[]): string {
-  const rows = files.map(file => `| \`${cell(file.path)}\` | ${file.reason ? cell(file.reason) : 'Sin motivo registrado; revisá el diff.'} |`);
+function changeTable(files: readonly ChangedFile[], spanish: (key: string) => string): string {
+  const rows = files.map((file, index) => `| \`${cell(file.path)}\` | ${file.reason ? cell(spanish(`file.${index}`)) : 'Sin motivo registrado; revisá el diff.'} |`);
   return ['| Archivo | Por qué cambió |', '|---|---|', ...rows].join('\n');
 }
 
-export function renderPRBody(root: string, facts: PRFacts, userText: string, value: unknown = {}) {
+/**
+ * The recorded prose this body is made of, named so it can be translated and put back. Nothing
+ * else in the body is actor text: the rest is MDD's own frame, already written for the reader.
+ */
+export function translatable(facts: PRFacts): Translatable[] {
+  const entries: Translatable[] = facts.delivered
+    ? [{ key: 'delivered.what', label: 'Qué quedó implementado', source: facts.delivered.what },
+      ...(facts.delivered.implies ? [{ key: 'delivered.implies', label: 'Qué implica para quien lo usa', source: facts.delivered.implies }] : [])]
+    : [{ key: 'goal', label: 'Objetivo registrado de la ejecución', source: facts.goal }];
+  facts.files.forEach((file, index) => {
+    if (file.reason) entries.push({ key: `file.${index}`, label: `Por qué cambió ${file.path}`, source: file.reason });
+  });
+  entries.push({ key: 'verification', label: 'Qué informó la verificación', source: facts.verification });
+  facts.limits.forEach((limit, index) => entries.push({ key: `limit.${index}`, label: 'Límite informado por la verificación', source: limit }));
+  return entries;
+}
+
+/**
+ * The first half of drafting: the recorded text, and the digest that binds a translation to it.
+ * No body is rendered here, because a body rendered from English prose is the defect being fixed.
+ */
+export function prBodyRequest(facts: PRFacts): Record<string, unknown> {
+  const entries = translatable(facts);
+  return {
+    render: 'pending-translation',
+    digest: translationDigest(facts.runID, entries),
+    entries: entries.map(entry => ({ key: entry.key, label: entry.label, text: entry.source })),
+    instruction: 'Translate every entry into Spanish for the reviewer who reads the PR, then call mdd_pr_body again with the same userText, this digest and one translation per key. Translate only: keep numbers, paths, identifiers, quoted code and command names exactly as they are, add no fact the entry does not state, and drop none it does. Do not draft sections, headings or prose of your own; MDD renders the body.',
+    publication: 'not-authorized',
+  };
+}
+
+export function renderPRBody(root: string, facts: PRFacts, userText: string, value: unknown = {}, supplied: { digest: string; translations: readonly Translation[] }) {
   const skill = assetText(PACKAGE_ROOT, 'assets/opencode/skills/mdd-pr-body/SKILL.md');
   if (!/^---\r?\n(?:[^\n]*\n)*?name: mdd-pr-body\r?\n/.test(skill.content)) throw new Error('The exact packaged mdd-pr-body skill is required.');
   const template = assetText(PACKAGE_ROOT, 'assets/opencode/skills/mdd-pr-body/assets/template.md');
   const headings = [...template.content.matchAll(/^## (.+)$/gm)].map(match => match[1]);
-  if (JSON.stringify(headings) !== JSON.stringify(HEADINGS)) throw new Error('The packaged PR template must retain the six approved sections in order.');
+  if (JSON.stringify(headings) !== JSON.stringify(HEADINGS)) throw new Error('The packaged PR template must retain the seven approved sections in order.');
+  const entries = translatable(facts);
+  if (supplied.digest !== translationDigest(facts.runID, entries)) {
+    throw new TranslationError('Esa traducción no corresponde a la evidencia registrada ahora; la ejecución cambió mientras se redactaba. Pedí de nuevo los textos con mdd_pr_body sin traducciones y traducí los que devuelva.');
+  }
+  const translated = checkTranslations(entries, supplied.translations);
+  const spanish = (key: string): string => translated.get(key) ?? '';
   const notes = objectWithKeys(value, 'PR notes', ['environmentVariables', 'followUps', 'deployment']);
   const human = (key: string): string => {
     // An absent optional note is the ordinary case: the user asked for a body and said nothing
@@ -69,32 +150,40 @@ export function renderPRBody(root: string, facts: PRFacts, userText: string, val
     if (safe === REDACTED || safe === 'No aplica.') return safe;
     return `Lo aportó el usuario, sin verificación independiente: ${safe}`;
   };
-  const commands = facts.checks.map(command => /^(?:npm|pnpm|yarn|bun) (?:test|run (?:test|typecheck|lint|check|build)(?:[:_-][a-z0-9_-]+)?)$/i.test(command) && safeCopy(command) === command
-    ? `- Comando registrado: ${command}; salida 0.` : '- Comando registrado: se omite para no exponer argumentos ni rutas; salida 0. Revisá la evidencia local.');
+  const failed = facts.checks.filter(check => check.exit !== 0).length;
   const blockers = [
     ...(facts.changedFiles ? [] : ['No se registró evidencia de cambios de implementación; puede no haber nada para proponer.']),
-    ...(facts.verified ? [] : ['Los requisitos y el plan no están verificados del todo. Que un comando termine en 0 no establece que el trabajo esté completo.']),
+    ...(failed ? [`${failed} comando(s) de verificación terminaron con salida distinta de 0.`] : []),
     ...(facts.uncertain ? ['La ejecución o la persistencia quedaron inciertas; no reintentes ni declares que está listo.'] : []),
-    ...facts.limits.map(safeCopy),
+    ...facts.limits.map((_limit, index) => safeCopy(spanish(`limit.${index}`))),
   ];
   const sections: Record<string, string> = {
-    // No boilerplate about this being a draft: the tool returns `publication: not-authorized` to
-    // the caller, which is where that fact belongs. Repeating it at the top of every body told the
-    // reviewer something about MDD's permissions instead of about the change they have to review.
-    Resumen: `${safeCopy(facts.goal)}\n\n${facts.verified ? 'La ejecución registrada terminó; que los requisitos y el plan coincidan sigue siendo la evaluación del agente, no una revisión independiente.' : 'Los requisitos y el plan de esta ejecución no están verificados del todo.'}`,
-    Cambios: `${facts.changedFiles
-      ? `${changeTable(facts.files)}\n\n${safeCopy(facts.changes)}`
-      : 'No se registró ningún cambio de implementación.'}\n\n${commands.length ? commands.join('\n') : '- No se registró evidencia de comandos de verificación.'}`,
+    // What changed and what it enables, in that order, and nothing about how it was built: the
+    // per-file table already answers "how", and a summary that repeats it tells the reviewer
+    // about the diff they are already reading instead of about the change they have to judge.
+    // No boilerplate about this being a draft either: the tool returns `publication:
+    // not-authorized` to the caller, which is where that fact belongs.
+    Resumen: facts.delivered
+      ? [safeCopy(spanish('delivered.what')), ...(facts.delivered.implies ? [safeCopy(spanish('delivered.implies'))] : [])].join('\n\n')
+      : `${safeCopy(spanish('goal'))}\n\nNo se registró un resumen del cambio: este texto es el objetivo que se pidió, no lo que quedó implementado.`,
+    Cambios: facts.changedFiles ? changeTable(facts.files, spanish) : 'No se registró ningún cambio de implementación.',
+    Verificación: `${facts.verified
+      ? 'La ejecución registrada terminó; que los requisitos y el plan coincidan sigue siendo la evaluación del agente, no una revisión independiente.'
+      : 'Los requisitos y el plan de esta ejecución no están verificados del todo.'}\n\n${safeCopy(spanish('verification'))}\n\n${commands(facts.checks)}`,
     'Variables de entorno': human('environmentVariables'), Seguimiento: human('followUps'),
     Bloqueos: blockers.length ? blockers.map(item => `- ${item}`).join('\n') : 'No aplica.', Despliegue: human('deployment'),
   };
   const body = template.content.replace(/^## (.+)\r?\n[\s\S]*?(?=^## |$(?![\s\S]))/gm, (_section, heading: string) => `## ${heading}\n\n${sections[heading]}\n\n`).trimEnd() + '\n';
   return {
     body,
-    // The body is rendered here from recorded facts, not drafted by a model, so reformatting it
-    // downstream can only move it away from the template it was built to satisfy.
+    // The body is assembled here from recorded facts against a fixed template, so reformatting it
+    // downstream can only move it away from the template it was built to satisfy. The prose was
+    // translated before it got here, which is why nothing may translate it now.
     render: 'final', instruction: 'Print body verbatim. Do not rewrite, summarize, reorder, reformat or translate it; it is already written for the reader. Keep provenance in drilldown evidence.',
     publication: 'not-authorized',
-    provenance: { runID: facts.runID, skill: { path: skill.path, digest: skill.digest }, template: { path: template.path, digest: template.digest } },
+    provenance: { runID: facts.runID, skill: { path: skill.path, digest: skill.digest }, template: { path: template.path, digest: template.digest },
+      // Named so the record shows which sentences reached the reviewer through a translation
+      // rather than straight from the phase that recorded them.
+      translated: entries.map(entry => entry.key) },
   };
 }

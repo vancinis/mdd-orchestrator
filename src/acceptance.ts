@@ -26,7 +26,7 @@ export const PHASE_RESULT_FIELDS: Record<Phase, readonly string[]> = Object.free
   // it rejected: the field belonged to Verify alone. Implementation checks are evidence the phase
   // genuinely produced, so it keeps them. They are recorded as its claim; only Verify's checks
   // earn the checks evidence flag.
-  'mdd-apply': ['changes', 'noChangeReason', 'checks'],
+  'mdd-apply': ['changes', 'noChangeReason', 'checks', 'delivered'],
   'mdd-verify': ['checks', 'verification'],
 });
 export const FIELD_SCHEMA: Record<string, string> = {
@@ -36,6 +36,7 @@ export const FIELD_SCHEMA: Record<string, string> = {
   domain: 'domain="project", the fixed storage namespace.',
   changes: 'changes=[{path,reason}] lists the files this phase actually changed and why each one had to change. A bare path string is accepted where there is nothing to add.',
   noChangeReason: 'noChangeReason=text instead of changes when nothing needed changing.',
+  delivered: 'delivered={what,implies} summarises the finished change for whoever reviews the pull request: what is now possible or different (what), and what that enables or requires of them (implies). Describe the outcome, never the mechanics — the per-file reasons already say how.',
   checks: 'checks=[{command,exit}] reports only checks this phase actually ran.',
   verification: 'verification={scenarios:[{requirementID,scenarioID,stepID,status,checks:[command],assessment}],steps:[{stepID,status,checks,assessment}],decisions:[{decisionID,status,checks,assessment}],changes,limits:[]}. Status is verified/not-verified/deviation. Assessment explains source evidence and limits, not just a pass label. Cover all held links exactly once.',
 };

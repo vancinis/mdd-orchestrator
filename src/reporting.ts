@@ -1,3 +1,4 @@
+import type { Check } from './phase-evidence.js';
 import type { Answers, Phase } from './policy.js';
 import { MODEL_ROLES } from './settings.js';
 import { objectWithKeys, ValidationError } from './validation.js';
@@ -107,12 +108,15 @@ export function renderReport(detail: Answers['summary'], value: PhaseReport): st
   return `${medium}\n\nEstado\n${STATUS_LABELS[input.status as ReportStatus]}\n\nCobertura\n${evidenceCoverage(evidence)}% de cobertura de evidencia (no es una probabilidad de acierto).\n${breakdown}\n`;
 }
 
-export function renderClosure(detail: Answers['summary'], input: { goal: string; changes: string; matched: boolean; checks: string[]; limits: string[]; status: ReportStatus; evidence: Evidence }): string {
-  if (input.status === 'passed' && (!input.matched || !input.checks.length || input.evidence.checks !== 'confirmed')) throw new ValidationError('Successful closure requires matched acceptance and confirmed executed checks.');
+export function renderClosure(detail: Answers['summary'], input: { goal: string; changes: string; matched: boolean; checks: Check[]; limits: string[]; status: ReportStatus; evidence: Evidence }): string {
+  if (input.status === 'passed' && (!input.checks.length || input.evidence.checks !== 'confirmed' || !input.matched)) throw new ValidationError('Successful closure requires matched acceptance and confirmed executed checks.');
   if (input.matched && input.status !== 'passed') throw new ValidationError('An incomplete closure cannot claim requirements and plan matched.');
-  const summary = `${text(input.goal)} ${text(input.changes)} ${input.matched ? 'Evaluación del agente: los requisitos y el plan coinciden con lo implementado.' : 'Sin completar: los requisitos y el plan no están verificados del todo.'} Se registraron ${input.checks.length} comando(s) de chequeo.${input.limits.length ? `\nPendiente: ${input.limits.map(text).join(' ')}` : ''}`;
+  // A command that exited nonzero is evidence, and a closure that counts it among the others
+  // reports a calmer run than the one that happened. It is counted apart and named apart.
+  const failed = input.checks.filter(check => check.exit !== 0);
+  const summary = `${text(input.goal)} ${text(input.changes)} ${input.matched ? 'Evaluación del agente: los requisitos y el plan coinciden con lo implementado.' : 'Sin completar: los requisitos y el plan no están verificados del todo.'} Se registraron ${input.checks.length} comando(s) de chequeo${failed.length ? `, ${failed.length} de ellos con salida distinta de 0` : ''}.${input.limits.length ? `\nPendiente: ${input.limits.map(text).join(' ')}` : ''}`;
   return renderReport(detail, { phase: 'mdd-verify', summary, how: [
-    ...input.checks.map(command => `Se ejecutó ${text(command)}.`),
+    ...input.checks.map(check => `Se ejecutó ${text(check.command)}; salida ${check.exit ?? 'desconocida'}.`),
     'Que los requisitos y el plan coincidan es la interpretación del agente a partir de las fuentes; la ejecución de los comandos la verifica el adaptador por su cuenta.',
   ], status: input.status, evidence: input.evidence }).replace(`Resumen (${phaseLabel('mdd-verify')})`, 'Resumen');
 }

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import { EngramHttp, LESSON_TITLE_PREFIX } from './engram-http.js';
+import { EngramHttp, LESSON_TITLE_PREFIX, mddDataRoot } from './engram-http.js';
 import { readLessons, recordLesson, renderLessonsReport } from './lessons.js';
 import type { LessonState } from './lessons.js';
 import { boundedText, runContext } from './phase-runner.js';
@@ -275,7 +275,7 @@ export class NativeIntake {
    * and an ordinary way to run MDD, the improvement must still be kept.
    */
   async improve(input: { title: string; detail: string; phase?: Phase }, runtime: Runtime): Promise<unknown> {
-    const recorded = recordLesson(runtime.directory, {
+    const recorded = recordLesson(mddDataRoot(runtime.directory), {
       source: 'user', title: input.title, detail: input.detail, ...(input.phase ? { phase: input.phase } : {}),
     });
     if (!recorded.ok) {
@@ -310,7 +310,7 @@ export class NativeIntake {
    * than a short review that says so.
    */
   async improvements(query: { text?: string; state?: LessonState; limit?: number }, runtime: Runtime): Promise<unknown> {
-    const local = readLessons(runtime.directory, query);
+    const local = readLessons(mddDataRoot(runtime.directory), query);
     if (!local.ok) throw new Error('The local improvements file could not be read. Inspect the .mdd directory.');
     let memory: 'searched' | 'unavailable' | 'off' = this.#settings.engram ? 'unavailable' : 'off';
     let remote: { id: number; title: string; content: string; created: string | undefined }[] = [];

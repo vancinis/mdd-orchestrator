@@ -274,6 +274,24 @@ function readRollup(files: LocalFiles): TelemetryRollup | undefined {
 }
 
 /**
+ * The accumulated counters, for a reader that has to combine them with something else. A damaged
+ * or absent file reads as nothing rather than throwing: a review that cannot open one of its
+ * sources should report that source as empty, not fail as a whole.
+ */
+export function telemetryTotals(root: string): TelemetryRollup | undefined {
+  try { return readRollup(new LocalFiles(root)); } catch { return undefined; }
+}
+
+/**
+ * Events still inside the retention window, counted without pruning anything. `telemetryStatus`
+ * answers the same question but rewrites the file while it does, and a report that silently edits
+ * the record it is reporting on is not a report.
+ */
+export function telemetryRetained(root: string, now = Date.now()): number {
+  try { return retained(new LocalFiles(root).read('.mdd/telemetry.jsonl', LIMIT), now).length; } catch { return 0; }
+}
+
+/**
  * A rollup that quietly stops accumulating would leave the report looking healthy while the only
  * record that outlives retention goes stale, so the failure is reported instead of swallowed. It
  * never blocks the event itself: an event already written is worth keeping.

@@ -190,15 +190,19 @@ OpenSpec is used only when requested; no automatic folders are authorized. The u
 
 The rendered frame is Spanish because it is read by the user. The prose inside it is written by
 the phase actor in English and translated by the coordinator, which keeps the sections intact.
+That applies to the closure report the coordinator presents and to the PR body alike; the body
+differs only in that its translation is checked against the recorded text before it is rendered,
+because nobody reading a pull request is in a position to notice a paragraph that drifted.
 
 Reports evolve with evidence rather than phase counts. **Implemented:** coverage is 20 points for accepted native requirements/profile intake, 20 for validated planning deliverables, 25 for reported implementation changes, and 35 for reported Verify checks that passed. The flags describe what each phase reported; MDD records the claim as a claim and never re-runs a command, so coverage is not correctness probability. A recorded failure loses its points; an attempt that never completed loses nothing because it claimed nothing. A no-change Apply earns no implementation points. No confidence is fabricated in the kernel.
 
 ### Configuration, telemetry, and contextual skills
 
 - The terminal editor configures nine model roles, named profiles, partial answers, and Engram setup. Native startup applies only explicit model overrides and preserves all unrelated config. A model-only profile is not complete preflight.
+- A finished run appends one compact row to a bounded local run ledger, and `mdd retro` reads that ledger together with the accumulated counters and the unreviewed improvements to report signals as counts, never as diagnosed causes. Everything MDD persists locally is anchored at the repository, so a linked worktree's records outlive the worktree instead of being deleted with it.
 - Approved local metadata-only telemetry defaults on, retains 30 days, supports off/delete, and never exports. Native lifecycle event wiring is implemented with bounded failure diagnostics. Events additionally carry run identity, attempt, delegate/inline mode, an adapter-assigned failure class and provider-reported usage for the delegated child, all still metadata; fixed-key counters outlive retention in a local rollup, and `telemetry report` reads both with plain arithmetic. Measurement never gates execution, and an undercount is marked rather than presented as a measurement.
 - Project-local cleanup and PR-body skills are wired. Apply receives exact local cleanup instructions; the coordinator drafts requested PR bodies from recorded facts using the local skill/template. Both retain provenance and grant no additional execution rights. Apply comments stay minimal.
-- The PR-body skill uses **Resumen / Cambios / Variables de entorno / Seguimiento / Bloqueos / Despliegue**, in Spanish, with one `Cambios` table row per changed file stating why that file changed. Drafting grants no publication authority. No PR or commit is part of this unit.
+- The PR-body skill uses **Resumen / Cambios / Verificación / Variables de entorno / Seguimiento / Bloqueos / Despliegue**, in Spanish, with one `Cambios` table row per changed file stating why that file changed. `Resumen` states what the change delivers and what it enables, never how it was built; `Verificación` holds the state, Verify's account and the aggregated check counts including the commands that exited nonzero. Recorded prose is translated by the coordinator and machine-checked against the source before rendering. Drafting grants no publication authority. No PR or commit is part of this unit.
 
 Confirmed reruns/material changes, contextual exploration and a minimal per-parent startup
 guard, global initialization, read-only diagnostics and PR-body drafting are implemented. Existing

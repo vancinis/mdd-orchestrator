@@ -1,11 +1,15 @@
 ## Resumen
 
-Describe el propósito y el resultado visible para quien lo use.
+Qué quedó implementado y qué habilita, en términos del resultado, no de cómo se construyó.
 
 ## Cambios
 
 | Archivo | Por qué cambió |
 |---|---|
+
+## Verificación
+
+Estado de la verificación y los comandos registrados.
 
 ## Variables de entorno
 

@@ -14,6 +14,7 @@ Uso:
   mdd-ai profile list | create <nombre> | use <nombre>
   mdd-ai telemetry status | report | on | off | clear
   mdd-ai lessons report | list [texto] | mark <id> | clear
+  mdd-ai retro               qué viene pasando: ejecuciones, fallos y automejoras
   node dist/cli.js --answers <archivo.json> [--config <archivo.json>] [--explore]
   node dist/cli.js --profile <archivo.json> [--config <archivo.json>] [--explore]
   node dist/cli.js --help

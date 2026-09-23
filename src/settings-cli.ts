@@ -1,6 +1,8 @@
 import { changeProfile, runTerminalConfig } from './config-ui.js';
 import { clearTelemetry, telemetryReport, telemetryStatus } from './telemetry.js';
 import { clearLessons, markLessons, readLessons, renderLessonsReport } from './lessons.js';
+import { mddDataRoot } from './engram-http.js';
+import { retroReport } from './retro.js';
 import { ValidationError } from './validation.js';
 import { initProject } from './setup.js';
 import { doctor } from './doctor.js';
@@ -69,23 +71,33 @@ export async function settingsCommand(args: string[], root: string, write: (text
     if (args.length < 2 || args.length > 3 || !['list', 'report', 'clear', 'mark'].includes(action ?? '')) {
       throw new ValidationError('Uso: mdd lessons report | list [texto] | mark <id> | clear');
     }
+    // Read from where a run wrote: a linked worktree's lessons live in the repository it belongs to,
+    // so the CLI run from inside that worktree must look there, not at the worktree's empty .mdd.
+    const dataRoot = mddDataRoot(root);
     if (action === 'clear') {
       if (args.length !== 2) throw new ValidationError('Uso: mdd lessons clear');
-      const cleared = clearLessons(root);
+      const cleared = clearLessons(dataRoot);
       if (!cleared.ok) throw new Error(cleared.diagnostic);
       write('Se borraron las automejoras anotadas de este workspace.\n');
     } else if (action === 'mark') {
       if (!name) throw new ValidationError('Uso: mdd lessons mark <id>');
-      const marked = markLessons(root, [name], 'reviewed');
+      const marked = markLessons(dataRoot, [name], 'reviewed');
       if (!marked.ok) throw new Error(marked.diagnostic);
       write(marked.updated.length
         ? `Marcada como revisada: ${marked.updated.join(', ')}\n`
         : `No se encontró ninguna automejora con ese identificador: ${name}\n`);
     } else {
-      const read = readLessons(root, name === undefined ? undefined : { text: name });
+      const read = readLessons(dataRoot, name === undefined ? undefined : { text: name });
       if (!read.ok) throw new Error(read.diagnostic);
       write(action === 'report' ? renderLessonsReport(read.lessons, read.total) : `${JSON.stringify(read.lessons, null, 2)}\n`);
     }
+    return true;
+  }
+  if (command === 'retro') {
+    if (args.length !== 1) throw new ValidationError('Uso: mdd retro');
+    // Reads the three records that already existed and were never read together: the run ledger,
+    // the accumulated counters and the improvements nobody reviewed.
+    write(retroReport(mddDataRoot(root)).text);
     return true;
   }
   if (command === 'telemetry') {
@@ -98,11 +110,12 @@ export async function settingsCommand(args: string[], root: string, write: (text
       saveGlobalSettings(settings);
       write(`Preferencia global de telemetría: ${action === 'on' ? 'activada' : 'desactivada'}. Los archivos de eventos siguen siendo locales al workspace; clear afecta solo al workspace actual.\n`);
     } else if (action === 'report') {
-      const report = telemetryReport(root);
+      const report = telemetryReport(mddDataRoot(root));
       if (!report.ok) throw new Error(report.diagnostic);
       write(report.text);
     } else {
-      const result = action === 'clear' ? clearTelemetry(root) : telemetryStatus(root);
+      const dataRoot = mddDataRoot(root);
+      const result = action === 'clear' ? clearTelemetry(dataRoot) : telemetryStatus(dataRoot);
       if (!result.ok) throw new Error(result.diagnostic);
       write(`${JSON.stringify(result)}\n`);
     }

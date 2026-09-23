@@ -13,11 +13,14 @@ import { recordTelemetry } from './telemetry.js';
 import type { TelemetryUsage } from './telemetry.js';
 import { ProgressGuard } from './progress.js';
 import { RunDossierStore } from './run-dossier.js';
-import { renderPRBody } from './pr-body.js';
+import { prBodyRequest, renderPRBody } from './pr-body.js';
+import { TranslationError } from './pr-translation.js';
+import { mddDataRoot } from './engram-http.js';
 import { statusPayload } from './status-budget.js';
 import type { StatusView } from './status-budget.js';
 import { phaseName } from './phase-assets.js';
 import { recordLessonQuietly } from './lessons.js';
+import { recordRunQuietly } from './run-ledger.js';
 import { withNextAction } from './next-action.js';
 import { collapseDispatchPrompts } from './dispatch-transcript.js';
 import { checkReportForm } from './report-check.js';
@@ -58,6 +61,8 @@ export const MDD_TOOLS = ['mdd_start', 'mdd_status', 'mdd_phase_result', 'mdd_re
  */
 export const CHECK_TOOL = 'mdd_check_report';
 export const COORDINATOR = 'mdd-orchestrator';
+/** Translation attempts a single conversation gets per PR body before drafting refuses outright. */
+export const PR_TRANSLATION_ATTEMPTS = 3;
 function coordinatorOnly(agent: string, tool: string): void {
   if (agent !== COORDINATOR) {
     throw new Error(`${tool} belongs to the ${COORDINATOR} agent and does nothing here. This session is not an MDD run; continue with your own tools.`);
@@ -412,7 +417,20 @@ const plugin: Plugin = async input => {
   const settings = (() => { try { return loadGlobalSettings(); } catch { throw new Error(setupDiagnostic(installationPaths().ownedRoot).action); } })();
   const profile = freezeProfile(settings);
   const inspector = createInspector(input);
-  const runner = new PhaseRunner(inspector, { telemetry: recordTelemetry, progress: new ProgressGuard(input.directory), dossier: new RunDossierStore(input.directory), lessons: recordLessonQuietly });
+  // Everything MDD persists locally is anchored at the repository, not the checkout a run happens
+  // in. A linked git worktree is removed as soon as its task is done; anchored there, the dossier
+  // and the lessons went with it. For an ordinary checkout this is byte-for-byte today's directory.
+  const dataRoot = mddDataRoot(input.directory);
+  const runner = new PhaseRunner(inspector, {
+    // The runner passes the run's own checkout directory to these callbacks; MDD writes to the
+    // shared anchor instead, so a worktree's telemetry and lessons join the repository's own rather
+    // than dying with it. Within a session the two are the same checkout, so nothing else shifts.
+    telemetry: (_directory, value, now) => recordTelemetry(dataRoot, value, now),
+    progress: new ProgressGuard(dataRoot),
+    dossier: new RunDossierStore(dataRoot),
+    lessons: (_directory, value, now) => recordLessonQuietly(dataRoot, value, now),
+    ledger: (_directory, value, now) => recordRunQuietly(dataRoot, value, now),
+  });
   const intake = new NativeIntake(runner, inspector, settings);
   /**
    * The workspace only ever learned that MDD had been used here once a phase had already produced
@@ -444,13 +462,19 @@ const plugin: Plugin = async input => {
   const reply = (value: unknown, view: StatusView = 'compact'): string => payload(value, assets, view);
   const opened = new Set<string>();
   const nativeChildren = new Set<string>();
+  /**
+   * How many times a conversation may send Spanish that fails its checks before drafting refuses.
+   * The point of the bound is that the failure is a model producing text, and a model that failed
+   * three times at translating a paragraph is not one attempt away from succeeding at it.
+   */
+  const translationAttempts = new Map<string, number>();
   const enter = (context: { agent: string; sessionID: string; directory: string; worktree: string }, name: string): void => {
     coordinatorOnly(context.agent, name);
     if (opened.has(context.sessionID)) return;
     opened.add(context.sessionID);
     // Never throws, and its result is deliberately unused: instrumentation that can fail a run is
     // instrumentation that ends up being removed.
-    recordSession(input.directory, { sessionID: context.sessionID, agent: context.agent, directory: context.directory, worktree: context.worktree });
+    recordSession(dataRoot, { sessionID: context.sessionID, agent: context.agent, directory: context.directory, worktree: context.worktree });
   };
   return {
     config: async config => {
@@ -460,8 +484,14 @@ const plugin: Plugin = async input => {
     },
     tool: {
       mdd_pr_body: tool({
-        description: 'Draft only a PR body using the exact local skill/template and recorded current-run evidence. Never commits, pushes or publishes. Optional notes must quote whole lines of the actual latest user text; unknown facts remain unverified.',
-        args: { userText: tool.schema.string().min(1), notes: tool.schema.object({ environmentVariables: tool.schema.string().optional(), followUps: tool.schema.string().optional(), deployment: tool.schema.string().optional() }).optional() },
+        description: 'Draft only a PR body using the exact local skill/template and recorded current-run evidence. Two calls: without translations it returns the recorded text to translate into Spanish; with them it renders the body. Never commits, pushes or publishes. Optional notes must quote whole lines of the actual latest user text; unknown facts remain unverified.',
+        args: {
+          userText: tool.schema.string().min(1),
+          notes: tool.schema.object({ environmentVariables: tool.schema.string().optional(), followUps: tool.schema.string().optional(), deployment: tool.schema.string().optional() }).optional(),
+          digest: tool.schema.string().min(1).optional().describe('The digest the first call returned. Required with translations, and it binds them to the evidence they were made from.'),
+          translations: tool.schema.array(tool.schema.object({ key: tool.schema.string().min(1), text: tool.schema.string().min(1).max(2000) })).max(128).optional()
+            .describe('One Spanish translation per key returned by the first call. Translate only: keep numbers, paths, identifiers and commands exactly, add no fact and drop none.'),
+        },
         async execute(args, context) {
           enter(context, 'mdd_pr_body');
           if (context.abort.aborted) throw new Error('The PR body draft was aborted.');
@@ -469,7 +499,25 @@ const plugin: Plugin = async input => {
           await inspector.intake(context, boundedText(args.userText, 'actual user request', 12000), context.messageID);
           const facts = runner.prFacts(context.sessionID);
           if (facts.runID !== current.runID) throw new Error('The current run changed while drafting; no draft was produced.');
-          return JSON.stringify(renderPRBody(context.directory, facts, args.userText, args.notes));
+          // Asking again for the recorded text is how a stuck translation is restarted, so it
+          // clears the budget: the next set is judged on its own, not on what came before it.
+          if (!args.translations) { translationAttempts.delete(context.sessionID); return JSON.stringify(prBodyRequest(facts)); }
+          if (!args.digest) throw new Error('Translations must carry the digest the first call returned; without it nothing proves they belong to this evidence.');
+          const spent = translationAttempts.get(context.sessionID) ?? 0;
+          if (spent >= PR_TRANSLATION_ATTEMPTS) {
+            translationAttempts.delete(context.sessionID);
+            throw new Error(`The Spanish sent for this body failed its checks ${PR_TRANSLATION_ATTEMPTS} times and no body was drafted. Tell the user plainly, in Spanish, rather than trying again: a body that mixes languages or loses a recorded fact is the defect this refuses to produce.`);
+          }
+          try {
+            const drafted = JSON.stringify(renderPRBody(context.directory, facts, args.userText, args.notes, { digest: args.digest, translations: args.translations }));
+            translationAttempts.delete(context.sessionID);
+            return drafted;
+          } catch (error) {
+            // Only a bad translation spends the budget. A note quoting the wrong user line is the
+            // caller's other mistake to fix, and it must not push the draft towards refusal.
+            if (error instanceof TranslationError) translationAttempts.set(context.sessionID, spent + 1);
+            throw error;
+          }
         },
       }),
       mdd_improve: tool({

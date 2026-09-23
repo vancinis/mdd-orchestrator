@@ -38,6 +38,20 @@ export function worktreeRepository(directory: string): string | undefined {
 }
 
 /**
+ * Where MDD keeps everything it persists locally — dossiers, lessons, the session ledger,
+ * telemetry and progress markers — given the checkout a run happens in. For an ordinary checkout,
+ * a subdirectory of one, or a directory that is not a git repository at all, that is the directory
+ * itself, exactly as before. For a linked git worktree it is the repository the worktree belongs
+ * to instead: a worktree is deleted the moment its task finishes, and anchoring MDD's records
+ * inside it deleted them too — the dossier a later run could have restarted from, and the lessons
+ * the repository was meant to accumulate across every one of its worktrees. Anchoring at the
+ * repository lets those records survive the worktree and gather in one place.
+ */
+export function mddDataRoot(directory: string): string {
+  return worktreeRepository(directory) ?? resolve(directory);
+}
+
+/**
  * Whether the native root actually belongs to the resolved memory project. Engram reports the
  * project root, which is the repository root: a worktree and a subdirectory are ordinary places
  * to work from and resolve to that same project, so requiring an identical path blocked them for

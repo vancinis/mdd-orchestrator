@@ -33,6 +33,28 @@ export function executed(value: unknown): Check[] {
   });
 }
 
+export type Delivered = { what: string; implies?: string };
+
+/**
+ * What the change is, told the way the person reviewing it needs to hear it: what is now possible
+ * or different, and what that enables. It is deliberately not a description of how the work was
+ * done — the per-file reasons already carry the mechanics, and a summary that repeats them tells
+ * a reviewer about the diff they are already looking at instead of about the change.
+ *
+ * A malformed summary is dropped rather than fatal, and the phase is told the field was ignored.
+ * Apply reports it after the implementation is finished, and no summary is worth discarding
+ * finished work over; the body falls back to the recorded goal and says that it did.
+ */
+export function delivered(value: unknown): Delivered | undefined {
+  if (value === undefined) return undefined;
+  try {
+    const entry = objectWithKeys(value, 'delivered summary', ['what', 'implies']);
+    const summary: Delivered = { what: shortText(entry.what, 'what the change delivers', 400) };
+    if (entry.implies !== undefined) summary.implies = shortText(entry.implies, 'what the change implies', 300);
+    return summary;
+  } catch { return undefined; }
+}
+
 export type ChangedFile = { path: string; reason?: string };
 
 /**
