@@ -71,6 +71,8 @@ type Executor = Phase | 'explore' | 'general';
  * something else: a prompt the coordinator composed itself can no longer reach an actor at all.
  */
 export const DISPATCH_HANDLE_PREFIX = 'mdd:dispatch:';
+/** A transcript note about a settled call is never a dispatch capability or a lost handle. */
+const DELIVERED_PROMPT_PREFIX = `${DISPATCH_HANDLE_PREFIX}delivered [`;
 const DISPATCH_NOTE = 'The prompt in task is a single-use MDD dispatch handle, not a shortened or truncated prompt. MDD expands it into the full phase prompt inside the hook, so the actor receives the complete instructions, dependency artifacts and packaged MDD instructions exactly as before. Pass the three fields through unchanged: do not expand the handle yourself, do not substitute a prompt of your own, and do not ask MDD for the full text. Keeping it out of this conversation is what stops a long run from filling the context window and being compacted.';
 type State = 'starting' | 'ready' | 'persisting-intent' | 'await-result' | 'persisting-result' | 'blocked' | 'await-approval' | 'complete';
 type Run = {
@@ -635,17 +637,18 @@ export class PhaseRunner {
       throw new ValidationError('The run is not ready for another task. Wait for the current operation; nothing was changed.');
     }
     // Either form is accepted: the handle mdd_status returns, or the full task a run that fell
-    // back to exposing its prompt returns. Anything else is refused, and the refusal itself turns
-    // the fallback on, so a coordinator that cannot pass a token through is never left stuck.
+    // back to exposing its prompt returns. Other prompts are refused; only an unknown prompt
+    // turns fallback on. The delivered transcript note is known non-authoritative history.
     if (!isDeepStrictEqual(args, this.#dispatchable(run)) && !isDeepStrictEqual(args, run.args)) {
       // Only a prompt that arrives as neither the handle nor the real text says the handle failed
       // to travel. Extra arguments or a substituted subagent are a different mistake — the
       // coordinator composing instead of copying — and giving up the small payload over one of
       // those would spend the rest of the run's context on a problem the refusal already fixed.
       const sent = (args as { prompt?: unknown }).prompt;
-      const handled = run.expose !== 'full' && run.token !== undefined && sent !== run.token && sent !== run.args.prompt;
+      const delivered = typeof sent === 'string' && sent.startsWith(DELIVERED_PROMPT_PREFIX);
+      const handled = !delivered && run.expose !== 'full' && run.token !== undefined && sent !== run.token && sent !== run.args.prompt;
       if (handled) run.expose = 'full';
-      throw new ValidationError(`Task arguments differ from the ready task. Read mdd_status and pass its exact task object, copying description, subagent_type and prompt verbatim; do not compose your own. No execution was started.${handled ? ' The prompt was a single-use MDD dispatch handle and must travel unchanged; this run now returns the full phase prompt instead, so read mdd_status again and dispatch what it returns.' : ''}`);
+      throw new ValidationError(`Task arguments differ from the ready task. Read mdd_status and pass its exact task object, copying description, subagent_type and prompt verbatim; do not compose your own. No execution was started.${delivered ? ' A delivered transcript placeholder is not a task; the current compact handle remains available from mdd_status.' : handled ? ' The prompt was a single-use MDD dispatch handle and must travel unchanged; this run now returns the full phase prompt instead, so read mdd_status again and dispatch what it returns.' : ''}`);
     }
     boundedText(call.callID, 'native callID', 256);
     if (run.calls.has(call.callID)) throw new ValidationError('Native task call ID was already consumed.');
@@ -1038,6 +1041,9 @@ export class PhaseRunner {
     run.uncertain = false;
     run.attempts = 0;
     run.mode = 'delegate';
+    // Reset remints the handle. A full-prompt fallback must not survive this explicit recovery:
+    // large prompts can exceed the host's result limit even when the phase itself is valid.
+    delete run.expose;
     delete run.nativeUsed;
     delete run.fallbackExhausted;
     delete run.reportRepairExhausted;
@@ -1186,9 +1192,10 @@ export class PhaseRunner {
     if (solo.state !== 'ready') throw new ValidationError('An investigation is already in flight; nothing was changed.');
     if (!isDeepStrictEqual(args, this.#soloDispatchable(solo)) && !isDeepStrictEqual(args, solo.args)) {
       const sent = (args as { prompt?: unknown }).prompt;
-      const handled = solo.expose !== 'full' && solo.token !== undefined && sent !== solo.token && sent !== solo.args.prompt;
+      const delivered = typeof sent === 'string' && sent.startsWith(DELIVERED_PROMPT_PREFIX);
+      const handled = !delivered && solo.expose !== 'full' && solo.token !== undefined && sent !== solo.token && sent !== solo.args.prompt;
       if (handled) solo.expose = 'full';
-      throw new ValidationError(`Task arguments differ from the ready investigation. Read mdd_status and pass its exact task object, copying description, subagent_type and prompt verbatim; do not compose your own. No execution was started.${handled ? ' The prompt was a single-use MDD dispatch handle and must travel unchanged; this investigation now returns the full prompt instead, so read mdd_status again and dispatch what it returns.' : ''}`);
+      throw new ValidationError(`Task arguments differ from the ready investigation. Read mdd_status and pass its exact task object, copying description, subagent_type and prompt verbatim; do not compose your own. No execution was started.${delivered ? ' A delivered transcript placeholder is not a task; the current compact handle remains available from mdd_status.' : handled ? ' The prompt was a single-use MDD dispatch handle and must travel unchanged; this investigation now returns the full prompt instead, so read mdd_status again and dispatch what it returns.' : ''}`);
     }
     boundedText(call.callID, 'native callID', 256);
     if (solo.calls.has(call.callID)) throw new ValidationError('Native task call ID was already consumed.');

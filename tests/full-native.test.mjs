@@ -11,6 +11,7 @@ import { traceArtifact } from '../dist/acceptance.js';
 import { ManagedMemory } from '../dist/managed-memory.js';
 import { STATUS_BUDGET_BYTES, STATUS_COMPACT_KEEP, STATUS_DROP_ORDER, STATUS_PROTECTED_FIELDS } from '../dist/status-budget.js';
 import { retroReport } from '../dist/retro.js';
+import { collapsedPrompt } from '../dist/dispatch-transcript.js';
 
 // Native SDK/hook contract fixtures. No model or real shell execution is performed.
 async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', partial = false, summary = 'low', telemetry = true, memoryEnabled = true, memoryFault, start = true, worktree: worktreeLayout = false } = {}) {
@@ -727,6 +728,19 @@ test('read-only investigation answers without an accepted run and leaves impleme
   assert.equal(started.task.subagent_type, 'mdd-plan');
   assert.equal(started.contextual, false);
 });
+test('a delivered transcript note cannot strand a standalone investigation', async t => {
+  const f = await fixture(t, { start: false, memoryEnabled: false });
+  await f.hooks.tool.mdd_contextual_explore.execute({ purpose: 'Inspect this project.' }, f.context);
+  const ready = await f.status();
+  const note = collapsedPrompt('mdd-explore', Buffer.byteLength(ready.task.prompt));
+  await assert.rejects(f.hooks['tool.execute.before']({ ...f.runtime, callID: 'solo-note', tool: 'task' },
+    { args: { ...ready.task, prompt: note } }), /delivered transcript placeholder is not a task/);
+  const after = await f.status();
+  assert.equal(after.dispatch.mode, 'handle');
+  assert.deepEqual(after.task, ready.task);
+  await f.phase();
+  assert.equal((await f.status()).contextual, false);
+});
 {
   test('a standalone investigation exhausts bounded fallback before explicit recovery', async t => {
     const f = await fixture(t, { start: false, memoryEnabled: false });
@@ -1007,6 +1021,18 @@ test('a settled dispatch stops being re-read, while the run still dispatches the
   assert.match(sent, /omitted from the transcript/);
   // The run's own record is untouched: only what travels to the model changed.
   assert.equal(f.parent[1].parts[0].state.input.prompt, expanded);
+
+  // A model may replay the transcript note as a fresh task argument. It is not a lost handle:
+  // rejecting it must leave the exact compact task available, not expose a truncated full prompt.
+  const ready = await f.status();
+  await assert.rejects(f.hooks['tool.execute.before']({ ...f.runtime, callID: 'transcript-replay', tool: 'task' },
+    { args: { ...ready.task, prompt: sent } }), /delivered transcript placeholder is not a task/);
+  const recoveredRaw = await f.hooks.tool.mdd_status.execute({}, f.context);
+  assert.ok(Buffer.byteLength(recoveredRaw) <= STATUS_BUDGET_BYTES);
+  const recovered = JSON.parse(recoveredRaw);
+  assert.equal(recovered.state, 'ready');
+  assert.equal(recovered.dispatch.mode, 'handle');
+  assert.deepEqual(recovered.task, ready.task);
 
   // And the protocol still works: the next phase dispatches normally through the same hooks.
   await f.phase({ large: true });
@@ -1438,6 +1464,25 @@ test('a handle that cannot travel falls back to the full prompt instead of block
   await f.hooks['tool.execute.before']({ ...f.runtime, callID: 'recovered', tool: 'task' }, output);
   assert.equal((await f.status()).state, 'await-result');
   assert.match(output.args.prompt, /Native callID="recovered"/);
+});
+
+test('phase reset restores a compact fresh handle after full-prompt fallback', async t => {
+  const f = await fixture(t);
+  const ready = await f.status();
+  await assert.rejects(f.hooks['tool.execute.before']({ ...f.runtime, callID: 'lost', tool: 'task' },
+    { args: { ...ready.task, prompt: 'unknown substituted prompt' } }), /full phase prompt instead/);
+  assert.equal((await f.status()).dispatch, undefined);
+
+  const resetRaw = await f.hooks.tool.mdd_reset.execute({ scope: 'phase' }, f.context);
+  assert.ok(Buffer.byteLength(resetRaw) <= STATUS_BUDGET_BYTES);
+  const reset = JSON.parse(resetRaw);
+  assert.equal(reset.state, 'ready');
+  assert.equal(reset.dispatch.mode, 'handle');
+  assert.notEqual(reset.task.prompt, ready.task.prompt);
+  assert.ok(reset.task.prompt.startsWith('mdd:dispatch:'));
+  const output = { args: reset.task };
+  await f.hooks['tool.execute.before']({ ...f.runtime, callID: 'reset-recovered', tool: 'task' }, output);
+  assert.equal((await f.status()).state, 'await-result');
 });
 
 // Compaction is not a failure and MDD's state never lived in the transcript. What the coordinator
