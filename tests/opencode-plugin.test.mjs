@@ -67,7 +67,39 @@ test('child termination requires correlated host metadata, a terminal message an
   f.child.parentID = 'unrelated';
   assert.equal(await inspector.stopped(runtime, call, f.output), false);
   delete state.metadata;
-  await assert.rejects(inspector.stopped(runtime, call, f.output), /metadata/);
+  assert.deepEqual(await inspector.liveness(runtime, call), { verdict: 'unknown', detail: 'OpenCode recorded no subagent session for this task, so its state cannot be read.' });
+  assert.equal(await inspector.stopped(runtime, call, f.output), false);
+});
+
+// A restarted or interrupted OpenCode leaves the task marked running and the child's last message
+// open forever, because the process that would have closed them is gone. Waiting for them to
+// close locked a real conversation for good; the host's own status is the evidence that counts.
+test('an orphaned task is stopped once the host has no live loop and the child went silent', async () => {
+  const f = sdkFixture();
+  const clock = { now: 1_000_000_000 };
+  const state = f.parentMessages[0].parts[0].state;
+  state.status = 'running';
+  state.metadata = { sessionId: f.child.id };
+  f.childMessages[0].info = { ...f.childMessages[0].info, time: { created: 5 } };
+  delete f.childMessages[0].info.finish;
+  f.child.time = { created: 1, updated: clock.now - 50 * 60_000 };
+  f.input.client.session.status = async () => ({ data: {} });
+  const aborted = [];
+  f.input.client.session.abort = async options => { aborted.push(options.path.id); return { data: true }; };
+  const inspector = createInspector(f.input, 5000, () => clock.now);
+  const orphan = await inspector.liveness(runtime, call);
+  assert.equal(orphan.verdict, 'stopped');
+  assert.equal(orphan.child, f.child.id);
+  assert.match(orphan.detail, /silent for 50 min/);
+  // Recent activity is not silence: the instant between a dispatch and its loop stays reserved.
+  f.child.time.updated = clock.now - 10_000;
+  assert.equal((await inspector.liveness(runtime, call)).verdict, 'unknown');
+  // A child the host reports working is running, however stale its history looks.
+  f.child.time.updated = clock.now - 50 * 60_000;
+  f.input.client.session.status = async () => ({ data: { [f.child.id]: { type: 'busy' } } });
+  assert.deepEqual(await inspector.liveness(runtime, call), { verdict: 'running', child: f.child.id, detail: `OpenCode reports subagent session ${f.child.id} as busy.` });
+  await inspector.abort(runtime, f.child.id);
+  assert.deepEqual(aborted, [f.child.id]);
 });
 
 async function setupFixture(t) {

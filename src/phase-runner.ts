@@ -153,7 +153,7 @@ export type Consent = { questionReceipts: PriorReceipt[]; usedMessages: string[]
 const RECOVERY_LIMITS: readonly string[] = Object.freeze([
   'This run is not resumed, and cannot be. If it stopped during mdd-apply, the working tree may hold partial changes MDD never recorded: inspect it yourself with git status and git diff before continuing, because MDD cannot tell you what was written.',
   'No phase approval survived. Nothing here authorizes any phase; a new run earns its own consent through its own preflight.',
-  'A native child may still be running after the plugin restarts. Reset requires host evidence that it stopped; a missing result does not prove termination.',
+  'A native child may still be running after the plugin restarts. Reset releases it on host evidence that it stopped, or on the user\'s own latest message saying so (mdd_reset userText), unless OpenCode still reports it busy; a missing result alone does not prove termination.',
   'priorRun.questionReceipts is a historical record of what the user was once asked. It is not current consent and is not loaded as such.',
   'Artifacts appear as data, not as live references: they cannot be re-read through the artifact store, only read here and in the local record.',
 ]);
@@ -187,9 +187,23 @@ const SUMMARY_DETAIL: Record<Answers['summary'], string> = {
   medium: 'The user asked for medium-detail reports: make the summary say what you did, how you did it, and what it means, in a short paragraph. Keep call IDs, routing details and confidence percentages out of it.',
   detailed: 'The user asked for detailed reports: make the summary say what you did, how you did it, which evidence it rests on and what remains uncertain. Keep call IDs and routing details out of it, and never state a confidence percentage.',
 };
+/**
+ * What the host can say about a dispatched child right now. Only `stopped` releases a writer on
+ * its own; `running` is positive evidence that it is still working and outranks anything a person
+ * says; `unknown` is the honest answer when the host kept no usable trace, which is exactly what
+ * an interrupted or restarted OpenCode tends to leave behind.
+ */
+export type Liveness = { verdict: 'stopped' | 'running' | 'unknown'; child?: string; detail: string };
+/** How a pending child was released: by host evidence, or on the word of the user who interrupted it. */
+type Released = Liveness & { released?: 'host' | 'user' };
+const ATTEST_HINT = 'If the user says the subagent is stopped or was interrupted, call mdd_reset again with userText set to their exact latest message: MDD stops it through OpenCode when it can and releases it, unless OpenCode still reports it busy.';
 export type Inspect = {
   /** Positive host evidence only; an absent capability never releases a writer. */
   stopped?(runtime: Runtime, call: TaskCall, returned?: unknown): Promise<boolean>;
+  /** The host's account of a dispatched child. Preferred over `stopped` when present. */
+  liveness?(runtime: Runtime, call: TaskCall): Promise<Liveness>;
+  /** Asks the host to stop a child session. Never evidence by itself: liveness is read again after it. */
+  abort?(runtime: Runtime, child: string): Promise<void>;
   parent(runtime: Runtime, callID?: string, tool?: 'task' | 'question', args?: unknown): Promise<void>;
   result(runtime: Runtime, call: TaskCall, phase: string, output: unknown): Promise<string>;
   /**
@@ -268,7 +282,7 @@ export class PhaseRunner {
         // It reports an attempt whose outcome is unknown, so it must gate a start; the dossier
         // only reports finished evidence and never gates anything. The preserved run still rides
         // along, because blocking a restart is no reason to hide what the last 40 minutes produced.
-        if (marker && marker.state === 'pending') return { state: 'recovery-blocked', sessionID, ...investigation, ...preserved, recoverable: true, reason: 'A previous attempt in this conversation never reported an outcome, so it is not resumed automatically. Its evidence was preserved. Use mdd_reset to release it and start new work here, or open a new conversation. Read-only investigation remains available.' };
+        if (marker && marker.state === 'pending') return { state: 'recovery-blocked', sessionID, ...investigation, ...preserved, recoverable: true, reason: 'A previous attempt in this conversation never reported an outcome, so it is not resumed automatically. Its evidence was preserved. Use mdd_reset to release it and start new work here, or open a new conversation. Read-only investigation remains available. ' + ATTEST_HINT };
       } catch (error) { return { state: 'recovery-blocked', sessionID, ...investigation, ...preserved, recoverable: true, reason: `${error instanceof Error ? error.message : 'Progress is unavailable.'} Use mdd_reset to clear the local marker.` }; }
       if (preserved.priorRun) return { state: 'recoverable', sessionID, ...investigation, ...preserved, recoverable: true, recovery: 'data-only', reason: RECOVERY_REASON };
       return { state: 'not-started', sessionID, ...investigation, ...preserved };
@@ -343,27 +357,87 @@ export class PhaseRunner {
     return callID !== undefined && this.#nativeDispatches.get(sessionID)?.has(callID) === true;
   }
 
-  /** Explicit reset may recheck a child stopped through the host; it never cancels one. */
-  async confirmStopped(sessionID: string, runtime?: Runtime): Promise<void> {
-    const callID = this.#inflight.get(sessionID);
+  /**
+   * The child a reset would have to release, if any: the in-flight dispatch of a live run, or the
+   * call a pending marker names after the process that dispatched it is gone.
+   */
+  #pendingChild(sessionID: string, runtime?: Runtime): { runtime: Runtime; call: TaskCall; marker?: ReturnType<ProgressGuard['read']> } | undefined {
     const pending = this.#runs.get(sessionID) ?? this.#solo.get(sessionID);
-    if (!pending && runtime) {
-      const marker = this.options.progress?.read(sessionID);
-      if (marker?.state !== 'pending' || !marker.callID) return;
-      let stopped = false;
-      try { stopped = await this.inspect.stopped?.(runtime, { sessionID, callID: marker.callID }) === true; } catch { /* Unknown after restart still reserves the writer. */ }
-      if (stopped && !this.#runs.has(sessionID) && !this.#solo.has(sessionID) && isDeepStrictEqual(this.options.progress?.read(sessionID), marker)) {
-        this.options.progress?.write(sessionID, { ...marker, state: 'settled' });
+    if (!pending) {
+      if (!runtime) return undefined;
+      let marker;
+      try { marker = this.options.progress?.read(sessionID); } catch { return undefined; }
+      if (marker?.state !== 'pending' || !marker.callID) return undefined;
+      return { runtime, call: { sessionID, callID: marker.callID }, marker };
+    }
+    const callID = this.#inflight.get(sessionID);
+    if (!callID || pending.state !== 'await-result') return undefined;
+    return { runtime: pending.runtime, call: { sessionID, callID } };
+  }
+
+  async #liveness(runtime: Runtime, call: TaskCall): Promise<Liveness> {
+    if (this.inspect.liveness) {
+      try { return await this.inspect.liveness(runtime, call); }
+      catch { return { verdict: 'unknown', detail: 'OpenCode could not be inspected for this subagent.' }; }
+    }
+    try {
+      if (await this.inspect.stopped?.(runtime, call) === true) return { verdict: 'stopped', detail: 'OpenCode confirmed the subagent stopped.' };
+    } catch { /* Unknown still reserves the writer. */ }
+    return { verdict: 'unknown', detail: 'OpenCode has not confirmed that the subagent stopped.' };
+  }
+
+  /**
+   * Read-only: what the host says about the child a reset would release. It changes nothing, so
+   * status can show it and the coordinator can tell the user what MDD actually sees.
+   */
+  async probe(sessionID: string, runtime?: Runtime): Promise<Liveness | undefined> {
+    const pending = this.#pendingChild(sessionID, runtime);
+    return pending ? this.#liveness(pending.runtime, pending.call) : undefined;
+  }
+
+  /**
+   * Host evidence first. When it has none, the user who interrupted the subagent is the one who
+   * knows, and an interruption or a restarted OpenCode is exactly where the host keeps no usable
+   * trace: refusing their word there left conversations locked with no way out. Their word is
+   * still not taken against positive evidence: MDD asks OpenCode to stop the child first, reads it
+   * again, and refuses only while OpenCode still reports it busy.
+   */
+  async #check(runtime: Runtime, call: TaskCall, attested: boolean): Promise<Released> {
+    let seen = await this.#liveness(runtime, call);
+    if (seen.verdict === 'stopped') return { ...seen, released: 'host' };
+    if (!attested) return seen;
+    if (seen.child && this.inspect.abort) {
+      try { await this.inspect.abort(runtime, seen.child); } catch { /* Liveness is read again either way. */ }
+      seen = await this.#liveness(runtime, call);
+    }
+    return seen.verdict === 'running' ? seen : { ...seen, released: 'user' };
+  }
+
+  /**
+   * Explicit reset may recheck a child stopped through the host. With `attested`, the user's own
+   * latest message says it stopped: MDD then aborts it through the host when it can, and releases
+   * it unless the host still reports it busy. Returns what the host said, for the caller to show.
+   */
+  async confirmStopped(sessionID: string, runtime?: Runtime, attested = false): Promise<Liveness | undefined> {
+    const pending = this.#pendingChild(sessionID, runtime);
+    if (!pending) return undefined;
+    const seen = await this.#check(pending.runtime, pending.call, attested);
+    const { released, ...report } = seen;
+    if (!released) return report;
+    if (pending.marker) {
+      if (!this.#runs.has(sessionID) && !this.#solo.has(sessionID) && isDeepStrictEqual(this.options.progress?.read(sessionID), pending.marker)) {
+        this.options.progress?.write(sessionID, { ...pending.marker, state: 'settled' });
       }
-      return;
+      return report;
     }
-    if (!callID || !pending || pending.state !== 'await-result') return;
-    let stopped = false;
-    try { stopped = await this.inspect.stopped?.(pending.runtime, { sessionID, callID }) === true; } catch { /* Fail closed. */ }
-    if (stopped && this.#inflight.get(sessionID) === callID && pending.state === 'await-result') {
+    const run = this.#runs.get(sessionID) ?? this.#solo.get(sessionID);
+    if (this.#inflight.get(sessionID) === pending.call.callID && run?.state === 'await-result') {
       this.#inflight.delete(sessionID);
-      this.block(sessionID, 'The host confirmed the child stopped. Partial changes remain and must be inspected before continuing.');
+      this.block(sessionID, released === 'host'
+        ? 'The host confirmed the child stopped. Partial changes remain and must be inspected before continuing.'
+        : 'The user confirmed the interrupted subagent stopped, and OpenCode did not report it busy. Partial changes may remain and must be inspected before continuing.');
     }
+    return report;
   }
 
   ownsNativePrompt(sessionID: unknown, callID: unknown, args: unknown): boolean {
@@ -496,7 +570,7 @@ export class PhaseRunner {
     if (this.#inflight.has(run.runtime.sessionID)) {
       run.state = 'await-result';
       run.uncertain = true;
-      run.reason = 'Child termination is unconfirmed. Do not retry, reset, or perform the work inline. Wait for the native task to finish or stop it in OpenCode; preserve and inspect partial changes before continuation.';
+      run.reason = `Child termination is unconfirmed. Do not retry or perform the work inline. Wait for the native task to finish or stop it in OpenCode; preserve and inspect partial changes before continuation. ${ATTEST_HINT}`;
       throw new Error(run.reason);
     }
     if (error instanceof ArtifactWriteError) run.artifactAttempts = error.attempts;
@@ -953,7 +1027,7 @@ export class PhaseRunner {
     if (this.#inflight.get(sessionID) !== callID || pending.state !== 'await-result') return;
     if (!stopped) {
       pending.state = 'await-result';
-      pending.reason = 'Child termination is unconfirmed. Wait for the task or stop it in OpenCode. No retry, reset, fallback, or inline work is safe yet.';
+      pending.reason = `Child termination is unconfirmed. Wait for the task or stop it in OpenCode. No retry, fallback, or inline work is safe yet. ${ATTEST_HINT}`;
       return;
     }
     this.#inflight.delete(sessionID);
@@ -986,7 +1060,7 @@ export class PhaseRunner {
   block(sessionID: string, reason: string): void {
     if (this.#inflight.has(sessionID)) {
       const pending = this.#runs.get(sessionID) ?? this.#solo.get(sessionID);
-      if (pending) { pending.state = 'await-result'; pending.reason = `${reason} Child termination is unconfirmed; no new work or reset is allowed.`; }
+      if (pending) { pending.state = 'await-result'; pending.reason = `${reason} Child termination is unconfirmed; no new work is allowed yet. ${ATTEST_HINT}`; }
       return;
     }
     const run = this.#runs.get(sessionID);
@@ -1013,10 +1087,10 @@ export class PhaseRunner {
    * again; run scope discards the run, its investigation and the local marker so new work can start.
    */
   reset(sessionID: string, scope: 'phase' | 'run'): { scope: 'phase' | 'run'; phase?: Phase; approval?: true; preserved?: { file: string; runID: string } } {
-    if (this.#inflight.has(sessionID)) throw new ValidationError('The child may still be running. Stop or await it in OpenCode before resetting; reset does not cancel a child.');
+    if (this.#inflight.has(sessionID)) throw new ValidationError(`The child may still be running: OpenCode has not confirmed it stopped. ${ATTEST_HINT}`);
     const run = this.#runs.get(sessionID);
     const pending = run ?? this.#solo.get(sessionID);
-    if (!pending && this.options.progress?.read(sessionID)?.state === 'pending') throw new ValidationError('A previous child has unconfirmed liveness. Stop or await it in OpenCode; reset cannot clear the pending marker without host evidence.');
+    if (!pending && this.options.progress?.read(sessionID)?.state === 'pending') throw new ValidationError(`A previous child has unconfirmed liveness: OpenCode has not confirmed it stopped. ${ATTEST_HINT}`);
     if (pending && ['persisting-intent', 'persisting-result'].includes(pending.state)) throw new ValidationError('Wait for the current persistence operation before resetting.');
     if (run) this.#event(run, 'reset');
     if (scope === 'run' || !run) {
@@ -1097,7 +1171,7 @@ export class PhaseRunner {
     if (this.#runs.has(sessionID)) return;
     const marker = this.options.progress?.read(sessionID);
     if (!marker) return;
-    if (marker.state === 'pending') throw new Error('A previous attempt in this conversation never reported an outcome. Inspect mdd_status, then use mdd_reset to release it before starting new work.');
+    if (marker.state === 'pending') throw new Error(`A previous attempt in this conversation never reported an outcome. Inspect mdd_status, then use mdd_reset to release it before starting new work. ${ATTEST_HINT}`);
     if (marker.userMessageID === userMessageID) throw new Error('This exact request already ran in this conversation. Send a new request, or use mdd_reset to start it over deliberately.');
   }
 
@@ -1108,7 +1182,7 @@ export class PhaseRunner {
     if (runtime.agent !== 'mdd-orchestrator') throw new Error('Only mdd-orchestrator may request read-only investigation.');
     const run = this.#runs.get(runtime.sessionID);
     if (!run) {
-      if (this.options.progress?.read(runtime.sessionID)?.state === 'pending') throw new ValidationError('A previous child has unconfirmed liveness. Resolve it in OpenCode before starting another investigation.');
+      if (this.options.progress?.read(runtime.sessionID)?.state === 'pending') throw new ValidationError(`A previous child has unconfirmed liveness. Release it with mdd_reset before starting another investigation. ${ATTEST_HINT}`);
       return this.#soloStart(runtime, purpose);
     }
     if (run.side) throw new Error('A read-only investigation is already in progress for this run; wait for its result.');
@@ -1303,7 +1377,7 @@ export class PhaseRunner {
   #soloFail(solo: Solo, error: unknown, reported?: string): never {
     if (this.#inflight.has(solo.runtime.sessionID)) {
       solo.state = 'await-result';
-      solo.reason = 'Child termination is unconfirmed. Wait for it or stop it in OpenCode; do not reset or redispatch.';
+      solo.reason = `Child termination is unconfirmed. Wait for it or stop it in OpenCode; do not redispatch. ${ATTEST_HINT}`;
       throw new Error(solo.reason);
     }
     if (reported !== undefined) {

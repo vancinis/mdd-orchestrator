@@ -65,6 +65,59 @@ test('reset after restart requires host evidence that the previous child stopped
   assert.equal(runner.status(runtime.sessionID).state, 'not-started');
   assert.equal((await runner.start(request(endpoint), runtime, { requirementsConfirmed: true, userMessageID: 'new-user' })).state, 'ready');
 });
+// The user interrupted the subagent and knows it stopped; OpenCode kept no trace that proves it.
+// Their own latest message releases it, after MDD asks OpenCode to stop it for certain. Only
+// positive evidence that it still works outranks their word.
+test('the user who interrupted a subagent can release it; a busy host still refuses', async t => {
+  const path = root(t); const guard = new ProgressGuard(path);
+  const runtime = { sessionID: 'ses_parent', agent: 'mdd-orchestrator', directory: path, worktree: path };
+  let verdict = 'unknown';
+  const aborted = [];
+  const inspect = {
+    parent: async () => {}, result: async () => '{}',
+    liveness: async () => ({ verdict, child: 'ses_child', detail: `host says ${verdict}` }),
+    abort: async (_runtime, child) => { aborted.push(child); },
+  };
+  const runner = new PhaseRunner(inspect, { progress: guard });
+  guard.write(runtime.sessionID, marker);
+  assert.deepEqual(await runner.probe(runtime.sessionID, runtime), { verdict: 'unknown', child: 'ses_child', detail: 'host says unknown' });
+  // Without the user's word, unknown still reserves the writer, and the refusal says how to go on.
+  await runner.confirmStopped(runtime.sessionID, runtime);
+  assert.throws(() => runner.reset(runtime.sessionID, 'run'), /unconfirmed liveness[\s\S]*userText/);
+  // A host that reports the child working is not overruled, even after being asked to stop it.
+  verdict = 'running';
+  assert.equal((await runner.confirmStopped(runtime.sessionID, runtime, true)).verdict, 'running');
+  assert.deepEqual(aborted, ['ses_child']);
+  assert.deepEqual(guard.read(runtime.sessionID), marker);
+  // Once the host no longer reports it busy, the user's word releases it.
+  verdict = 'unknown';
+  assert.equal((await runner.confirmStopped(runtime.sessionID, runtime, true)).verdict, 'unknown');
+  assert.equal(guard.read(runtime.sessionID).state, 'settled');
+  assert.deepEqual(runner.reset(runtime.sessionID, 'run'), { scope: 'run' });
+});
+
+test('a live dispatch interrupted in this process is released by the user and keeps its run', async t => {
+  const path = root(t); const { endpoint, binding } = await memoryServer(t);
+  binding.directory = path;
+  const runtime = { sessionID: 'ses_parent', agent: 'mdd-orchestrator', directory: path, worktree: path };
+  let verdict = 'unknown';
+  const inspect = { parent: async () => {}, result: async () => '{}', liveness: async () => ({ verdict, detail: `host says ${verdict}` }) };
+  const runner = new PhaseRunner(inspect, { progress: new ProgressGuard(path) });
+  const ready = await runner.start(request(endpoint), runtime, { requirementsConfirmed: true, userMessageID: 'native-user' });
+  const call = { sessionID: runtime.sessionID, callID: 'interrupted' };
+  await runner.before(call, ready.task);
+  assert.equal(runner.status(runtime.sessionID).state, 'await-result');
+  assert.throws(() => runner.reset(runtime.sessionID, 'phase'), /may still be running[\s\S]*userText/);
+  await runner.confirmStopped(runtime.sessionID, runtime, true);
+  const released = runner.status(runtime.sessionID);
+  assert.equal(released.state, 'blocked');
+  assert.match(released.reason, /user confirmed the interrupted subagent stopped/);
+  const again = runner.reset(runtime.sessionID, 'phase');
+  assert.equal(again.scope, 'phase');
+  assert.equal(runner.status(runtime.sessionID).state, 'ready');
+  assert.equal(runner.status(runtime.sessionID).runID, ready.runID);
+});
+
 test('a pending old conversation does not prevent a different native parent from starting', async t => {
   const path = root(t); const guard = new ProgressGuard(path); guard.write('old-parent', marker);
   const { endpoint, binding } = await memoryServer(t); binding.directory = path; binding.id = 'new-parent';

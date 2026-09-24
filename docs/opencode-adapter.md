@@ -526,12 +526,35 @@ Confirmation of phase/side results settles it; final main completion marks it co
 A run is never reconstructed automatically after process loss. Only a marker still `pending`,
 an attempt that never reported an outcome, holds the conversation: status reports it as
 `recovery-blocked` with `recoverable: true`, read-only investigation keeps working, and
-`mdd_reset` releases it in place. Settled or complete markers leave the conversation free for
+`mdd_reset` releases it in place once the child is known to have stopped. Settled or complete markers leave the conversation free for
 new work; only reusing the same native user message is refused, so nothing is silently
 replayed. Other parent IDs use independent marker files, so an old pending or corrupt marker
 never blocks unrelated conversations.
 The marker remains a replay guard and an authorization source for nothing at all. It is not the
 workflow ledger either; that role belongs to the separate run dossier described next.
+
+#### Knowing whether a subagent stopped
+
+A dispatch that never reported holds the conversation until MDD knows its subagent is no longer
+writing. The inspector reads OpenCode's own account of that subagent and returns a `liveness`
+verdict, which `mdd_status` reports for `recovery-blocked` and `await-result` states:
+
+- `stopped` — the task returned; or the subagent finished its last message and OpenCode reports it
+  idle; or OpenCode has no live loop for it and it has been silent for `ORPHAN_QUIET_MS` (2 min).
+  The last case is what an interrupted or restarted OpenCode leaves behind: the parent task part
+  stays `running` and the subagent's last message stays open forever, because the process that
+  would have closed them is gone. `mdd_reset` releases a `stopped` child on its own.
+- `running` — OpenCode reports the subagent `busy` or `retry`. Nothing overrules this.
+- `unknown` — OpenCode kept no usable trace, such as a task with no recorded subagent session, or
+  activity too recent to call silence.
+
+For `unknown`, the user who interrupted the subagent is the one who knows. `mdd_reset({ scope,
+userText })` takes their exact latest native message, proven the same way `mdd_improve` proves
+one. MDD then asks OpenCode to abort that subagent session, reads liveness again, and releases
+the attempt unless OpenCode now reports it busy. The release is recorded as the user's, and the
+blocked reason says partial changes may remain and must be inspected. A paraphrase or an older
+message is refused and releases nothing. Scope `phase` keeps the run and makes the phase
+runnable again; scope `run` discards it. Both keep the evidence.
 
 ### Where `.mdd` lives
 

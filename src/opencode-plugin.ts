@@ -2,7 +2,7 @@ import { tool } from '@opencode-ai/plugin';
 import type { Plugin, PluginInput } from '@opencode-ai/plugin';
 import { isDeepStrictEqual } from 'node:util';
 import { boundedText, PhaseRunner } from './phase-runner.js';
-import type { Inspect, Runtime } from './phase-runner.js';
+import type { Inspect, Liveness, Runtime } from './phase-runner.js';
 import { freezeProfile, setupDiagnostic } from './settings.js';
 import { loadGlobalSettings } from './global-settings.js';
 import { installationPaths } from './installation-paths.js';
@@ -152,7 +152,15 @@ async function readSdk<T>(operation: (signal: AbortSignal) => Promise<T>, timeou
   } finally { controller.abort(); clearTimeout(timer); }
 }
 
-export function createInspector(input: PluginInput, timeout = 5000): Inspect & IntakeInspect {
+/**
+ * How long an idle subagent must have been silent before a task the host still marks running is
+ * treated as orphaned. A working child is reported busy for its whole loop — through long commands
+ * and permission prompts alike — so this only guards the instant between a dispatch and the loop
+ * starting. The user can always release sooner by saying the subagent stopped.
+ */
+export const ORPHAN_QUIET_MS = 2 * 60_000;
+
+export function createInspector(input: PluginInput, timeout = 5000, now: () => number = Date.now): Inspect & IntakeInspect {
   if (!Number.isInteger(timeout) || timeout < 1 || timeout > 5000) throw new Error('Invalid inspection timeout.');
   const session = async (id: string, directory: string) => {
     const response = await readSdk(signal => input.client.session.get({
@@ -172,6 +180,45 @@ export function createInspector(input: PluginInput, timeout = 5000): Inspect & I
       path: { id }, query: { directory, limit: 100 }, signal, throwOnError: true,
     }), timeout);
     return list(response.data, 'message history', HISTORY_MAX);
+  };
+  /**
+   * What OpenCode can say about the child of one dispatched task. A child is stopped when it
+   * finished its last message and the host reports it idle — or, for a task the host left marked
+   * running, when the host has no live loop for the child and it has been silent for a while. That
+   * second case is what an interrupted or restarted OpenCode leaves behind: the task part and the
+   * child's last message are frozen mid-flight because the process that would have closed them is
+   * gone, so waiting for them to close is waiting forever. A child the host reports busy is never
+   * stopped, whatever its history looks like.
+   */
+  const liveness = async (runtime: Runtime, call: { callID: string }, returned?: unknown): Promise<Liveness> => {
+    const history = await messages(runtime.sessionID, runtime.directory);
+    const matches = history.flatMap(message => list(message.parts, 'message parts', PARTS_MAX))
+      .filter(part => part.type === 'tool' && part.tool === 'task' && part.callID === call.callID);
+    if (matches.length !== 1) return { verdict: 'unknown', detail: 'The dispatched task is not uniquely visible in the recent parent history.' };
+    const state = record(matches[0]!.state, 'task state');
+    if (state.status === 'completed' && typeof state.output === 'string' && TASK_ENVELOPE.test(state.output.trim())) return { verdict: 'stopped', detail: 'The task returned its completed result.' };
+    const metadata = state.metadata === undefined ? {} : record(state.metadata, 'task metadata');
+    const child = typeof metadata.sessionId === 'string' ? metadata.sessionId : undefined;
+    if (!child) return { verdict: 'unknown', detail: 'OpenCode recorded no subagent session for this task, so its state cannot be read.' };
+    const info = await session(child, runtime.directory);
+    if (info.parentID !== runtime.sessionID) return { verdict: 'unknown', detail: 'The recorded subagent session does not belong to this conversation.' };
+    const statuses = await readSdk(signal => input.client.session.status({ query: { directory: runtime.directory }, signal, throwOnError: true }), timeout);
+    const current = record(statuses.data, 'session statuses')[child];
+    const hostState = current === undefined ? 'idle' : String(record(current, 'child status').type);
+    if (hostState !== 'idle') return { verdict: 'running', child, detail: `OpenCode reports subagent session ${child} as ${hostState}.` };
+    const last = (await messages(child, runtime.directory)).at(-1);
+    const lastInfo = last ? record(last.info, 'child message') : undefined;
+    const terminal = !!last && lastInfo!.role === 'assistant' && !!record(lastInfo!.time ?? {}, 'child time').completed &&
+      (!!lastInfo!.error || (typeof lastInfo!.finish === 'string' && !['tool-calls', 'unknown'].includes(lastInfo!.finish))) &&
+      !list(last.parts, 'child message parts', PARTS_MAX).some(part => part.type === 'tool' && ['pending', 'running'].includes(String(record(part.state, 'child tool state').status)));
+    const settled = state.status === 'error' || state.status === 'completed' || returned !== undefined;
+    if (terminal && settled) return { verdict: 'stopped', child, detail: `Subagent session ${child} finished its last message and OpenCode reports it idle.` };
+    const updated = record(info.time ?? {}, 'child session time').updated;
+    const quiet = typeof updated === 'number' ? now() - updated : undefined;
+    if (quiet !== undefined && quiet >= ORPHAN_QUIET_MS) {
+      return { verdict: 'stopped', child, detail: `OpenCode has no live loop for subagent session ${child} and it has been silent for ${Math.floor(quiet / 60000)} min: it was interrupted or the process running it ended.` };
+    }
+    return { verdict: 'unknown', child, detail: `OpenCode reports subagent session ${child} idle, but its last activity is too recent to prove it stopped.` };
   };
   const checkWorkspace = (runtime: Runtime) => {
     if (runtime.directory !== input.directory || runtime.worktree !== input.worktree) {
@@ -349,27 +396,13 @@ export function createInspector(input: PluginInput, timeout = 5000): Inspect & I
       return boundedText(match[1], 'delegated phase result', 20000);
     },
     async stopped(runtime, call, returned) {
-      const history = await messages(runtime.sessionID, runtime.directory);
-      const matches = history.flatMap(message => list(message.parts, 'message parts', PARTS_MAX))
-        .filter(part => part.type === 'tool' && part.tool === 'task' && part.callID === call.callID);
-      if (matches.length !== 1) return false;
-      const state = record(matches[0]!.state, 'task state');
-      if (state.status === 'completed' && typeof state.output === 'string' && TASK_ENVELOPE.test(state.output.trim())) return true;
-      if (state.status !== 'error' && state.status !== 'completed' && returned === undefined) return false;
-      const metadata = record(state.metadata, 'task metadata');
-      if (typeof metadata.sessionId !== 'string') return false;
-      const child = await session(metadata.sessionId, runtime.directory);
-      if (child.parentID !== runtime.sessionID) return false;
-      const childHistory = await messages(metadata.sessionId, runtime.directory);
-      const last = childHistory.at(-1);
-      if (!last) return false;
-      const info = record(last.info, 'child message');
-      if (info.role !== 'assistant' || !record(info.time, 'child time').completed) return false;
-      if (!info.error && (typeof info.finish !== 'string' || ['tool-calls', 'unknown'].includes(info.finish))) return false;
-      if (list(last.parts, 'child message parts', PARTS_MAX).some(part => part.type === 'tool' && ['pending', 'running'].includes(String(record(part.state, 'child tool state').status)))) return false;
-      const statuses = await readSdk(signal => input.client.session.status({ query: { directory: runtime.directory }, signal, throwOnError: true }), timeout);
-      const current = record(statuses.data, 'session statuses')[metadata.sessionId];
-      return current === undefined || record(current, 'child status').type === 'idle';
+      return (await liveness(runtime, call, returned)).verdict === 'stopped';
+    },
+    async liveness(runtime, call) {
+      return liveness(runtime, call);
+    },
+    async abort(runtime, child) {
+      await readSdk(signal => input.client.session.abort({ path: { id: child }, query: { directory: runtime.directory }, signal, throwOnError: true }), timeout);
     },
     /**
      * What the phase cost, taken from the child session the task envelope already names in its
@@ -603,8 +636,15 @@ const plugin: Plugin = async input => {
               if (pending) recovery = { pendingStart: { requirements: pending.requirements } };
             } catch { recovery = { recovery: 'unavailable', reason: 'The original objective cannot be recovered safely from native history. Restate it in a fresh parent; do not resume uncertain execution.' }; }
           }
+          // Work that never reported is where the user asks "is it still running?", so status
+          // answers with what OpenCode actually says instead of leaving it to be guessed.
+          let liveness = {};
+          if (['recovery-blocked', 'await-result'].includes(String(status.state))) {
+            try { const seen = await runner.probe(context.sessionID, context); if (seen) liveness = { liveness: seen }; }
+            catch { /* Status never fails because a probe did. */ }
+          }
           return reply({
-            ...status, ...recovery,
+            ...status, ...recovery, ...liveness,
             runtime: { sessionID: context.sessionID, directory: context.directory, worktree: context.worktree, agent: context.agent },
           }, args.detail ?? 'compact');
         },
@@ -628,12 +668,28 @@ const plugin: Plugin = async input => {
         },
       }),
       mdd_reset: tool({
-        description: 'Release stopped MDD work in this conversation. Scope phase makes the current phase runnable again; scope run forgets the run so a new objective can start here. Recorded artifacts and memory are never deleted.',
-        args: { scope: tool.schema.enum(['phase', 'run']).describe('phase releases the current attempt; run discards the run state for this conversation.') },
+        description: 'Release stopped MDD work in this conversation. Scope phase makes the current phase runnable again; scope run forgets the run so a new objective can start here. Recorded artifacts and memory are never deleted. When a subagent was interrupted and OpenCode cannot confirm it stopped, pass userText with the user\'s exact latest message saying it stopped: MDD stops it through OpenCode when it can and releases it, unless OpenCode still reports it busy.',
+        args: {
+          scope: tool.schema.enum(['phase', 'run']).describe('phase releases the current attempt; run discards the run state for this conversation.'),
+          userText: tool.schema.string().min(1).optional().describe('Only when the user says the interrupted subagent is stopped: their exact latest native message, without rewriting.'),
+        },
         async execute(args, context) {
           enter(context, 'mdd_reset');
-          await runner.confirmStopped(context.sessionID, context);
-          return reply(intake.reset(context, args.scope));
+          let attested = false;
+          if (args.userText !== undefined) {
+            if (context.abort.aborted) throw new Error('The reset was aborted.');
+            // The same proof mdd_improve and change requests require: the user's word releases a
+            // subagent only when it is the user's actual latest message, never the model's summary.
+            try { await inspector.intake(context, boundedText(args.userText, 'user confirmation', 12000), context.messageID); }
+            catch { throw new Error('userText must be the user\'s exact latest message in this conversation, unchanged. Nothing was released.'); }
+            attested = true;
+          }
+          const seen = await runner.confirmStopped(context.sessionID, context, attested);
+          try { return reply({ ...record(intake.reset(context, args.scope), 'reset'), ...(seen ? { liveness: seen } : {}) }); }
+          catch (error) {
+            if (!seen || seen.verdict === 'stopped') throw error;
+            throw new Error(`${error instanceof Error ? error.message : 'Reset was refused.'} What OpenCode reports: ${seen.detail}`);
+          }
         },
       }),
       mdd_context: tool({

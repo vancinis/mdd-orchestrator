@@ -71,9 +71,23 @@ export function nextAction(status: unknown): NextAction | undefined {
       why: 'An earlier objective in this conversation never got past setup. Use these exact arguments only if the user is continuing that same objective; for a different goal, start from their actual latest text instead.' };
   }
 
+  // What OpenCode says about a subagent that never reported, when status could ask it.
+  const liveness = object(value.liveness);
+  const verdict = typeof liveness?.verdict === 'string' ? liveness.verdict : undefined;
+  const attest = 'If the user says the subagent is stopped or was interrupted, call mdd_reset with userText set to their exact latest message; MDD stops it through OpenCode when it can and releases it.';
+
   if (state === 'recovery-blocked') {
     return { tool: 'mdd_reset', args: { scope: 'run' },
-      why: 'A previous attempt here never reported an outcome, so it is not resumed automatically. Releasing it frees this conversation; the evidence it produced is preserved and is never deleted by a reset.' };
+      why: `A previous attempt here never reported an outcome, so it is not resumed automatically. Releasing it frees this conversation; the evidence it produced is preserved and is never deleted by a reset. ${verdict === 'stopped' ? 'OpenCode confirms its subagent stopped, so this reset releases it.' : verdict === 'running' ? 'OpenCode still reports its subagent busy: wait for it or stop it in OpenCode first.' : attest}` };
+  }
+
+  if (state === 'await-result' && verdict === 'stopped') {
+    return { tool: 'mdd_reset', args: { scope: 'phase' },
+      why: 'The dispatched subagent never reported, and OpenCode confirms it stopped. Scope phase releases that attempt and keeps the run; inspect partial changes before the phase runs again.' };
+  }
+  if (state === 'await-result' && verdict === 'unknown') {
+    return { tool: 'mdd_status',
+      why: `The dispatched subagent has not reported and OpenCode cannot confirm whether it stopped. Never redispatch it while it may run. ${attest} Use scope phase to keep the run.` };
   }
 
   if (state === 'blocked' || state === 'stopped') {

@@ -878,9 +878,20 @@ test('restart detects pending work without repeating memory writes', async t => 
   await assert.rejects(restarted.tool.mdd_start.execute({ requirements: 'Rerun while still pending.' }, f.context), /mdd_reset/);
   assert.equal(f.writes.length, writes);
   // Reset cannot manufacture evidence that the old child stopped.
-  await assert.rejects(restarted.tool.mdd_reset.execute({ scope: 'run' }, f.context), /unconfirmed liveness/);
-  assert.equal(JSON.parse(await restarted.tool.mdd_status.execute({}, f.context)).state, 'recovery-blocked');
+  await assert.rejects(restarted.tool.mdd_reset.execute({ scope: 'run' }, f.context), /unconfirmed liveness[\s\S]*userText[\s\S]*What OpenCode reports/);
+  const blocked = JSON.parse(await restarted.tool.mdd_status.execute({}, f.context));
+  assert.equal(blocked.state, 'recovery-blocked');
+  // Status says what OpenCode actually sees, and how the user's word gets the conversation out.
+  assert.equal(blocked.liveness.verdict, 'unknown');
+  assert.match(blocked.nextAction.why, /userText/);
   assert.equal(f.writes.length, writes);
+  // The user's word is their own latest message, never the model's paraphrase of it.
+  f.user('El subagente está detenido, podés continuar.');
+  await assert.rejects(restarted.tool.mdd_reset.execute({ scope: 'run', userText: 'The user confirmed it stopped.' }, f.context), /exact latest message/);
+  assert.equal(JSON.parse(await restarted.tool.mdd_status.execute({}, f.context)).state, 'recovery-blocked');
+  const released = JSON.parse(await restarted.tool.mdd_reset.execute({ scope: 'run', userText: 'El subagente está detenido, podés continuar.' }, f.context));
+  assert.equal(released.state, 'not-started');
+  assert.equal(released.liveness.verdict, 'unknown');
 });
 
 for (const stage of ['confirmation', 'preflight']) {

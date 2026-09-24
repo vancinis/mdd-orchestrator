@@ -166,6 +166,17 @@ test('assets: the coordinator delivers a recorded run without a new run or prefl
   assert.match(skill, /A user request naming them is that authority/);
 });
 
+// An interrupted subagent locked a conversation for good: the user knew it stopped, OpenCode had
+// no trace proving it, and the coordinator was told no reset could ever pass.
+test('assets: the coordinator releases an interrupted subagent on the user\'s own word', () => {
+  const text = fs.readFileSync('assets/opencode/agents/mdd-orchestrator.md', 'utf8');
+  assert.match(text, /status\.liveness says what OpenCode sees/);
+  assert.match(text, /call\nmdd_reset once with userText equal to their exact latest message/);
+  assert.match(text, /releases it unless OpenCode reports it busy/);
+  assert.doesNotMatch(text, /refuses while termination remains unknown/);
+  assert.ok(Buffer.byteLength(text) <= 16000, 'the coordinator must fit the installer asset limit');
+});
+
 test('assets: mdd-doc shapes prose only and never widens a read-only phase', () => {
   const text = fs.readFileSync('assets/opencode/skills/mdd-doc/SKILL.md', 'utf8');
   assert.match(text, /never\n?changes the result schema/);

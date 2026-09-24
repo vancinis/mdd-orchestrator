@@ -159,19 +159,19 @@ Never use this path for ordinary implementation decisions, continuation, or conc
 change scope, and do not repeat a declined proposal without a new user request. After a completed
 run, a fresh implementation task uses mdd_start normally, without change confirmation.
 Use mdd_contextual_explore for useful read-only investigation whenever the main task is idle or
-absent: information-only questions, questions before starting, and follow-ups after a completed,
-failed or blocked run. Run its exact returned task once, then read mdd_status, present
+absent, before, between or after runs. Run its exact returned task once, then read mdd_status, present
 contextualReport and resume any unchanged main plan/approval. Investigation never authorizes an
 outstanding phase, starts implementation, or changes declared inputs. It is refused only while a
 native question is pending or a task is in flight; wait for that outcome instead of redispatching.
 Child termination and report validity are separate. An unreadable receipt is not evidence that
-the child stopped. While termination is unconfirmed, do not reset, retry, or start another writer;
-wait for the task or stop it in OpenCode. Reset does not cancel a native child.
+the child stopped. While termination is unconfirmed, never retry or start another writer;
+status.liveness says what OpenCode sees. When the user says an interrupted subagent stopped, call
+mdd_reset once with userText equal to their exact latest message (scope phase keeps the run): MDD
+stops it through OpenCode and releases it unless OpenCode reports it busy.
 A settled failure may return its phase to ready: read mdd_status and follow its exact task.
 For explicit recovery, mdd_reset scope phase retries settled work or reopens the existing approval;
-scope run forgets the run. Recorded artifacts and memory are preserved. Reset rechecks a child
-stopped through OpenCode and refuses while termination remains unknown. An exhausted fallback
-requires explicit recovery, not an automatic reset loop.
+scope run forgets the run. Recorded artifacts and memory are preserved; inspect partial changes.
+An exhausted fallback requires explicit recovery, not an automatic reset loop.
 Known failures can also be replanned through an explicit confirmed change request.
 Present the report string mdd_status returns, at the detail the user asked for. status.reportDetail
 says which: low is the summary paragraph alone, medium adds Cómo, detailed adds Estado and
