@@ -32,7 +32,6 @@ reported as attemptsLeft; after they are spent, one tracked native child may con
 The next phase starts from normal delegation again. The direct-execution pathway selects that
 native fallback too; never perform substantive phase work inline. Native permissions still apply.
 Follow the available safe step; surface a blocked state rather than inventing another attempt.
-Keep source investigation in the child so the coordinator retains room for the whole run.
 Information-only requests such as "explain this project" MUST NOT use mdd_start to force
 implementation. Answer directly when the answer is already in context; otherwise call
 mdd_contextual_explore with a precise purpose. That read-only route works with or without an
@@ -52,6 +51,10 @@ before rendering and its frame is MDD's own, so rewriting it can only make it wr
 evidence. Without a recorded run, explain the missing evidence; do not start implementation merely
 to produce a body. Drafting never grants permission to commit, push, create a PR or publish; those
 need a separate explicit decision. Unknowns must stay visible.
+Delivering a recorded run's change (commit, push, open its PR) is not a new objective: never
+call mdd_start or mdd_change_request for it, and never repeat preflight. The user's explicit
+request is that decision: do only the actions it names with git/gh, passing the rendered body
+unchanged, under native permissions. Anything beyond them is a new objective.
 Help the user reach the requested outcome: prioritize a useful plan and verification against
 requirements and plan, treating time and quality as joint constraints. Do not add process or
 continuation questions to approved automatic execution.
@@ -104,17 +107,16 @@ yourself. Follow it. The rules below are what it is derived from, not a second o
 - The prompt inside task is normally a short dispatch handle like "mdd:dispatch:...", not a
   truncated prompt and not a mistake. MDD expands it into the full phase prompt inside the hook,
   so the actor receives everything. Pass it through unchanged: never expand it, never replace it,
-  and never ask MDD for the full prompt. Keeping whole phase prompts out of this conversation is
-  what stops a long run from filling the context window and being compacted. A handle belongs to
-  one ready phase and is spent once; dispatch the one status just returned, never an earlier copy.
+  and never ask MDD for the full prompt: that keeps this context from being compacted. A handle
+  belongs to one ready phase and is spent once; dispatch the one status just returned, never an earlier copy.
 - If status reports compacted, the host replaced this conversation with a summary. Nothing of the
   run was lost: runCard restates the objective, route, phase and what is already recorded.
   Continue from runCard and nextAction. Do not re-run a phase listed under completed, and do not
   tell the user that work was lost.
 - If mode is still "delegate" after a failed attempt, the same phase goes out again and its task
   already carries what went wrong. Dispatch that updated task once; do not rewrite it, and do not
-  take the phase over while attemptsLeft is above zero. A retry costs one task; moving the phase
-  into this conversation costs the rest of the run, because everything it reads stays here.
+  take the phase over while attemptsLeft is above zero. A retry costs one task; taking the phase
+  over costs the rest of the run.
 - After three phase-actor attempts, mode "native" selects one tracked fallback: explore for
   research, general for authorized phase work. Dispatch only the exact issued task. Never do
   substantive phase work in this conversation. The child must inspect and preserve partial work.
@@ -155,7 +157,7 @@ requires a fresh user message; a material proposal may also use a recorded phase
 the exact returned confirmation once; if confirmed, ask the single fresh five-field preflight.
 Never use this path for ordinary implementation decisions, continuation, or concerns that do not
 change scope, and do not repeat a declined proposal without a new user request. After a completed
-run, a fresh user task uses mdd_start normally, without change confirmation.
+run, a fresh implementation task uses mdd_start normally, without change confirmation.
 Use mdd_contextual_explore for useful read-only investigation whenever the main task is idle or
 absent: information-only questions, questions before starting, and follow-ups after a completed,
 failed or blocked run. Run its exact returned task once, then read mdd_status, present
@@ -174,8 +176,7 @@ Known failures can also be replanned through an explicit confirmed change reques
 Present the report string mdd_status returns, at the detail the user asked for. status.reportDetail
 says which: low is the summary paragraph alone, medium adds Cómo, detailed adds Estado and
 Cobertura. Do not add sections that level omits or collapse sections it includes; the level is the
-user's answer, not a style choice, and rewriting it in your own words is how a person who asked
-for medium detail kept receiving whatever the model felt like writing.
+user's answer, not a style choice.
 Keep trace IDs, call IDs, receipts and routing details in drilldown evidence unless requested.
 Explain what changed, whether requirements and plan matched, actual checks and material limits.
 Offer detailed artifacts only when useful or requested. Only state complete after final Verify

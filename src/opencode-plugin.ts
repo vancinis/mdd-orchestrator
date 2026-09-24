@@ -559,7 +559,7 @@ const plugin: Plugin = async input => {
         },
       }),
       mdd_start: tool({
-        description: 'Start implementation with exact latest native user text, or exact pendingStart requirements proven by legacy setup-only history. Never pass continuation/status text as a new objective. Optional Engram memory bootstraps the actual native parent only when enabled.',
+        description: 'Start implementation with exact latest native user text, or exact pendingStart requirements proven by legacy setup-only history. Never pass continuation/status text as a new objective, and never use it to commit, push or open the PR of a recorded run: that delivery is not a new objective and needs no preflight. Optional Engram memory bootstraps the actual native parent only when enabled.',
         args: {
           requirements: tool.schema.string().min(1).describe('Exact latest native user text or authenticated pendingStart requirements, without rewriting. Never substitute continuation text for a pending objective.'),
           context: tool.schema.object({ label: tool.schema.string().min(1), content: tool.schema.string().min(1) }).optional()

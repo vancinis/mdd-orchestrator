@@ -15,7 +15,7 @@ Load when the user requests a PR or PR body. Draft only for the authorized chang
 
 - The body is written in Spanish: it is read by a reviewer, not by MDD. Quoted commands, paths and identifiers stay verbatim.
 - Recorded prose is English, so drafting takes two calls: ask for the text, translate it, send it back. Translate only — keep every number, path, identifier and command exactly, add no fact and drop none.
-- Separate drafting from permission to commit, push or create a PR; obtain explicit authority for those actions.
+- Separate drafting from permission to commit, push or create a PR; obtain explicit authority for those actions. A user request naming them is that authority: deliver the recorded run as it is, without a new run or preflight.
 - Use observed changes and verification evidence. Never invent tests, deployments, configuration or issue links.
 - Keep all seven template headings in order. Write `No aplica.` for absent optional information; label unknown facts as unverified.
 - `Resumen` says what the change delivers and what it enables. It never describes how the work was done: the per-file reasons already carry that.

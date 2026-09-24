@@ -153,6 +153,19 @@ test('assets: the coordinator hands gathered context to MDD instead of editing a
   assert.match(text, /refused\nrather than silently cut/);
 });
 
+// After a verified run, "haz commit y abre un pr a staging" started a new intake and asked all five
+// preflight questions again: delivering a recorded change is not a new objective.
+test('assets: the coordinator delivers a recorded run without a new run or preflight', () => {
+  const text = fs.readFileSync('assets/opencode/agents/mdd-orchestrator.md', 'utf8');
+  assert.match(text, /Delivering a recorded run's change \(commit, push, open its PR\) is not a new objective/);
+  assert.match(text, /never\ncall mdd_start or mdd_change_request for it, and never repeat preflight/);
+  assert.match(text, /The user's explicit\nrequest is that decision: do only the actions it names/);
+  assert.match(text, /a fresh implementation task uses mdd_start normally/);
+  assert.ok(Buffer.byteLength(text) <= 16000, 'the coordinator must fit the installer asset limit');
+  const skill = fs.readFileSync('assets/opencode/skills/mdd-pr-body/SKILL.md', 'utf8');
+  assert.match(skill, /A user request naming them is that authority/);
+});
+
 test('assets: mdd-doc shapes prose only and never widens a read-only phase', () => {
   const text = fs.readFileSync('assets/opencode/skills/mdd-doc/SKILL.md', 'utf8');
   assert.match(text, /never\n?changes the result schema/);

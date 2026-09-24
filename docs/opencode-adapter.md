@@ -254,7 +254,11 @@ confirmed. Only a task that is actually running postpones a change request; a st
 failed run is always changeable, and `mdd_reset` releases a dispatch that never reported.
 Harmless incorrect task/question parameters are rejected before effects without poisoning a
 ready plan. A completed run accepts a fresh next task through normal `mdd_start`, using the
-startup profile without an additional change confirmation. Permissions/models are not widened
+startup profile without an additional change confirmation. Delivering the recorded change —
+committing it, pushing it, opening its PR — is not such a task: the coordinator never calls
+`mdd_start` or `mdd_change_request` for it and never repeats preflight. The user's explicit request
+is the separate decision drafting lacks; the coordinator performs only the actions it names with
+git/gh, passes the rendered `mdd_pr_body` output unchanged, and native permissions still apply. Permissions/models are not widened
 by confirming a material change.
 
 ### Contextual exploration
