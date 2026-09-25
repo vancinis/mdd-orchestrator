@@ -94,10 +94,10 @@ export const PHASE_AGENTS: readonly string[] = Object.freeze([
  * them was a sentence in its prompt asking it not to.
  *
  * `task` goes because a phase actor is the actor: it carries the phase out itself, and anything
- * it delegated would run under instructions MDD never composed. `skill` goes because the skills
- * a phase needs are already inlined in its prompt by value and digest, so a name lookup against
- * the shared registry can only find something else. The coordinator keeps both: it dispatches
- * phases, and its own work is not a phase.
+ * it delegated would run under instructions MDD never composed. `skill` goes because a phase that
+ * wants an applicable packaged skill already has its direct path in the prompt; a name lookup
+ * against the shared registry can only find something else. The coordinator keeps both: it
+ * dispatches phases, and its own work is not a phase.
  */
 export function pinPhaseAgents(config: { agent?: Record<string, Record<string, unknown>> }): void {
   config.agent ??= {};

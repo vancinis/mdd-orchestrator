@@ -315,13 +315,15 @@ and the permission prompt is where the user makes it.
 the native permission request is the moment to assess that. Indirect behaviour is never
 semantically certified by MDD.
 
-Native skill loading still yields to packaged instructions: skill text, path and digest are
-injected before dispatch so a same-named global skill cannot shadow them. Apply receives
-`mdd-cleanup/SKILL.md`. Explore, Plan, Propose, Spec, Design and Verify receive
-`mdd-doc/SKILL.md`, which shapes only the readable `artifact` prose and costs about 3.9% of
-the phase context budget; Tasks and Apply carry structure rather than narrative and do not
-pay for it. Standalone investigation receives it too. The `mdd_pr_body` tool reads the fixed
-packaged PR skill/template with path/digest provenance; no name-based skill lookup occurs.
+Native skill loading still yields to packaged instructions, but the skill body itself is never
+injected by value: the phase prompt names the applicable packaged skill by its direct absolute
+path, one line, no content and no digest, so a same-named global skill cannot be reached by name
+and a phase actor that finds the path useful reads it with its own read tool. Apply is offered
+`mdd-cleanup/SKILL.md`. Explore, Plan, Propose, Spec, Design and Verify are offered
+`mdd-doc/SKILL.md` and `cognitive-doc-design/SKILL.md`; Tasks and Apply carry structure rather
+than narrative and are offered no documentation skill. Standalone investigation is offered the
+same documentation paths. The `mdd_pr_body` tool reads the fixed packaged PR skill/template with
+path/digest provenance; no name-based skill lookup occurs there either.
 
 ### Delegation and the inline route
 

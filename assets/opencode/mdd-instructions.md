@@ -23,9 +23,11 @@ phase unless the task prompt says otherwise.
 
 ## Skills
 
-The MDD skills your phase needs are inlined in the task prompt with their path and digest. Use
-that text. Do not load a skill by name to obtain them: a name resolves against the shared
-registry, where another tool's skill may answer to it.
+An applicable packaged skill, if any, is named in the task prompt by its direct file path. Its
+text is not included: reading it is optional, worth doing only if it actually helps this phase,
+and grants no extra scope or permission either way. When you do read one, read that exact path
+with your own read tool. Do not load a skill by name to obtain it: a name resolves against the
+shared registry, where another tool's skill may answer instead.
 
 ## Evidence
 

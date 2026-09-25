@@ -21,9 +21,10 @@ export const MDD_ASSETS = Object.freeze([
  *
  * The upstream `cognitive-doc-design` skill is here for a second reason: it is a widely installed
  * community skill, so writing MDD's copy into the shared skills directory would either collide
- * with the user's own or be shadowed by it. Injected by value with its digest, the text a phase
- * receives is the one MDD ships, whatever else answers to that name. Its NOTICE travels with it
- * because the file stays verbatim Apache-2.0 material inside an MIT package.
+ * with the user's own or be shadowed by it. A phase prompt offers its packaged path directly
+ * instead, so the file an actor reads — if it reads one at all — is the one MDD ships, whatever
+ * else answers to that name. Its NOTICE travels with it because the file stays verbatim
+ * Apache-2.0 material inside an MIT package.
  */
 export const MDD_PACKAGED_ASSETS = Object.freeze([...MDD_ASSETS, 'assets/opencode/mdd-instructions.md',
   'assets/opencode/skills/cognitive-doc-design/SKILL.md', 'assets/opencode/skills/cognitive-doc-design/NOTICE']);

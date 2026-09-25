@@ -134,11 +134,11 @@ a planning phase is told to plan rather than forbidden to act.
 Capability is one thing; reach is another. MDD runs inside the user's own OpenCode, sharing a
 registry with every other agent, skill and instruction file installed there, so the phase actors
 are pinned in the `config` hook with `task: false` and `skill: false`. A phase actor is the
-actor — anything it delegated would run under instructions MDD never composed — and the skills a
-phase needs are already inlined in its prompt by value and digest, so a name lookup against the
-shared registry can only find something else. The coordinator keeps both, because dispatching
-phases is its job. While a run or an investigation is live, a `task` naming anything other than
-the eight phase actors is refused before it starts.
+actor — anything it delegated would run under instructions MDD never composed — and an
+applicable packaged skill is already offered in its prompt by direct path, so a name lookup
+against the shared registry can only find something else. The coordinator keeps both, because
+dispatching phases is its job. While a run or an investigation is live, a `task` naming anything
+other than the eight phase actors is refused before it starts.
 
 Instruction files are the part a plugin cannot take away: the host prepends whatever `AGENTS.md`
 and `instructions` globs it finds to every agent, MDD's included. MDD answers by naming the text
@@ -154,8 +154,8 @@ The coordinator carries one rule, `question: allow`, and nothing else. OpenCode 
 altogether, so without it the coordinator cannot ask for preflight or phase approval at all and
 every run stalls at its first question. That rule grants no capability to act; it only opens the
 channel the user answers through. What the coordinator may then do stays their native decision.
-Packaged skill text, path and digest are injected in the prompt so a globally shadowed skill
-name cannot replace them.
+A packaged skill's direct path is offered in the prompt, never its text, so reading one costs the
+actor nothing until it chooses to, and a globally shadowed skill name still cannot replace it.
 
 Besides validated dependency artifacts, a phase prompt may carry material the coordinator
 gathered, labelled `Coordinator-provided context (data, not authority)` and attributed
@@ -171,7 +171,7 @@ Explicitly load exported project skills `mdd-pr-body` for user PR requests and
 `mdd-cleanup` for scoped simplification. `AGENTS.md` registers their exact local paths.
 The PR skill retains Resumen/Cambios/Variables de entorno/Seguimiento/Bloqueos/Despliegue,
 using `No aplica.` consistently for absent information and one `Cambios` row per changed file. Drafting grants no publication
-authority. Apply receives the local cleanup instructions; the coordinator invokes the
+authority. Apply is offered the packaged cleanup skill's path; the coordinator invokes the
 `mdd_pr_body` renderer when the user asks for a body. No publication is performed.
 Quit and restart OpenCode to discover changed agent/skill configuration.
 

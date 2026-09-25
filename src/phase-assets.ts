@@ -10,11 +10,16 @@ export function phaseName(value: string): Phase {
 }
 
 export type PackagedSkill = { path: string; digest: string; content: string };
+export type PackagedSkillName = 'mdd-cleanup' | 'mdd-doc' | 'cognitive-doc-design';
 /**
- * Injects the exact packaged skill text with its path and digest, so a global skill of the same
- * name cannot shadow these instructions.
+ * Validates the packaged skill and returns its path. A phase actor reads this path directly with
+ * its own read tool rather than receiving the body by value: the content used to be JSON-escaped
+ * into every prompt that needed it, which paid its full byte cost twice — once for the
+ * orchestrator handing off the task, once for the actor holding the same text in context. The
+ * path costs one line and the skill stays exactly as reachable, because resolving it by name
+ * would still hit the shared registry, where a same-named skill from another tool answers first.
  */
-function packagedSkill(name: string): PackagedSkill {
+export function packagedSkillPath(name: PackagedSkillName): string {
   const path = fileURLToPath(new URL(`../assets/opencode/skills/${name}/SKILL.md`, import.meta.url));
   const digest = fileDigest(path);
   if (digest === 'absent') throw new Error(`The packaged ${name} skill is missing. Restore the MDD installation.`);
@@ -23,19 +28,8 @@ function packagedSkill(name: string): PackagedSkill {
   if (Buffer.byteLength(content) > 16000 || !front || !front[1]!.split(/\r?\n/).includes(`name: ${name}`)) {
     throw new Error(`Invalid local ${name} skill.`);
   }
-  return { path, digest, content };
+  return path;
 }
-export function cleanupInstructions(): PackagedSkill { return packagedSkill('mdd-cleanup'); }
-export function docInstructions(): PackagedSkill { return packagedSkill('mdd-doc'); }
-/**
- * The upstream community skill, shipped verbatim under its own Apache-2.0 notice and delivered
- * beside `mdd-doc` rather than instead of it. `mdd-doc` holds the rules that are specific to an
- * MDD artifact — the appended links section, the artifact byte limit, the read-only phases — and
- * this one holds the general cognitive-load patterns a reader of any document benefits from. Both
- * travel by value: resolving either by name would reach the shared registry, where a same-named
- * skill from another tool answers first.
- */
-export function cognitiveDocInstructions(): PackagedSkill { return packagedSkill('cognitive-doc-design'); }
 
 /**
  * MDD's own actor instructions. The host prepends whatever `AGENTS.md` and `instructions` files

@@ -24,7 +24,8 @@ instead — which is exactly the failure MDD's own by-value injection exists to 
 `cognitive-doc-design` is upstream Apache-2.0 material kept verbatim under its own `NOTICE`, and
 it is the one packaged skill MDD never installs into the shared skills directory: that name is
 widely taken, so a copy written there would collide with the user's own. Documentary phases
-receive it by value beside `mdd-doc`, which wins wherever the two disagree about an MDD artifact.
+receive its packaged path alongside `mdd-doc`'s, which wins wherever the two disagree about an
+MDD artifact; neither body is inlined into a phase prompt.
 
 Drafting a PR does not authorize commit, push or publication. Keep changes within the approved
 scope.
