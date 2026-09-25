@@ -50,6 +50,14 @@ export function nextAction(status: unknown): NextAction | undefined {
       why: 'A native question is pending. Ask it once, exactly as it is here, and answer nothing on the user\'s behalf. While it is pending it is the only question the user should see.' };
   }
 
+  // A failed verification is the one stop whose useful next step is not the same phase again:
+  // re-checking an unchanged implementation reproduces the same failure. It outranks the exhausted
+  // fallback notice because the findings are recorded, whatever route produced them.
+  if (state === 'blocked' && typeof value.reworkable === 'string') {
+    return { tool: 'mdd_reset',
+      why: `Verification reported failure and its findings are recorded. Present them and let the user choose: to correct them, call mdd_reset with scope rework and userText set to their exact latest message asking for it, which sends the run back to ${value.reworkable} with the findings; to re-check without changes, scope phase. Never choose for them.` };
+  }
+
   if (value.fallbackExhausted === true) return { tool: 'mdd_status', why: 'Native fallback is exhausted. Present the blocked reason and request explicit recovery; do not automatically reset, redispatch, or perform the work inline.' };
   if (value.reportRepairExhausted === true) return { tool: 'mdd_status', why: 'Report repair is exhausted. Present the retained report and request explicit recovery; never rerun substantive work to repair its wording.' };
 

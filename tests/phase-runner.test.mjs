@@ -450,12 +450,19 @@ test('run context: an over-budget contribution fails clearly instead of truncati
   const { runner, endpoint } = await fixture(t);
   const ready = await runner.start(request(endpoint), runtime);
   runner.contribute({ label: 'Held', content: 'x'.repeat(5000) }, runtime);
-  assert.throws(() => runner.contribute({ label: 'Too big', content: 'y'.repeat(4000) }, runtime),
-    /above the 8000-byte limit[\s\S]*Nothing was recorded and nothing was truncated[\s\S]*5004 bytes are already held/);
-  assert.throws(() => runner.contribute({ label: 'Single', content: 'y'.repeat(8001) }, runtime), /at most 8000 bytes/);
+  // A second contribution that keeps the composed prompt well inside the hard bound succeeds even
+  // though the combined size is above the old, now-removed 8000-byte aggregate cap.
+  runner.contribute({ label: 'More', content: 'x'.repeat(5000) }, runtime);
+  assert.equal(runner.status(runtime.sessionID).providedContext.length, 2);
+  // A single entry stays bounded by the same ceiling the composed prompt is checked against.
+  assert.throws(() => runner.contribute({ label: 'Single', content: 'y'.repeat(96001) }, runtime), /at most 96000 bytes/);
+  // A contribution that would push the composed prompt itself past the hard bound fails
+  // explicitly, without truncating and without being recorded.
+  assert.throws(() => runner.contribute({ label: 'Too big', content: 'z'.repeat(90000) }, runtime),
+    /combined phase handoff must be nonempty text of at most 96000 bytes/);
   const status = runner.status(runtime.sessionID);
-  assert.equal(status.providedContext.length, 1);
-  assert.ok(!status.task.prompt.includes('yyy'));
+  assert.equal(status.providedContext.length, 2);
+  assert.ok(!status.task.prompt.includes('zzz'));
   // The refused contribution left a dispatchable task behind, unchanged.
   assert.deepEqual(status.task, runner.status(runtime.sessionID).task);
   assert.notDeepEqual(status.task, ready.task);

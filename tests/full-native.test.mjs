@@ -109,6 +109,9 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
     assert.ok(Buffer.byteLength(JSON.stringify(args)) < 300, `oversized dispatched task for ${phase}`);
     assert.equal(current.dispatch.mode, 'handle');
     assert.deepEqual(current.nextAction.args, args, `nextAction must carry the dispatchable task for ${phase}`);
+    // A coordinator reading its own collapsed history back may replay the transcript note in
+    // place of the handle. The byte count it writes is whatever it remembers, never the real one.
+    if (options.replayNote) args.prompt = collapsedPrompt(args.subagent_type, 4242);
     const callID = `task-${++index}`;
     const call = { sessionID: runtime.sessionID, callID, tool: 'task' };
     parent[1].parts = [{ type: 'tool', tool: 'task', callID, state: { status: 'running', input: args } }];
@@ -372,6 +375,9 @@ for (const summary of ['low', 'medium', 'detailed']) {
     for (let current = await f.status(); current.task; current = await f.status()) await f.phase();
     const status = await f.status();
     assert.match(status.report, /Make the requested feature usable/);
+    assert.match(status.report, /^\*\*MDD · low route\*\*\n\n✅ plan  ✅ apply  ✅ verify\n\nSkills: doc, cognitive doc design/m);
+    assert.equal(status.visual.route, 'low');
+    assert.deepEqual(status.visual.skills, ['mdd-doc', 'cognitive-doc-design']);
     assert.match(status.report, /los requisitos y el plan coinciden con lo implementado/);
     assert.doesNotMatch(status.report, /mdd-|task-\d|bash-\d|receipt/i);
     assert.equal(status.report.includes('\nCómo\n'), summary !== 'low');
@@ -424,6 +430,43 @@ for (const fault of ['missing', 'invented', 'drift', 'partial']) {
     assert.doesNotMatch(status.report, /100%|los requisitos y el plan coinciden con lo implementado/);
   });
 }
+
+// A failed verification used to leave one exit that kept the run: re-checking the same unchanged
+// implementation. Correcting it meant a material change, new requirements and a fresh preflight.
+test('a failed verification can send the run back to Apply with its findings, on the user\'s word', async t => {
+  const f = await fixture(t); await f.phase(); await f.phase();
+  await f.phase({ coverageFault: 'partial' });
+  const blocked = await f.status();
+  assert.equal(blocked.state, 'blocked'); assert.equal(blocked.reworkable, 'mdd-apply');
+  assert.equal(blocked.nextAction.tool, 'mdd_reset'); assert.match(blocked.nextAction.why, /scope rework/);
+  // Rework changes the route, so the coordinator cannot choose it on its own.
+  await assert.rejects(f.hooks.tool.mdd_reset.execute({ scope: 'rework' }, f.context), /needs the user's own word/);
+  await assert.rejects(f.hooks.tool.mdd_reset.execute({ scope: 'rework', userText: 'fix it' }, f.context), /exact latest message/);
+  assert.equal((await f.status()).state, 'blocked');
+  f.user('Vamos con la opción A: corregí lo que encontró la verificación.');
+  const reworked = JSON.parse(await f.hooks.tool.mdd_reset.execute({ scope: 'rework', userText: f.parent[0].parts[0].text }, f.context));
+  assert.equal(reworked.reset.scope, 'rework'); assert.equal(reworked.phase, 'mdd-apply'); assert.equal(reworked.state, 'ready');
+  assert.equal(reworked.rework.after, 'mdd-verify'); assert.equal(reworked.reworkable, undefined);
+  // Every recorded result and artifact survives; the failed verification is part of the history.
+  assert.deepEqual(reworked.workflow.results.map(item => `${item.phase}:${item.outcome}`), ['mdd-plan:passed', 'mdd-apply:passed', 'mdd-verify:failed']);
+  assert.equal(reworked.artifacts.length, blocked.artifacts.length);
+  await f.phase();
+  assert.match(f.delivered(), /This is a correction pass: mdd-verify reported failure/);
+  assert.match(f.delivered(), /Artifact for mdd-verify/);
+  const verifying = await f.status();
+  assert.equal(verifying.phase, 'mdd-verify'); assert.equal(verifying.rework, undefined);
+  await f.phase();
+  const done = await f.status();
+  assert.equal(done.state, 'complete'); assert.equal(done.coverage, 100);
+});
+test('rework is refused where there is no failed verification to correct', async t => {
+  const f = await fixture(t); await f.phase({ outcome: 'failed' });
+  f.user('Corregí lo que falló.');
+  const blocked = await f.status();
+  assert.equal(blocked.reworkable, undefined);
+  await assert.rejects(f.hooks.tool.mdd_reset.execute({ scope: 'rework', userText: f.parent[0].parts[0].text }, f.context), /only after mdd-verify reported failure/);
+  assert.deepEqual((await f.status()).workflow, blocked.workflow);
+});
 
 // Seven phases of maximum-size artifacts outgrow the handoff budget, and the route used to die
 // there: at Tasks, Apply or Verify, after everything that produced them had already been paid for.
@@ -504,7 +547,7 @@ test('confirmed rerun asks every field once despite complete profile and preserv
   assert.deepEqual(next.previousRuns[0].acceptance, old.acceptance);
   assert.equal(next.workflow.answers.mode, 'interactive'); assert.equal(next.previousRuns[0].workflow.answers.mode, 'automatic');
   assert.equal(f.questions(), 2);
-  await assert.rejects(f.change(), /fresh actual user/);
+  await assert.rejects(f.change(), /already used by MDD\. A rerun needs a new user message/);
 });
 test('rejected material change restores exact answers, plan and pending approval', async t => {
   const f = await fixture(t, { mode: 'interactive' }); await f.phase();
@@ -728,17 +771,21 @@ test('read-only investigation answers without an accepted run and leaves impleme
   assert.equal(started.task.subagent_type, 'mdd-plan');
   assert.equal(started.contextual, false);
 });
-test('a delivered transcript note cannot strand a standalone investigation', async t => {
+test('a replayed transcript note dispatches the standalone investigation it stands for', async t => {
   const f = await fixture(t, { start: false, memoryEnabled: false });
   await f.hooks.tool.mdd_contextual_explore.execute({ purpose: 'Inspect this project.' }, f.context);
   const ready = await f.status();
-  const note = collapsedPrompt('mdd-explore', Buffer.byteLength(ready.task.prompt));
+  // The note names another actor: that is not this investigation, and it stays refused.
+  const note = collapsedPrompt('mdd-plan', Buffer.byteLength(ready.task.prompt));
   await assert.rejects(f.hooks['tool.execute.before']({ ...f.runtime, callID: 'solo-note', tool: 'task' },
-    { args: { ...ready.task, prompt: note } }), /delivered transcript placeholder is not a task/);
+    { args: { ...ready.task, subagent_type: 'mdd-plan', prompt: note } }), /delivered transcript placeholder is not a task/);
   const after = await f.status();
   assert.equal(after.dispatch.mode, 'handle');
   assert.deepEqual(after.task, ready.task);
-  await f.phase();
+  // The same note with the investigation's own description and actor is the handle in another
+  // shape: the actor receives the investigation's real prompt, never the note.
+  await f.phase({ replayNote: true });
+  assert.match(f.delivered(), /Standalone read-only investigation only/);
   assert.equal((await f.status()).contextual, false);
 });
 {
@@ -943,6 +990,58 @@ test('a recorded material concern can be proposed once without inventing new hum
   await assert.rejects(f.hooks.tool.mdd_change_request.execute(args, f.context), /already presented/);
   assert.deepEqual((await f.status()).workflow, old.workflow);
 });
+test('mdd_change_request accepts concerns the host tool bridge serialized as a JSON string', async t => {
+  const f = await fixture(t);
+  const concern = { category: 'integrations', evidence: 'The host serialized this concern as a JSON string.', impact: 'The bridge must still validate it strictly.' };
+  // Recorded first through the ordinary array form, as any concern must be, so the fresh-message
+  // guard below is satisfied by a matching recorded concern rather than by an unused user message.
+  await f.phase({ concerns: [concern] });
+  const args = { kind: 'material', userText: f.parent[0].parts[0].text, requirements: 'Implement a different integration.', concerns: JSON.stringify([concern]) };
+  const status = JSON.parse(await f.hooks.tool.mdd_change_request.execute(args, f.context));
+  assert.equal(status.question.questions[0].header, 'Cambio');
+  assert.match(status.question.questions[0].question, /integrations/);
+});
+test('a fresh user message is enough for a material change: concerns are optional', async t => {
+  const f = await fixture(t); await f.phase();
+  f.user('Change the scope: also remove the obsolete context cap.');
+  const status = JSON.parse(await f.hooks.tool.mdd_change_request.execute({ kind: 'material', userText: f.parent[0].parts[0].text, requirements: 'Also remove the obsolete context cap.' }, f.context));
+  assert.equal(status.question.questions[0].header, 'Cambio');
+  assert.doesNotMatch(status.question.questions[0].question, /Evidencia advertida/);
+});
+test('mdd_change_request accepts a single bare concern object and an empty concerns string', async t => {
+  const f = await fixture(t); await f.phase();
+  const concern = { category: 'objective', evidence: 'The user widened the scope.', impact: 'The plan must be redone.' };
+  f.user('Widen the scope to include the recovery path.');
+  const single = JSON.parse(await f.hooks.tool.mdd_change_request.execute({ kind: 'material', userText: f.parent[0].parts[0].text, requirements: 'Include the recovery path.', concerns: concern }, f.context));
+  assert.match(single.question.questions[0].question, /objective/);
+  await f.answer('Mantener el plan actual');
+  f.user('Widen it again, differently.');
+  const empty = JSON.parse(await f.hooks.tool.mdd_change_request.execute({ kind: 'material', userText: f.parent[0].parts[0].text, requirements: 'Include a different recovery path.', concerns: '  ' }, f.context));
+  assert.equal(empty.question.questions[0].header, 'Cambio');
+});
+test('a spent user message still needs recorded concerns, and the refusal says how to proceed', async t => {
+  const f = await fixture(t); await f.phase(); const before = await f.status();
+  await assert.rejects(f.hooks.tool.mdd_change_request.execute({ kind: 'material', userText: f.parent[0].parts[0].text, requirements: 'Something else entirely.' }, f.context), /already used by MDD\. Ask the user to state the change in a new message/);
+  await assert.rejects(f.hooks.tool.mdd_change_request.execute({ kind: 'material', userText: f.parent[0].parts[0].text, requirements: 'Something else entirely.',
+    concerns: [{ category: 'objective', evidence: 'Never recorded by any phase.', impact: 'None.' }] }, f.context), /already used by MDD/);
+  assert.deepEqual((await f.status()).workflow, before.workflow);
+});
+test('decoded concerns are still validated strictly', async t => {
+  const f = await fixture(t); await f.phase();
+  f.user('Change the scope.');
+  const base = { kind: 'material', userText: f.parent[0].parts[0].text, requirements: 'A changed scope.' };
+  const nine = Array.from({ length: 9 }, () => ({ category: 'objective', evidence: 'x', impact: 'y' }));
+  await assert.rejects(f.hooks.tool.mdd_change_request.execute({ ...base, concerns: JSON.stringify(nine) }, f.context), /at most eight/);
+  await assert.rejects(f.hooks.tool.mdd_change_request.execute({ ...base, concerns: JSON.stringify([{ category: 'style', evidence: 'x', impact: 'y' }]) }, f.context), /Unknown material-change category/);
+  await assert.rejects(f.hooks.tool.mdd_change_request.execute({ ...base, concerns: '"just text"' }, f.context), /must decode to an array/);
+  await assert.rejects(f.hooks.tool.mdd_change_request.execute({ ...base, concerns: `[${'"x",'.repeat(4000)}"x"]` }, f.context), /exceeds 16000 bytes/);
+});
+test('mdd_change_request rejects a concerns string that is not valid JSON, without recording anything', async t => {
+  const f = await fixture(t); const before = await f.status();
+  const args = { kind: 'material', userText: f.parent[0].parts[0].text, requirements: 'Implement a different integration.', concerns: '{not json' };
+  await assert.rejects(f.hooks.tool.mdd_change_request.execute(args, f.context), /not valid JSON/);
+  assert.deepEqual((await f.status()).workflow, before.workflow);
+});
 test('context accumulation is bounded without truncating results or advancing the main workflow', async t => {
   const f = await fixture(t); await f.phase(); const main = await f.status();
   let stopped = false;
@@ -1033,11 +1132,14 @@ test('a settled dispatch stops being re-read, while the run still dispatches the
   // The run's own record is untouched: only what travels to the model changed.
   assert.equal(f.parent[1].parts[0].state.input.prompt, expanded);
 
-  // A model may replay the transcript note as a fresh task argument. It is not a lost handle:
-  // rejecting it must leave the exact compact task available, not expose a truncated full prompt.
+  // A model may replay the transcript note as a fresh task argument. Aimed at another actor it is
+  // not a lost handle: rejecting it must leave the exact compact task available, not expose a
+  // truncated full prompt.
   const ready = await f.status();
   await assert.rejects(f.hooks['tool.execute.before']({ ...f.runtime, callID: 'transcript-replay', tool: 'task' },
-    { args: { ...ready.task, prompt: sent } }), /delivered transcript placeholder is not a task/);
+    { args: { ...ready.task, subagent_type: 'mdd-verify', prompt: sent } }), /delivered transcript placeholder is not a task/);
+  await assert.rejects(f.hooks['tool.execute.before']({ ...f.runtime, callID: 'transcript-replay-2', tool: 'task' },
+    { args: { ...ready.task, prompt: sent, background: true } }), /Task arguments differ/);
   const recoveredRaw = await f.hooks.tool.mdd_status.execute({}, f.context);
   assert.ok(Buffer.byteLength(recoveredRaw) <= STATUS_BUDGET_BYTES);
   const recovered = JSON.parse(recoveredRaw);
@@ -1045,8 +1147,12 @@ test('a settled dispatch stops being re-read, while the run still dispatches the
   assert.equal(recovered.dispatch.mode, 'handle');
   assert.deepEqual(recovered.task, ready.task);
 
-  // And the protocol still works: the next phase dispatches normally through the same hooks.
-  await f.phase({ large: true });
+  // Aimed at this phase and actor it is the handle in the shape the model saw last, and on the
+  // observed run it was the only shape the model could produce: it dispatches, and the actor
+  // receives the run's own prompt rather than the note.
+  await f.phase({ large: true, replayNote: true });
+  assert.ok(Buffer.byteLength(f.delivered()) > 2000, 'the note must be expanded into the real prompt');
+  assert.doesNotMatch(f.delivered(), /omitted from the transcript/);
   const next = await f.status();
   assert.ok(next.task || next.state === 'complete');
 });
@@ -1475,6 +1581,28 @@ test('a handle that cannot travel falls back to the full prompt instead of block
   await f.hooks['tool.execute.before']({ ...f.runtime, callID: 'recovered', tool: 'task' }, output);
   assert.equal((await f.status()).state, 'await-result');
   assert.match(output.args.prompt, /Native callID="recovered"/);
+});
+
+// `nextAction.args` repeats whatever `task` holds, so exposing the full prompt doubles it in one
+// payload. Once that doubled payload could not fit the tool transport budget, falling back to it
+// would only replace one undispatchable shape with another; a fresh compact handle stays usable.
+test('an unrecognised prompt too large to expose in full reminted a fresh compact handle instead', async t => {
+  const f = await fixture(t);
+  await f.hooks.tool.mdd_context.execute({ label: 'Large material', content: 'x'.repeat(20000) }, f.context);
+  const ready = await f.status();
+  assert.ok(ready.task.prompt.startsWith('mdd:dispatch:'), 'the run still holds a compact handle before the mismatch');
+  await assert.rejects(f.hooks['tool.execute.before']({ ...f.runtime, callID: 'lost', tool: 'task' },
+    { args: { ...ready.task, prompt: 'I will write the prompt myself.' } }), /fresh compact handle instead/);
+  const after = await f.status();
+  assert.equal(after.state, 'ready');
+  // A fresh handle was minted rather than the full prompt being exposed.
+  assert.ok(after.task.prompt.startsWith('mdd:dispatch:'));
+  assert.notEqual(after.task.prompt, ready.task.prompt);
+  assert.equal(after.dispatch.mode, 'handle');
+  // The phase still dispatches normally through the reminted handle.
+  const output = { args: after.task };
+  await f.hooks['tool.execute.before']({ ...f.runtime, callID: 'recovered', tool: 'task' }, output);
+  assert.equal((await f.status()).state, 'await-result');
 });
 
 test('phase reset restores a compact fresh handle after full-prompt fallback', async t => {

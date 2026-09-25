@@ -169,14 +169,19 @@ export class NativeIntake {
     const advisory = concerns(input.concerns);
     const requirements = input.kind === 'rerun' ? entry.requirements : boundedText(input.requirements, 'proposed requirements', 12000);
     if (input.kind === 'rerun' && (input.requirements !== undefined || advisory.length)) throw new Error('A preflight rerun retains requirements; use material change for a new objective.');
-    if (input.kind === 'material' && (!advisory.length || requirements.trim() === entry.requirements.trim())) throw new Error('Material change requires changed requirements and explicit advisory evidence. Ordinary plan choices do not require this path.');
+    if (input.kind === 'material' && requirements.trim() === entry.requirements.trim()) throw new Error('A material change needs requirements that differ from the current ones. Ordinary plan choices do not require this path.');
     const saved = { state: entry.state, requirements: entry.requirements, known: entry.known, ...(entry.slot ? { slot: entry.slot } : {}), ...(entry.userMessageID ? { userMessageID: entry.userMessageID } : {}) };
     entry.state = 'accepting';
     try {
       const userID = await this.inspect.intake(runtime, userText, boundedText(messageID, 'native messageID', 256));
       const status = this.runner.status(runtime.sessionID);
-      const backedConcern = input.kind === 'material' && 'concerns' in status && advisory.every(item => status.concerns.some(known => isDeepStrictEqual(known, item)));
-      if (!userID || (entry.usedMessages.has(userID) && !backedConcern)) throw new Error('Change requests require a fresh actual user message or a recorded material concern, not a model approval claim.');
+      // A fresh user message asking for the change is authority enough. Only when that message was
+      // already spent must the proposal rest on concerns a phase actually recorded.
+      const backedConcern = input.kind === 'material' && advisory.length > 0 && 'concerns' in status && advisory.every(item => status.concerns.some(known => isDeepStrictEqual(known, item)));
+      if (!userID) throw new Error('Change requests require the actual latest user message, not a model approval claim.');
+      if (entry.usedMessages.has(userID) && !backedConcern) throw new Error(input.kind === 'material'
+        ? 'This user message was already used by MDD. Ask the user to state the change in a new message, or back the proposal with concerns a phase already recorded.'
+        : 'This user message was already used by MDD. A rerun needs a new user message asking for it.');
       const proposal = JSON.stringify([userID, input.kind, requirements.trim(), advisory.map(item => JSON.stringify(item)).sort()]);
       if (entry.proposed.has(proposal)) throw new Error('This change proposal was already presented. Do not repeat it without a new user request.');
       if (entry.state !== 'accepting') throw new Error('Change validation was interrupted.');
@@ -226,7 +231,7 @@ export class NativeIntake {
    * Explicit recovery for the conversation. Phase scope releases the current attempt; run scope
    * forgets the run and its intake so a new objective can start here without a new conversation.
    */
-  reset(runtime: Runtime, scope: 'phase' | 'run'): unknown {
+  reset(runtime: Runtime, scope: 'phase' | 'run' | 'rework'): unknown {
     if (runtime.agent !== 'mdd-orchestrator') throw new Error('Only the coordinator may reset MDD state.');
     const entry = this.#sessions.get(runtime.sessionID);
     // Releasing the phase of a conversation whose run never started is really about the question
@@ -244,7 +249,9 @@ export class NativeIntake {
     else if (entry) {
       delete entry.slot; delete entry.reason; delete entry.restore; delete entry.replacing;
       entry.state = 'active';
-      entry.notice = applied.approval
+      entry.notice = applied.scope === 'rework'
+        ? `Verification failed and the user chose to correct it: ${applied.phase ?? 'mdd-apply'} is ready again with the verification findings as its newest input. Verification follows it through the route's ordinary approval. Previous evidence is retained.`
+        : applied.approval
         ? `The run was released at its approval boundary: ${applied.phase ?? 'the next phase'} is waiting for the same approval question again. Nothing was approved and previous evidence is retained.`
         : `The ${applied.phase ?? 'current'} phase was released and is ready to run again. Previous evidence is retained.`;
       // A run released while it waited for approval still needs that approval, so its question is

@@ -504,6 +504,35 @@ test('native intake SDK contract: exact multiple user text parts are accepted; w
   await assert.rejects(createInspector(f.input).intake(runtime, 'First\nSecond', 'wrong'));
 });
 
+// The exact-match comparison only folds line endings and trims outer edges; a near-miss is still
+// refused, but the refusal now names the offset at which it actually diverges from what the user
+// wrote, so the caller does not have to guess what changed.
+test('native intake SDK contract: a near-miss requirement is refused with its first diverging offset', async () => {
+  const f = sdkFixture(); addNativeUser(f, 'Please implement the caching layer.');
+  await assert.rejects(createInspector(f.input).intake(runtime, 'Please implement the cache layer.', 'msg_parent'),
+    /latest native user text[\s\S]*first differs at offset 25/);
+});
+
+// CRLF/CR are folded to LF and outer whitespace is trimmed on both sides, and nothing else is:
+// the same text with different line endings and surrounding whitespace still matches exactly.
+test('native intake SDK contract: line-ending and outer-whitespace differences still match exactly', async () => {
+  const f = sdkFixture(); addNativeUser(f, '  Line one\r\nLine two  ');
+  await createInspector(f.input).intake(runtime, 'Line one\nLine two', 'msg_parent');
+});
+
+// A full page of history proves nothing about what came before it, so a caller reading the error
+// learns that the objective cannot be read here at all, not that it failed to match.
+test('native intake SDK contract: a full history page reports the objective as unreadable, not unmatched', async () => {
+  const f = sdkFixture(); addNativeUser(f, 'Please implement the caching layer.');
+  const caller = f.parentMessages.at(-1);
+  // The read itself is capped at exactly HISTORY_MAX (100) entries; one more than that fails
+  // earlier, as "exceeds the inspection limit", which is a different and unrelated refusal.
+  f.parentMessages.push(...Array.from({ length: 98 }, () => ({ info: { role: 'user' }, parts: [] })));
+  f.parentMessages.splice(f.parentMessages.indexOf(caller), 1);
+  f.parentMessages.push(caller);
+  await assert.rejects(createInspector(f.input).intake(runtime, 'Something else entirely.', 'msg_parent'), /outside the readable native history/);
+});
+
 // A conversation longer than one page is ordinary once a route has actually run, so refusing to
 // read it at all stopped approvals exactly where they were needed most. What an incomplete history
 // cannot do is prove that some older call is the one being answered: only the running call of the

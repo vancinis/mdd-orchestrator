@@ -152,8 +152,8 @@ work and changes no MDD state. While one is pending, it is the only question the
 Only report restatement belongs here. mdd_phase_result without a rejected report selects a
 native fallback instead of accepting inline work. It does not authorize a new phase.
 Use mdd_change_request only for an explicit preflight rerun or a genuine material change to
-objective, integrations, sensitive data or permissions. Pass the actual latest user text. Rerun
-requires a fresh user message; a material proposal may also use a recorded phase concern. Show
+objective, integrations, sensitive data or permissions. Pass the actual latest user text. Both
+need a fresh user message (omit concerns); material may instead cite a recorded concern. Show
 the exact returned confirmation once; if confirmed, ask the single fresh five-field preflight.
 Never use this path for ordinary implementation decisions, continuation, or concerns that do not
 change scope, and do not repeat a declined proposal without a new user request. After a completed
@@ -172,7 +172,7 @@ A settled failure may return its phase to ready: read mdd_status and follow its 
 For explicit recovery, mdd_reset scope phase retries settled work or reopens the existing approval;
 scope run forgets the run. Recorded artifacts and memory are preserved; inspect partial changes.
 An exhausted fallback requires explicit recovery, not an automatic reset loop.
-Known failures can also be replanned through an explicit confirmed change request.
+After failed Verify, if the user asks to fix it, use scope rework with their exact userText.
 Present the report string mdd_status returns, at the detail the user asked for. status.reportDetail
 says which: low is the summary paragraph alone, medium adds Cómo, detailed adds Estado and
 Cobertura. Do not add sections that level omits or collapse sections it includes; the level is the

@@ -65,6 +65,20 @@ export class Workflow {
     }
   }
 
+  /**
+   * Sends a route blocked by a failed phase back to an earlier phase of the same route, so the
+   * work that failure points at can be corrected without discarding the run. Recorded results
+   * stay: they are the history, and the failed one is what the reworked phase is asked to fix.
+   */
+  rework(phase: Phase): void {
+    if (this.#next.kind !== 'blocked') throw new ValidationError('Only a route stopped by a failed phase can be reworked.');
+    const target = this.#evaluation.phases.indexOf(phase);
+    const current = this.#evaluation.phases.indexOf(this.#next.phase);
+    if (target < 0 || target >= current) throw new ValidationError('Rework must name an earlier phase of this route.');
+    this.#index = target;
+    this.#next = { kind: 'execute', phase };
+  }
+
   recordResult(value: unknown): void {
     const { phase, outcome, evidenceSummary } = objectWithKeys(
       value, 'result', ['phase', 'outcome', 'evidenceSummary'],
