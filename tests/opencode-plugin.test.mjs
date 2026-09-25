@@ -281,7 +281,7 @@ test('informational_request_does_not_start_implementation: shipped instruction c
   assert.match(asset, /works with or without an\naccepted run/);
   assert.doesNotMatch(asset, /no standalone read-only investigation route/);
   assert.match(asset, /Never end a phase report with an approval question of your own/);
-  assert.match(asset, /mdd_pr_body[\s\S]*Never\nhand-write the body/);
+  assert.match(asset, /mdd_pr_body[\s\S]*do not hand-write one/);
   // This checks shipped instructions, not model adherence or a native E2E run.
 });
 
@@ -357,7 +357,7 @@ test('OpenCode SDK contract: bounded callback even if injected client ignores ab
 test('plugin contract: scoped tools, in-place native args, result gating, no native override', async t => {
   const f = await pluginFixture(t);
   const { hooks, context, writes } = f;
-  assert.deepEqual(Object.keys(hooks.tool).sort(), ['mdd_change_request', 'mdd_check_report', 'mdd_context', 'mdd_contextual_explore', 'mdd_improve', 'mdd_improvements', 'mdd_phase_result', 'mdd_pr_body', 'mdd_reset', 'mdd_start', 'mdd_status']);
+  assert.deepEqual(Object.keys(hooks.tool).sort(), ['mdd_change_request', 'mdd_check_report', 'mdd_context', 'mdd_contextual_explore', 'mdd_improve', 'mdd_improvements', 'mdd_phase_result', 'mdd_pr_body', 'mdd_prepare_advance', 'mdd_reset', 'mdd_revisit', 'mdd_start', 'mdd_status']);
   assert.deepEqual(Object.keys(hooks.tool.mdd_start.args), ['requirements', 'context']);
   const ready = JSON.parse(await hooks.tool.mdd_start.execute({ requirements: f.requirements }, context));
   const nativeArgs = ready.task;
@@ -451,12 +451,14 @@ test('native plugin contract: partial profile question receipt starts actual run
   f.output.output = `<task id="ses_child" state="completed">\n<task_result>\n${text}\n</task_result>\n</task>`;
   await hooks['tool.execute.after']({ ...call, tool: 'task', args: ready.task }, f.output);
   const approval = JSON.parse(await hooks.tool.mdd_status.execute({}, context));
-  assert.equal(approval.state, 'question-ready');
-  assert.equal(approval.next.phase, 'mdd-apply');
+  assert.equal(approval.state, 'review-ready');
+  assert.equal(approval.question, undefined);
+  const pendingApproval = JSON.parse(await hooks.tool.mdd_prepare_advance.execute({ questions: [] }, context));
+  assert.equal(approval.workflow.nextAction.phase, 'mdd-apply');
   assert.equal(approval.task, undefined);
-  const ac = questionCall(f, approval.question, 'approval_one');
-  await hooks['tool.execute.before'](ac, { args: approval.question });
-  await hooks['tool.execute.after']({ ...ac, args: approval.question }, questionOutput(approval.question, [['Continuar']]));
+  const ac = questionCall(f, pendingApproval.question, 'approval_one');
+  await hooks['tool.execute.before'](ac, { args: pendingApproval.question });
+  await hooks['tool.execute.after']({ ...ac, args: pendingApproval.question }, questionOutput(pendingApproval.question, [['Continuar']]));
   const approved = JSON.parse(await hooks.tool.mdd_status.execute({}, context));
   assert.deepEqual(approved.workflow.nextAction, { kind: 'execute', phase: 'mdd-apply' });
   assert.equal(approved.task.subagent_type, 'mdd-apply');
@@ -608,7 +610,7 @@ test('plugin config contract: settings frozen at startup; only explicit model ov
   await hooks.config(config);
   // Every agent but the coordinator loses the MDD tools: they are registered app-wide but are
   // meaningless, and misleading, anywhere else.
-  const denied = { mdd_start: false, mdd_status: false, mdd_phase_result: false, mdd_reset: false, mdd_change_request: false, mdd_contextual_explore: false, mdd_context: false, mdd_pr_body: false, mdd_improve: false, mdd_improvements: false, 'mdd_*': false };
+  const denied = { mdd_start: false, mdd_status: false, mdd_prepare_advance: false, mdd_revisit: false, mdd_phase_result: false, mdd_reset: false, mdd_change_request: false, mdd_contextual_explore: false, mdd_context: false, mdd_pr_body: false, mdd_improve: false, mdd_improvements: false, 'mdd_*': false };
   // And every phase actor loses `task` and `skill`: it is the actor, and the skills it needs are
   // already inlined in its prompt by value, so a name lookup can only reach someone else's. It
   // gains exactly one MDD tool back, which reads nothing and only tells it whether the report it

@@ -372,6 +372,8 @@ export class PhaseRunner {
       evidence: { ...run.evidence }, coverage: evidenceCoverage(run.evidence),
       report: run.side ? `Resumen\nLa exploración de contexto ${run.state === 'blocked' ? 'no pudo confirmarse' : run.state === 'ready' ? 'está lista' : 'está en curso'}. El plan principal y su aprobación no cambian.\n` :
         `${this.#visualFrame(run)}${run.state === 'complete' || run.state === 'blocked' ? this.#closure(run) : renderReport(run.workflow.snapshot().answers.summary, { ...run.report, evidence: run.evidence })}`,
+      ...(run.state === 'await-approval' && run.workflow.snapshot().answers.summary !== 'detailed'
+        ? { expandedReport: `${this.#visualFrame(run)}${renderReport('detailed', { ...run.report, evidence: run.evidence })}` } : {}),
       visual: phaseVisual({ phase: run.phase, state: run.state, workflow: run.workflow.snapshot() }, presentationSettings().ascii),
       acceptance: structuredClone(run.acceptance), decisions: structuredClone(run.decisions), planned: structuredClone(run.planned), verification: structuredClone(run.verification),
       uncertain: run.uncertain, attempts: run.attempts, runAttempts: run.spent, recoverable: true, mode: run.mode,

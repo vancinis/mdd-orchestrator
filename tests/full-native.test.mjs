@@ -67,7 +67,13 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
   // These tests inspect the run itself — its route, held plan, coverage and recorded evidence —
   // so they read the inspection view. The compact default that every other tool returns has its
   // own contract tests; asserting run semantics through it would only test the projection twice.
-  const status = async () => JSON.parse(await hooks.tool.mdd_status.execute({ detail: 'full' }, context));
+  const status = async () => {
+    const current = JSON.parse(await hooks.tool.mdd_status.execute({ detail: 'full' }, context));
+    // Existing route tests act as a coordinator with no outstanding clarification.
+    return current.state === 'review-ready'
+      ? JSON.parse(await hooks.tool.mdd_prepare_advance.execute({ questions: [] }, context))
+      : current;
+  };
   let questionCount = 0;
   async function answer(selection) {
     const current = await status();
@@ -261,6 +267,32 @@ for (const route of ['low', 'high']) for (const store of ['none', 'openspec']) f
     await f.hooks.event({ event: { type: 'server.instance.disposed', properties: { directory: f.root } } });
   });
 }
+
+test('interactive review exposes expanded detail and carries clarification choices into the next actor', async t => {
+  const f = await fixture(t, { mode: 'interactive', summary: 'low', store: 'none', memoryEnabled: false });
+  await f.phase();
+  let current = JSON.parse(await f.hooks.tool.mdd_status.execute({ detail: 'full' }, f.context));
+  assert.equal(current.state, 'question-ready');
+  assert.match(current.expandedReport, /Cobertura/);
+  assert.ok(current.question.questions[0].options.some(option => option.label === 'Obtener un resumen más completo de esta fase'));
+  await f.answer('Obtener un resumen más completo de esta fase');
+  current = await f.status();
+  assert.equal(current.workflow.nextAction.kind, 'approve');
+  assert.equal(current.question.questions[0].options.some(option => option.label === 'Obtener un resumen más completo de esta fase'), false);
+  await f.hooks.tool.mdd_revisit.execute({}, f.context);
+  current = JSON.parse(await f.hooks.tool.mdd_prepare_advance.execute({ questions: [
+    { question: 'Which date format?', options: [{ label: 'ISO', description: 'Use ISO dates.', recommended: true }], deferrable: true },
+    { question: 'Which retry strategy?', options: [{ label: 'Fixed', description: 'Use a fixed backoff.', recommended: true }] },
+  ] }, f.context));
+  assert.equal(current.question.questions[0].header, 'Detalle');
+  await f.answer('Dejar para más adelante');
+  await f.answer('Que decida el agente');
+  assert.equal((await f.status()).workflow.nextAction.kind, 'approve');
+  await f.answer('Continuar');
+  await f.phase();
+  assert.match(f.delivered(), /Clarification: Which date format\?/);
+  assert.match(f.delivered(), /Clarification: Which retry strategy\?/);
+});
 
 for (const fault of [{ noChecks: true }, { coverageFault: 'missing' }]) {
   test(`memory off rejects an inconsistent report and keeps the phase runnable: ${JSON.stringify(fault)}`, async t => {
