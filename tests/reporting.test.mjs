@@ -49,6 +49,8 @@ for (const detail of ['low', 'medium', 'detailed']) {
       checks: [{ command: 'npm test', exit: 0 }], limits: ['Invalid-order behavior remains unverified.'], status: 'blocked', evidence: invalidateEvidence(all, ['implementation', 'checks']) });
     assert.match(output, /Accept valid orders/); assert.match(output, /Sin completar/); assert.match(output, /Invalid-order behavior remains unverified/);
     assert.equal(output.includes('\nCómo\n'), detail !== 'low');
+    assert.equal(output.includes('\nVerificación\n'), detail !== 'low');
+    assert.doesNotMatch(output.split('\nCómo\n')[1]?.split('\nVerificación\n')[0] ?? '', /npm test|Order validation was added/);
     assert.equal(output.includes('40% de cobertura de evidencia (no es una probabilidad de acierto)'), detail === 'detailed');
     assert.doesNotMatch(output, /mdd-|callID|receipt|100%/);
   });
@@ -89,7 +91,26 @@ test('closure counts and names the checks that exited nonzero', () => {
   const output = renderClosure('medium', { goal: 'Deliver the requested outcome.', changes: 'Scoped changes made.', matched: false,
     checks: [{ command: 'npm test', exit: 0 }, { command: 'npm run lint', exit: 1 }, { command: 'npm run build', exit: null }],
     limits: [], status: 'blocked', evidence: invalidateEvidence(all, ['checks']) });
-  assert.match(output, /3 comando\(s\) de chequeo, 2 de ellos con salida distinta de 0/);
-  assert.match(output, /Se ejecutó npm run lint; salida 1\./);
-  assert.match(output, /Se ejecutó npm run build; salida desconocida\./);
+  assert.match(output, /Verificación\n- npm test: salida 0/);
+  assert.match(output, /salida 0 \(informada; no demuestra por sí sola el comportamiento\)/);
+  assert.match(output, /npm run lint: salida 1 \(no confirma el resultado\)/);
+  assert.match(output, /npm run build: salida desconocida \(no confirma el resultado\)/);
+  assert.doesNotMatch(output.split('Verificación')[0], /npm (test|run)/);
+});
+
+test('closure does not invent a cause or claim checks when verification never ran', () => {
+  const output = renderClosure('medium', { goal: 'Deliver the requested outcome.', changes: 'The implementation is not verified; its effect is unknown.', matched: false,
+    checks: [], limits: ['The planned build could not run; its impact remains unknown.'], status: 'blocked', evidence: invalidateEvidence(all, ['checks']) });
+  assert.match(output, /Cómo\nNo se informó una explicación causal/);
+  assert.match(output, /Verificación\nNo se informaron comprobaciones ejecutadas/);
+  assert.match(output, /planned build could not run/);
+});
+
+test('detailed closure puts verification before status and coverage without repeating changes', () => {
+  const output = renderClosure('detailed', { goal: 'Validate orders.', changes: 'Invalid orders are rejected.',
+    how: ['Validation is at the boundary because malformed orders must not reach persistence.'], matched: true,
+    checks: [{ command: 'npm test', exit: 0 }], limits: [], status: 'passed', evidence: all });
+  assert.match(output, /Resumen\nValidate orders\. Invalid orders are rejected\.[\s\S]*Cómo\n- Validation is at the boundary because malformed orders must not reach persistence\.[\s\S]*Verificación\n- npm test[\s\S]*Estado\ncompletado[\s\S]*Cobertura\n100%/);
+  assert.equal(output.split('Invalid orders are rejected.').length, 2);
+  assert.equal(output.split('Validation is at the boundary').length, 2);
 });

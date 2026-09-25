@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { PhaseRunner } from '../dist/phase-runner.js';
 import { reportFormatLines } from '../dist/phase-report.js';
-import { memoryServer, request, result, runtime, call, answers, installCleanup, traceFixture, ARTIFACT_TEXT, SUMMARY_TEXT } from './adapter-fixture.mjs';
+import { memoryServer, request, result, reportDocument, runtime, call, answers, installCleanup, traceFixture, ARTIFACT_TEXT, SUMMARY_TEXT } from './adapter-fixture.mjs';
 import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -64,6 +64,7 @@ test('runner contract: a phase prompt carries only the schema of its own result 
   // `before` returns is exactly what the dispatched subagent receives.
   const dispatched = await runner.before(call, ready.task);
   assert.match(dispatched.prompt, /exactly these keys: acceptance, decisions, deliverables\./);
+  assert.match(dispatched.prompt, /concrete changes or decisions, their source-grounded causal reason/);
   // The injected mdd-doc guide names verification reports in prose; no verification schema leaks.
   assert.doesNotMatch(dispatched.prompt, /verification=\{|keys: checks, verification/);
   const plan = reportFormatLines('mdd-plan').join('\n');
@@ -73,6 +74,25 @@ test('runner contract: a phase prompt carries only the schema of its own result 
   assert.match(verify, /verification=\{scenarios:/);
   assert.doesNotMatch(verify, /deliverables=/);
   assert.match(reportFormatLines('mdd-explore').join('\n'), /reports no structured data/);
+});
+
+test('completed plan presents a distinct causal Cómo grounded in its decision', async t => {
+  const { runner, endpoint } = await fixture(t);
+  const input = request(endpoint);
+  input.preflight.answers = { ...answers, mode: 'interactive', summary: 'medium' };
+  const ready = await runner.start(input, runtime);
+  const dispatched = await runner.before(call, ready.task);
+  await runner.after(call, dispatched, reportDocument({
+    evidenceSummary: 'Planned CLI input validation to make errors actionable.',
+    how: 'The CLI boundary was chosen because trace decision D1 ties validation to the input scenario; this keeps invalid input from reaching execution and supports the requested clear errors.',
+    artifact: ARTIFACT_TEXT, ...traceFixture(),
+  }));
+  const status = runner.status(runtime.sessionID);
+  assert.equal(status.state, 'await-approval');
+  assert.match(status.report, /Resumen \(Planificación\)\nPlanned CLI input validation/);
+  assert.match(status.report, /Cómo\n- The CLI boundary was chosen because trace decision D1/);
+  assert.equal(status.report.split('Planned CLI input validation').length, 2);
+  assert.doesNotMatch(status.report, /Ignored \d+ field|file\(s\) reported as changed|Reported running/);
 });
 
 test('runner contract: high route starts only explore and preserves profile validation', async t => {

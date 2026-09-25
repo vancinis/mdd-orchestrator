@@ -975,6 +975,7 @@ export class PhaseRunner {
       return {
         result, ignored, outcome,
         evidenceSummary: boundedText(result.evidenceSummary, 'summary', 2000),
+        how: result.how === undefined ? undefined : boundedText(result.how, 'how', 2000),
         artifact: assertNoTraceSection(boundedText(result.artifact, 'artifact', 16000)),
         advisory: concerns(result.concerns),
       };
@@ -1036,13 +1037,9 @@ export class PhaseRunner {
       } catch (error) { throw asMalformed(error); }
       // The report a person will read is built and rendered before anything is persisted, so a
       // phase whose summary cannot be presented fails here rather than after it was recorded.
-      const how = [
-        'Kept the requirements, decisions and implementation evidence linked.',
-        ...(applied?.paths.length ? [`${new Set(applied.paths).size} file(s) reported as changed.`] : []),
-        ...(applied?.reason ? [`Nothing was changed: ${applied.reason}`] : []),
-        ...ran.map(check => `Reported running ${check.command}; exit ${check.exit ?? 'unknown'}.`),
-        ...(ignored.length ? [`Ignored ${ignored.length} field(s) this phase does not report: ${ignored.join(', ')}.`] : []),
-      ];
+      // Only an explicit phase explanation can supply causal reasoning. A changed-file reason
+      // alone does not establish its relation to the goal; missing reasoning stays missing.
+      const how = report.how ? [report.how] : applied?.reason ? [applied.reason] : [];
       const rendered = renderReport(run.workflow.snapshot().answers.summary, { phase: run.phase, summary: evidenceSummary, how, status: outcome, evidence: nextEvidence });
       if (run.state !== 'persisting-result') throw new Error('Result became uncertain during inspection.');
       run.artifact = await run.artifacts.save({ runID: run.id, phase: run.phase, ...(run.phase === 'mdd-spec' ? { domain: boundedText(result.domain, 'spec domain', 64) } : {}) }, artifact);
@@ -1681,7 +1678,7 @@ export class PhaseRunner {
     run.brief = prompts.brief;
     this.#arm(run);
     run.state = 'ready';
-    run.report = { phase, summary: `Listo para ${phaseLabel(phase).toLowerCase()}.`, how: ['El trabajo que sigue respeta los requisitos y el plan disponible; en modo automático no hace falta confirmar el proceso aparte.'], status: 'in-progress', evidence: run.evidence };
+    run.report = { phase, summary: `Listo para ${phaseLabel(phase).toLowerCase()}.`, how: [], status: 'in-progress', evidence: run.evidence };
   }
 
   /** Change executor, never semantic phase, approval, dependencies, or report contract. */
@@ -1707,7 +1704,7 @@ export class PhaseRunner {
       'mdd-design': 'Use held acceptance IDs to define only relevant decisions, boundaries and test seams. Supply decisions; do not redefine requirements or invent extra process.',
       'mdd-tasks': 'Supply ordered deliverables linked to held scenarios and decisions. Keep check commands applicable to acceptance; no extra unrelated checks. Preserve ID and dependency consistency.',
       'mdd-apply': 'Implement the applicable planned deliverables. Supply changes as [{path,reason}], one entry per file you changed, where reason says in one sentence why that file had to change — a reviewer reads it beside the diff, so "updated the file" is not a reason. A bare path is still accepted when there is genuinely nothing to add. Use noChangeReason instead when nothing needed changing. Report the checks you actually ran as checks [{command,exit}]; they are recorded as your claim, and an empty list is the honest answer when you ran none.',
-      'mdd-verify': 'Check requirements AND the held plan against the implementation, running the planned checks. Supply checks [{command,exit}] for what you actually ran and verification for EVERY scenario-step pair, step and decision. Give source-based semantic assessments naming the check they rely on; use not-verified/deviation and outcome failed for gaps. An exit code is not semantic proof; never report a check you did not run.',
+      'mdd-verify': 'Check requirements, design decisions AND the held plan against the implementation. Run applicable tests and build checks as appropriate, including planned checks when applicable; if a check is inapplicable or cannot run, explain why, its impact and what remains unknown. Supply checks [{command,exit}] for what you actually ran and verification for EVERY scenario-step pair, step and decision. Give source-based semantic assessments naming the check they rely on; use not-verified/deviation and outcome failed for gaps. Explain any deviation or failed/unrun check, its impact, and the next choices (improve, reject or request implementation rework) so the user can decide. An exit code is not semantic proof; never report a check you did not run.',
     };
     const cleanup = phase === 'mdd-apply' ? cleanupInstructions() : undefined;
     const doc = DOC_PHASES.includes(phase) ? docInstructions() : undefined;
@@ -1723,6 +1720,7 @@ export class PhaseRunner {
       ISOLATION,
       'Prioritize a useful plan, matching requirements and plan, and reaching the user goal. Time and quality are joint constraints on both routes.',
       SUMMARY_DETAIL[detail],
+      'Keep the MDD Summary outcome-focused. In MDD How, explain concrete changes or decisions, their source-grounded causal reason and their relation to the user objective. If the reason is unknown, say so instead of inventing one. Do not substitute process bookkeeping, file counts, ignored fields or command lists. Commands belong in verification evidence, not in the explanation of how the goal was advanced.',
       'Use the tools and commands the phase actually needs; native permission requests are the real boundary. Shell executes real project code and is NOT a sandbox.',
       // Phase actors sit at the native subagent depth limit, so a task they dispatch fails. Saying
       // so costs one line and saves an attempt spent discovering it.
@@ -1791,7 +1789,8 @@ export class PhaseRunner {
     const checked = run.verification;
     const gap = checked ? [...checked.scenarios, ...checked.steps, ...checked.decisions].find(item => item.status !== 'verified') : undefined;
     return renderClosure(run.workflow.snapshot().answers.summary, { goal: run.acceptance?.goal ?? 'Completar el cambio pedido.',
-      changes: run.changedFiles ? checked?.changes ?? `Cambiaron ${run.changedFiles} archivo(s) del alcance; el resultado no está verificado del todo.` : 'No se registró ningún cambio de implementación.', matched: run.state === 'complete' && checked?.matched === true,
+      changes: run.changedFiles ? checked?.changes ?? (run.delivered ? `${run.delivered.what}${run.delivered.implies ? ` ${run.delivered.implies}` : ''} La verificación de este resultado está pendiente.` : 'El resultado de la implementación no está verificado; se desconoce si cumple el objetivo.') : 'No se registró ningún cambio de implementación.',
+      how: checked && run.phase === 'mdd-verify' ? run.report.how : [], matched: run.state === 'complete' && checked?.matched === true,
       checks: run.executedChecks, limits: [...(gap ? [`Brecha de criterios o de plan: ${gap.assessment}`] : []), ...(checked?.limits ?? []), ...(run.state === 'blocked' && !gap ? ['No se pudo confirmar que esté completo. Revisá la evidencia detallada antes de seguir.'] : [])],
       status: run.state === 'complete' ? 'passed' : run.report.status === 'failed' ? 'failed' : 'blocked', evidence: run.evidence });
   }

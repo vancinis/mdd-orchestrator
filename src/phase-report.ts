@@ -34,7 +34,7 @@ export class MalformedReport extends Error {
 }
 
 /** Headings MDD reads. Everything else in the document belongs to the section it sits in. */
-const SECTIONS = ['outcome', 'summary', 'artifact', 'data', 'concerns', 'phase', 'run'] as const;
+const SECTIONS = ['outcome', 'summary', 'how', 'artifact', 'data', 'concerns', 'phase', 'run'] as const;
 type Section = typeof SECTIONS[number];
 const REQUIRED: readonly Section[] = ['outcome', 'summary', 'artifact'];
 /**
@@ -45,7 +45,7 @@ const REQUIRED: readonly Section[] = ['outcome', 'summary', 'artifact'];
  */
 const PREFIX = 'mdd ';
 const ALIASES: Record<string, Section> = {
-  outcome: 'outcome', summary: 'summary', artifact: 'artifact',
+  outcome: 'outcome', summary: 'summary', how: 'how', artifact: 'artifact',
   data: 'data', concerns: 'concerns', phase: 'phase',
   run: 'run', runid: 'run', 'run id': 'run',
   'evidence summary': 'summary',
@@ -133,6 +133,7 @@ export function parsePhaseReport(text: string, phase: Phase): Record<string, unk
     evidenceSummary: parts.get('summary')!,
     artifact: parts.get('artifact')!,
   };
+  if (parts.has('how')) result.how = parts.get('how')!;
   const binding = parts.get('phase');
   const run = parts.get('run');
   if (binding) result.phase = binding.replace(EMPHASIS, '').trim();
@@ -165,6 +166,7 @@ export function reportFormatLines(phase: Phase): string[] {
     'Report this phase as a short markdown document, not as a JSON object. Use these exact headings, each once:',
     '"## MDD Outcome" holding exactly passed or failed.',
     '"## MDD Summary" holding 1–2000 bytes of plain prose a person reads first: what you did and what it means. No call IDs, routing details or confidence percentages.',
+    '"## MDD How" holding a distinct, source-grounded explanation of the concrete decision or change, why it was chosen, and how it advances the user objective. Do not repeat the summary, list commands or invent a reason; if the cause is unknown, state that explicitly.',
     `"## MDD Artifact" holding 1–16000 bytes of the actual deliverable of this phase, in ordinary markdown. ${fields.length ? 'MDD appends its own links section to this text and holds the total to the same 16,000 bytes, so leave room rather than filling the budget exactly. ' : ''}Headings inside it must not reuse an "MDD ..." name.`,
     ...(fields.length
       ? [`"## MDD Data" holding ONE fenced json block with exactly these keys: ${fields.join(', ')}. No other key is accepted.`,

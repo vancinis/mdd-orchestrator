@@ -90,12 +90,13 @@ export function request(endpoint, explore = false) {
  * prose, exactly as a real actor writes it.
  */
 export function reportDocument(result) {
-  const { phase, runID, callID, outcome, evidenceSummary, artifact, concerns, ...data } = result;
+  const { phase, runID, callID, outcome, evidenceSummary, how, artifact, concerns, ...data } = result;
   return [
     ...(phase ? [`## MDD Phase\n\n${phase}\n`] : []),
     ...(runID ? [`## MDD Run\n\n${runID}\n`] : []),
     `## MDD Outcome\n\n${outcome ?? 'passed'}\n`,
     `## MDD Summary\n\n${evidenceSummary}\n`,
+    ...(how ? [`## MDD How\n\n${how}\n`] : []),
     `## MDD Artifact\n\n${artifact}\n`,
     ...(Object.keys(data).length ? [`## MDD Data\n\n\`\`\`json\n${JSON.stringify(data, null, 2)}\n\`\`\`\n`] : []),
     ...(concerns ? [`## MDD Concerns\n\n\`\`\`json\n${JSON.stringify(concerns)}\n\`\`\`\n`] : []),
