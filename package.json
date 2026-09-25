@@ -4,11 +4,24 @@
   "private": true,
   "description": "OpenCode-first planned development with native consent and grounded verification",
   "type": "module",
-  "bin": { "mdd": "dist/cli.js", "mdd-ai": "dist/cli.js" },
-  "exports": { ".": "./dist/kernel.js", "./opencode-plugin": "./dist/opencode-plugin.js" },
+  "bin": {
+    "mdd": "dist/cli.js",
+    "mdd-ai": "dist/cli.js"
+  },
+  "exports": {
+    ".": "./dist/kernel.js",
+    "./opencode-plugin": "./dist/opencode-plugin.js",
+    "./opencode-tui": "./dist/opencode-tui.js"
+  },
   "files": [
-    "dist/*.js", "dist/*.d.ts", "scripts/setup.mjs", "scripts/extract-engram.ps1", "assets/opencode",
-    "README.md", "docs/*.md", "docs/mdd-config.schema.json"
+    "dist/*.js",
+    "dist/*.d.ts",
+    "scripts/setup.mjs",
+    "scripts/extract-engram.ps1",
+    "assets/opencode",
+    "README.md",
+    "docs/*.md",
+    "docs/mdd-config.schema.json"
   ],
   "engines": {
     "node": ">=24.6.0 <25"
@@ -22,10 +35,13 @@
     "setup": "node scripts/setup.mjs"
   },
   "devDependencies": {
+    "@opentui/keymap": "0.4.5",
     "@types/node": "24.13.4",
     "typescript": "7.0.2"
   },
   "dependencies": {
-    "@opencode-ai/plugin": "1.18.31"
+    "@opencode-ai/plugin": "1.18.31",
+    "@opentui/solid": "0.4.5",
+    "solid-js": "1.9.12"
   }
 }

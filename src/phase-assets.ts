@@ -27,6 +27,11 @@ function packagedSkill(name: string): PackagedSkill {
 }
 export function cleanupInstructions(): PackagedSkill { return packagedSkill('mdd-cleanup'); }
 export function docInstructions(): PackagedSkill { return packagedSkill('mdd-doc'); }
+/** The prose phases inject both document skills; Tasks intentionally injects neither. */
+export const DOC_PHASES: readonly Phase[] = ['mdd-explore', 'mdd-plan', 'mdd-propose', 'mdd-spec', 'mdd-design', 'mdd-verify'];
+export function injectedSkillNames(phase: Phase): readonly string[] {
+  return phase === 'mdd-apply' ? ['mdd-cleanup'] : DOC_PHASES.includes(phase) ? ['mdd-doc', 'cognitive-doc-design'] : [];
+}
 /**
  * The upstream community skill, shipped verbatim under its own Apache-2.0 notice and delivered
  * beside `mdd-doc` rather than instead of it. `mdd-doc` holds the rules that are specific to an
