@@ -62,7 +62,7 @@ const CONCERN_SCHEMA = tool.schema.object({
 });
 
 /** MDD tools belong to the MDD coordinator. Other agents share the registry but not this state. */
-export const MDD_TOOLS = ['mdd_start', 'mdd_status', 'mdd_phase_result', 'mdd_reset', 'mdd_change_request', 'mdd_contextual_explore', 'mdd_context', 'mdd_pr_body', 'mdd_improve', 'mdd_improvements'] as const;
+export const MDD_TOOLS = ['mdd_start', 'mdd_status', 'mdd_prepare_advance', 'mdd_revisit', 'mdd_phase_result', 'mdd_reset', 'mdd_change_request', 'mdd_contextual_explore', 'mdd_context', 'mdd_pr_body', 'mdd_improve', 'mdd_improvements'] as const;
 /**
  * The one MDD tool that is not the coordinator's alone. It is kept out of `MDD_TOOLS` because
  * that list is what `restrictTools` switches off everywhere else, and this one has to reach the
@@ -703,6 +703,26 @@ const plugin: Plugin = async input => {
           // adapter boundary, and concerns() still validates every entry strictly.
           const advisory = decodeConcerns(args.concerns);
           return reply(await intake.changeRequest({ ...args, concerns: advisory.length ? advisory : undefined }, context, context.messageID));
+        },
+      }),
+      mdd_prepare_advance: tool({
+        description: 'After presenting the phase result, submit all necessary clarification questions before offering phase approval. Pass [] only when none remain. Each question offers agent delegation, optional deferral, recommended choices and free text. Also resumes a paused review without approving it.',
+        args: { questions: tool.schema.array(tool.schema.object({
+          question: tool.schema.string().min(1),
+          options: tool.schema.array(tool.schema.object({ label: tool.schema.string().min(1), description: tool.schema.string().min(1), recommended: tool.schema.boolean().optional() })).min(1).max(6),
+          deferrable: tool.schema.boolean().optional(),
+        })).max(8) },
+        async execute(args, context) {
+          enter(context, 'mdd_prepare_advance');
+          return reply(intake.prepareAdvance(args, context));
+        },
+      }),
+      mdd_revisit: tool({
+        description: 'Withdraw an idle phase approval or clarification question for a user question or edit, without approving or rejecting anything. Then answer or record context and prepare advancement again.',
+        args: {},
+        async execute(_args, context) {
+          enter(context, 'mdd_revisit');
+          return reply(intake.revisit(context));
         },
       }),
       mdd_phase_result: tool({

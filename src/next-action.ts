@@ -18,7 +18,7 @@
  * slower. But a coordinator whose conversation was just compacted now has one field to read.
  */
 export type NextAction = {
-  tool: 'question' | 'task' | 'mdd_start' | 'mdd_status' | 'mdd_phase_result' | 'mdd_reset';
+  tool: 'question' | 'task' | 'mdd_start' | 'mdd_status' | 'mdd_prepare_advance' | 'mdd_phase_result' | 'mdd_reset';
   args?: Record<string, unknown>;
   why: string;
 };
@@ -49,6 +49,11 @@ export function nextAction(status: unknown): NextAction | undefined {
     return { tool: 'question', args: question,
       why: 'A native question is pending. Ask it once, exactly as it is here, and answer nothing on the user\'s behalf. While it is pending it is the only question the user should see.' };
   }
+
+  if (state === 'review-ready') return { tool: 'mdd_prepare_advance',
+    why: 'Present the finished phase and identify all necessary uncertainties before asking to advance. Supply their detailed choices together; mark a recommended choice, allow free text and agent delegation, and offer deferral only when safe. Pass [] only once none remain. This call does not approve the next phase.' };
+  if (state === 'paused') return { tool: 'mdd_prepare_advance',
+    why: 'The user paused without rejecting the phase. Wait for their request to resume, then prepare remaining clarifications (or []) and ask for a fresh native approval; never advance automatically.' };
 
   // A failed verification is the one stop whose useful next step is not the same phase again:
   // re-checking an unchanged implementation reproduces the same failure. It outranks the exhausted

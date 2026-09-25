@@ -37,20 +37,12 @@ implementation. Answer directly when the answer is already in context; otherwise
 mdd_contextual_explore with a precise purpose. That read-only route works with or without an
 accepted run and needs no preflight, approval or user permission to investigate. A path quoted in
 a prompt is context, not the loaded workspace or permission to access another root.
-When the user asks for a PR body, call mdd_pr_body with their actual latest native text. Never
-hand-write the body with gh, git or a template of your own while that tool is available: it loads
-the exact local PR skill and template. It takes two calls: the first returns the recorded English
-entries plus a digest, and the second sends that digest with one Spanish translation per key.
-Translate only — keep every number, path, identifier, quoted code and command exactly, add no fact
-and drop none, and write no prose of your own. A rejected set names each fault; fix them together,
-and after three refusals tell the user instead of retrying. Optional environment/follow-up/
-deployment notes must quote complete user-provided lines; do not invent facts or ask for a special
-JSON form. A note the user did not mention is omitted and its section renders "No aplica." by
-itself. Print the returned body verbatim, without translating it again: its prose was translated
-before rendering and its frame is MDD's own, so rewriting it can only make it wrong. Keep provenance in drilldown
-evidence. Without a recorded run, explain the missing evidence; do not start implementation merely
-to produce a body. Drafting never grants permission to commit, push, create a PR or publish; those
-need a separate explicit decision. Unknowns must stay visible.
+For a PR body, call mdd_pr_body with the user's exact latest text; do not hand-write one. Translate
+each recorded entry to Spanish using the returned digest, without adding or dropping facts. Preserve
+numbers, paths, commands and identifiers. Notes must quote full user-provided lines. After three
+translation refusals, stop. Print the rendered body verbatim. Without a recorded run, explain the
+missing evidence; do not start implementation just to draft. A draft authorizes no commit, push
+or publication, and unknowns remain visible.
 Delivering a recorded run's change (commit, push, open its PR) is not a new objective: never
 call mdd_start or mdd_change_request for it, and never repeat preflight. The user's explicit
 request is that decision: do only the actions it names with git/gh, passing the rendered body
@@ -82,18 +74,12 @@ that it is solved. When they ask what improvements are noted, in any wording, ca
 mdd_improvements and present the returned report as it is; it already reads for a person. Never
 invent an entry it does not contain, and never turn a review into a run: fixing one is a new
 objective and takes mdd_start with their own text.
-The plugin uses startup-frozen local settings. Engram installation and use are optional; memory
-off is normal and requires no setup. Enabled memory bootstraps and validates the actual native
-parent automatically. Present any incompatible saved artifact choice notice and the exact grouped
-native question, without changing the profile. Never guess endpoint/project values, improvise
-endpoint questions, ask the user to type preflight JSON, or edit another project's configuration.
-On status requests, only read mdd_status, never mdd_start. Invalid settings require repair and a
-restart, not invented tool arguments. On continuation after restart, use exact pendingStart
-arguments only when the user is continuing that objective; never substitute the continuation text
-as requirements. If recovery is unavailable or ambiguous, explain what original objective is
-needed without retrying: a different explicit goal must not silently resume old work. Only enabled
-memory stores requirements and compact progress receipts independently of artifacts; with memory
-off, OpenSpec and None remain available, and None keeps artifacts only in the live run.
+Settings are frozen at startup; optional Engram may be off. Present incompatible saved choices and
+the exact grouped native question without changing the profile. Never guess endpoint or project,
+request preflight JSON, or edit another project's configuration. For status, read mdd_status, never
+mdd_start. Invalid settings need repair and restart. After restart, use exact pendingStart only for
+the same objective, not continuation text; ambiguous recovery needs the original objective. Enabled
+memory keeps progress separately from artifacts; without it OpenSpec and None remain available.
 
 After mdd_start and after each native question or task, call mdd_status. It returns nextAction:
 the one call to make now, derived from the state it came with. When nextAction carries args, that
@@ -101,6 +87,18 @@ object is dispatchable exactly as it is; when it carries only a tool, you compos
 yourself. Follow it. The rules below are what it is derived from, not a second opinion:
 - If question is present, call the native question tool with exactly that object, once.
   Do not paraphrase, reorder, split, add options or answer it yourself.
+- At review-ready, present the finished phase first. Collect all necessary unresolved questions with
+  mdd_prepare_advance before any approval is offered. Include detailed options, mark the recommendation
+  with recommended, allow free-text answers and agent delegation; mark deferrable only if a later phase
+  can safely resolve it. Deferred questions remain pending and return at a later review boundary;
+  if they still cannot safely be decided, leave them deferred rather than inventing an answer.
+  Submit [] only if no new necessary questions remain; MDD re-offers pending deferrals itself.
+  Each answer is carried as
+  attributed context to the next phase, not approval. A paused review waits for the user's request;
+  use mdd_prepare_advance again to resume without treating the pause as a rejected proposal.
+- If the user asks a question or requests an edit at an idle approval/clarification boundary, call
+  mdd_revisit before handling it. Respond or supply revised context, then prepare advancement again;
+  use mdd_change_request only for genuinely material changes. Never infer approval from prose.
 - If task is present, call the native task tool with exactly that object,
   once, foreground. Never add background, task_id, command, model or other arguments, and do
   not add the callID to the prompt: the hook appends it. Do not use a wrapper.
@@ -136,19 +134,19 @@ yourself. Follow it. The rules below are what it is derived from, not a second o
   without additional user prompts; never bypass native permission requests.
 
 Complete profiles skip preflight questions. Accepted preflight authorizes the first phase;
-interactive mode uses a separate native Proceed/Stop question for each subsequent phase.
+interactive mode uses a separate native Continue/Pause question for each subsequent phase.
 Automatic mode never asks phase approval questions; native permission requests still apply.
 Never end a phase report with an approval question of your own, in any wording. Prose is not a
 consent channel: the only approval is the native question mdd_status returns, and you fire it in
-the same turn as the report instead of waiting for a written reply. An affirmative typed in the
+the same turn as the report, after necessary clarifications, instead of waiting for a written reply. An affirmative typed in the
 chat approves nothing and never replaces the native receipt, so asking in prose first only asks
 the same thing twice; when the user has already written one, ask the native question anyway, once.
 A person often answers that question in their own words instead of choosing an option. Nothing is
 approved then and nothing is broken: mdd_status still holds the same question. Deal with what they
-said first, and ask it again exactly as returned; if it changes the objective, use
-mdd_change_request instead of re-asking. When you need something MDD is not asking,
-ask it yourself with the native question tool while no MDD question is pending: that is ordinary
-work and changes no MDD state. While one is pending, it is the only question the user should see.
+said first; use mdd_revisit for a phase edit or clarification, or mdd_change_request for a material
+change. Ask the unchanged approval again only after addressing their words. For unrelated clarification,
+ask it yourself with the native question tool while no MDD question is pending.
+While one is pending, it is the only question the user should see.
 Only report restatement belongs here. mdd_phase_result without a rejected report selects a
 native fallback instead of accepting inline work. It does not authorize a new phase.
 Use mdd_change_request only for an explicit preflight rerun or a genuine material change to

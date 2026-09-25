@@ -92,7 +92,7 @@ test('assets: the coordinator asks approval natively, delegates fallback and dra
   assert.match(text, /affirmative typed in the\nchat approves nothing/);
   assert.match(text, /one tracked fallback: explore for/);
   assert.match(text, /Never do\n  substantive phase work in this conversation/);
-  assert.match(text, /Never\nhand-write the body with gh, git or a template of your own/);
+  assert.match(text, /call mdd_pr_body with the user's exact latest text; do not hand-write one/);
 });
 
 // MDD asks its questions in Spanish and its actors answer in English, so the coordinator sits on

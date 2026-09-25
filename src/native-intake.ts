@@ -19,16 +19,19 @@ export type IntakeInspect = {
   question(runtime: Runtime, call: TaskCall, args: QuestionEnvelope): Promise<void>;
 };
 type Runner = Pick<PhaseRunner, 'start' | 'status' | 'approveNative' | 'block'> & Partial<Pick<PhaseRunner, 'approvalStopped' | 'assertChangeable' | 'assertFreshStart' | 'contribute' | 'explore' | 'priorGuards' | 'recordConsent' | 'reset' | 'submit'>>;
-type Slot = { kind: 'preflight' | 'approval' | 'change'; args: QuestionEnvelope; phase?: Phase; callID?: string; requirements?: string };
+type Slot = { kind: 'preflight' | 'approval' | 'change' | 'clarification'; args: QuestionEnvelope; phase?: Phase; callID?: string; requirements?: string };
+type Clarification = { question: string; options: { label: string; description: string; recommended?: boolean }[]; deferrable?: boolean };
 type Intake = {
   runtime: Runtime; requirements: string;
-  state: 'starting' | 'question-ready' | 'await-answer' | 'accepting' | 'active' | 'blocked' | 'stopped';
+  state: 'starting' | 'question-ready' | 'review-ready' | 'paused' | 'await-answer' | 'accepting' | 'active' | 'blocked' | 'stopped';
   slot?: Slot; reason?: string;
   provenance?: { requirements: 'native-user'; preflight: 'startup-profile' | 'native-question'; profile: string };
   receipts: { kind: Slot['kind']; phase?: Phase; callID: string; answers: string[][]; cancelled?: true }[];
   known: Partial<Answers>; userMessageID?: string; usedMessages: Set<string>; proposed: Set<string>; replacing?: true; notice?: string;
-  restore?: { state: Intake['state']; slot?: Slot; requirements: string; known: Partial<Answers>; userMessageID?: string };
+  restore?: { state: Intake['state']; slot?: Slot; requirements: string; known: Partial<Answers>; userMessageID?: string; clarifications: Clarification[]; deferred: Clarification[]; clarificationAnswers: { question: string; answer: string; phase: Phase; disposition: 'answered' | 'deferred' }[] };
   memory?: { endpoint: string; project: string }; context?: { label: string; content: string };
+  clarifications: Clarification[]; deferred: Clarification[];
+  clarificationAnswers: { question: string; answer: string; phase: Phase; disposition: 'answered' | 'deferred' }[];
 };
 
 /**
@@ -36,12 +39,22 @@ type Intake = {
  * compares against, so they live in one place: a translated label can never drift from the
  * comparison that maps it to an outcome.
  */
-export const APPROVAL_LABELS = Object.freeze({ proceed: 'Continuar', stop: 'Detener' });
+export const APPROVAL_LABELS = Object.freeze({ proceed: 'Continuar', pause: 'Pausar', detail: 'Obtener un resumen más completo de esta fase' });
 export const CHANGE_LABELS = Object.freeze({ confirm: 'Confirmar el cambio', keep: 'Mantener el plan actual' });
+export const CLARIFICATION_LABELS = Object.freeze({ defer: 'Dejar para más adelante', delegate: 'Que decida el agente' });
+const clarificationOptionLabel = (option: Clarification['options'][number]): string => `${option.label}${option.recommended ? ' (Recomendada)' : ''}`;
 
-export function approvalEnvelope(runID: string, phase: Phase): QuestionEnvelope {
+export function approvalEnvelope(runID: string, phase: Phase, detail = false): QuestionEnvelope {
   return { questions: [{ header: 'Aprobación', question: `¿Continuar con ${phase} en el run MDD ${runID}? Esto autoriza solo esta fase; los pedidos de permiso nativos siguen aplicando.`, multiple: false,
-    options: [{ label: APPROVAL_LABELS.proceed, description: 'Autorizar únicamente esta fase.' }, { label: APPROVAL_LABELS.stop, description: 'Detener sin autorizar esta fase.' }] }] };
+    options: [{ label: APPROVAL_LABELS.proceed, description: 'Autorizar únicamente esta fase.' }, { label: APPROVAL_LABELS.pause, description: 'Pausar sin rechazar la fase ni perder el plan.' },
+      ...(detail ? [{ label: APPROVAL_LABELS.detail, description: 'Ver más información antes de tomar una decisión.' }] : [])] }] };
+}
+
+function clarificationEnvelope(item: Clarification): QuestionEnvelope {
+  return { questions: [{ header: 'Detalle', question: item.question, multiple: false,
+    options: [...item.options.map(option => ({ label: clarificationOptionLabel(option), description: option.description })),
+      ...(item.deferrable ? [{ label: CLARIFICATION_LABELS.defer, description: 'Resolver esto en una fase posterior; no se considera decidido.' }] : []),
+      { label: CLARIFICATION_LABELS.delegate, description: 'Delegar esta decisión al agente de la próxima fase.' }] }] };
 }
 
 /**
@@ -120,8 +133,8 @@ export class NativeIntake {
     // messages and change proposals. Those guards are restored; the receipts that recorded actual
     // consent are not, because their call IDs would look like approvals this run never received.
     const guards = previous ? undefined : this.runner.priorGuards?.(runtime.sessionID);
-    const entry: Intake = { runtime: { ...runtime }, requirements, state: 'starting', receipts: previous?.receipts ?? [], known: { ...this.#profile.answers }, usedMessages: new Set(previous?.usedMessages ?? guards?.usedMessages), proposed: new Set(previous?.proposed ?? guards?.proposed), ...(context ? { context } : {}), ...(previous ? { replacing: true } : {}) };
-    if (previous) entry.restore = { state: previous.state, requirements: previous.requirements, known: previous.known, ...(previous.slot ? { slot: previous.slot } : {}), ...(previous.userMessageID ? { userMessageID: previous.userMessageID } : {}) };
+    const entry: Intake = { runtime: { ...runtime }, requirements, state: 'starting', receipts: previous?.receipts ?? [], known: { ...this.#profile.answers }, usedMessages: new Set(previous?.usedMessages ?? guards?.usedMessages), proposed: new Set(previous?.proposed ?? guards?.proposed), clarifications: [], deferred: [], clarificationAnswers: [], ...(context ? { context } : {}), ...(previous ? { replacing: true } : {}) };
+    if (previous) entry.restore = { state: previous.state, requirements: previous.requirements, known: previous.known, clarifications: previous.clarifications, deferred: previous.deferred, clarificationAnswers: previous.clarificationAnswers, ...(previous.slot ? { slot: previous.slot } : {}), ...(previous.userMessageID ? { userMessageID: previous.userMessageID } : {}) };
     this.#sessions.set(runtime.sessionID, entry);
     try {
       // An objective may be older than the last thing the user said: a continuation message never
@@ -161,8 +174,8 @@ export class NativeIntake {
     const input = objectWithKeys(value, 'change request', ['kind', 'userText', 'requirements', 'concerns']);
     if (runtime.agent !== 'mdd-orchestrator' || !['rerun', 'material'].includes(String(input.kind))) throw new Error('Only the coordinator may request a rerun or material change.');
     const entry = this.#sessions.get(runtime.sessionID);
-    if (!entry || entry.restore || !['active', 'question-ready', 'stopped', 'blocked'].includes(entry.state) ||
-        (entry.state === 'question-ready' && entry.slot?.kind !== 'approval') ||
+    if (!entry || entry.restore || !['active', 'review-ready', 'paused', 'question-ready', 'stopped', 'blocked'].includes(entry.state) ||
+        (entry.state === 'question-ready' && !['approval', 'clarification'].includes(entry.slot?.kind ?? '')) ||
         (entry.state === 'blocked' && entry.slot?.callID && !entry.receipts.some(item => item.callID === entry.slot!.callID))) throw new Error('Finish or dismiss the current native interaction before requesting a change.');
     if (this.runner.status(runtime.sessionID).state !== 'not-started') this.runner.assertChangeable?.(runtime.sessionID);
     const userText = boundedText(input.userText, 'actual user request', 12000);
@@ -170,7 +183,7 @@ export class NativeIntake {
     const requirements = input.kind === 'rerun' ? entry.requirements : boundedText(input.requirements, 'proposed requirements', 12000);
     if (input.kind === 'rerun' && (input.requirements !== undefined || advisory.length)) throw new Error('A preflight rerun retains requirements; use material change for a new objective.');
     if (input.kind === 'material' && requirements.trim() === entry.requirements.trim()) throw new Error('A material change needs requirements that differ from the current ones. Ordinary plan choices do not require this path.');
-    const saved = { state: entry.state, requirements: entry.requirements, known: entry.known, ...(entry.slot ? { slot: entry.slot } : {}), ...(entry.userMessageID ? { userMessageID: entry.userMessageID } : {}) };
+    const saved = { state: entry.state, requirements: entry.requirements, known: entry.known, clarifications: [...entry.clarifications], deferred: [...entry.deferred], clarificationAnswers: [...entry.clarificationAnswers], ...(entry.slot ? { slot: entry.slot } : {}), ...(entry.userMessageID ? { userMessageID: entry.userMessageID } : {}) };
     entry.state = 'accepting';
     try {
       const userID = await this.inspect.intake(runtime, userText, boundedText(messageID, 'native messageID', 256));
@@ -198,7 +211,7 @@ export class NativeIntake {
     if (runtime.agent !== 'mdd-orchestrator' || !this.runner.explore) throw new Error('Only the coordinator may request read-only investigation.');
     const entry = this.#sessions.get(runtime.sessionID);
     if (entry && (entry.restore || ['starting', 'accepting', 'await-answer'].includes(entry.state) ||
-        (entry.state === 'question-ready' && entry.slot?.kind !== 'approval'))) {
+        (entry.state === 'question-ready' && !['approval', 'clarification'].includes(entry.slot?.kind ?? '')))) {
       throw new Error('A native question is pending. Let the user answer it before requesting investigation.');
     }
     await this.runner.explore(value, runtime);
@@ -212,9 +225,63 @@ export class NativeIntake {
   contribute(value: unknown, runtime: Runtime): unknown {
     if (runtime.agent !== 'mdd-orchestrator' || !this.runner.contribute) throw new Error('Only the coordinator may contribute run context.');
     const entry = this.#sessions.get(runtime.sessionID);
-    if (entry && entry.state !== 'active') throw new Error('Finish or dismiss the pending native interaction before contributing context; nothing was recorded.');
+    if (entry && !['active', 'review-ready', 'paused'].includes(entry.state)) throw new Error('Finish or dismiss the pending native interaction before contributing context; nothing was recorded.');
     this.runner.contribute(value, runtime);
     return this.status(runtime.sessionID);
+  }
+
+  /** Review must finish before the native phase approval is ever offered. */
+  prepareAdvance(value: unknown, runtime: Runtime): unknown {
+    if (runtime.agent !== 'mdd-orchestrator') throw new Error('Only the coordinator may prepare phase advancement.');
+    const entry = this.#sessions.get(runtime.sessionID);
+    if (!entry || !['review-ready', 'paused'].includes(entry.state)) throw new Error('Phase review is not ready; no approval was changed.');
+    const status = this.runner.status(runtime.sessionID);
+    if (!('workflow' in status) || status.workflow.nextAction.kind !== 'approve') throw new Error('No phase is awaiting approval.');
+    const input = objectWithKeys(value, 'advance preparation', ['questions']);
+    if (!Array.isArray(input.questions) || input.questions.length > 8) throw new Error('Provide up to eight clarification questions, or an empty array when none remain.');
+    const questions: Clarification[] = input.questions.map(raw => {
+      const item = objectWithKeys(raw, 'clarification', ['question', 'options', 'deferrable']);
+      const question = boundedText(item.question, 'clarification question', 1000);
+      if (!Array.isArray(item.options) || !item.options.length || item.options.length > 6 || (item.deferrable !== undefined && typeof item.deferrable !== 'boolean')) throw new Error('Clarifications require one to six options and a boolean deferrable flag.');
+      const options = item.options.map(rawOption => {
+        const option = objectWithKeys(rawOption, 'clarification option', ['label', 'description', 'recommended']);
+        if (option.recommended !== undefined && typeof option.recommended !== 'boolean') throw new Error('recommended must be boolean.');
+        return { label: boundedText(option.label, 'option label', 100), description: boundedText(option.description, 'option description', 500), recommended: option.recommended === true };
+      });
+      const labels = options.map(clarificationOptionLabel);
+      if (new Set([...labels, CLARIFICATION_LABELS.defer, CLARIFICATION_LABELS.delegate]).size !== labels.length + 2) throw new Error('Clarification option labels must be unique and not reserved.');
+      return { question, options, deferrable: item.deferrable === true };
+    });
+    if (questions.length) {
+      // A question explicitly re-offered by the coordinator replaces its pending copy.
+      const named = new Set(questions.map(item => item.question));
+      entry.clarifications = [...entry.clarifications.filter(item => !named.has(item.question)), ...questions];
+    }
+    delete entry.reason;
+    this.#nextReviewQuestion(entry);
+    return this.status(runtime.sessionID);
+  }
+
+  /** A question or edit may return to review without accepting or declining a pending approval. */
+  revisit(runtime: Runtime): unknown {
+    if (runtime.agent !== 'mdd-orchestrator') throw new Error('Only the coordinator may revisit phase review.');
+    const entry = this.#sessions.get(runtime.sessionID);
+    if (!entry || entry.state !== 'question-ready' || !['approval', 'clarification'].includes(entry.slot?.kind ?? '')) throw new Error('No idle phase question can be revisited.');
+    delete entry.slot;
+    entry.clarifications = entry.clarifications.filter(item =>
+      entry.clarificationAnswers.findLast(answer => answer.question === item.question)?.disposition === 'deferred');
+    entry.state = 'review-ready';
+    entry.notice = 'The phase question was withdrawn without approval. Answer the user or edit the plan, then prepare advancement again.';
+    return this.status(runtime.sessionID);
+  }
+
+  #nextReviewQuestion(entry: Intake): void {
+    const status = this.runner.status(entry.runtime.sessionID);
+    if (!('workflow' in status) || status.workflow.nextAction.kind !== 'approve') throw new Error('No phase is awaiting approval.');
+    const phase = status.workflow.nextAction.phase;
+    const item = entry.clarifications[0];
+    this.#slot(entry, { kind: item ? 'clarification' : 'approval', phase,
+      args: item ? clarificationEnvelope(item) : approvalEnvelope(status.runID, phase, status.reportDetail !== 'detailed') });
   }
 
   /** The coordinator reports a phase it carried out itself instead of delegating it. */
@@ -240,7 +307,7 @@ export class NativeIntake {
       const pending: Slot = { ...entry.slot };
       delete pending.callID;
       delete entry.restore; delete entry.reason;
-      this.#slot(entry, pending);
+      this.#slot(entry, pending, true);
       entry.notice = 'The pending question was re-opened. Nothing was approved or recorded: ask it again exactly as mdd_status returns it.';
       return { ...this.status(runtime.sessionID), reset: { scope: 'phase' as const } };
     }
@@ -351,8 +418,10 @@ export class NativeIntake {
     const state = entry.state === 'active' || side ? status.state : entry.state;
     return { ...status, state, memory, ...(entry.reason ? { reason: entry.reason } : {}),
       task: (entry.state === 'active' || side) && 'task' in status ? status.task : undefined,
-      ...(entry.state !== 'active' && !side ? { next: { kind: entry.state === 'question-ready' ? 'question' : 'wait', ...(entry.slot?.phase ? { phase: entry.slot.phase } : {}) } } : {}),
+      ...(entry.state !== 'active' && !side ? { next: { kind: entry.state === 'question-ready' ? 'question' : entry.state === 'review-ready' ? 'review' : 'wait', ...(entry.slot?.phase ? { phase: entry.slot.phase } : {}) } } : {}),
       question: entry.state === 'question-ready' && !side ? structuredClone(entry.slot!.args) : undefined,
+      clarificationAnswers: structuredClone(entry.clarificationAnswers),
+      pendingClarifications: structuredClone([...entry.deferred, ...entry.clarifications.filter(item => entry.clarificationAnswers.some(answer => answer.question === item.question && answer.disposition === 'deferred'))]),
       notice: entry.notice,
       provenance: entry.provenance ? { ...entry.provenance } : undefined,
       questionReceipts: structuredClone(entry.receipts),
@@ -370,7 +439,10 @@ export class NativeIntake {
     // between phases into a blocked run.
     if (entry.state === 'question-ready') {
       if (!isDeepStrictEqual(args, entry.slot!.args)) throw new Error('Question arguments differ from the pending question; no answer was accepted.');
-    } else if (!this.#owned(args)) return;
+    } else if (!this.#owned(args)) {
+      if (entry.state === 'accepting' || entry.state === 'await-answer') throw new Error('A native MDD question is already pending; no unrelated question may run.');
+      return;
+    }
     const status = this.runner.status(call.sessionID);
     if ('contextual' in status && status.contextual) throw new Error('Wait for the contextual exploration before answering the main approval.');
     if (entry.state !== 'question-ready') return this.#fail(entry, new Error('Unexpected, duplicate, or changed native question.'));
@@ -395,7 +467,12 @@ export class NativeIntake {
     try {
       await this.inspect.question(entry.runtime, call, slot.args);
       if (entry.state !== 'accepting') throw new Error('Question became uncertain during result inspection.');
-      const selections = nativeQuestionAnswers(slot.args, output);
+      let selections: string[][];
+      try { selections = nativeQuestionAnswers(slot.args, output); }
+      catch (error) {
+        if (!(error instanceof UnselectedAnswer) || slot.kind !== 'clarification') throw error;
+        selections = [[boundedText(error.text, 'free-text clarification', 12000)]];
+      }
       if (slot.kind === 'change') {
         if (selections[0]![0] === CHANGE_LABELS.keep) this.#restore(entry, 'Kept the current plan, answers and approval unchanged.');
         else {
@@ -408,14 +485,31 @@ export class NativeIntake {
           this.#slot(entry, { kind: 'preflight', args });
         }
       } else if (slot.kind === 'preflight') await this.#startRunner(entry, selections, 'native-question');
-      else if (selections[0]![0] === APPROVAL_LABELS.stop) {
-        entry.state = 'stopped';
-        entry.reason = 'The user stopped at the phase approval boundary. No phase was authorized.';
+      else if (slot.kind === 'clarification') {
+        const item = entry.clarifications[0]!;
+        const answer = selections[0]![0]!;
+        const deferred = answer === CLARIFICATION_LABELS.defer;
+        // A deferral is context, not a choice: the next actor must not silently decide it.
+        this.runner.contribute?.({ label: `Clarification: ${item.question}`, content: deferred
+          ? 'Deferred by the user; unresolved. Do not assume a choice. Continue only with work safe without this decision.'
+          : `Answer: ${answer}` }, entry.runtime);
+        entry.clarificationAnswers.push({ question: item.question, answer, phase: slot.phase!, disposition: deferred ? 'deferred' : 'answered' });
+        if (deferred) entry.deferred.push(item);
+        entry.clarifications.shift();
+        this.#nextReviewQuestion(entry);
+      } else if (selections[0]![0] === APPROVAL_LABELS.pause) {
+        entry.state = 'paused';
+        entry.reason = 'The user paused before the next phase. No phase was authorized or rejected.';
         this.runner.approvalStopped?.(call.sessionID);
-        this.runner.block(call.sessionID, entry.reason);
+      } else if (selections[0]![0] === APPROVAL_LABELS.detail) {
+        const current = this.runner.status(call.sessionID);
+        if (!('runID' in current) || !slot.phase) throw new Error('Phase detail is no longer available.');
+        this.#slot(entry, { kind: 'approval', phase: slot.phase, args: approvalEnvelope(current.runID, slot.phase) });
+        entry.notice = 'Show the full phase report and relevant artifact from mdd_status(detail="full") before asking this approval again. Nothing was approved.';
       } else {
         this.runner.approveNative(call.sessionID, slot.phase!);
         entry.state = 'active';
+        delete entry.notice;
       }
       entry.receipts.push({ kind: slot.kind, ...(slot.phase ? { phase: slot.phase } : {}), callID: call.callID, answers: selections });
       this.#recordConsent(entry);
@@ -440,9 +534,11 @@ export class NativeIntake {
     }
     const pending: Slot = { ...slot };
     delete pending.callID;
-    this.#slot(entry, pending);
+    this.#slot(entry, pending, true);
     entry.notice = slot.kind === 'approval'
       ? 'The user answered in their own words instead of choosing an option, so no phase was approved and nothing was recorded. Read what they actually said and respond to it; when the phase should still go ahead, ask the same approval question again exactly as mdd_status returns it. If their message changes the objective, use mdd_change_request instead.'
+      : slot.kind === 'clarification'
+      ? 'The phase was not approved. Read the user\'s words and respond to them; this clarification remains pending. Ask the same clarification question again exactly as mdd_status returns it.'
       : 'The user answered in their own words instead of choosing an option, so the run has not started and no answer was recorded. Respond to what they said, then ask the same preflight question again exactly as mdd_status returns it.';
   }
 
@@ -452,7 +548,13 @@ export class NativeIntake {
     const status = this.runner.status(sessionID);
     if (!('workflow' in status) || status.state === 'blocked') return;
     const next = status.workflow.nextAction;
-    if (next.kind === 'approve') this.#slot(entry, { kind: 'approval', phase: next.phase, args: approvalEnvelope(status.runID, next.phase) });
+    if (next.kind === 'approve') {
+      entry.state = 'review-ready'; delete entry.slot; delete entry.notice;
+      // Only a completed subsequent phase makes deferred questions eligible again. Never re-offer
+      // them at the approval immediately following the original deferral.
+      entry.clarifications = entry.deferred;
+      entry.deferred = [];
+    }
   }
 
   guardTask(sessionID: string): void {
@@ -468,6 +570,11 @@ export class NativeIntake {
     entry.receipts.push({ kind: entry.slot.kind, callID: call.callID, answers: [], cancelled: true });
     this.#recordConsent(entry);
     if (entry.restore) { this.#restore(entry, 'Change cancelled; the current plan and approval are unchanged.'); return; }
+    if (['approval', 'clarification'].includes(entry.slot.kind)) {
+      entry.state = 'paused';
+      entry.reason = 'The native phase question was dismissed. The run and unresolved questions remain; no phase was authorized.';
+      return;
+    }
     entry.state = 'stopped';
     entry.reason = 'The native question failed or was dismissed. No approval was recorded; do not repeat or dispatch.';
     this.runner.block(call.sessionID, entry.reason);
@@ -506,8 +613,13 @@ export class NativeIntake {
       usedMessages: [...entry.usedMessages], proposed: [...entry.proposed] });
   }
 
-  #slot(entry: Intake, slot: Slot): void {
+  #slot(entry: Intake, slot: Slot, reissued = false): void {
     entry.slot = structuredClone(slot);
+    // Ownership compares envelope values across all parents. Equal wording and options must not
+    // let another session's first registered question claim this one.
+    if (slot.kind === 'clarification' && !reissued) {
+      entry.slot.args.questions[0]!.question += ` [MDD clarification ${randomUUID()}]`;
+    }
     entry.state = 'question-ready';
     this.#questionOwners.set(entry.slot.args, entry.runtime.sessionID);
   }
