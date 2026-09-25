@@ -30,6 +30,21 @@ export function packagedSkillPath(name: PackagedSkillName): string {
   }
   return path;
 }
+const DOC_SKILLS: readonly PackagedSkillName[] = ['mdd-doc', 'cognitive-doc-design'];
+/**
+ * The packaged skills each phase may find useful, named by direct path rather than injected by
+ * value. Phases whose artifact is prose a person reads get both documentation skills; Apply gets
+ * the cleanup skill; Tasks carries structure only and gets none. The prompt hint and the visual
+ * status both read this one map, so what the user sees is what the actor is offered.
+ */
+export const PHASE_SKILLS: Readonly<Record<Phase, readonly PackagedSkillName[]>> = {
+  'mdd-explore': DOC_SKILLS, 'mdd-plan': DOC_SKILLS, 'mdd-propose': DOC_SKILLS, 'mdd-spec': DOC_SKILLS,
+  'mdd-design': DOC_SKILLS, 'mdd-verify': DOC_SKILLS, 'mdd-tasks': [], 'mdd-apply': ['mdd-cleanup'],
+};
+/** The skills offered to a phase by path, as shown in the visual status. */
+export function injectedSkillNames(phase: Phase): readonly string[] {
+  return PHASE_SKILLS[phase];
+}
 
 /**
  * MDD's own actor instructions. The host prepends whatever `AGENTS.md` and `instructions` files

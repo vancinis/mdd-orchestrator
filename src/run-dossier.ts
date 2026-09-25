@@ -36,7 +36,7 @@ export const DOSSIER_MAX_BYTES = 400000;
 /** Discarded on purpose. Each entry names why restoring it would be wrong, not merely costly. */
 export type PriorArtifact = { ref: ArtifactRef; content?: string };
 export type PriorContext = { explorationID: string; outcome: 'passed' | 'failed'; summary: string; concerns: Concern[]; artifact: PriorArtifact };
-export type PriorReceipt = { kind: 'preflight' | 'approval' | 'change'; phase?: Phase; callID: string; answers: string[][]; cancelled?: true };
+export type PriorReceipt = { kind: 'preflight' | 'approval' | 'change' | 'clarification'; phase?: Phase; callID: string; answers: string[][]; cancelled?: true };
 
 export type RunDossier = {
   version: typeof DOSSIER_VERSION;
@@ -128,9 +128,13 @@ export function priorRunView(dossier: RunDossier, file: string): Record<string, 
     ...(dossier.artifactContentOmitted ? { artifactContentOmitted: true as const } : {}),
   };
   if (Buffer.byteLength(JSON.stringify(base) ?? '') <= DOSSIER_STATUS_BYTES) return base;
-  return { ...base, artifactContentOmitted: true as const,
+  const reduced = { ...base, artifactContentOmitted: true as const,
     artifacts: base.artifacts.map(item => ({ ref: item.ref })),
     contexts: base.contexts.map(item => ({ ...item, artifact: { ref: item.artifact.ref } })) };
+  if (Buffer.byteLength(JSON.stringify(reduced) ?? '') <= DOSSIER_STATUS_BYTES) return reduced;
+  // Still over budget: the larger context entries this view now allows are the remaining cost, so
+  // they are reduced to a label and byte count rather than dropped from the view silently.
+  return { ...reduced, providedContext: reduced.providedContext.map(item => ({ label: item.label, bytes: Buffer.byteLength(item.content) })) };
 }
 
 export class RunDossierStore {

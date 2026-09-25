@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { PhaseRunner } from '../dist/phase-runner.js';
 import { reportFormatLines } from '../dist/phase-report.js';
-import { memoryServer, request, result, runtime, call, answers, installCleanup, traceFixture, ARTIFACT_TEXT, SUMMARY_TEXT } from './adapter-fixture.mjs';
+import { memoryServer, request, result, reportDocument, runtime, call, answers, installCleanup, traceFixture, ARTIFACT_TEXT, SUMMARY_TEXT } from './adapter-fixture.mjs';
 import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -64,6 +64,7 @@ test('runner contract: a phase prompt carries only the schema of its own result 
   // `before` returns is exactly what the dispatched subagent receives.
   const dispatched = await runner.before(call, ready.task);
   assert.match(dispatched.prompt, /exactly these keys: acceptance, decisions, deliverables\./);
+  assert.match(dispatched.prompt, /concrete changes or decisions, their source-grounded causal reason/);
   // The injected mdd-doc guide names verification reports in prose; no verification schema leaks.
   assert.doesNotMatch(dispatched.prompt, /verification=\{|keys: checks, verification/);
   const plan = reportFormatLines('mdd-plan').join('\n');
@@ -73,6 +74,25 @@ test('runner contract: a phase prompt carries only the schema of its own result 
   assert.match(verify, /verification=\{scenarios:/);
   assert.doesNotMatch(verify, /deliverables=/);
   assert.match(reportFormatLines('mdd-explore').join('\n'), /reports no structured data/);
+});
+
+test('completed plan presents a distinct causal Cómo grounded in its decision', async t => {
+  const { runner, endpoint } = await fixture(t);
+  const input = request(endpoint);
+  input.preflight.answers = { ...answers, mode: 'interactive', summary: 'medium' };
+  const ready = await runner.start(input, runtime);
+  const dispatched = await runner.before(call, ready.task);
+  await runner.after(call, dispatched, reportDocument({
+    evidenceSummary: 'Planned CLI input validation to make errors actionable.',
+    how: 'The CLI boundary was chosen because trace decision D1 ties validation to the input scenario; this keeps invalid input from reaching execution and supports the requested clear errors.',
+    artifact: ARTIFACT_TEXT, ...traceFixture(),
+  }));
+  const status = runner.status(runtime.sessionID);
+  assert.equal(status.state, 'await-approval');
+  assert.match(status.report, /Resumen \(Planificación\)\nPlanned CLI input validation/);
+  assert.match(status.report, /Cómo\n- The CLI boundary was chosen because trace decision D1/);
+  assert.equal(status.report.split('Planned CLI input validation').length, 2);
+  assert.doesNotMatch(status.report, /Ignored \d+ field|file\(s\) reported as changed|Reported running/);
 });
 
 test('runner contract: high route starts only explore and preserves profile validation', async t => {
@@ -450,12 +470,19 @@ test('run context: an over-budget contribution fails clearly instead of truncati
   const { runner, endpoint } = await fixture(t);
   const ready = await runner.start(request(endpoint), runtime);
   runner.contribute({ label: 'Held', content: 'x'.repeat(5000) }, runtime);
-  assert.throws(() => runner.contribute({ label: 'Too big', content: 'y'.repeat(4000) }, runtime),
-    /above the 8000-byte limit[\s\S]*Nothing was recorded and nothing was truncated[\s\S]*5004 bytes are already held/);
-  assert.throws(() => runner.contribute({ label: 'Single', content: 'y'.repeat(8001) }, runtime), /at most 8000 bytes/);
+  // A second contribution that keeps the composed prompt well inside the hard bound succeeds even
+  // though the combined size is above the old, now-removed 8000-byte aggregate cap.
+  runner.contribute({ label: 'More', content: 'x'.repeat(5000) }, runtime);
+  assert.equal(runner.status(runtime.sessionID).providedContext.length, 2);
+  // A single entry stays bounded by the same ceiling the composed prompt is checked against.
+  assert.throws(() => runner.contribute({ label: 'Single', content: 'y'.repeat(96001) }, runtime), /at most 96000 bytes/);
+  // A contribution that would push the composed prompt itself past the hard bound fails
+  // explicitly, without truncating and without being recorded.
+  assert.throws(() => runner.contribute({ label: 'Too big', content: 'z'.repeat(90000) }, runtime),
+    /combined phase handoff must be nonempty text of at most 96000 bytes/);
   const status = runner.status(runtime.sessionID);
-  assert.equal(status.providedContext.length, 1);
-  assert.ok(!status.task.prompt.includes('yyy'));
+  assert.equal(status.providedContext.length, 2);
+  assert.ok(!status.task.prompt.includes('zzz'));
   // The refused contribution left a dispatchable task behind, unchanged.
   assert.deepEqual(status.task, runner.status(runtime.sessionID).task);
   assert.notDeepEqual(status.task, ready.task);

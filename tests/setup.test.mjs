@@ -5,7 +5,7 @@ import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
-import { initProject, LOADER_PATH, LOADER_TEXT, PRIVATE_IGNORE_PATH } from '../dist/setup.js';
+import { initProject, LOADER_PATH, LOADER_TEXT, PRIVATE_IGNORE_PATH, registerTuiPlugin, TUI_CONFIG_PATH, TUI_PLUGIN_SPEC } from '../dist/setup.js';
 import { doctor } from '../dist/doctor.js';
 import { defaultSettings, saveSettings as writeSettings, setupDiagnostic } from '../dist/settings.js';
 const saveSettings = (root, value) => writeSettings(join(root, 'mdd'), value);
@@ -13,7 +13,7 @@ import { MDD_ASSETS } from '../dist/project-assets.js';
 import { runConfigUI } from '../dist/config-ui.js';
 import { pathToFileURL } from 'node:url';
 
-function fixture(t, installed = true) {
+function fixture(t, installed = true, stubJSX = false) {
   const home = fs.mkdtempSync(join(tmpdir(), 'mdd-setup-'));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   process.env.HOME = process.env.USERPROFILE = process.env.XDG_CONFIG_HOME = home;
@@ -26,6 +26,16 @@ function fixture(t, installed = true) {
     fs.cpSync('assets', join(pkg, 'assets'), { recursive: true });
     const scope = join(root, 'mdd/node_modules/@opencode-ai'); fs.mkdirSync(scope, { recursive: true });
     fs.symlinkSync(resolve('node_modules/@opencode-ai/plugin'), join(scope, 'plugin'), process.platform === 'win32' ? 'junction' : 'dir');
+    const renderer = join(root, 'mdd/node_modules/@opentui'); fs.mkdirSync(renderer, { recursive: true });
+    if (stubJSX) {
+      const solid = join(renderer, 'solid'); fs.mkdirSync(solid);
+      fs.writeFileSync(join(solid, 'package.json'), JSON.stringify({ type: 'module', exports: {
+        '.': './index.js', './jsx-runtime': './jsx-runtime.js',
+      } }));
+      fs.writeFileSync(join(solid, 'index.js'), 'export const testRenderer = true;\n');
+      fs.writeFileSync(join(solid, 'jsx-runtime.js'), 'export function jsx(tag, props) { return { tag, props }; }\n');
+    } else fs.symlinkSync(resolve('node_modules/@opentui/solid'), join(renderer, 'solid'), process.platform === 'win32' ? 'junction' : 'dir');
+    fs.symlinkSync(resolve('node_modules/solid-js'), join(root, 'mdd/node_modules/solid-js'), process.platform === 'win32' ? 'junction' : 'dir');
   }
   return root;
 }
@@ -44,12 +54,74 @@ test('init installs only owned assets, preserves user files and is byte-idempote
   fs.mkdirSync(join(root, 'skills/custom'), { recursive: true }); fs.writeFileSync(join(root, 'skills/custom/SKILL.md'), 'user skill');
   fs.writeFileSync(join(root, 'AGENTS.md'), 'user instructions'); fs.writeFileSync(join(root, 'opencode.json'), '{"default_agent":"build"}');
   saveSettings(root, defaultSettings()); const before = snapshot(root);
-  const first = initProject(root); assert.equal(first.created, MDD_ASSETS.length + 2);
+  const first = initProject(root); assert.equal(first.created, MDD_ASSETS.length + 3);
   for (const [path, text] of Object.entries(before)) assert.equal(fs.readFileSync(join(root, path), 'utf8'), text);
   assert.equal(fs.readFileSync(join(root, LOADER_PATH), 'utf8'), LOADER_TEXT);
   assert.equal(fs.readFileSync(join(root, PRIVATE_IGNORE_PATH), 'utf8'), '*\n!.gitignore\n');
+  assert.deepEqual(JSON.parse(fs.readFileSync(join(root, TUI_CONFIG_PATH), 'utf8')).plugin, [TUI_PLUGIN_SPEC]);
   const installed = snapshot(root); const second = initProject(root);
   assert.equal(second.created, 0); assert.equal(second.unchanged, first.created); assert.deepEqual(snapshot(root), installed);
+});
+test('TUI registration merges existing config and preserves attention and plugin options', t => {
+  const root = fixture(t);
+  const original = { theme: 'smoke', attention: { enabled: false, sound: true }, plugin: ['other', ['local.tsx', { flag: true }]] };
+  fs.writeFileSync(join(root, TUI_CONFIG_PATH), JSON.stringify(original));
+  initProject(root);
+  const result = JSON.parse(fs.readFileSync(join(root, TUI_CONFIG_PATH), 'utf8'));
+  assert.deepEqual(result, { ...original, plugin: [...original.plugin, TUI_PLUGIN_SPEC] });
+  assert.equal(registerTuiPlugin(JSON.stringify(result)), JSON.stringify(result));
+  assert.deepEqual(JSON.parse(fs.readFileSync(join(root, TUI_CONFIG_PATH), 'utf8')), result);
+});
+test('the installed TUI entry renders after a real Solid signal update', async t => {
+  // OpenTUI native FFI is unavailable under Node here. Stub only JSX creation;
+  // keep the built plugin, installed-prefix resolution and client Solid runtime real.
+  const root = fixture(t, true, true);
+  initProject(root);
+  const spec = JSON.parse(fs.readFileSync(join(root, TUI_CONFIG_PATH), 'utf8')).plugin[0];
+  const loaded = await import(pathToFileURL(join(root, spec)).href);
+  assert.equal(loaded.default.id, 'mdd.visual');
+  assert.equal(typeof loaded.default.tui, 'function');
+  assert.equal('server' in loaded.default, false);
+  let slot; const values = []; const handlers = new Map(); const disposers = [];
+  await loaded.default.tui({ kv: { get: (_, fallback) => fallback, set: (...args) => values.push(args) },
+    slots: { register(value) { slot = value; return 'mdd.visual:sidebar'; } },
+    event: { on(type, handler) { handlers.set(type, handler); return () => handlers.delete(type); } },
+    lifecycle: { onDispose(fn) { disposers.push(fn); } }, tuiConfig: { attention: { enabled: false } },
+  });
+  assert.equal(slot?.order, 250, 'renderer resolves from the installed prefix and registers the sidebar');
+  assert.deepEqual(values, [['mdd.sidebarAvailable', true]]);
+  assert.equal(typeof handlers.get('message.part.updated'), 'function');
+  const { createRoot, createRenderEffect } = await import(pathToFileURL(join(root, 'mdd/node_modules/solid-js/dist/solid.js')).href);
+  const frames = [];
+  const dispose = createRoot(dispose => {
+    const content = slot.slots.sidebar_content({}, { session_id: 'parent' });
+    createRenderEffect(() => frames.push(content()));
+    return dispose;
+  });
+  try {
+    assert.deepEqual(frames, [null]);
+    handlers.get('message.part.updated')({ properties: { part: { type: 'tool', tool: 'mdd_status', sessionID: 'parent',
+      state: { status: 'completed', output: JSON.stringify({ phase: 'mdd-plan', state: 'ready', workflow: {
+        evaluation: { route: 'low', phases: ['mdd-plan', 'mdd-apply'] }, results: [],
+      } }) } } } });
+    assert.equal(frames.at(-1)?.tag, 'box');
+    assert.deepEqual(frames.at(-1)?.props.children.map(child => child.props.children),
+      ['MDD · low route', '🔵 plan', '○ apply', 'Skills: mdd-doc, cognitive-doc-design']);
+    handlers.get('message.part.updated')({ properties: { part: { type: 'tool', tool: 'mdd_status', sessionID: 'parent',
+      state: { status: 'completed', output: JSON.stringify({ phase: 'mdd-apply', state: 'ready', workflow: {
+        evaluation: { route: 'low', phases: ['mdd-plan', 'mdd-apply'] },
+        results: [{ phase: 'mdd-plan', outcome: 'passed' }],
+      } }) } } } });
+    assert.deepEqual(frames.at(-1)?.props.children.map(child => child.props.children),
+      ['MDD · low route', '✅ plan', '🔵 apply', 'Skills: mdd-cleanup']);
+  } finally { dispose(); }
+  disposers[0]();
+  assert.equal(handlers.size, 0);
+});
+test('malformed TUI config blocks setup before installing owned files', t => {
+  const root = fixture(t); fs.writeFileSync(join(root, TUI_CONFIG_PATH), '{broken');
+  assert.throws(() => initProject(root), /tui.json/);
+  assert.equal(fs.existsSync(join(root, LOADER_PATH)), false);
 });
 test('init refuses a conflicting owned file before creating other assets', t => {
   const root = fixture(t); const path = join(root, 'agents/mdd-verify.md'); fs.mkdirSync(join(root, 'agents'), { recursive: true });

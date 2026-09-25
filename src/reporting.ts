@@ -99,7 +99,7 @@ export function renderReport(detail: Answers['summary'], value: PhaseReport): st
   }
   const heading = `Resumen (${phaseLabel(input.phase as Phase)})\n${summary}`;
   if (detail === 'low') return `${heading}\n`;
-  const medium = `${heading}\n\nCómo\n${how.length ? how.map(item => `- ${item}`).join('\n') : 'No se informaron detalles del trabajo realizado.'}`;
+  const medium = `${heading}\n\nCómo\n${how.length ? how.map(item => `- ${item}`).join('\n') : input.status === 'in-progress' ? 'Todavía no hay cambios ni decisiones de esta fase que explicar.' : 'No se informó una explicación causal de esta fase; no se puede inferir de su resultado.'}`;
   if (detail === 'medium') return `${medium}\n`;
   if (detail !== 'detailed') throw new ValidationError('Unknown report detail.');
   const breakdown = (Object.keys(EVIDENCE_WEIGHTS) as EvidenceFlag[]).map(flag =>
@@ -108,15 +108,19 @@ export function renderReport(detail: Answers['summary'], value: PhaseReport): st
   return `${medium}\n\nEstado\n${STATUS_LABELS[input.status as ReportStatus]}\n\nCobertura\n${evidenceCoverage(evidence)}% de cobertura de evidencia (no es una probabilidad de acierto).\n${breakdown}\n`;
 }
 
-export function renderClosure(detail: Answers['summary'], input: { goal: string; changes: string; matched: boolean; checks: Check[]; limits: string[]; status: ReportStatus; evidence: Evidence }): string {
+export function renderClosure(detail: Answers['summary'], input: { goal: string; changes: string; how?: string[]; matched: boolean; checks: Check[]; limits: string[]; status: ReportStatus; evidence: Evidence }): string {
   if (input.status === 'passed' && (!input.checks.length || input.evidence.checks !== 'confirmed' || !input.matched)) throw new ValidationError('Successful closure requires matched acceptance and confirmed executed checks.');
   if (input.matched && input.status !== 'passed') throw new ValidationError('An incomplete closure cannot claim requirements and plan matched.');
   // A command that exited nonzero is evidence, and a closure that counts it among the others
   // reports a calmer run than the one that happened. It is counted apart and named apart.
   const failed = input.checks.filter(check => check.exit !== 0);
-  const summary = `${text(input.goal)} ${text(input.changes)} ${input.matched ? 'Evaluación del agente: los requisitos y el plan coinciden con lo implementado.' : 'Sin completar: los requisitos y el plan no están verificados del todo.'} Se registraron ${input.checks.length} comando(s) de chequeo${failed.length ? `, ${failed.length} de ellos con salida distinta de 0` : ''}.${input.limits.length ? `\nPendiente: ${input.limits.map(text).join(' ')}` : ''}`;
-  return renderReport(detail, { phase: 'mdd-verify', summary, how: [
-    ...input.checks.map(check => `Se ejecutó ${text(check.command)}; salida ${check.exit ?? 'desconocida'}.`),
-    'Que los requisitos y el plan coincidan es la interpretación del agente a partir de las fuentes; la ejecución de los comandos la verifica el adaptador por su cuenta.',
-  ], status: input.status, evidence: input.evidence }).replace(`Resumen (${phaseLabel('mdd-verify')})`, 'Resumen');
+  const changes = text(input.changes);
+  const summary = `${text(input.goal)} ${changes} ${input.matched ? 'Evaluación del agente: los requisitos y el plan coinciden con lo implementado.' : 'Sin completar: los requisitos y el plan no están verificados del todo.'}${input.limits.length ? `\nPendiente: ${input.limits.map(text).join(' ')}` : ''}${input.matched ? '' : '\nPodés pedir una mejora, rechazar el resultado o solicitar una nueva implementación con correcciones según las brechas indicadas.'}`;
+  const report = renderReport(detail, { phase: 'mdd-verify', summary, how: input.how ?? [], status: input.status, evidence: input.evidence }).replace(`Resumen (${phaseLabel('mdd-verify')})`, 'Resumen');
+  if (detail === 'low') return report;
+  const verification = input.checks.length
+    ? input.checks.map(check => `- ${text(check.command)}: salida ${check.exit ?? 'desconocida'}${check.exit === 0 ? ' (informada; no demuestra por sí sola el comportamiento)' : ' (no confirma el resultado)'}.`).join('\n')
+    : 'No se informaron comprobaciones ejecutadas; el resultado no está confirmado.';
+  const section = `\n\nVerificación\n${verification}${failed.length ? `\n${failed.length} comprobación(es) no concluyeron satisfactoriamente.` : ''}`;
+  return detail === 'detailed' ? report.replace('\n\nEstado\n', `${section}\n\nEstado\n`) : `${report.trimEnd()}${section}\n`;
 }

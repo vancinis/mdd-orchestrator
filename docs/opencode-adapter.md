@@ -8,6 +8,40 @@ a guarantee of semantic correctness or independent review**. Model-backed E2E is
 
 ## Setup
 
+### Visual status
+
+MDD's server plugin adds a route/progress/skills frame to status reports, sets phase task
+titles after completion, and sends best-effort toasts for completion and attention. These
+presentations do not authorize a phase or change its skills. Set `MDD_ASCII=1` in the server
+environment before launching OpenCode for ASCII progress markers and titles instead of emoji;
+set `MDD_TOASTS=0` to disable MDD server toasts. Neither changes workflow evidence.
+
+The separate TUI module requires an explicit entry in the active `tui.json` (it is not loaded
+by the server plugin). Setup merges the plugin entry below into that file without removing other
+plugins or changing the user's attention settings; malformed configs fail setup before writing
+owned assets:
+
+```json
+{
+  "plugin": ["./mdd/node_modules/my-driven-development/dist/opencode-tui.js"]
+}
+```
+
+For file plugins `mdd.visual` is the exported nonempty id. The pinned plugin type declares
+`api.attention.notify`, but the module also tolerates a runtime without that capability and
+swallows failed deliveries. Live TUI sound playback has not been verified. Attention sounds use
+the host's `attention` controls; `enabled` is false by default, so set
+`"attention": { "enabled": true }` in `tui.json` to opt in. MDD requests sound only, not a
+second desktop notification. The
+sidebar uses the `sidebar_content` slot at order 250 (between MCP 200 and LSP 300; context
+100, todo 400, files 500 remain in order). It registers only if `@opentui/solid` and `solid-js`
+resolve from the installed module; setup installs both as pinned runtime dependencies in the
+owned prefix. If either renderer is unavailable, no sidebar is registered, while attention
+remains available. Isolated plugin loading verifies registration from that prefix; a live
+interactive sidebar and sound have not been visually verified. The TUI-only `mdd.ascii` KV flag changes the sidebar's
+icons; `mdd.sidebarAvailable` reports whether registration succeeded. These keys do not alter
+the server's `MDD_ASCII` environment setting.
+
 Run the single [setup wizard](setup.md): `npm run setup` from trusted source, or
 `node "<OpenCode root>/mdd/node_modules/my-driven-development/dist/cli.js" setup` from any directory.
 
@@ -132,16 +166,24 @@ preflight answer, route, score or evidence flag. Provenance is explicit: every e
 as `source: "coordinator"`, distinct from `provenance.requirements: "native-user"`.
 
 Entries accumulate rather than replace, because useful context also appears after the run starts.
-Their combined size is bounded to **8,000 UTF-8 bytes**, well inside the 46,000-byte payload
-budget even though the text is JSON-encoded twice on the way into `task`. An over-budget
-contribution is refused with the held and attempted sizes, and nothing is recorded or truncated:
-a silently trimmed prompt is the delegation failure this bound exists to prevent. Contributions
-are rejected while a task is in flight, and a confirmed **material** change drops context
-gathered for the replaced objective; a plain preflight rerun keeps it. `mdd_status` reports
-`providedContext` as labels, byte sizes and source only, since the text itself is already
-delivered to the actor inside the phase prompt. With memory enabled, the entries are persisted
-with the intent receipt next to the requirements, so the recorded objective is not merely the
-sentence that pointed at it.
+A single entry is bounded to **96,000 UTF-8 bytes** — the same `PHASE_CONTEXT_MAX_BYTES` ceiling
+the composed phase prompt is checked against — rather than a smaller aggregate cap: the prompt is
+what actually has to stay deliverable, no longer the `task` field of `mdd_status`, since context no
+longer travels through status at all. Every contribution therefore trial-composes the current
+phase prompt and is refused, unrecorded, if that composed prompt would exceed 96,000 bytes; a
+ready phase's prompt is recomposed immediately so `mdd_status` returns the updated task. Delivery
+still targets the smaller **38,000-byte** `DISPATCHABLE_PROMPT_BYTES` compaction goal described
+below, by shedding older inlined artifacts first, before the 96,000-byte bound is ever reached. A
+silently trimmed prompt is the delegation failure both bounds exist to prevent. Contributions are
+rejected while a task is in flight, and a confirmed **material** change drops context gathered for
+the replaced objective; a plain preflight rerun keeps it. `mdd_status` reports `providedContext`
+as labels, byte sizes and source only, since the text itself is already delivered to the actor
+inside the phase prompt. With memory enabled, entries are persisted with the intent receipt next
+to the requirements when the whole receipt still fits Engram's 40,000-byte `save()` limit;
+otherwise the receipt carries each entry's label, byte count and content SHA-256 instead of its
+text (`contextOmitted: true`), so the record still proves what was carried without exceeding that
+separate limit. The preserved-run view degrades the same way, in the same order, when a restored
+run's `providedContext` alone would push it past the 30,000-byte `DOSSIER_STATUS_BYTES` budget.
 
 ### Dispatch handles: the prompt never enters the parent conversation
 
@@ -170,6 +212,16 @@ text is the one failure that says the handle did not travel, and that run return
 from then on, exactly as before. Any other mismatch — extra arguments, a substituted
 `subagent_type` — is the coordinator composing instead of copying; the refusal is the whole fix,
 and the handle stays.
+
+One replayed shape is accepted as the handle. Settled dispatches are collapsed in the transcript
+(see below) into a fixed note, `mdd:dispatch:delivered [MDD phase prompt for <actor>, <n> bytes.
+…]`, and a model reading its own history back tends to reproduce that note as the next task's
+prompt instead of the handle status just returned: on one observed run eleven consecutive
+dispatches arrived that way while the handle was reminted twice, leaving the run correct and
+undispatchable. So `PhaseRunner.before` treats the note as the handle when `description` and
+`subagent_type` are exactly those of the ready task. Nothing new is authorized by that: the note
+cannot carry a composed prompt, the actor receives the run's own ready prompt, and a note naming
+another phase or actor, or arriving with extra arguments, is still refused.
 
 ### Native consent contract
 
@@ -206,7 +258,7 @@ pending; no automated recovery is attempted. Unrelated sessions remain unaffecte
 | Consent | Complete startup profile or exact correlated native preflight answers; later interactive Proceed/Stop applies only to the currently waiting phase. No repeat preflight or implicit approval. An answer that names nothing on offer selects nothing: the user wrote their own words, or a host reordered the result, and MDD cannot tell those apart. Neither is consent, so the receipt is recorded as cancelled and the same question stays open to be asked again. A question MDD did not compose is the coordinator's own and touches no MDD state, except while an MDD question is pending, when it is the only question that may run. |
 | Persistence | HTTP only to a literal IPv4 loopback origin, no credentials/path/query/redirects, no retries. Each HTTP/SDK read has a maximum five-second timeout. HTTP responses are bounded to 128 KiB. |
 | Failure | Infrastructure failures do not fabricate failed phase results. A rejected dispatch, result, capability or persistence ends that attempt: the phase returns to `ready`, the attempt counter increases, and the run stops being uncertain, so delegating again, taking the phase over directly, replanning or resetting all stay available. A failure below `DELEGATION_ATTEMPTS` (3) keeps `mode: "delegate"` and rewrites the phase task to carry what went wrong, so each retry is a different attempt rather than the same one; the third sets `mode: "inline"` and hands that phase to the coordinator, because retrying forever against one failure is not resilience and handing it over immediately spends the context that delegation exists to protect. `attempts` and the threshold are per phase: reaching the next phase restores the full count, and `attemptsLeft` reports it. A failed read-only investigation leaves the main plan's task, mode and attempts untouched. A missing after-hook leaves `await-result` until a matching native error releases it. `mdd_status` never grants approval or dispatches by itself. |
-| Recovery | No MDD state is terminal. `mdd_reset` releases the current attempt (`scope: phase`) or forgets the run for this conversation (`scope: run`), clearing the local progress marker. Scope `phase` also covers work waiting on a person rather than on an actor: a run stopped at an approval returns to `await-approval` with that question re-armed, and an intake stopped before any run re-opens its pending question. Neither prepares a phase nobody authorized. Recorded artifacts, memory and `previousRuns` are never deleted by a reset, and `scope: run` sets the preserved record aside under a discarded name rather than destroying it. |
+| Recovery | No MDD state is terminal. `mdd_reset` releases the current attempt (`scope: phase`) or forgets the run for this conversation (`scope: run`), clearing the local progress marker. Scope `phase` also covers work waiting on a person rather than on an actor: a run stopped at an approval returns to `await-approval` with that question re-armed, and an intake stopped before any run re-opens its pending question. Neither prepares a phase nobody authorized. When Verify reports failure, status names `reworkable: "mdd-apply"` and `scope: rework` sends the run back to Apply to correct what it found, instead of re-checking the unchanged implementation or filing a material change. It needs `userText`, the user's exact latest message choosing the correction; the failed verification becomes Apply's newest dependency artifact, earlier changes are kept, and Verify follows through the route's ordinary approval. Recorded artifacts, memory and `previousRuns` are never deleted by a reset, and `scope: run` sets the preserved record aside under a discarded name rather than destroying it. |
 | Handoff budget | Each phase prompt carries the artifacts it depends on. A seven-phase route holding 16,000-byte artifacts outgrows what a dispatched task can be delivered at, and the phases that paid for it were the last ones. Artifacts are therefore inlined newest-first while the prompt stays within 38000 bytes, the size that still fits inside the 46000-byte payload budget with the rest of the status; older ones travel as their own recorded `evidenceSummary` plus the ref that identifies the complete text in the artifact store. Shedding is ordered and announced in the prompt, and `mdd_status` reports it as `handoff`. Contextual findings are not compacted: they accumulate by the user's own choice, and `PHASE_CONTEXT_MAX_BYTES` (96000) remains the absolute bound that fails explicitly rather than cutting anything. |
 | Payload budget | Every MDD tool serializes through `statusPayload`, bounded to 46000 bytes so the host cannot truncate a result and make the exact `task`/`question` uncopyable. Artifact history is reported as refs only (content lives in the artifact store and is already injected into the next phase prompt), and `brief` accompanies only `mode: "inline"`. Over budget, fields are dropped in the fixed order `priorRun, previousRuns, contexts, contextualReport, providedContext, artifacts, artifactAttempts, artifact, concerns, report, planned, decisions, acceptance, verification, workflow` and listed in `omitted`; `task`, `brief`, `question`, `state`, `phase`, `next`, `mode`, `reason`, `runID`, `sessionID`, `runtime`, `questionReceipts`, `recovery`/`pendingStart`, `notice`, `provenance`, `reset`, `evidence`, `coverage` and `recoverable` are never dropped. A task too large to fit is reported in `budget.problem`, never cut. |
 | Next phase | Automatic success prepares only the next phase. Interactive success waits for exact native approval. Only final corroborated Verify returns `complete`. |
@@ -237,9 +289,12 @@ or rollback. Local telemetry records only allowlisted lifecycle metadata.
 
 Ask naturally to rerun preflight or describe a material objective/integration/data/permission
 change. The coordinator uses `mdd_change_request`, not a user-written JSON form. A rerun
-requires a fresh actual native user message. A material proposal requires new requirements
-and advisory evidence, backed by a fresh user message or a concern already recorded by a
-phase. No keyword scoring or automatic route replacement occurs.
+requires a fresh actual native user message. A material proposal requires new requirements,
+backed either by a fresh user message asking for the change — which is enough on its own — or,
+when that message was already used, by concerns a phase already recorded. Concerns are optional
+supporting evidence otherwise. The tool accepts them as the declared array, as JSON text, or as a
+single bare object, because host tool bridges and models deliver all three; every entry is still
+validated strictly. No keyword scoring or automatic route replacement occurs.
 
 The existing native gate shows one exact confirmation. Keeping the current plan or dismissing
 the change leaves its answers, artifacts and pending approval unchanged. Confirmation leads

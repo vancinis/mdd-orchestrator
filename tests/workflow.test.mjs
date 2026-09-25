@@ -43,6 +43,25 @@ for (const [name, request, phases] of [
   });
 }
 
+test('rework returns a failed route to an earlier phase and keeps every recorded result', () => {
+  const workflow = new Workflow({ answers: { ...answers, mode: 'interactive' } });
+  rejectsUnchanged(workflow, () => workflow.rework('mdd-plan'));
+  workflow.start('mdd-plan'); workflow.recordResult(result('mdd-plan'));
+  workflow.approve('mdd-apply'); workflow.start('mdd-apply'); workflow.recordResult(result('mdd-apply'));
+  workflow.approve('mdd-verify'); workflow.start('mdd-verify'); workflow.recordResult(result('mdd-verify', 'failed'));
+  rejectsUnchanged(workflow, () => workflow.rework('mdd-verify'));
+  rejectsUnchanged(workflow, () => workflow.rework('mdd-explore'));
+  workflow.rework('mdd-apply');
+  assert.deepEqual(workflow.nextAction(), { kind: 'execute', phase: 'mdd-apply' });
+  workflow.start('mdd-apply'); workflow.recordResult(result('mdd-apply'));
+  // Verification after the correction still goes through the ordinary interactive approval.
+  assert.deepEqual(workflow.nextAction(), { kind: 'approve', phase: 'mdd-verify' });
+  workflow.approve('mdd-verify'); workflow.start('mdd-verify'); workflow.recordResult(result('mdd-verify'));
+  assert.deepEqual(workflow.nextAction(), { kind: 'finished' });
+  assert.deepEqual(workflow.snapshot().results.map(item => `${item.phase}:${item.outcome}`),
+    ['mdd-plan:passed', 'mdd-apply:passed', 'mdd-verify:failed', 'mdd-apply:passed', 'mdd-verify:passed']);
+});
+
 test('interactive approvals authorize only the exact next phase, not the whole route', () => {
   const workflow = new Workflow({ answers: { ...answers, mode: 'interactive' } });
   for (const [index, phase] of low.entries()) {

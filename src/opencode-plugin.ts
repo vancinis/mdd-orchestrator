@@ -24,9 +24,12 @@ import { recordRunQuietly } from './run-ledger.js';
 import { withNextAction } from './next-action.js';
 import { collapseDispatchPrompts } from './dispatch-transcript.js';
 import { checkReportForm } from './report-check.js';
+import { CHANGE_CATEGORIES, decodeConcerns } from './concerns.js';
+import { authoredNativeText, canonicalNativeText, firstDivergence } from './native-text.js';
 import type { Phase } from './policy.js';
 import { recordSession } from './session-log.js';
 import { staleAssets } from './project-assets.js';
+import { visualTitle, presentationSettings } from './visual-ux.js';
 
 /**
  * Every MDD tool answers through here, so the derived next call and the payload budget are
@@ -51,8 +54,15 @@ function record(value: unknown, subject = 'response'): Record<string, unknown> {
  */
 export const TASK_ENVELOPE = /^<task id="[^"\r\n]*" state="completed">\r?\n(?:<summary>[^\r\n]*<\/summary>\r?\n)?<task_result>\r?\n([\s\S]*?)\r?\n?<\/task_result>\r?\n?<\/task>$/;
 
+/** One advisory concern as the change-request tool advertises it to the model. */
+const CONCERN_SCHEMA = tool.schema.object({
+  category: tool.schema.enum(CHANGE_CATEGORIES as unknown as [string, ...string[]]),
+  evidence: tool.schema.string(),
+  impact: tool.schema.string(),
+});
+
 /** MDD tools belong to the MDD coordinator. Other agents share the registry but not this state. */
-export const MDD_TOOLS = ['mdd_start', 'mdd_status', 'mdd_phase_result', 'mdd_reset', 'mdd_change_request', 'mdd_contextual_explore', 'mdd_context', 'mdd_pr_body', 'mdd_improve', 'mdd_improvements'] as const;
+export const MDD_TOOLS = ['mdd_start', 'mdd_status', 'mdd_prepare_advance', 'mdd_revisit', 'mdd_phase_result', 'mdd_reset', 'mdd_change_request', 'mdd_contextual_explore', 'mdd_context', 'mdd_pr_body', 'mdd_improve', 'mdd_improvements'] as const;
 /**
  * The one MDD tool that is not the coordinator's alone. It is kept out of `MDD_TOOLS` because
  * that list is what `restrictTools` switches off everywhere else, and this one has to reach the
@@ -364,19 +374,40 @@ export function createInspector(input: PluginInput, timeout = 5000, now: () => n
       const users = history.slice(0, -1).filter(message => record(message.info, 'message').role === 'user');
       const candidates = scope === 'objective' ? users : users.slice(-1);
       if (!candidates.length) throw new Error('No actual native user requirements found.');
+      const canonicalRequirements = canonicalNativeText(requirements);
       const matches = candidates.filter(user => {
         const info = record(user.info, 'message');
         if (info.sessionID !== runtime.sessionID) return false;
         const parts = list(user.parts, 'message parts', PARTS_MAX).filter(part => part.type === 'text');
-        return parts.length > 0 && !parts.some(part => part.synthetic === true || part.ignored === true ||
-          part.sessionID !== runtime.sessionID || part.messageID !== info.id || typeof part.text !== 'string') &&
-          parts.map(part => part.text).join('\n') === requirements;
+        let candidate: string | undefined;
+        try { candidate = authoredNativeText(parts, runtime.sessionID, String(info.id)); } catch { return false; }
+        return candidate !== undefined && canonicalNativeText(candidate) === canonicalRequirements;
       });
       if (matches.length > 1) throw new Error('Several native user messages carry exactly this text; ask the user to restate the objective so the run binds to one message.');
       if (!matches.length) {
-        throw new Error(scope === 'objective'
+        // A full page proves nothing about what came before it, so the honest answer is that the
+        // objective cannot be read here at all — not that it failed to match. Otherwise, the
+        // first offset where the latest authored user text actually differs turns "no match" into
+        // something the caller can act on instead of guessing what changed.
+        if (history.length >= HISTORY_MAX) {
+          throw new Error('The objective is outside the readable native history; ask the user to restate it so a recent message carries it.');
+        }
+        let detail = '';
+        const latestUser = users.at(-1);
+        if (latestUser) {
+          try {
+            const info = record(latestUser.info, 'message');
+            const parts = list(latestUser.parts, 'message parts', PARTS_MAX).filter(part => part.type === 'text');
+            const latestText = authoredNativeText(parts, runtime.sessionID, String(info.id));
+            if (latestText !== undefined) {
+              const offset = firstDivergence(canonicalNativeText(latestText), canonicalRequirements);
+              detail = ` The latest native user text first differs at offset ${offset}.`;
+            }
+          } catch { /* diagnosis is best-effort; the base error still stands without it. */ }
+        }
+        throw new Error((scope === 'objective'
           ? 'Requirements must exactly match an actual native user message in this conversation; do not rewrite or invent them.'
-          : 'Requirements must exactly match the latest native user text; do not rewrite or invent them.');
+          : 'Requirements must exactly match the latest native user text; do not rewrite or invent them.') + detail);
       }
       return boundedText(record(matches[0]!.info, 'message').id, 'native user message ID', 256);
     },
@@ -495,6 +526,11 @@ const plugin: Plugin = async input => {
   const reply = (value: unknown, view: StatusView = 'compact'): string => payload(value, assets, view);
   const opened = new Set<string>();
   const nativeChildren = new Set<string>();
+  const notify = async (sessionID: string, message: string, variant: 'success' | 'error' | 'info' = 'info'): Promise<void> => {
+    if (!presentationSettings().toasts) return;
+    try { await input.client.tui.showToast({ body: { message, variant }, query: { directory: input.directory } }); }
+    catch { /* A missing TUI must never change the run's outcome. */ }
+  };
   /**
    * How many times a conversation may send Spanish that fails its checks before drafting refuses.
    * The point of the bound is that the failure is a model producing text, and a model that failed
@@ -650,12 +686,43 @@ const plugin: Plugin = async input => {
         },
       }),
       mdd_change_request: tool({
-        description: 'Request an explicit preflight rerun from fresh native user text, or propose a material change backed by a new user request or recorded concern. Keeps the current run until native confirmation and grouped preflight. Never use for ordinary plan choices or continuation.',
-        args: { kind: tool.schema.enum(['rerun', 'material']), userText: tool.schema.string().min(1), requirements: tool.schema.string().optional(), concerns: tool.schema.unknown().optional() },
+        description: 'Request an explicit preflight rerun from fresh native user text, or propose a material change to the requirements. A fresh user message asking for the change is enough on its own; concerns are optional supporting evidence and are only needed when no fresh user message backs the change (then they must match a concern a phase already recorded). Keeps the current run until native confirmation and grouped preflight. Never use for ordinary plan choices or continuation.',
+        args: {
+          kind: tool.schema.enum(['rerun', 'material']), userText: tool.schema.string().min(1), requirements: tool.schema.string().optional(),
+          concerns: tool.schema.union([
+            tool.schema.array(CONCERN_SCHEMA).max(8),
+            CONCERN_SCHEMA,
+            tool.schema.string(),
+          ]).optional().describe('Optional. An array of {category, evidence, impact}; category is objective, integrations, sensitive-data or permissions. Omit it when the user asked for the change directly.'),
+        },
         async execute(args, context) {
           enter(context, 'mdd_change_request');
           if (context.abort.aborted) throw new Error('Change request was aborted.');
-          return reply(await intake.changeRequest(args, context, context.messageID));
+          // The host tool bridge does not always deliver the declared array: it may serialize it as
+          // JSON text, or the model may send a single bare concern. Both are normalized here, at the
+          // adapter boundary, and concerns() still validates every entry strictly.
+          const advisory = decodeConcerns(args.concerns);
+          return reply(await intake.changeRequest({ ...args, concerns: advisory.length ? advisory : undefined }, context, context.messageID));
+        },
+      }),
+      mdd_prepare_advance: tool({
+        description: 'After presenting the phase result, submit all necessary clarification questions before offering phase approval. Pass [] only when none remain. Each question offers agent delegation, optional deferral, recommended choices and free text. Also resumes a paused review without approving it.',
+        args: { questions: tool.schema.array(tool.schema.object({
+          question: tool.schema.string().min(1),
+          options: tool.schema.array(tool.schema.object({ label: tool.schema.string().min(1), description: tool.schema.string().min(1), recommended: tool.schema.boolean().optional() })).min(1).max(6),
+          deferrable: tool.schema.boolean().optional(),
+        })).max(8) },
+        async execute(args, context) {
+          enter(context, 'mdd_prepare_advance');
+          return reply(intake.prepareAdvance(args, context));
+        },
+      }),
+      mdd_revisit: tool({
+        description: 'Withdraw an idle phase approval or clarification question for a user question or edit, without approving or rejecting anything. Then answer or record context and prepare advancement again.',
+        args: {},
+        async execute(_args, context) {
+          enter(context, 'mdd_revisit');
+          return reply(intake.revisit(context));
         },
       }),
       mdd_phase_result: tool({
@@ -668,21 +735,24 @@ const plugin: Plugin = async input => {
         },
       }),
       mdd_reset: tool({
-        description: 'Release stopped MDD work in this conversation. Scope phase makes the current phase runnable again; scope run forgets the run so a new objective can start here. Recorded artifacts and memory are never deleted. When a subagent was interrupted and OpenCode cannot confirm it stopped, pass userText with the user\'s exact latest message saying it stopped: MDD stops it through OpenCode when it can and releases it, unless OpenCode still reports it busy.',
+        description: 'Release stopped MDD work in this conversation. Scope phase makes the current phase runnable again; scope rework, available when status reports reworkable after a failed verification, sends the run back to mdd-apply to correct what verification found; scope run forgets the run so a new objective can start here. Recorded artifacts and memory are never deleted. Scope rework needs userText with the user\'s exact latest message choosing to fix it. When a subagent was interrupted and OpenCode cannot confirm it stopped, pass userText with the user\'s exact latest message saying it stopped: MDD stops it through OpenCode when it can and releases it, unless OpenCode still reports it busy.',
         args: {
-          scope: tool.schema.enum(['phase', 'run']).describe('phase releases the current attempt; run discards the run state for this conversation.'),
-          userText: tool.schema.string().min(1).optional().describe('Only when the user says the interrupted subagent is stopped: their exact latest native message, without rewriting.'),
+          scope: tool.schema.enum(['phase', 'run', 'rework']).describe('phase releases the current attempt; rework returns a failed verification to mdd-apply with its findings; run discards the run state for this conversation.'),
+          userText: tool.schema.string().min(1).optional().describe('Required for rework: the user\'s exact latest native message asking to fix what verification found. Otherwise only when the user says the interrupted subagent is stopped. Never rewrite it.'),
         },
         async execute(args, context) {
           enter(context, 'mdd_reset');
+          if (args.scope === 'rework' && args.userText === undefined) throw new Error('Rework changes the route, so it needs the user\'s own word: pass userText with their exact latest message asking to fix what verification found. Nothing was changed.');
           let attested = false;
           if (args.userText !== undefined) {
             if (context.abort.aborted) throw new Error('The reset was aborted.');
             // The same proof mdd_improve and change requests require: the user's word releases a
-            // subagent only when it is the user's actual latest message, never the model's summary.
+            // subagent, or sends a run back to Apply, only when it is the user's actual latest
+            // message, never the model's summary.
             try { await inspector.intake(context, boundedText(args.userText, 'user confirmation', 12000), context.messageID); }
             catch { throw new Error('userText must be the user\'s exact latest message in this conversation, unchanged. Nothing was released.'); }
-            attested = true;
+            // A request to correct the implementation says nothing about a subagent having stopped.
+            attested = args.scope !== 'rework';
           }
           const seen = await runner.confirmStopped(context.sessionID, context, attested);
           try { return reply({ ...record(intake.reset(context, args.scope), 'reset'), ...(seen ? { liveness: seen } : {}) }); }
@@ -734,8 +804,18 @@ const plugin: Plugin = async input => {
     'tool.execute.after': async (input, output) => {
       if (input.tool === 'question') await intake.afterQuestion(input, input.args, output);
       if (input.tool === 'task') {
+        const previousState = runner.status(input.sessionID).state;
         await runner.after(input, input.args, output);
         intake.phaseRecorded(input.sessionID);
+        const current = runner.status(input.sessionID);
+        const phase = typeof input.args === 'object' && input.args !== null && 'subagent_type' in input.args &&
+          PHASE_AGENTS.includes(String(input.args.subagent_type)) ? input.args.subagent_type as Phase : undefined;
+        if (phase) {
+          output.title = visualTitle(phase, presentationSettings().ascii);
+          const state = current.state;
+          if (state !== previousState && (state === 'complete' || state === 'blocked' || state === 'await-approval'))
+            await notify(input.sessionID, `MDD ${state === 'complete' ? 'complete' : state === 'blocked' ? 'needs attention' : 'awaiting approval'}`, state === 'complete' ? 'success' : state === 'blocked' ? 'error' : 'info');
+        }
       }
     },
     // The handle keeps the phase prompt out of the message the coordinator writes; this keeps it

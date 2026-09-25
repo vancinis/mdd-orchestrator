@@ -11,6 +11,16 @@ test('next action: a pending question outranks everything the run could otherwis
   assert.deepEqual(action.args, question);
 });
 
+test('next action: review resolves uncertainties first and pause never advances automatically', () => {
+  const review = nextAction({ state: 'review-ready' });
+  assert.equal(review.tool, 'mdd_prepare_advance');
+  assert.equal(review.args, undefined);
+  assert.match(review.why, /before asking to advance/);
+  const paused = nextAction({ state: 'paused' });
+  assert.equal(paused.tool, 'mdd_prepare_advance');
+  assert.match(paused.why, /Wait for their request to resume/);
+});
+
 // The report was refused for its wording, not its work. Dispatching here pays for the phase twice.
 test('next action: a rejected report is restated, never re-dispatched', () => {
   const action = nextAction({ state: 'ready', task, mode: 'inline', rejected: { reason: 'Missing heading.', text: '## MDD Outcome' } });

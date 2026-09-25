@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { EngramHttp } from './engram-http.js';
 import { objectWithKeys, ValidationError } from './validation.js';
@@ -6,7 +6,7 @@ import { Workflow } from './workflow.js';
 import { ArtifactStore, ArtifactWriteError } from './artifacts.js';
 import type { ArtifactAttempt, ArtifactRef, ArtifactResult } from './artifacts.js';
 import type { Answers, Phase } from './policy.js';
-import { mddInstructions, packagedSkillPath } from './phase-assets.js';
+import { mddInstructions, packagedSkillPath, PHASE_SKILLS } from './phase-assets.js';
 import type { PackagedSkillName } from './phase-assets.js';
 import type { LessonInput } from './lessons.js';
 import type { RunLedgerInput } from './run-ledger.js';
@@ -24,6 +24,8 @@ import type { ProgressGuard } from './progress.js';
 import { DOSSIER_VERSION, priorRunView } from './run-dossier.js';
 import type { PriorReceipt, RunDossier, RunDossierStore } from './run-dossier.js';
 import type { PRFacts } from './pr-body.js';
+import { phaseVisual, presentationSettings } from './visual-ux.js';
+import { STATUS_BUDGET_BYTES } from './status-budget.js';
 
 export type Runtime = { sessionID: string; agent: string; directory: string; worktree: string };
 export type TaskCall = { sessionID: string; callID: string };
@@ -37,16 +39,6 @@ export const PHASE_CONTEXT_MAX_BYTES = 96000;
  * PHASE_CONTEXT_MAX_BYTES stays the absolute bound that fails explicitly instead of cutting.
  */
 export const DISPATCHABLE_PROMPT_BYTES = 38000;
-/**
- * Material the coordinator already gathered and hands to MDD, so MDD composes it into the phase
- * prompt itself. The cap is not the 96000-byte prompt budget: the prompt travels inside `task` in
- * every `mdd_status`, which is bounded to 46000 bytes, and this text is JSON-encoded twice on the
- * way there (once into the prompt, once into the tool result), so quote- and newline-heavy input
- * can grow several times over. 8000 bytes stays a small share of that budget even at a worst-case
- * expansion, leaving the instructions, dependency artifacts and protected status fields intact,
- * while still holding a whole issue body or design thread.
- */
-export const RUN_CONTEXT_MAX_BYTES = 8000;
 /** Provenance is explicit: this came from the coordinator, not from the user and not from a phase. */
 export type RunContext = { label: string; content: string; source: 'coordinator' };
 type TaskArgs = { description: string; subagent_type: string; prompt: string };
@@ -74,6 +66,66 @@ type Executor = Phase | 'explore' | 'general';
 export const DISPATCH_HANDLE_PREFIX = 'mdd:dispatch:';
 /** A transcript note about a settled call is never a dispatch capability or a lost handle. */
 const DELIVERED_PROMPT_PREFIX = `${DISPATCH_HANDLE_PREFIX}delivered [`;
+/** Larger than any note MDD writes, smaller than any prompt it collapses. */
+const DELIVERED_NOTE_MAX_BYTES = 1024;
+/**
+ * Whether a task arrived as the transcript note standing in for an earlier dispatch, with the
+ * other two fields exactly those of the ready task.
+ *
+ * The note is written by MDD's own transform over the coordinator's settled calls, and a model
+ * reading its history back tends to reproduce the shape it finds there rather than the handle
+ * status just handed it: on one observed run eleven consecutive dispatches arrived this way while
+ * the handle was reminted twice, and the run stayed correct and undispatchable. The note cannot
+ * carry a composed prompt — it is one fixed sentence with a byte count — so accepting it as the
+ * handle authorizes nothing new: the actor receives the run's own ready prompt, and a note aimed
+ * at a different phase or actor is still refused. Only the identity of the phase is trusted here,
+ * and that identity is the two fields the coordinator did copy right.
+ */
+function repeatsDeliveredNote(args: unknown, ready: TaskArgs): boolean {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) return false;
+  const keys = Object.keys(args);
+  if (keys.length !== 3 || !keys.every(key => key === 'description' || key === 'subagent_type' || key === 'prompt')) return false;
+  const { description, subagent_type: subagent, prompt } = args as Record<string, unknown>;
+  return description === ready.description && subagent === ready.subagent_type
+    && typeof prompt === 'string' && prompt.startsWith(DELIVERED_PROMPT_PREFIX) && prompt.endsWith(']')
+    && !prompt.includes('\n') && Buffer.byteLength(prompt) <= DELIVERED_NOTE_MAX_BYTES;
+}
+/**
+ * `nextAction.args` repeats whatever `task` holds, so exposing the full prompt doubles it in one
+ * payload. This is the largest a full task may be while that doubled payload still fits inside
+ * the tool result budget, with room left for the rest of the status; above it the handle is the
+ * only thing that can actually be delivered.
+ */
+export const FULL_TASK_MAX_BYTES = Math.floor((STATUS_BUDGET_BYTES - 10000) / 2);
+function withinFullTaskGate(args: TaskArgs): boolean {
+  return Buffer.byteLength(JSON.stringify(args)) <= FULL_TASK_MAX_BYTES;
+}
+type DispatchVerdict = { action: 'accept' } | { action: 'refuse'; delivered: boolean } | { action: 'expose-full' } | { action: 'remint' };
+/**
+ * One mismatch classifier shared by the main run and a solo investigation. A matching delivered
+ * placeholder is accepted without reminting anything; a stale handle, a fabricated prompt, an
+ * altered actor or extra keys are refused without changing what is exposed; only a prompt that
+ * matches none of those known shapes — what a handle looks like once it failed to travel — turns
+ * fallback on, and even then only within the transport gate, remaining compact otherwise.
+ */
+function classifyDispatch(sent: unknown, ready: TaskArgs, full: TaskArgs, token: string | undefined): DispatchVerdict {
+  if (isDeepStrictEqual(sent, ready) || isDeepStrictEqual(sent, full) || repeatsDeliveredNote(sent, ready)) return { action: 'accept' };
+  const prompt = sent && typeof sent === 'object' && !Array.isArray(sent) ? (sent as Record<string, unknown>).prompt : undefined;
+  const delivered = typeof prompt === 'string' && prompt.startsWith(DELIVERED_PROMPT_PREFIX);
+  if (delivered || token === undefined || prompt === token || prompt === full.prompt) return { action: 'refuse', delivered };
+  return { action: withinFullTaskGate(full) ? 'expose-full' : 'remint' };
+}
+function dispatchMismatchMessage(verdict: DispatchVerdict, noun: 'task' | 'investigation'): string {
+  const subject = noun === 'task' ? 'run' : 'investigation';
+  const detail = verdict.action === 'refuse' && verdict.delivered
+    ? ' A delivered transcript placeholder is not a task; the current compact handle remains available from mdd_status.'
+    : verdict.action === 'expose-full'
+      ? ` The prompt was a single-use MDD dispatch handle and must travel unchanged; this ${subject} now returns the full ${noun === 'task' ? 'phase prompt' : 'prompt'} instead, so read mdd_status again and dispatch what it returns.`
+      : verdict.action === 'remint'
+        ? ' The prompt was a single-use MDD dispatch handle and must travel unchanged; the full prompt cannot be delivered within the tool transport budget either, so mdd_status now returns a fresh compact handle instead — read it and dispatch that exact task.'
+        : '';
+  return `Task arguments differ from the ready ${noun}. Read mdd_status and pass its exact task object, copying description, subagent_type and prompt verbatim; do not compose your own. No execution was started.${detail}`;
+}
 const DISPATCH_NOTE = 'The prompt in task is a single-use MDD dispatch handle, not a shortened or truncated prompt. MDD expands it into the full phase prompt inside the hook, so the actor receives the complete instructions, dependency artifacts and packaged MDD instructions exactly as before. Pass the three fields through unchanged: do not expand the handle yourself, do not substitute a prompt of your own, and do not ask MDD for the full text. Keeping it out of this conversation is what stops a long run from filling the context window and being compacted.';
 type State = 'starting' | 'ready' | 'persisting-intent' | 'await-result' | 'persisting-result' | 'blocked' | 'await-approval' | 'complete';
 type Run = {
@@ -127,6 +179,8 @@ type Run = {
   changedList: ChangedFile[];
   /** Apply's own summary of the finished change, for the reader of the pull request it becomes. */
   delivered?: Delivered;
+  /** Set while Apply runs again to correct what a failed Verify found; cleared once Apply reports. */
+  rework?: { after: Phase; summary: string };
   /** The terminal state already written to the run ledger, so one run occupies one row. */
   ledgered?: 'complete' | 'blocked';
   uncertain: boolean; userMessageID: string; concerns: Concern[]; contextReport?: string; context: RunContext[]; dossierDiagnostic?: string;
@@ -171,16 +225,6 @@ const CONTROL_CHARACTERS = /[\x00-\x08\x0b-\x1f\x7f]/;
  */
 export const DELEGATION_ATTEMPTS = 3;
 const NATIVE_FALLBACK = 'Native fallback: inspect git status and git diff and preserve partial work before continuing. Do not redo completed work. Do not delegate, load skills, or call any MDD tools, including the report checker. Return the phase report to the parent; the parent checks its form. This is the only native fallback attempt. Native permissions remain in force; shell is not a sandbox.';
-const DOC_SKILLS: readonly PackagedSkillName[] = ['mdd-doc', 'cognitive-doc-design'];
-/**
- * The packaged skills each phase may find useful, named by direct path rather than injected by
- * value. Phases whose artifact is prose a person reads get both documentation skills; Apply gets
- * the cleanup skill; Tasks carries structure only and gets none.
- */
-const PHASE_SKILLS: Readonly<Record<Phase, readonly PackagedSkillName[]>> = {
-  'mdd-explore': DOC_SKILLS, 'mdd-plan': DOC_SKILLS, 'mdd-propose': DOC_SKILLS, 'mdd-spec': DOC_SKILLS,
-  'mdd-design': DOC_SKILLS, 'mdd-verify': DOC_SKILLS, 'mdd-tasks': [], 'mdd-apply': ['mdd-cleanup'],
-};
 /**
  * One prompt line naming each applicable packaged skill by absolute path. No body, no digest: the
  * actor reads the path itself with its own read tool if the skill turns out to help, and reading
@@ -265,7 +309,10 @@ function artifactRefs(items: readonly ArtifactResult[]): { ref: ArtifactRef }[] 
 export function runContext(value: unknown): RunContext {
   const input = objectWithKeys(value, 'context', ['label', 'content']);
   const label = boundedText(input.label, 'context label', 200);
-  const content = boundedText(input.content, 'context content', RUN_CONTEXT_MAX_BYTES);
+  // A single entry is bounded by the same hard ceiling the composed phase prompt is checked
+  // against, not by a smaller aggregate cap: the prompt itself, not a status payload, is what has
+  // to stay deliverable, and that is checked explicitly wherever it is composed.
+  const content = boundedText(input.content, 'context content', PHASE_CONTEXT_MAX_BYTES);
   if (CONTROL_CHARACTERS.test(label) || CONTROL_CHARACTERS.test(content)) {
     throw new ValidationError('Context must not contain terminal control characters.');
   }
@@ -277,6 +324,22 @@ export function boundedText(value: unknown, label: string, max: number): string 
     throw new ValidationError(`${label} must be nonempty text of at most ${max} bytes.`);
   }
   return value;
+}
+
+/**
+ * Fits the coordinator-contributed context into an Engram intent receipt, which `EngramHttp.save`
+ * refuses outright above 40000 bytes. Content that now allows a single 96000-byte entry can no
+ * longer be assumed to fit whole next to the rest of the receipt, so the receipt degrades to a
+ * label, byte count and content digest per entry rather than losing the whole save: the digest
+ * still lets a reader confirm which context a run actually carried, even without its text.
+ */
+export function intentEnvelope(base: Record<string, unknown>, context: readonly RunContext[]): Record<string, unknown> {
+  const full = context.length ? { context } : {};
+  const whole = { ...base, ...full };
+  if (Buffer.byteLength(JSON.stringify(whole)) <= 40000) return whole;
+  if (!context.length) return whole;
+  return { ...base, contextOmitted: true as const,
+    context: context.map(item => ({ label: item.label, bytes: Buffer.byteLength(item.content), sha256: createHash('sha256').update(item.content).digest('hex') })) };
 }
 
 export class PhaseRunner {
@@ -323,11 +386,19 @@ export class PhaseRunner {
       // present the report the user actually asked for instead of improvising its own.
       reportDetail: run.workflow.snapshot().answers.summary,
       evidence: { ...run.evidence }, coverage: evidenceCoverage(run.evidence),
-      report: run.side ? `Resumen\nLa exploración de contexto ${run.state === 'blocked' ? 'no pudo confirmarse' : run.state === 'ready' ? 'está lista' : 'está en curso'}. El plan principal y su aprobación no cambian.\n` : run.state === 'complete' || run.state === 'blocked' ? this.#closure(run) : renderReport(run.workflow.snapshot().answers.summary, { ...run.report, evidence: run.evidence }),
+      report: run.side ? `Resumen\nLa exploración de contexto ${run.state === 'blocked' ? 'no pudo confirmarse' : run.state === 'ready' ? 'está lista' : 'está en curso'}. El plan principal y su aprobación no cambian.\n` :
+        `${this.#visualFrame(run)}${run.state === 'complete' || run.state === 'blocked' ? this.#closure(run) : renderReport(run.workflow.snapshot().answers.summary, { ...run.report, evidence: run.evidence })}`,
+      ...(run.state === 'await-approval' && run.workflow.snapshot().answers.summary !== 'detailed'
+        ? { expandedReport: `${this.#visualFrame(run)}${renderReport('detailed', { ...run.report, evidence: run.evidence })}` } : {}),
+      visual: phaseVisual({ phase: run.phase, state: run.state, workflow: run.workflow.snapshot() }, presentationSettings().ascii),
       acceptance: structuredClone(run.acceptance), decisions: structuredClone(run.decisions), planned: structuredClone(run.planned), verification: structuredClone(run.verification),
       uncertain: run.uncertain, attempts: run.attempts, runAttempts: run.spent, recoverable: true, mode: run.mode,
       ...(run.fallbackExhausted ? { fallbackExhausted: true } : {}),
       ...(run.reportRepairExhausted ? { reportRepairExhausted: true } : {}),
+      // Named so the coordinator can offer the user the correction path instead of only
+      // re-running the same verification against the same implementation.
+      ...(this.#reworkTarget(run) ? { reworkable: this.#reworkTarget(run) } : {}),
+      ...(run.rework ? { rework: { ...run.rework } } : {}),
       // How many dispatches this phase still has before it becomes the coordinator's own. Reported
       // rather than derived, because a coordinator that has to work the threshold out from a
       // counter guesses, and the guess it made was to take the phase over early.
@@ -369,12 +440,12 @@ export class PhaseRunner {
    * handle by default and the full prompt only where a run has proven it needs it.
    */
   #dispatchable(run: Run): TaskArgs {
-    if (run.expose === 'full' || run.token === undefined) return structuredClone(run.args);
+    if (run.token === undefined || (run.expose === 'full' && withinFullTaskGate(run.args))) return structuredClone(run.args);
     return { description: run.args.description, subagent_type: run.args.subagent_type, prompt: run.token };
   }
 
   /** Mints the handle for the prompt a run is currently holding. Called wherever that prompt changes. */
-  #arm(run: Run): void { run.token = `${DISPATCH_HANDLE_PREFIX}${randomUUID()}`; }
+  #arm(run: { token?: string }): void { run.token = `${DISPATCH_HANDLE_PREFIX}${randomUUID()}`; }
 
   nativePending(sessionID: string): boolean {
     const callID = this.#inflight.get(sessionID);
@@ -487,10 +558,16 @@ export class PhaseRunner {
     return {
       runID: run.id, objective, route: snapshot.evaluation.route, phases: [...snapshot.evaluation.phases],
       phase: run.phase, state: run.state, mode: run.mode,
+      visual: phaseVisual({ phase: run.phase, state: run.state, workflow: snapshot }, presentationSettings().ascii),
       completed: snapshot.results.map(item => `${item.phase}: ${item.outcome}`),
       artifacts: run.history.length, changedFiles: run.changedFiles,
       note: 'This conversation was compacted by the host, so the transcript above may no longer hold what this run has done. This card is read from MDD\'s own state, not from the conversation: continue from it and from nextAction. Phases listed under completed are recorded and must not be run again.',
     };
+  }
+
+  #visualFrame(run: Run): string {
+    const visual = phaseVisual({ phase: run.phase, state: run.state, workflow: run.workflow.snapshot() }, presentationSettings().ascii);
+    return visual ? `**MDD · ${visual.route} route**\n\n${visual.progress}\n\nSkills: ${visual.skills.length ? visual.skills.map(skill => skill.replace(/^mdd-/, '').replaceAll('-', ' ')).join(', ') : 'none'}\n\n` : '';
   }
 
   /**
@@ -734,19 +811,20 @@ export class PhaseRunner {
       }
       throw new ValidationError('The run is not ready for another task. Wait for the current operation; nothing was changed.');
     }
-    // Either form is accepted: the handle mdd_status returns, or the full task a run that fell
-    // back to exposing its prompt returns. Other prompts are refused; only an unknown prompt
-    // turns fallback on. The delivered transcript note is known non-authoritative history.
-    if (!isDeepStrictEqual(args, this.#dispatchable(run)) && !isDeepStrictEqual(args, run.args)) {
-      // Only a prompt that arrives as neither the handle nor the real text says the handle failed
-      // to travel. Extra arguments or a substituted subagent are a different mistake — the
-      // coordinator composing instead of copying — and giving up the small payload over one of
-      // those would spend the rest of the run's context on a problem the refusal already fixed.
-      const sent = (args as { prompt?: unknown }).prompt;
-      const delivered = typeof sent === 'string' && sent.startsWith(DELIVERED_PROMPT_PREFIX);
-      const handled = !delivered && run.expose !== 'full' && run.token !== undefined && sent !== run.token && sent !== run.args.prompt;
-      if (handled) run.expose = 'full';
-      throw new ValidationError(`Task arguments differ from the ready task. Read mdd_status and pass its exact task object, copying description, subagent_type and prompt verbatim; do not compose your own. No execution was started.${delivered ? ' A delivered transcript placeholder is not a task; the current compact handle remains available from mdd_status.' : handled ? ' The prompt was a single-use MDD dispatch handle and must travel unchanged; this run now returns the full phase prompt instead, so read mdd_status again and dispatch what it returns.' : ''}`);
+    // Three forms are accepted: the handle mdd_status returns, the full task a run that fell back
+    // to exposing its prompt returns, and the transcript note a coordinator replays in place of the
+    // handle for this same phase and actor. Other prompts are refused; only an unknown prompt
+    // turns fallback on. A note aimed at another phase is known non-authoritative history.
+    const ready = this.#dispatchable(run);
+    const verdict = classifyDispatch(args, ready, run.args, run.token);
+    if (verdict.action !== 'accept') {
+      // Only a prompt that matches none of the known shapes says the handle failed to travel.
+      // Extra arguments or a substituted subagent are a different mistake — the coordinator
+      // composing instead of copying — and giving up the small payload over one of those would
+      // spend the rest of the run's context on a problem the refusal already fixed.
+      if (verdict.action === 'expose-full') run.expose = 'full';
+      else if (verdict.action === 'remint') { delete run.expose; this.#arm(run); }
+      throw new ValidationError(dispatchMismatchMessage(verdict, 'task'));
     }
     boundedText(call.callID, 'native callID', 256);
     if (run.calls.has(call.callID)) throw new ValidationError('Native task call ID was already consumed.');
@@ -763,14 +841,14 @@ export class PhaseRunner {
       if (run.state !== 'persisting-intent') throw new Error('Dispatch became uncertain during inspection.');
       run.uncertain = true;
       this.#mark(run, 'pending');
-      await run.memory?.save(`MDD intent ${run.id}`, JSON.stringify({
+      await run.memory?.save(`MDD intent ${run.id}`, JSON.stringify(intentEnvelope({
         kind: 'intent', runID: run.id, callID: call.callID, phase: run.phase,
         requirements: run.requirements, workflow: run.workflow.snapshot(),
-        // Persisted with the run so the recorded objective is not just the sentence that pointed at
-        // it: the material the coordinator gathered survives in memory next to the requirements.
-        ...(run.context.length ? { context: run.context } : {}),
         ...(run.side ? { explorationID: run.side.id, purpose: run.side.purpose } : {}),
-      }));
+        // Persisted with the run so the recorded objective is not just the sentence that pointed at
+        // it: the material the coordinator gathered survives in memory next to the requirements,
+        // when it fits; otherwise intentEnvelope degrades it to a checkable reference instead.
+      }, run.context)));
       if (run.state !== 'persisting-intent') throw new Error('Dispatch became uncertain during persistence.');
       run.state = 'await-result';
       run.report = { phase: run.phase, summary: `${phaseLabel(run.phase)} en curso.`, how: ['Con los requisitos acordados y la evidencia de plan disponible.'], status: 'in-progress', evidence: run.evidence };
@@ -870,23 +948,22 @@ export class PhaseRunner {
       throw new ValidationError('A native task is in flight for this run, so its prompt cannot change now. Wait for its result, then contribute again; nothing was recorded.');
     }
     const entry = runContext(value);
-    const size = (items: readonly RunContext[]) => items.reduce((total, item) => total + Buffer.byteLength(item.label) + Buffer.byteLength(item.content), 0);
-    const total = size(run.context) + size([entry]);
-    // Truncating here would push the oversized prompt into `task` and break dispatch exactly where
-    // the byte budget exists to protect it, so an over-budget contribution fails instead.
-    if (total > RUN_CONTEXT_MAX_BYTES) {
-      throw new ValidationError(`This context would bring the run to ${total} bytes, above the ${RUN_CONTEXT_MAX_BYTES}-byte limit that keeps the dispatched task copyable within the tool output budget. Nothing was recorded and nothing was truncated: contribute a shorter summary of the same material, or a reference the phase can read for itself. ${size(run.context)} bytes are already held.`);
-    }
     run.context.push(entry);
-    // A ready phase must actually carry the new material, so its prompt is recomposed here. The
-    // coordinator re-reads mdd_status and dispatches that updated task verbatim, as always.
-    if (run.state === 'ready') {
+    // Truncating here would push an oversized prompt into `task` and break dispatch exactly where
+    // the byte budget exists to protect it, so the composed prompt is trial-built for whatever
+    // phase is current — not only a ready one — and an over-budget contribution fails explicitly
+    // instead of being accepted now and discovered unusable only once the phase is dispatched.
+    if (run.state !== 'complete') {
       try {
         const prompts = this.#phasePrompts(run, run.phase);
-        run.args = prompts.args;
-        run.brief = prompts.brief;
-        // The prompt changed, so the handle that stood for the old one must not dispatch the new.
-        this.#arm(run);
+        // A ready phase must actually carry the new material, so its prompt is recomposed here.
+        // The coordinator re-reads mdd_status and dispatches that updated task verbatim, as always.
+        if (run.state === 'ready') {
+          run.args = prompts.args;
+          run.brief = prompts.brief;
+          // The prompt changed, so the handle that stood for the old one must not dispatch the new.
+          this.#arm(run);
+        }
       } catch (error) { run.context.pop(); throw error; }
     }
     return this.status(runtime.sessionID);
@@ -916,6 +993,7 @@ export class PhaseRunner {
       return {
         result, ignored, outcome,
         evidenceSummary: boundedText(result.evidenceSummary, 'summary', 2000),
+        how: result.how === undefined ? undefined : boundedText(result.how, 'how', 2000),
         artifact: assertNoTraceSection(boundedText(result.artifact, 'artifact', 16000)),
         advisory: concerns(result.concerns),
       };
@@ -977,13 +1055,9 @@ export class PhaseRunner {
       } catch (error) { throw asMalformed(error); }
       // The report a person will read is built and rendered before anything is persisted, so a
       // phase whose summary cannot be presented fails here rather than after it was recorded.
-      const how = [
-        'Kept the requirements, decisions and implementation evidence linked.',
-        ...(applied?.paths.length ? [`${new Set(applied.paths).size} file(s) reported as changed.`] : []),
-        ...(applied?.reason ? [`Nothing was changed: ${applied.reason}`] : []),
-        ...ran.map(check => `Reported running ${check.command}; exit ${check.exit ?? 'unknown'}.`),
-        ...(ignored.length ? [`Ignored ${ignored.length} field(s) this phase does not report: ${ignored.join(', ')}.`] : []),
-      ];
+      // Only an explicit phase explanation can supply causal reasoning. A changed-file reason
+      // alone does not establish its relation to the goal; missing reasoning stays missing.
+      const how = report.how ? [report.how] : applied?.reason ? [applied.reason] : [];
       const rendered = renderReport(run.workflow.snapshot().answers.summary, { phase: run.phase, summary: evidenceSummary, how, status: outcome, evidence: nextEvidence });
       if (run.state !== 'persisting-result') throw new Error('Result became uncertain during inspection.');
       run.artifact = await run.artifacts.save({ runID: run.id, phase: run.phase, ...(run.phase === 'mdd-spec' ? { domain: boundedText(result.domain, 'spec domain', 64) } : {}) }, artifact);
@@ -1010,9 +1084,14 @@ export class PhaseRunner {
       run.decisions = choices;
       run.concerns.push(...advisory);
       if (applied) {
-        run.changedFiles = new Set(applied.paths).size;
-        run.changedList = applied.files;
+        // A correction pass reports only what it touched; the first pass's files still changed.
+        const files = run.rework && run.phase === 'mdd-apply'
+          ? [...run.changedList.filter(file => !applied!.files.some(next => next.path === file.path)), ...applied.files]
+          : applied.files;
+        run.changedFiles = new Set([...(run.rework && run.phase === 'mdd-apply' ? run.changedList.map(file => file.path) : []), ...applied.paths]).size;
+        run.changedList = files;
       }
+      if (run.phase === 'mdd-apply') delete run.rework;
       if (summary) run.delivered = summary;
       // Every check Verify ran, with the exit it reported — not only the ones that succeeded.
       // Keeping the successes alone made a PR body that listed seven green commands next to a
@@ -1110,12 +1189,29 @@ export class PhaseRunner {
    * Explicit recovery. Phase scope releases the current attempt and makes the same phase runnable
    * again; run scope discards the run, its investigation and the local marker so new work can start.
    */
-  reset(sessionID: string, scope: 'phase' | 'run'): { scope: 'phase' | 'run'; phase?: Phase; approval?: true; preserved?: { file: string; runID: string } } {
+  /**
+   * The phase a failed Verify can send its run back to. Only a Verify that actually reported
+   * failure qualifies: its findings are recorded, so there is something concrete to correct, and
+   * the phase that produced the implementation is still in this route.
+   */
+  #reworkTarget(run: Run): Phase | undefined {
+    if (run.side || run.state !== 'blocked' || run.phase !== 'mdd-verify') return undefined;
+    const workflow = run.workflow.snapshot();
+    if (workflow.nextAction.kind !== 'blocked' || workflow.nextAction.phase !== 'mdd-verify') return undefined;
+    const last = workflow.results.at(-1);
+    if (last?.phase !== 'mdd-verify' || last.outcome !== 'failed') return undefined;
+    return workflow.evaluation.phases.includes('mdd-apply') ? 'mdd-apply' : undefined;
+  }
+
+  reset(sessionID: string, scope: 'phase' | 'run' | 'rework'): { scope: 'phase' | 'run' | 'rework'; phase?: Phase; approval?: true; preserved?: { file: string; runID: string } } {
     if (this.#inflight.has(sessionID)) throw new ValidationError(`The child may still be running: OpenCode has not confirmed it stopped. ${ATTEST_HINT}`);
     const run = this.#runs.get(sessionID);
     const pending = run ?? this.#solo.get(sessionID);
     if (!pending && this.options.progress?.read(sessionID)?.state === 'pending') throw new ValidationError(`A previous child has unconfirmed liveness: OpenCode has not confirmed it stopped. ${ATTEST_HINT}`);
     if (pending && ['persisting-intent', 'persisting-result'].includes(pending.state)) throw new ValidationError('Wait for the current persistence operation before resetting.');
+    if (scope === 'rework' && (!run || !this.#reworkTarget(run))) {
+      throw new ValidationError('Rework is available only after mdd-verify reported failure in a route that includes mdd-apply. Use scope phase to run the current phase again.');
+    }
     if (run) this.#event(run, 'reset');
     if (scope === 'run' || !run) {
       this.#runs.delete(sessionID);
@@ -1147,6 +1243,18 @@ export class PhaseRunner {
     delete run.reportRepairExhausted;
     run.malformed = 0;
     delete run.lastFailure;
+    if (scope === 'rework') {
+      // The user chose to correct the implementation rather than re-check it unchanged. Apply
+      // runs again with the failed verification as its newest dependency artifact, and Verify
+      // follows it through the route's ordinary approval.
+      const target = this.#reworkTarget(run)!;
+      const failed = run.workflow.snapshot().results.at(-1)!;
+      run.workflow.rework(target);
+      run.rework = { after: failed.phase, summary: failed.evidenceSummary };
+      this.#prepare(run);
+      this.#settle(run);
+      return { scope: 'rework', phase: target };
+    }
     run.workflow.retry();
     const next = run.workflow.nextAction();
     // A run stopped at an approval boundary is not waiting for work to be prepared, it is waiting
@@ -1288,12 +1396,12 @@ export class PhaseRunner {
       return undefined;
     }
     if (solo.state !== 'ready') throw new ValidationError('An investigation is already in flight; nothing was changed.');
-    if (!isDeepStrictEqual(args, this.#soloDispatchable(solo)) && !isDeepStrictEqual(args, solo.args)) {
-      const sent = (args as { prompt?: unknown }).prompt;
-      const delivered = typeof sent === 'string' && sent.startsWith(DELIVERED_PROMPT_PREFIX);
-      const handled = !delivered && solo.expose !== 'full' && solo.token !== undefined && sent !== solo.token && sent !== solo.args.prompt;
-      if (handled) solo.expose = 'full';
-      throw new ValidationError(`Task arguments differ from the ready investigation. Read mdd_status and pass its exact task object, copying description, subagent_type and prompt verbatim; do not compose your own. No execution was started.${delivered ? ' A delivered transcript placeholder is not a task; the current compact handle remains available from mdd_status.' : handled ? ' The prompt was a single-use MDD dispatch handle and must travel unchanged; this investigation now returns the full prompt instead, so read mdd_status again and dispatch what it returns.' : ''}`);
+    const ready = this.#soloDispatchable(solo);
+    const verdict = classifyDispatch(args, ready, solo.args, solo.token);
+    if (verdict.action !== 'accept') {
+      if (verdict.action === 'expose-full') solo.expose = 'full';
+      else if (verdict.action === 'remint') { delete solo.expose; this.#arm(solo); }
+      throw new ValidationError(dispatchMismatchMessage(verdict, 'investigation'));
     }
     boundedText(call.callID, 'native callID', 256);
     if (solo.calls.has(call.callID)) throw new ValidationError('Native task call ID was already consumed.');
@@ -1375,7 +1483,7 @@ export class PhaseRunner {
   }
 
   #soloDispatchable(solo: Solo): TaskArgs {
-    if (solo.expose === 'full' || solo.token === undefined) return structuredClone(solo.args);
+    if (solo.token === undefined || (solo.expose === 'full' && withinFullTaskGate(solo.args))) return structuredClone(solo.args);
     return { description: solo.args.description, subagent_type: solo.args.subagent_type, prompt: solo.token };
   }
 
@@ -1587,7 +1695,7 @@ export class PhaseRunner {
     run.brief = prompts.brief;
     this.#arm(run);
     run.state = 'ready';
-    run.report = { phase, summary: `Listo para ${phaseLabel(phase).toLowerCase()}.`, how: ['El trabajo que sigue respeta los requisitos y el plan disponible; en modo automático no hace falta confirmar el proceso aparte.'], status: 'in-progress', evidence: run.evidence };
+    run.report = { phase, summary: `Listo para ${phaseLabel(phase).toLowerCase()}.`, how: [], status: 'in-progress', evidence: run.evidence };
   }
 
   /** Change executor, never semantic phase, approval, dependencies, or report contract. */
@@ -1613,7 +1721,7 @@ export class PhaseRunner {
       'mdd-design': 'Use held acceptance IDs to define only relevant decisions, boundaries and test seams. Supply decisions; do not redefine requirements or invent extra process.',
       'mdd-tasks': 'Supply ordered deliverables linked to held scenarios and decisions. Keep check commands applicable to acceptance; no extra unrelated checks. Preserve ID and dependency consistency.',
       'mdd-apply': 'Implement the applicable planned deliverables. Supply changes as [{path,reason}], one entry per file you changed, where reason says in one sentence why that file had to change — a reviewer reads it beside the diff, so "updated the file" is not a reason. A bare path is still accepted when there is genuinely nothing to add. Use noChangeReason instead when nothing needed changing. Report the checks you actually ran as checks [{command,exit}]; they are recorded as your claim, and an empty list is the honest answer when you ran none.',
-      'mdd-verify': 'Check requirements AND the held plan against the implementation, running the planned checks. Supply checks [{command,exit}] for what you actually ran and verification for EVERY scenario-step pair, step and decision. Give source-based semantic assessments naming the check they rely on; use not-verified/deviation and outcome failed for gaps. An exit code is not semantic proof; never report a check you did not run.',
+      'mdd-verify': 'Check requirements, design decisions AND the held plan against the implementation. Run applicable tests and build checks as appropriate, including planned checks when applicable; if a check is inapplicable or cannot run, explain why, its impact and what remains unknown. Supply checks [{command,exit}] for what you actually ran and verification for EVERY scenario-step pair, step and decision. Give source-based semantic assessments naming the check they rely on; use not-verified/deviation and outcome failed for gaps. Explain any deviation or failed/unrun check, its impact, and the next choices (improve, reject or request implementation rework) so the user can decide. An exit code is not semantic proof; never report a check you did not run.',
     };
     const hint = skillHint(PHASE_SKILLS[phase]);
     const detail = run.workflow.snapshot().answers.summary;
@@ -1627,6 +1735,7 @@ export class PhaseRunner {
       ISOLATION,
       'Prioritize a useful plan, matching requirements and plan, and reaching the user goal. Time and quality are joint constraints on both routes.',
       SUMMARY_DETAIL[detail],
+      'Keep the MDD Summary outcome-focused. In MDD How, explain concrete changes or decisions, their source-grounded causal reason and their relation to the user objective. If the reason is unknown, say so instead of inventing one. Do not substitute process bookkeeping, file counts, ignored fields or command lists. Commands belong in verification evidence, not in the explanation of how the goal was advanced.',
       'Use the tools and commands the phase actually needs; native permission requests are the real boundary. Shell executes real project code and is NOT a sandbox.',
       // Phase actors sit at the native subagent depth limit, so a task they dispatch fails. Saying
       // so costs one line and saves an attempt spent discovering it.
@@ -1637,6 +1746,7 @@ export class PhaseRunner {
       'Report in English — summary, artifact, concerns and data — whatever language the requirements, the repository or the conversation use. This report is read by MDD and by the coordinator, never by the user directly; the coordinator translates it for them. Reproduce quoted requirements, error messages, file names and identifiers exactly as they are.',
       ...(run.lastFailure ? [`A previous attempt at this exact phase did not complete: ${JSON.stringify(run.lastFailure)}. This attempt is a retry, not a repeat: where that is what failed, take a different route to the same outcome, and do not redo work whose result is already listed below.`] : []),
       phase === 'mdd-apply' ? 'This phase implements: edit the sources the plan calls for.' : 'This phase produces understanding or a plan, so change sources only if the phase genuinely requires it.',
+      ...(phase === 'mdd-apply' && run.rework ? [`This is a correction pass: ${run.rework.after} reported failure and the user chose to fix the implementation. Its artifact is the newest dependency artifact below and lists every deviation and missing check; its summary was ${JSON.stringify(run.rework.summary)}. The changes already applied are in the working tree: keep them, correct what verification found, and add the tests it named as missing. Report in changes only the files this pass touched; earlier ones are kept.`] : []),
       ...reportFormatLines(phase),
     ];
     const data = (handoff: readonly unknown[], compacted: readonly ArtifactRef[]) => [
@@ -1692,7 +1802,8 @@ export class PhaseRunner {
     const checked = run.verification;
     const gap = checked ? [...checked.scenarios, ...checked.steps, ...checked.decisions].find(item => item.status !== 'verified') : undefined;
     return renderClosure(run.workflow.snapshot().answers.summary, { goal: run.acceptance?.goal ?? 'Completar el cambio pedido.',
-      changes: run.changedFiles ? checked?.changes ?? `Cambiaron ${run.changedFiles} archivo(s) del alcance; el resultado no está verificado del todo.` : 'No se registró ningún cambio de implementación.', matched: run.state === 'complete' && checked?.matched === true,
+      changes: run.changedFiles ? checked?.changes ?? (run.delivered ? `${run.delivered.what}${run.delivered.implies ? ` ${run.delivered.implies}` : ''} La verificación de este resultado está pendiente.` : 'El resultado de la implementación no está verificado; se desconoce si cumple el objetivo.') : 'No se registró ningún cambio de implementación.',
+      how: checked && run.phase === 'mdd-verify' ? run.report.how : [], matched: run.state === 'complete' && checked?.matched === true,
       checks: run.executedChecks, limits: [...(gap ? [`Brecha de criterios o de plan: ${gap.assessment}`] : []), ...(checked?.limits ?? []), ...(run.state === 'blocked' && !gap ? ['No se pudo confirmar que esté completo. Revisá la evidencia detallada antes de seguir.'] : [])],
       status: run.state === 'complete' ? 'passed' : run.report.status === 'failed' ? 'failed' : 'blocked', evidence: run.evidence });
   }

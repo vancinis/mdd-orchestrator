@@ -48,7 +48,7 @@ export const STATUS_PROTECTED_FIELDS: readonly string[] = Object.freeze([
  */
 export const STATUS_DROP_ORDER: readonly string[] = Object.freeze([
   'priorRun', 'previousRuns', 'contexts', 'contextualReport', 'providedContext', 'artifacts', 'artifactAttempts', 'artifact',
-  'concerns', 'report', 'planned', 'decisions', 'acceptance', 'verification',
+  'concerns', 'expandedReport', 'report', 'visual', 'planned', 'decisions', 'acceptance', 'verification',
   // A rejected report is the work itself, waiting to be restated. It sheds late, because dropping
   // it turns a free restatement into re-running the phase that produced it.
   'rejected',
@@ -79,7 +79,7 @@ export const STATUS_DROP_ORDER: readonly string[] = Object.freeze([
  * the artifact store still holds, or that detail="full" returns.
  */
 export const STATUS_COMPACT_KEEP: readonly string[] = Object.freeze([
-  'rejected', 'report', 'providedContext', 'artifacts', 'handoff', 'workflow', 'priorRun',
+  'rejected', 'report', 'visual', 'providedContext', 'artifacts', 'handoff', 'workflow', 'priorRun',
 ]);
 
 /**
