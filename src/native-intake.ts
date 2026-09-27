@@ -12,6 +12,9 @@ import { freezeProfile, parseSettings } from './settings.js';
 import { ManagedMemory } from './managed-memory.js';
 import { objectWithKeys } from './validation.js';
 import { concerns } from './concerns.js';
+import { STABLE_CHECKPOINT_VERSION } from './checkpoint.js';
+import type { CheckpointStore } from './checkpoint.js';
+import type { QuestionCheckpointStore, QuestionRecord } from './question-checkpoint.js';
 
 export type IntakeInspect = {
   setupPending?(runtime: Runtime, requirements?: string, messageID?: string): Promise<{ requirements: string; userMessageID: string } | undefined>;
@@ -100,7 +103,8 @@ export class NativeIntake {
   readonly #settings;
   readonly #profile;
   readonly #managed;
-  constructor(readonly runner: Runner, readonly inspect: IntakeInspect, settings: unknown) {
+  constructor(readonly runner: Runner, readonly inspect: IntakeInspect, settings: unknown,
+    readonly durable: { questions?: QuestionCheckpointStore; checkpoint?: CheckpointStore } = {}) {
     this.#settings = parseSettings(settings);
     this.#profile = freezeProfile(this.#settings);
     this.#managed = this.#settings.engram && 'mode' in this.#settings.engram ? new ManagedMemory(this.#settings.engram) : undefined;
@@ -108,8 +112,56 @@ export class NativeIntake {
 
   async close(): Promise<void> { await this.#managed?.close(); }
 
+  /** Restore only an already registered session; never bootstrap a replacement memory identity. */
+  async boundRunMemory(runtime: Runtime, project: string): Promise<EngramHttp> {
+    const engram = this.#settings.engram;
+    if (!engram) throw new Error('This run needs Engram, but memory is disabled.');
+    const endpoint = 'endpoint' in engram ? engram.endpoint : await this.#managed!.endpoint();
+    const client = new EngramHttp(endpoint, { id: runtime.sessionID, project, directory: runtime.directory });
+    await client.checkBinding();
+    return client;
+  }
+
+  /** Reissue only the question envelope, never its historical answer or approval. */
+  recover(runtime: Runtime): void {
+    if (this.#sessions.has(runtime.sessionID)) return;
+    const status = this.runner.status(runtime.sessionID);
+    if (!('workflow' in status) || status.workflow.nextAction.kind !== 'approve' || status.state !== 'await-approval') return;
+    const checkpoint = this.durable.checkpoint?.read(runtime.sessionID)?.checkpoint;
+    if (checkpoint?.version !== STABLE_CHECKPOINT_VERSION || checkpoint.runID !== status.runID ||
+        checkpoint.data.directory !== runtime.directory || checkpoint.data.worktree !== runtime.worktree) {
+      throw new Error('The native question cannot be bound to a validated same-parent checkpoint.');
+    }
+    const recorded = this.durable.questions?.read(runtime.sessionID);
+    if (recorded && (recorded.runID !== status.runID ||
+        (recorded.checkpoint && recorded.checkpoint.sequence > checkpoint.sequence))) throw new Error('The native question belongs to a different or newer run.');
+    if (recorded && !['approval', 'clarification'].includes(recorded.slot.kind) &&
+        !['settled', 'cancelled', 'withdrawn'].includes(recorded.state)) throw new Error('A different native question is unresolved; no approval was reissued.');
+    const phase = status.workflow.nextAction.phase;
+    if (recorded && ['prepared', 'pending', 'answered'].includes(recorded.state) && recorded.slot.phase !== phase) {
+      throw new Error('The native question names another phase; no approval was reissued.');
+    }
+    const entry: Intake = {
+      runtime: { ...runtime }, requirements: checkpoint.data.requirements, state: 'review-ready',
+      receipts: [], known: { ...status.workflow.answers }, userMessageID: checkpoint.data.userMessageID,
+      usedMessages: new Set(checkpoint.data.usedMessages), proposed: new Set(checkpoint.data.proposed),
+      clarifications: structuredClone(recorded?.clarifications ?? []), deferred: structuredClone(recorded?.deferred ?? []),
+      clarificationAnswers: structuredClone(recorded?.clarificationAnswers ?? []),
+    };
+    this.#sessions.set(runtime.sessionID, entry);
+    try {
+      if (recorded && ['prepared', 'pending', 'answered'].includes(recorded.state)) {
+        const slot: Slot = structuredClone(recorded.slot);
+        slot.args.questions[0]!.question += ` [MDD re-present ${randomUUID()}]`;
+        this.#slot(entry, slot, true);
+        entry.notice = 'The earlier native question is not consent. Ask this newly issued question and use only its fresh native answer.';
+      }
+    } catch (error) { this.#sessions.delete(runtime.sessionID); throw error; }
+  }
+
   async start(value: unknown, runtime: Runtime, messageID: string): Promise<unknown> {
     if (runtime.agent !== 'mdd-orchestrator') throw new Error('Only mdd-orchestrator may start MDD.');
+    if (!this.#sessions.has(runtime.sessionID) && this.#unresolved(runtime.sessionID)) throw new Error('A native question in this parent has an unresolved outcome. Inspect mdd_status and explicitly discard the run before starting another.');
     this.runner.assertFreshStart?.(runtime.sessionID);
     const previous = this.#sessions.get(runtime.sessionID);
     if (previous) {
@@ -267,6 +319,7 @@ export class NativeIntake {
     if (runtime.agent !== 'mdd-orchestrator') throw new Error('Only the coordinator may revisit phase review.');
     const entry = this.#sessions.get(runtime.sessionID);
     if (!entry || entry.state !== 'question-ready' || !['approval', 'clarification'].includes(entry.slot?.kind ?? '')) throw new Error('No idle phase question can be revisited.');
+    this.#persistQuestion(entry, 'withdrawn');
     delete entry.slot;
     entry.clarifications = entry.clarifications.filter(item =>
       entry.clarificationAnswers.findLast(answer => answer.question === item.question)?.disposition === 'deferred');
@@ -312,7 +365,7 @@ export class NativeIntake {
       return { ...this.status(runtime.sessionID), reset: { scope: 'phase' as const } };
     }
     const applied = this.runner.reset?.(runtime.sessionID, scope) ?? { scope: 'run' as const };
-    if (applied.scope === 'run') this.#forget(runtime.sessionID);
+    if (applied.scope === 'run') { this.durable.questions?.clear(runtime.sessionID); this.#forget(runtime.sessionID); }
     else if (entry) {
       delete entry.slot; delete entry.reason; delete entry.restore; delete entry.replacing;
       entry.state = 'active';
@@ -413,7 +466,11 @@ export class NativeIntake {
     const entry = this.#sessions.get(sessionID);
     const status = this.runner.status?.(sessionID) ?? { state: 'not-started' };
     const memory = this.#settings.engram ? 'enabled' : 'off';
-    if (!entry) return { ...status, memory, question: undefined, provenance: undefined, questionReceipts: [] };
+    if (!entry) {
+      if (this.#unresolved(sessionID)) return { ...status, state: 'recovery-blocked', memory, question: undefined, task: undefined,
+        provenance: undefined, questionReceipts: [], reason: 'A native question outcome is unconfirmed. Do not ask again or infer an answer. Reinspect native history before any future restoration; explicit run discard remains available.' };
+      return { ...status, memory, question: undefined, provenance: undefined, questionReceipts: [] };
+    }
     const side = 'contextual' in status && status.contextual;
     const state = entry.state === 'active' || side ? status.state : entry.state;
     return { ...status, state, memory, ...(entry.reason ? { reason: entry.reason } : {}),
@@ -450,6 +507,8 @@ export class NativeIntake {
     try {
       entry.slot!.callID = boundedText(call.callID, 'native question callID', 256);
       if (entry.receipts.some(receipt => receipt.callID === call.callID)) throw new Error('Native question call ID was already consumed.');
+      if (this.durable.questions?.read(call.sessionID)?.retiredCalls?.includes(call.callID)) throw new Error('Native question call ID belongs to an earlier question.');
+      this.#persistQuestion(entry, 'pending');
       await this.inspect.question(entry.runtime, call, entry.slot!.args);
       if (entry.state !== 'accepting') throw new Error('Question became uncertain before execution.');
       entry.state = 'await-answer';
@@ -473,6 +532,9 @@ export class NativeIntake {
         if (!(error instanceof UnselectedAnswer) || slot.kind !== 'clarification') throw error;
         selections = [[boundedText(error.text, 'free-text clarification', 12000)]];
       }
+      // A native callback is evidence of an answer, not replayable consent. Persist its exact
+      // selections before any approval or plan transition; an incomplete write blocks the route.
+      this.#persistQuestion(entry, 'answered', selections);
       if (slot.kind === 'change') {
         if (selections[0]![0] === CHANGE_LABELS.keep) this.#restore(entry, 'Kept the current plan, answers and approval unchanged.');
         else {
@@ -513,6 +575,7 @@ export class NativeIntake {
       }
       entry.receipts.push({ kind: slot.kind, ...(slot.phase ? { phase: slot.phase } : {}), callID: call.callID, answers: selections });
       this.#recordConsent(entry);
+      if (entry.slot === slot) this.#persistQuestion(entry, 'settled');
     } catch (error) {
       if (error instanceof UnselectedAnswer) return this.#unanswered(entry, slot, call);
       this.#fail(entry, error);
@@ -526,6 +589,7 @@ export class NativeIntake {
    * evidence and its approvals over one sentence typed in place of a click.
    */
   #unanswered(entry: Intake, slot: Slot, call: TaskCall): void {
+    this.#persistQuestion(entry, 'cancelled');
     entry.receipts.push({ kind: slot.kind, ...(slot.phase ? { phase: slot.phase } : {}), callID: call.callID, answers: [], cancelled: true });
     this.#recordConsent(entry);
     if (slot.kind === 'change' && entry.restore) {
@@ -549,11 +613,13 @@ export class NativeIntake {
     if (!('workflow' in status) || status.state === 'blocked') return;
     const next = status.workflow.nextAction;
     if (next.kind === 'approve') {
+      const old = entry.slot;
       entry.state = 'review-ready'; delete entry.slot; delete entry.notice;
       // Only a completed subsequent phase makes deferred questions eligible again. Never re-offer
       // them at the approval immediately following the original deferral.
       entry.clarifications = entry.deferred;
       entry.deferred = [];
+      if (old?.callID) this.#persistQuestion(entry, 'settled', undefined, old);
     }
   }
 
@@ -567,6 +633,7 @@ export class NativeIntake {
   nativeError(call: TaskCall): void {
     const entry = this.#sessions.get(call.sessionID);
     if (!entry || entry.slot?.callID !== call.callID || !['accepting', 'await-answer'].includes(entry.state)) return;
+    this.#persistQuestion(entry, 'cancelled');
     entry.receipts.push({ kind: entry.slot.kind, callID: call.callID, answers: [], cancelled: true });
     this.#recordConsent(entry);
     if (entry.restore) { this.#restore(entry, 'Change cancelled; the current plan and approval are unchanged.'); return; }
@@ -614,14 +681,49 @@ export class NativeIntake {
   }
 
   #slot(entry: Intake, slot: Slot, reissued = false): void {
-    entry.slot = structuredClone(slot);
+    const next = structuredClone(slot);
     // Ownership compares envelope values across all parents. Equal wording and options must not
     // let another session's first registered question claim this one.
     if (slot.kind === 'clarification' && !reissued) {
-      entry.slot.args.questions[0]!.question += ` [MDD clarification ${randomUUID()}]`;
+      next.args.questions[0]!.question += ` [MDD clarification ${randomUUID()}]`;
     }
+    this.#persistQuestion(entry, 'prepared', undefined, next);
+    entry.slot = next;
     entry.state = 'question-ready';
     this.#questionOwners.set(entry.slot.args, entry.runtime.sessionID);
+  }
+
+  #unresolved(sessionID: string): QuestionRecord | undefined {
+    const record = this.durable.questions?.read(sessionID);
+    return record && !['settled', 'cancelled', 'withdrawn'].includes(record.state) ? record : undefined;
+  }
+
+  #persistQuestion(entry: Intake, state: QuestionRecord['state'], answer?: string[][], slot = entry.slot): void {
+    if (!this.durable.questions || !slot) return;
+    const parent = entry.runtime.sessionID;
+    const old = this.durable.questions.read(parent);
+    const status = this.runner.status(parent);
+    const runID = slot.kind === 'preflight' ? undefined : 'runID' in status ? status.runID as string : undefined;
+    if (slot.kind !== 'preflight' && !runID) throw new Error('Native question cannot be bound to a live run.');
+    const checkpoint = runID ? this.durable.checkpoint?.read(parent)?.checkpoint : undefined;
+    if (runID && this.durable.checkpoint && (checkpoint?.version !== STABLE_CHECKPOINT_VERSION || checkpoint.runID !== runID)) {
+      throw new Error('Native question cannot be bound to the current durable run checkpoint.');
+    }
+    const record: QuestionRecord = {
+      version: 1, parent, sequence: (old?.sequence ?? -1) + 1,
+      requirements: entry.requirements, known: structuredClone(entry.known),
+      ...(entry.userMessageID ? { userMessageID: entry.userMessageID } : {}),
+      ...(entry.context ? { context: { ...entry.context } } : {}),
+      ...(runID ? { runID } : {}),
+      ...(checkpoint && checkpoint.version === STABLE_CHECKPOINT_VERSION ? { checkpoint: { sequence: checkpoint.sequence, digest: checkpoint.dataDigest } } : {}),
+      state, slot: (({ callID: _callID, ...data }) => structuredClone(data))(slot), clarifications: structuredClone(entry.clarifications),
+      deferred: structuredClone(entry.deferred), clarificationAnswers: structuredClone(entry.clarificationAnswers),
+      ...(!['prepared', 'withdrawn'].includes(state) ? { callID: slot.callID! } : {}),
+      ...(state === 'answered' ? { answer: structuredClone(answer!) } : {}),
+      ...((old?.retiredCalls?.length || (state === 'prepared' && old?.callID))
+        ? { retiredCalls: [...(old?.retiredCalls ?? []), ...(state === 'prepared' && old?.callID && !old.retiredCalls?.includes(old.callID) ? [old.callID] : [])] } : {}),
+    };
+    this.durable.questions.write(parent, record);
   }
 
   async #startRunner(entry: Intake, selections: unknown, source: 'startup-profile' | 'native-question'): Promise<void> {

@@ -357,7 +357,7 @@ test('OpenCode SDK contract: bounded callback even if injected client ignores ab
 test('plugin contract: scoped tools, in-place native args, result gating, no native override', async t => {
   const f = await pluginFixture(t);
   const { hooks, context, writes } = f;
-  assert.deepEqual(Object.keys(hooks.tool).sort(), ['mdd_change_request', 'mdd_check_report', 'mdd_context', 'mdd_contextual_explore', 'mdd_improve', 'mdd_improvements', 'mdd_phase_result', 'mdd_pr_body', 'mdd_prepare_advance', 'mdd_reset', 'mdd_revisit', 'mdd_start', 'mdd_status']);
+  assert.deepEqual(Object.keys(hooks.tool).sort(), ['mdd_change_request', 'mdd_check_report', 'mdd_context', 'mdd_contextual_explore', 'mdd_improve', 'mdd_improvements', 'mdd_phase_result', 'mdd_pr_body', 'mdd_prepare_advance', 'mdd_reset', 'mdd_revisit', 'mdd_start', 'mdd_status', 'mdd_transfer']);
   assert.deepEqual(Object.keys(hooks.tool.mdd_start.args), ['requirements', 'context']);
   const ready = JSON.parse(await hooks.tool.mdd_start.execute({ requirements: f.requirements }, context));
   const nativeArgs = ready.task;

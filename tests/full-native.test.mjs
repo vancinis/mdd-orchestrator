@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { mkdtemp, mkdir, rm, writeFile, readFile, readdir, cp } from 'node:fs/promises';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import plugin from '../dist/opencode-plugin.js';
 import { defaultSettings, MODEL_ROLES } from '../dist/settings.js';
@@ -12,6 +13,228 @@ import { ManagedMemory } from '../dist/managed-memory.js';
 import { STATUS_BUDGET_BYTES, STATUS_COMPACT_KEEP, STATUS_DROP_ORDER, STATUS_PROTECTED_FIELDS } from '../dist/status-budget.js';
 import { retroReport } from '../dist/retro.js';
 import { collapsedPrompt } from '../dist/dispatch-transcript.js';
+
+test('opt-in same-parent restart restores ready Verify from validated local dependencies, memory off', async t => {
+  const previous = process.env.MDD_EXPERIMENTAL_RESUME;
+  process.env.MDD_EXPERIMENTAL_RESUME = '1';
+  t.after(() => { if (previous === undefined) delete process.env.MDD_EXPERIMENTAL_RESUME; else process.env.MDD_EXPERIMENTAL_RESUME = previous; });
+  const f = await fixture(t, { memoryEnabled: false, store: 'none' });
+  await f.hooks.tool.mdd_context.execute({ label: 'Issue context', content: 'The validated input boundary must preserve prior behavior. '.repeat(200) }, f.context);
+  await f.phase();
+  await f.phase();
+  assert.equal((await f.status()).phase, 'mdd-verify');
+  const resumed = await plugin(f.input);
+  const status = JSON.parse(await resumed.tool.mdd_status.execute({ detail: 'full' }, f.context));
+  assert.equal(status.state, 'ready');
+  assert.equal(status.phase, 'mdd-verify');
+  assert.equal(status.workflow.results.length, 2);
+  assert.equal(status.workflow.nextAction.phase, 'mdd-verify');
+  assert.equal(status.planned.length, 1);
+  assert.equal(status.evidence.implementation, 'confirmed');
+  const args = structuredClone(status.task);
+  const call = { sessionID: f.runtime.sessionID, callID: 'task-restored-verify', tool: 'task' };
+  f.parent[1].parts = [{ type: 'tool', tool: 'task', callID: call.callID, state: { status: 'running', input: structuredClone(args) } }];
+  await resumed['tool.execute.before'](call, { args });
+  assert.match(args.prompt, /Artifact for mdd-plan/);
+  assert.match(args.prompt, /Artifact for mdd-apply/);
+  assert.match(args.prompt, /validated input boundary must preserve prior behavior/);
+});
+
+test('opt-in pending child stays blocked until explicit release, then returns to its saved phase', async t => {
+  const previous = process.env.MDD_EXPERIMENTAL_RESUME;
+  process.env.MDD_EXPERIMENTAL_RESUME = '1';
+  t.after(() => { if (previous === undefined) delete process.env.MDD_EXPERIMENTAL_RESUME; else process.env.MDD_EXPERIMENTAL_RESUME = previous; });
+  const f = await fixture(t, { memoryEnabled: false, store: 'none' });
+  await f.phase();
+  const ready = await f.status();
+  const args = structuredClone(ready.task);
+  const call = { sessionID: f.runtime.sessionID, callID: 'task-interrupted-apply', tool: 'task' };
+  f.parent[1].parts = [{ type: 'tool', tool: 'task', callID: call.callID, state: { status: 'running', input: structuredClone(args) } }];
+  await f.hooks['tool.execute.before'](call, { args });
+  const resumed = await plugin(f.input);
+  const blocked = JSON.parse(await resumed.tool.mdd_status.execute({ detail: 'full' }, f.context));
+  assert.equal(blocked.state, 'recovery-blocked');
+  assert.equal(blocked.task, undefined);
+  f.user('I stopped the interrupted subagent.');
+  const released = JSON.parse(await resumed.tool.mdd_reset.execute({ scope: 'phase', userText: 'I stopped the interrupted subagent.' }, f.context));
+  assert.equal(released.state, 'ready');
+  assert.equal(released.runID, ready.runID);
+  assert.equal(released.phase, 'mdd-apply');
+  assert.equal(released.workflow.results.length, 1);
+  assert.equal(released.workflow.nextAction.kind, 'execute');
+  assert.equal(released.task.subagent_type, 'mdd-apply');
+  assert.notEqual(released.task.prompt, ready.task.prompt);
+});
+
+test('opt-in restart refuses a corrupt checkpoint instead of granting dossier authority', async t => {
+  const previous = process.env.MDD_EXPERIMENTAL_RESUME;
+  process.env.MDD_EXPERIMENTAL_RESUME = '1';
+  t.after(() => { if (previous === undefined) delete process.env.MDD_EXPERIMENTAL_RESUME; else process.env.MDD_EXPERIMENTAL_RESUME = previous; });
+  const f = await fixture(t, { memoryEnabled: false, store: 'none' });
+  await f.phase();
+  const name = `checkpoint-${createHash('sha256').update(f.runtime.sessionID).digest('hex')}.json`;
+  await writeFile(join(f.root, '.mdd', name), '{corrupt');
+  const resumed = await plugin(f.input);
+  const status = JSON.parse(await resumed.tool.mdd_status.execute({ detail: 'full' }, f.context));
+  assert.equal(status.state, 'recovery-blocked');
+  assert.equal(status.task, undefined);
+  assert.match(status.reason, /Checkpoint or progress cannot be validated/);
+  await assert.rejects(resumed.tool.mdd_start.execute({ requirements: f.requirements }, f.context));
+});
+
+test('opt-in native approval is re-presented with a new call and ignores the stale callback', async t => {
+  const previous = process.env.MDD_EXPERIMENTAL_RESUME;
+  process.env.MDD_EXPERIMENTAL_RESUME = '1';
+  t.after(() => { if (previous === undefined) delete process.env.MDD_EXPERIMENTAL_RESUME; else process.env.MDD_EXPERIMENTAL_RESUME = previous; });
+  const f = await fixture(t, { mode: 'interactive', store: 'none', memoryEnabled: false });
+  await f.phase();
+  const before = await f.status();
+  assert.equal(before.workflow.nextAction.kind, 'approve');
+  const oldArgs = before.question;
+  const oldCall = { sessionID: f.runtime.sessionID, callID: 'question-before-restart', tool: 'question' };
+  f.parent[1].parts = [{ type: 'tool', tool: 'question', callID: oldCall.callID, sessionID: f.runtime.sessionID,
+    messageID: f.context.messageID, state: { status: 'running', input: structuredClone(oldArgs) } }];
+  await f.hooks['tool.execute.before'](oldCall, { args: oldArgs });
+  const resumed = await plugin(f.input);
+  const status = JSON.parse(await resumed.tool.mdd_status.execute({ detail: 'full' }, f.context));
+  assert.equal(status.state, 'question-ready');
+  assert.equal(status.workflow.nextAction.kind, 'approve');
+  assert.equal(status.task, undefined);
+  assert.notEqual(status.question.questions[0].question, oldArgs.questions[0].question);
+  const answer = (args, callID) => {
+    const formatted = args.questions.map(q => `"${q.question}"="Continuar"`).join(', ');
+    return { title: 'Asked 1 question', output: `User has answered your questions: ${formatted}. You can now continue with the user's answers in mind.`,
+      metadata: { answers: [['Continuar']], truncated: false } };
+  };
+  await resumed['tool.execute.after']({ ...oldCall, args: oldArgs }, answer(oldArgs, oldCall.callID));
+  assert.equal(JSON.parse(await resumed.tool.mdd_status.execute({ detail: 'full' }, f.context)).workflow.nextAction.kind, 'approve');
+  const freshCall = { sessionID: f.runtime.sessionID, callID: 'question-after-restart', tool: 'question' };
+  f.parent[1].parts = [{ type: 'tool', tool: 'question', callID: freshCall.callID, sessionID: f.runtime.sessionID,
+    messageID: f.context.messageID, state: { status: 'running', input: structuredClone(status.question) } }];
+  await resumed['tool.execute.before'](freshCall, { args: status.question });
+  await resumed['tool.execute.after']({ ...freshCall, args: status.question }, answer(status.question, freshCall.callID));
+  const approved = JSON.parse(await resumed.tool.mdd_status.execute({ detail: 'full' }, f.context));
+  assert.equal(approved.state, 'ready');
+  assert.equal(approved.phase, 'mdd-apply');
+  assert.equal(approved.workflow.results.length, 1);
+});
+
+test('opt-in OpenSpec ready Verify restores without using serialized artifact refs', async t => {
+  const previous = process.env.MDD_EXPERIMENTAL_RESUME;
+  process.env.MDD_EXPERIMENTAL_RESUME = '1';
+  t.after(() => { if (previous === undefined) delete process.env.MDD_EXPERIMENTAL_RESUME; else process.env.MDD_EXPERIMENTAL_RESUME = previous; });
+  const f = await fixture(t, { memoryEnabled: false, store: 'openspec' });
+  await f.phase(); await f.phase();
+  const resumed = await plugin(f.input);
+  const status = JSON.parse(await resumed.tool.mdd_status.execute({ detail: 'full' }, f.context));
+  assert.equal(status.state, 'ready');
+  assert.equal(status.phase, 'mdd-verify');
+  const args = structuredClone(status.task);
+  const call = { sessionID: f.runtime.sessionID, callID: 'task-openspec-verify', tool: 'task' };
+  f.parent[1].parts = [{ type: 'tool', tool: 'task', callID: call.callID, state: { status: 'running', input: structuredClone(args) } }];
+  await resumed['tool.execute.before'](call, { args });
+  assert.match(args.prompt, /Artifact for mdd-plan/);
+  assert.match(args.prompt, /Artifact for mdd-apply/);
+});
+
+for (const store of ['engram', 'both']) {
+  test(`opt-in ${store} ready Verify requires a fresh bound Engram session`, async t => {
+    const previous = process.env.MDD_EXPERIMENTAL_RESUME;
+    process.env.MDD_EXPERIMENTAL_RESUME = '1';
+    t.after(() => { if (previous === undefined) delete process.env.MDD_EXPERIMENTAL_RESUME; else process.env.MDD_EXPERIMENTAL_RESUME = previous; });
+    const f = await fixture(t, { memoryEnabled: true, store });
+    await f.phase(); await f.phase();
+    const resumed = await plugin(f.input);
+    const status = JSON.parse(await resumed.tool.mdd_status.execute({ detail: 'full' }, f.context));
+    assert.equal(status.state, 'ready');
+    assert.equal(status.phase, 'mdd-verify');
+    assert.equal(status.workflow.results.length, 2);
+    assert.equal(status.task.subagent_type, 'mdd-verify');
+  });
+}
+
+test('opt-in Engram project mismatch blocks restoration without rebinding', async t => {
+  const previous = process.env.MDD_EXPERIMENTAL_RESUME;
+  process.env.MDD_EXPERIMENTAL_RESUME = '1';
+  t.after(() => { if (previous === undefined) delete process.env.MDD_EXPERIMENTAL_RESUME; else process.env.MDD_EXPERIMENTAL_RESUME = previous; });
+  const f = await fixture(t, { memoryEnabled: true, store: 'engram' });
+  await f.phase(); await f.phase();
+  f.memory.binding.project = 'different-project';
+  const resumed = await plugin(f.input);
+  const status = JSON.parse(await resumed.tool.mdd_status.execute({ detail: 'full' }, f.context));
+  assert.equal(status.state, 'recovery-blocked');
+  assert.equal(status.task, undefined);
+});
+
+test('opt-in rejected result survives restart as a retry of the same phase', async t => {
+  const previous = process.env.MDD_EXPERIMENTAL_RESUME;
+  process.env.MDD_EXPERIMENTAL_RESUME = '1';
+  t.after(() => { if (previous === undefined) delete process.env.MDD_EXPERIMENTAL_RESUME; else process.env.MDD_EXPERIMENTAL_RESUME = previous; });
+  const f = await fixture(t, { memoryEnabled: false, store: 'none' });
+  await assert.rejects(f.phase({ badEnvelope: true }));
+  const current = await f.status();
+  assert.equal(current.state, 'ready');
+  const resumed = await plugin(f.input);
+  const restored = JSON.parse(await resumed.tool.mdd_status.execute({ detail: 'full' }, f.context));
+  assert.equal(restored.state, 'ready');
+  assert.equal(restored.runID, current.runID);
+  assert.equal(restored.phase, 'mdd-plan');
+  assert.equal(restored.attempts, 1);
+  assert.equal(restored.workflow.results.length, 0);
+  assert.equal(restored.task.subagent_type, 'mdd-plan');
+});
+
+test('opt-in malformed completed report restores report-only restatement, not dispatch', async t => {
+  const previous = process.env.MDD_EXPERIMENTAL_RESUME;
+  process.env.MDD_EXPERIMENTAL_RESUME = '1';
+  t.after(() => { if (previous === undefined) delete process.env.MDD_EXPERIMENTAL_RESUME; else process.env.MDD_EXPERIMENTAL_RESUME = previous; });
+  const f = await fixture(t, { memoryEnabled: false, store: 'none' });
+  const malformed = 'I finished the plan, but did not use the report headings.';
+  await assert.rejects(f.phase({ reportText: malformed }));
+  const resumed = await plugin(f.input);
+  const held = JSON.parse(await resumed.tool.mdd_status.execute({ detail: 'full' }, f.context));
+  assert.equal(held.state, 'ready');
+  assert.equal(held.mode, 'inline');
+  assert.equal(held.task, undefined);
+  assert.equal(held.rejected.text, malformed);
+  const restated = JSON.parse(await resumed.tool.mdd_phase_result.execute({ result: reportDocument({
+    outcome: 'passed', evidenceSummary: 'Planned the CLI boundary change.',
+    artifact: 'Plan: validate at the CLI boundary; run npm test afterwards.',
+    ...traceFixture(join(f.root, 'feature.txt'), 'feature'),
+  }) }, f.context));
+  assert.equal(restated.state, 'ready');
+  assert.equal(restated.phase, 'mdd-apply');
+  assert.equal(restated.workflow.results.length, 1);
+});
+
+test('opt-in failed Verify restores rework and complete runs close before a fresh objective', async t => {
+  const previous = process.env.MDD_EXPERIMENTAL_RESUME;
+  process.env.MDD_EXPERIMENTAL_RESUME = '1';
+  t.after(() => { if (previous === undefined) delete process.env.MDD_EXPERIMENTAL_RESUME; else process.env.MDD_EXPERIMENTAL_RESUME = previous; });
+  const failed = await fixture(t, { memoryEnabled: false, store: 'none' });
+  await failed.phase(); await failed.phase(); await failed.phase({ outcome: 'failed' });
+  const resumed = await plugin(failed.input);
+  const blocked = JSON.parse(await resumed.tool.mdd_status.execute({ detail: 'full' }, failed.context));
+  assert.equal(blocked.state, 'blocked');
+  assert.equal(blocked.reworkable, 'mdd-apply');
+  failed.user('Please correct the failed verification.');
+  const corrected = JSON.parse(await resumed.tool.mdd_reset.execute({ scope: 'rework', userText: 'Please correct the failed verification.' }, failed.context));
+  assert.equal(corrected.state, 'ready');
+  assert.equal(corrected.runID, blocked.runID);
+  assert.equal(corrected.phase, 'mdd-apply');
+  assert.equal(corrected.workflow.results.length, 3);
+
+  const complete = await fixture(t, { memoryEnabled: false, store: 'none' });
+  await complete.phase(); await complete.phase(); await complete.phase();
+  const nextPlugin = await plugin(complete.input);
+  const finished = JSON.parse(await nextPlugin.tool.mdd_status.execute({ detail: 'full' }, complete.context));
+  assert.equal(finished.state, 'complete');
+  await nextPlugin.tool.mdd_reset.execute({ scope: 'run' }, complete.context);
+  complete.user('Build a new, separately scoped feature.');
+  const fresh = JSON.parse(await nextPlugin.tool.mdd_start.execute({ requirements: 'Build a new, separately scoped feature.' }, complete.context));
+  assert.equal(fresh.state, 'ready');
+  assert.notEqual(fresh.runID, finished.runID);
+});
 
 // Native SDK/hook contract fixtures. No model or real shell execution is performed.
 async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', partial = false, summary = 'low', telemetry = true, memoryEnabled = true, memoryFault, start = true, worktree: worktreeLayout = false } = {}) {

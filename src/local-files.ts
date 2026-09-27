@@ -6,7 +6,7 @@ export class LocalFileError extends Error {
   constructor() { super('Local storage unavailable or unsafe. Check project permissions and local file types.'); }
 }
 
-type LocalName = 'mdd.config.json' | 'mdd/setup-assets.json' | '.mdd/.gitignore' | '.mdd/telemetry.jsonl' | '.mdd/telemetry-rollup.json' | '.mdd/lessons.jsonl' | '.mdd/sessions.jsonl' | '.mdd/runs.jsonl' | `.mdd/progress-${string}.json` | `.mdd/run-${string}.json`;
+type LocalName = 'mdd.config.json' | 'mdd/setup-assets.json' | '.mdd/.gitignore' | '.mdd/telemetry.jsonl' | '.mdd/telemetry-rollup.json' | '.mdd/lessons.jsonl' | '.mdd/sessions.jsonl' | '.mdd/runs.jsonl' | `.mdd/progress-${string}.json` | `.mdd/run-${string}.json` | `.mdd/checkpoint-${string}.json` | `.mdd/question-${string}.json` | `.mdd/owner-${string}.json`;
 
 /**
  * A lock is only a cooperation hint between concurrent writers; atomicity comes from the
@@ -28,6 +28,12 @@ function lock(path: string): number {
     fs.unlinkSync(path);
     return fs.openSync(path, 'wx', 0o600);
   }
+}
+
+/** Ownership locks are never reclaimed by age; an orphan needs explicit inspection. */
+function strictLock(path: string): number {
+  try { return fs.openSync(path, 'wx', 0o600); }
+  catch { throw new LocalFileError(); }
 }
 
 function regular(path: string): boolean {
@@ -55,7 +61,7 @@ export class LocalFiles {
   #path(name: LocalName, create: boolean): string {
     if (name !== 'mdd.config.json' && name !== 'mdd/setup-assets.json' && name !== '.mdd/.gitignore' && name !== '.mdd/telemetry.jsonl' && name !== '.mdd/telemetry-rollup.json' &&
         name !== '.mdd/lessons.jsonl' && name !== '.mdd/sessions.jsonl' && name !== '.mdd/runs.jsonl' &&
-        !/^\.mdd\/progress-[a-f0-9]{64}\.json$/.test(name) && !/^\.mdd\/run-[a-f0-9]{64}(\.discarded)?\.json$/.test(name)) throw new LocalFileError();
+        !/^\.mdd\/progress-[a-f0-9]{64}\.json$/.test(name) && !/^\.mdd\/run-[a-f0-9]{64}(\.discarded)?\.json$/.test(name) && !/^\.mdd\/checkpoint-[a-f0-9]{64}\.json$/.test(name) && !/^\.mdd\/question-[a-f0-9]{64}\.json$/.test(name) && !/^\.mdd\/owner-[a-f0-9]{64}\.json$/.test(name)) throw new LocalFileError();
     directory(this.#root);
     const path = join(this.#root, name);
     const parent = dirname(path);
@@ -89,6 +95,16 @@ export class LocalFiles {
     } finally { fs.closeSync(fd); }
   }
 
+  /** Diagnostic reads refuse an in-progress or orphaned owner lock, before and after IO. */
+  readStrict(name: LocalName, limit: number): string | undefined {
+    if (!/^\.mdd\/owner-[a-f0-9]{64}\.json$/.test(name)) throw new LocalFileError();
+    const path = this.#path(name, false);
+    if (fs.lstatSync(`${path}.lock`, { throwIfNoEntry: false })) throw new LocalFileError();
+    const content = this.read(name, limit);
+    if (fs.lstatSync(`${path}.lock`, { throwIfNoEntry: false })) throw new LocalFileError();
+    return content;
+  }
+
   remove(name: LocalName): void {
     const path = this.#path(name, false);
     if (!regular(path)) return;
@@ -104,12 +120,22 @@ export class LocalFiles {
 
   /** Locks cooperating writers. A failed replacement leaves the previous file intact. */
   update(name: LocalName, change: (previous: string | undefined) => string | undefined, limit: number): void {
+    this.#update(name, change, limit, false);
+  }
+
+  /** For single-writer ownership: no stale-lock timeout, no age-based takeover. */
+  updateStrict(name: LocalName, change: (previous: string | undefined) => string | undefined, limit: number): void {
+    if (!/^\.mdd\/owner-[a-f0-9]{64}\.json$/.test(name)) throw new LocalFileError();
+    this.#update(name, change, limit, true);
+  }
+
+  #update(name: LocalName, change: (previous: string | undefined) => string | undefined, limit: number, strict: boolean): void {
     if (name.startsWith('.mdd/') && name !== '.mdd/.gitignore' && this.read('.mdd/.gitignore', 65536) === undefined) {
       this.update('.mdd/.gitignore', previous => previous ?? '*\n', 65536);
     }
     const path = this.#path(name, true);
     const guard = `${path}.lock`;
-    const lockFD = lock(guard);
+    const lockFD = strict ? strictLock(guard) : lock(guard);
     let temporary: string | undefined;
     try {
       const next = change(this.read(name, limit));

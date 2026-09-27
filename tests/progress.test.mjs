@@ -65,6 +65,21 @@ test('reset after restart requires host evidence that the previous child stopped
   assert.equal(runner.status(runtime.sessionID).state, 'not-started');
   assert.equal((await runner.start(request(endpoint), runtime, { requirementsConfirmed: true, userMessageID: 'new-user' })).state, 'ready');
 });
+test('pending inline work without a call ID has unknown liveness and needs explicit user release', async t => {
+  const path = root(t); const guard = new ProgressGuard(path);
+  const runtime = { sessionID: 'ses_parent', agent: 'mdd-orchestrator', directory: path, worktree: path };
+  const runner = new PhaseRunner({ parent: async () => {}, result: async () => '{}',
+    liveness: async () => { throw new Error('No child may be probed for inline work.'); } }, { progress: guard });
+  guard.write(runtime.sessionID, { runID: 'run', state: 'pending', userMessageID: 'native-user' });
+  assert.equal((await runner.confirmStopped(runtime.sessionID, runtime)).verdict, 'unknown');
+  assert.equal(guard.read(runtime.sessionID).state, 'pending');
+  assert.throws(() => runner.reset(runtime.sessionID, 'run'), /unconfirmed liveness/);
+  const released = await runner.confirmStopped(runtime.sessionID, runtime, true);
+  assert.equal(released.verdict, 'unknown');
+  assert.match(released.detail, /user attestation/);
+  assert.equal(guard.read(runtime.sessionID).state, 'settled');
+  assert.deepEqual(runner.reset(runtime.sessionID, 'run'), { scope: 'run' });
+});
 // The user interrupted the subagent and knows it stopped; OpenCode kept no trace that proves it.
 // Their own latest message releases it, after MDD asks OpenCode to stop it for certain. Only
 // positive evidence that it still works outranks their word.

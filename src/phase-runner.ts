@@ -21,6 +21,8 @@ import type { Acceptance, Decision, Verification } from './acceptance.js';
 import { concerns } from './concerns.js';
 import type { Concern } from './concerns.js';
 import type { ProgressGuard } from './progress.js';
+import { STABLE_CHECKPOINT_VERSION, reconcileProgress, sealResumeData } from './checkpoint.js';
+import type { CheckpointStore, StableCheckpoint, StableRunnerState, ResumeData } from './checkpoint.js';
 import { DOSSIER_VERSION, priorRunView } from './run-dossier.js';
 import type { PriorReceipt, RunDossier, RunDossierStore } from './run-dossier.js';
 import type { PRFacts } from './pr-body.js';
@@ -184,6 +186,7 @@ type Run = {
   /** The terminal state already written to the run ledger, so one run occupies one row. */
   ledgered?: 'complete' | 'blocked';
   uncertain: boolean; userMessageID: string; concerns: Concern[]; contextReport?: string; context: RunContext[]; dossierDiagnostic?: string;
+  checkpointRequest?: unknown; checkpointSequence?: number; checkpointFailed?: boolean; settledCheckpoint?: boolean; attemptID?: string;
   contexts: { explorationID: string; outcome: 'passed' | 'failed'; artifact: ArtifactResult; summary: string; concerns: Concern[] }[];
   side?: { id: string; purpose: string; phase: Phase; state: State; args: TaskArgs; report: PhaseReport; brief: string; attempts: number; mode: Run['mode']; nativeUsed?: boolean; lastFailure?: string; fallbackExhausted?: boolean; reason?: string; executor?: Executor };
 };
@@ -349,7 +352,97 @@ export class PhaseRunner {
   readonly #consent = new Map<string, Consent>();
   readonly #inflight = new Map<string, string>();
   readonly #nativeDispatches = new Map<string, Map<string, TaskArgs>>();
-  constructor(readonly inspect: Inspect, readonly options: { now?: () => number; progress?: ProgressGuard; dossier?: RunDossierStore; telemetry?: (root: string, value: TelemetryEvent, now: number) => TelemetryResult; lessons?: (root: string, value: LessonInput, now: number) => void; ledger?: (root: string, value: RunLedgerInput, now: number) => void } = {}) {}
+  constructor(readonly inspect: Inspect, readonly options: { now?: () => number; progress?: ProgressGuard; dossier?: RunDossierStore; checkpoint?: CheckpointStore; telemetry?: (root: string, value: TelemetryEvent, now: number) => TelemetryResult; lessons?: (root: string, value: LessonInput, now: number) => void; ledger?: (root: string, value: RunLedgerInput, now: number) => void } = {}) {}
+
+  /** Opt-in, same-parent recovery of a fully settled ready phase. No saved ref is a capability. */
+  async restore(runtime: Runtime, bindMemory?: (project: string) => Promise<EngramHttp>): Promise<{ restored: boolean; reason?: string }> {
+    if (this.#runs.has(runtime.sessionID)) return { restored: true };
+    if (!this.options.checkpoint) return { restored: false };
+    try {
+      const saved = this.options.checkpoint.read(runtime.sessionID);
+      if (!saved) return { restored: false };
+      if (saved.checkpoint.version !== STABLE_CHECKPOINT_VERSION) return { restored: false, reason: 'Only a v3 checkpoint may restore a run; older records remain data only.' };
+      const { checkpoint, workflow } = saved;
+      const { data, stable } = checkpoint;
+      if (runtime.agent !== 'mdd-orchestrator' || runtime.directory !== data.directory || runtime.worktree !== data.worktree ||
+          checkpoint.parent !== runtime.sessionID) throw new Error('Checkpoint parent or workspace differs from the native parent.');
+      let marker = this.options.progress?.read(runtime.sessionID);
+      if (marker?.state === 'pending') {
+        if (reconcileProgress(marker, checkpoint) !== 'clear') return { restored: false, reason: 'A pending phase attempt is unconfirmed. Confirm its child stopped or provide explicit user attestation; no task was reissued.' };
+        this.options.progress?.write(runtime.sessionID, { ...marker, state: 'settled' });
+        marker = this.options.progress?.read(runtime.sessionID);
+      }
+      const releasedAttempt = stable.state === 'await-result' && workflow.nextAction().kind === 'await-result' &&
+        checkpoint.attempt?.state === 'pending' && marker?.state === 'settled' && !!marker.callID &&
+        marker.callID === checkpoint.attempt.id && marker.attemptID === checkpoint.attempt.id;
+      if (!releasedAttempt && ((stable.state === 'ready' && ((!!stable.rejected) !== (stable.mode === 'inline'))) ||
+          !['ready', 'await-approval', 'blocked', 'complete'].includes(stable.state))) {
+        return { restored: false, reason: 'This checkpoint is not a settled phase state that can be safely restored; no task was reissued.' };
+      }
+      if (workflow.snapshot().results.length && (!marker || marker.runID !== checkpoint.runID || marker.userMessageID !== data.userMessageID ||
+          marker.state !== (stable.state === 'complete' ? 'complete' : 'settled'))) {
+        throw new Error('Checkpoint and progress marker disagree.');
+      }
+      if (releasedAttempt && (!marker || marker.runID !== checkpoint.runID || marker.userMessageID !== data.userMessageID)) throw new Error('Released attempt belongs to a different run.');
+      if (marker?.state === 'settled' && !marker.callID && !['settled', 'released'].includes(checkpoint.attempt?.state ?? '')) return { restored: false, reason: 'An inline attempt has no child identity. Inspect partial work and explicitly discard or recover it; no task was reissued.' };
+      if (marker && (marker.runID !== checkpoint.runID || marker.userMessageID !== data.userMessageID ||
+          (marker.state === 'complete' && stable.state !== 'complete') ||
+          (['settled', 'released'].includes(checkpoint.attempt?.state ?? '') && marker.attemptID !== checkpoint.attempt!.id) ||
+          (checkpoint.attempt?.state === 'released' && !!marker.callID && marker.callID !== checkpoint.attempt.id))) throw new Error('Checkpoint and progress correlation disagree.');
+      const store = workflow.snapshot().answers.artifactStore;
+      if (data.memoryProject && !bindMemory) return { restored: false, reason: 'A fresh Engram session binding is required before restoration; no task was reissued.' };
+      const memory = data.memoryProject ? await bindMemory!(data.memoryProject) : undefined;
+      if (memory && memory.project !== data.memoryProject) throw new Error('Engram project binding changed.');
+      const artifacts = new ArtifactStore(runtime.directory, store, memory);
+      // These synthetic identifiers are diagnostic data only. ArtifactStore.read will reject them
+      // because this new store instance never issued the serialized historical references.
+      const historical = (phase: Phase, content: string, digest: string, index: number, explorationID?: string): ArtifactResult => ({
+        content, ref: { runID: checkpoint.runID, phase, ...(explorationID ? { explorationID } : {}),
+          recordID: `restored-${index}`, digest, bytes: Buffer.byteLength(content), store: 'none' },
+      });
+      const run: Run = {
+        id: checkpoint.runID, runtime: { ...runtime }, workflow,
+        phase: stable.state === 'await-approval' ? workflow.snapshot().results.at(-1)!.phase : stable.phase, requirements: data.requirements,
+        memory, artifacts, args: { description: '', subagent_type: stable.phase, prompt: '' },
+        state: releasedAttempt ? 'blocked' : stable.state,
+        checkpointRequest: structuredClone(checkpoint.request), checkpointSequence: checkpoint.sequence,
+        history: data.dependencies.map((item, index) => historical(item.phase, item.content, item.digest, index)),
+        contexts: data.contexts.map((item, index) => ({ explorationID: item.explorationID, outcome: item.outcome,
+          summary: item.summary, concerns: structuredClone(item.concerns), artifact: historical('mdd-explore', item.content, item.digest, index, item.explorationID) })),
+        calls: new Set(data.calls), planned: structuredClone(data.planned), evidence: { ...data.evidence },
+        ...(data.acceptance ? { acceptance: structuredClone(data.acceptance) } : {}),
+        decisions: structuredClone(data.decisions), ...(data.verification ? { verification: structuredClone(data.verification) } : {}),
+        executedChecks: structuredClone(data.executedChecks), changedFiles: data.changedFiles,
+        changedList: structuredClone(stable.changedList), ...(stable.delivered ? { delivered: { ...stable.delivered } } : {}),
+        concerns: structuredClone(stable.concerns), context: structuredClone(data.context),
+        ...(data.rework ? { rework: { ...data.rework } } : {}),
+        userMessageID: data.userMessageID, uncertain: false, attempts: stable.attempts, spent: stable.spent,
+        mode: stable.mode, ...(stable.nativeUsed ? { nativeUsed: true } : {}),
+        ...(stable.lastFailure ? { lastFailure: stable.lastFailure } : {}),
+        ...(stable.fallbackExhausted ? { fallbackExhausted: true } : {}),
+        ...(stable.reportRepairExhausted ? { reportRepairExhausted: true } : {}),
+        malformed: stable.malformed, ...(stable.rejected ? { rejected: { ...stable.rejected } } : {}),
+        brief: '', report: structuredClone(stable.report),
+      };
+      if (releasedAttempt) {
+        run.reason = 'The prior child was released without a recorded result. Inspect partial changes, then explicitly reset this phase to retry it.';
+        run.attemptID = checkpoint.attempt!.id;
+        run.lastCallID = marker!.callID!;
+      } else if (stable.state === 'ready') {
+        if (stable.rejected) {
+          const prompts = this.#phasePrompts(run, run.phase);
+          run.args = prompts.args;
+          run.brief = prompts.brief;
+          this.#arm(run);
+        } else {
+          this.#prepare(run);
+          if (run.phase !== stable.phase || run.workflow.nextAction().kind !== 'execute') throw new Error('Prepared phase differs from checkpoint.');
+        }
+      }
+      this.#runs.set(runtime.sessionID, run);
+      return { restored: true };
+    } catch { return { restored: false, reason: 'Checkpoint or progress cannot be validated for this parent. No task was reissued; inspect local files and explicitly discard the run if needed.' }; }
+  }
 
   status(sessionID: string) {
     const run = this.#runs.get(sessionID);
@@ -514,6 +607,17 @@ export class PhaseRunner {
    * it unless the host still reports it busy. Returns what the host said, for the caller to show.
    */
   async confirmStopped(sessionID: string, runtime?: Runtime, attested = false): Promise<Liveness | undefined> {
+    // Inline work has no child to probe. An unknown marker stays pending unless the user explicitly
+    // attests the interruption; this is a user release, never a claim that OpenCode saw it stop.
+    if (!this.#runs.has(sessionID) && !this.#solo.has(sessionID)) {
+      const marker = this.options.progress?.read(sessionID);
+      if (marker?.state === 'pending' && !marker.callID) {
+        if (attested && isDeepStrictEqual(this.options.progress?.read(sessionID), marker)) {
+          this.options.progress?.write(sessionID, { ...marker, state: 'settled' });
+        }
+        return { verdict: 'unknown', detail: 'The inline attempt has no child call ID. OpenCode liveness is unknown; only an explicit user attestation can release its marker.' };
+      }
+    }
     const pending = this.#pendingChild(sessionID, runtime);
     if (!pending) return undefined;
     const seen = await this.#check(pending.runtime, pending.call, attested);
@@ -605,7 +709,7 @@ export class PhaseRunner {
     if (previous && !trusted?.replace) throw new ValidationError('This parent already has an MDD run; use mdd_status.');
     if (previous) this.assertChangeable(runtime.sessionID);
     else this.assertFreshStart(runtime.sessionID, trusted?.userMessageID);
-    if (this.options.progress && !trusted?.userMessageID) throw new Error('A native user message identity is required for startup protection.');
+    if ((this.options.progress || this.options.checkpoint) && !trusted?.userMessageID) throw new Error('A native user message identity is required for startup protection.');
     const request = objectWithKeys(value, 'start', ['preflight', 'requirements', 'engramEndpoint', 'project', 'context']);
     const workflow = new Workflow(request.preflight);
     const first = workflow.nextAction();
@@ -626,6 +730,7 @@ export class PhaseRunner {
     const inherited = previous ? undefined : this.#prior(runtime.sessionID)?.calls;
     const run: Run = {
       id, runtime: { ...runtime }, workflow, phase: first.phase, requirements,
+      ...(this.options.checkpoint ? { checkpointRequest: structuredClone(request.preflight), checkpointSequence: -1 } : {}),
       memory, artifacts: new ArtifactStore(runtime.directory, workflow.snapshot().answers.artifactStore, memory),
       args: { description: '', subagent_type: first.phase, prompt: '' }, state: 'starting',
       history: [], calls: new Set(previous?.calls ?? inherited), planned: [], evidence: { ...emptyEvidence(), requirements: trusted?.requirementsConfirmed ? 'confirmed' : 'unearned' },
@@ -639,6 +744,7 @@ export class PhaseRunner {
       await run.memory?.checkBinding();
       if (run.state !== 'starting') throw new Error('Run was blocked during initialization.');
       this.#prepare(run);
+      this.#checkpoint(run);
       if (previous) this.#previous.set(runtime.sessionID, [...(this.#previous.get(runtime.sessionID) ?? []), previous]);
       if (trusted?.requirementsConfirmed) this.#event(run, 'preflight', 'passed');
       // A new accepted run supersedes whatever was preserved here, so the record is replaced now
@@ -668,6 +774,16 @@ export class PhaseRunner {
    * cleared so change requests, investigation and reset all stay reachable.
    */
   #degrade(run: Run, error: unknown, failure: FailureClass = 'result-rejected', reported?: string): never {
+    if (run.checkpointFailed) throw new Error('Checkpoint outcome is unconfirmed. Do not retry or dispatch; inspect local state and explicitly discard the run if necessary.');
+    if (run.settledCheckpoint) {
+      run.checkpointFailed = true;
+      run.uncertain = true;
+      run.state = 'blocked';
+      run.evidence = invalidateEvidence(run.evidence, this.#affected(run.phase));
+      run.report = { ...run.report, status: 'blocked', evidence: run.evidence };
+      run.reason = 'The result checkpoint was confirmed but a later transition failed. No retry or dispatch is permitted.';
+      throw new Error(run.reason);
+    }
     if (this.#inflight.has(run.runtime.sessionID)) {
       run.state = 'await-result';
       run.uncertain = true;
@@ -792,11 +908,41 @@ export class PhaseRunner {
     }
   }
 
-  /** A stopped attempt is recorded as settled, never left pending, so a restart is not locked. */
+  /** Settle only after a rejected attempt's retry/restatement has a confirmed checkpoint. */
   #settle(run: Run): void {
+    // A rejected result produced no PhaseResult, but retry()/restatement changed the workflow.
+    // Commit that transition before releasing the pending marker. Otherwise a restart sees the
+    // old await-result checkpoint next to a settled marker and cannot tell what was rejected.
+    if (this.options.checkpoint && !run.side && run.state === 'ready' && run.workflow.nextAction().kind === 'execute') {
+      let marker;
+      try { marker = this.options.progress?.read(run.runtime.sessionID); }
+      catch { this.#failSettlement(run, 'Progress cannot be correlated with the rejected attempt. Do not retry or dispatch.'); }
+      if (marker?.state === 'pending') {
+        if (marker.runID !== run.id || !run.attemptID || marker.attemptID !== run.attemptID ||
+            (marker.callID !== undefined && marker.callID !== run.lastCallID)) {
+          this.#failSettlement(run, 'Pending progress does not match the rejected attempt. Do not retry or dispatch.');
+        }
+        this.#checkpoint(run, 'released');
+      }
+    }
     this.#preserve(run);
     try { this.#mark(run, run.state === 'complete' ? 'complete' : 'settled'); }
-    catch { /* A progress write failure must not re-lock work that already stopped. */ }
+    catch (error) {
+      if (this.options.checkpoint && !run.side) {
+        this.#failSettlement(run, 'The attempt stopped but its progress settlement is unconfirmed. Do not retry or dispatch.');
+      }
+      // Legacy data-only runs do not depend on a resumable checkpoint.
+    }
+  }
+
+  #failSettlement(run: Run, reason: string): never {
+    run.checkpointFailed = true;
+    run.uncertain = true;
+    run.state = 'blocked';
+    run.evidence = invalidateEvidence(run.evidence, this.#affected(run.phase));
+    run.report = { ...run.report, status: 'blocked', evidence: run.evidence };
+    run.reason = reason;
+    throw new Error(reason);
   }
 
   async before(call: TaskCall, args: unknown): Promise<TaskArgs | undefined> {
@@ -840,6 +986,11 @@ export class PhaseRunner {
       await this.inspect.parent(run.runtime, call.callID);
       if (run.state !== 'persisting-intent') throw new Error('Dispatch became uncertain during inspection.');
       run.uncertain = true;
+      if (!run.side && this.options.checkpoint) {
+        run.attemptID = call.callID;
+        run.settledCheckpoint = false;
+        this.#checkpoint(run, 'pending');
+      }
       this.#mark(run, 'pending');
       await run.memory?.save(`MDD intent ${run.id}`, JSON.stringify(intentEnvelope({
         kind: 'intent', runID: run.id, callID: call.callID, phase: run.phase,
@@ -921,6 +1072,7 @@ export class PhaseRunner {
     run.mode = 'inline';
     run.state = 'persisting-result';
     run.started = run.readyAt ?? this.#now();
+    run.attemptID = randomUUID();
     try {
       if (!run.side) run.workflow.start(run.phase);
       run.attempt = run.attempts + 1;
@@ -966,6 +1118,7 @@ export class PhaseRunner {
         }
       } catch (error) { run.context.pop(); throw error; }
     }
+    this.#checkpoint(run);
     return this.status(runtime.sessionID);
   }
 
@@ -1075,7 +1228,6 @@ export class PhaseRunner {
       }));
       if (run.state !== 'persisting-result') throw new Error('Result became uncertain during persistence.');
       run.uncertain = false;
-      run.workflow.recordResult({ phase: run.phase, outcome: result.outcome, evidenceSummary });
       // A recorded result closes the attempt, so the next phase is not warned about this one.
       delete run.lastFailure;
       run.history.push(run.artifact);
@@ -1103,6 +1255,16 @@ export class PhaseRunner {
       // A recorded result settles the report that produced it, so a later malformed one starts fresh.
       delete run.rejected;
       run.malformed = 0;
+      // Stage the workflow outcome, including its next action, without publishing it in this run.
+      // The checkpoint readback is the commit boundary; a fault leaves the live workflow awaiting
+      // its result and blocks the run instead of presenting the next phase as ready.
+      if (this.options.checkpoint) {
+        const staged = Workflow.replay(run.checkpointRequest, [...run.workflow.history(),
+          { kind: 'result', result: { phase: run.phase, outcome, evidenceSummary } }]);
+        this.#checkpoint(run, 'settled', staged);
+        run.settledCheckpoint = true;
+      }
+      run.workflow.recordResult({ phase: run.phase, outcome, evidenceSummary });
       this.#event(run, 'phase-end', outcome, outcome === 'failed' ? 'phase-failed' : undefined);
       if (outcome === 'failed') {
         run.state = 'blocked';
@@ -1117,7 +1279,19 @@ export class PhaseRunner {
       }
       this.#event(run, 'report', run.state === 'complete' ? 'passed' : run.state === 'blocked' ? 'blocked' : undefined);
       this.#preserve(run);
-      this.#mark(run, run.state === 'complete' ? 'complete' : 'settled');
+      try { this.#mark(run, run.state === 'complete' ? 'complete' : 'settled'); }
+      catch {
+        if (this.options.checkpoint) {
+          run.checkpointFailed = true;
+          run.uncertain = true;
+          run.state = 'blocked';
+          run.evidence = invalidateEvidence(run.evidence, this.#affected(run.phase));
+          run.report = { ...run.report, status: 'blocked', evidence: run.evidence };
+          run.reason = 'The result checkpoint was confirmed but progress settlement was not. No retry or dispatch is permitted.';
+          throw new Error(run.reason);
+        }
+        throw new Error('Progress settlement failed.');
+      }
     }
   }
 
@@ -1156,7 +1330,7 @@ export class PhaseRunner {
     const run = this.#runs.get(sessionID);
     if (!run || run.state !== 'await-approval') throw new Error('No recorded phase is awaiting native approval.');
     run.workflow.approve(phase);
-    try { this.#prepare(run); this.#event(run, 'approval', 'passed'); this.#preserve(run); }
+    try { this.#prepare(run); this.#checkpoint(run); this.#event(run, 'approval', 'passed'); this.#preserve(run); }
     catch (error) { this.#stop(run, error); }
   }
 
@@ -1172,6 +1346,7 @@ export class PhaseRunner {
       if (solo && solo.state !== 'settled' && solo.state !== 'blocked') { solo.state = 'blocked'; solo.reason = reason; this.#soloEvent(solo, 'phase-end', 'blocked'); }
       return;
     }
+    if (run.checkpointFailed) return;
     if (!run.side) run.evidence = invalidateEvidence(run.evidence, this.#affected(run.phase));
     run.report = { phase: run.phase, summary: 'La ejecución se detuvo; la evidencia afectada quedó retirada.', how: [], status: 'blocked', evidence: run.evidence };
     if (run.state !== 'blocked') this.#event(run, 'phase-end', 'blocked', 'stopped');
@@ -1206,6 +1381,8 @@ export class PhaseRunner {
   reset(sessionID: string, scope: 'phase' | 'run' | 'rework'): { scope: 'phase' | 'run' | 'rework'; phase?: Phase; approval?: true; preserved?: { file: string; runID: string } } {
     if (this.#inflight.has(sessionID)) throw new ValidationError(`The child may still be running: OpenCode has not confirmed it stopped. ${ATTEST_HINT}`);
     const run = this.#runs.get(sessionID);
+    if (!run && scope !== 'run' && this.options.checkpoint?.read(sessionID)) throw new ValidationError('A durable run has not been restored. Phase reset cannot discard it; inspect mdd_status or explicitly discard the run.');
+    if (run?.checkpointFailed && scope !== 'run') throw new ValidationError('Checkpoint durability is unknown; phase recovery cannot replay this result. Explicit run discard is required.');
     const pending = run ?? this.#solo.get(sessionID);
     if (!pending && this.options.progress?.read(sessionID)?.state === 'pending') throw new ValidationError(`A previous child has unconfirmed liveness: OpenCode has not confirmed it stopped. ${ATTEST_HINT}`);
     if (pending && ['persisting-intent', 'persisting-result'].includes(pending.state)) throw new ValidationError('Wait for the current persistence operation before resetting.');
@@ -1214,6 +1391,7 @@ export class PhaseRunner {
     }
     if (run) this.#event(run, 'reset');
     if (scope === 'run' || !run) {
+      this.options.checkpoint?.clear(sessionID);
       this.#runs.delete(sessionID);
       this.#solo.delete(sessionID);
       this.#consent.delete(sessionID);
@@ -1252,6 +1430,7 @@ export class PhaseRunner {
       run.workflow.rework(target);
       run.rework = { after: failed.phase, summary: failed.evidenceSummary };
       this.#prepare(run);
+      this.#checkpoint(run);
       this.#settle(run);
       return { scope: 'rework', phase: target };
     }
@@ -1264,10 +1443,12 @@ export class PhaseRunner {
     if (next.kind === 'approve') {
       run.state = 'await-approval';
       run.report = { phase: run.phase, summary: `Quedó registrada la fase de ${phaseLabel(run.phase).toLowerCase()}; la siguiente espera aprobación.`, how: [], status: 'in-progress', evidence: run.evidence };
+      this.#checkpoint(run);
       this.#settle(run);
       return { scope: 'phase', phase: next.phase, approval: true };
     }
     this.#prepare(run);
+    this.#checkpoint(run);
     this.#settle(run);
     return { scope: 'phase', phase: run.phase };
   }
@@ -1301,6 +1482,7 @@ export class PhaseRunner {
 
   assertFreshStart(sessionID: string, userMessageID?: string): void {
     if (this.#runs.has(sessionID)) return;
+    if (this.options.checkpoint?.read(sessionID)) throw new Error('A durable run already occupies this parent. Read mdd_status; explicitly discard it before starting a new objective.');
     const marker = this.options.progress?.read(sessionID);
     if (!marker) return;
     if (marker.state === 'pending') throw new Error(`A previous attempt in this conversation never reported an outcome. Inspect mdd_status, then use mdd_reset to release it before starting new work. ${ATTEST_HINT}`);
@@ -1356,6 +1538,7 @@ export class PhaseRunner {
       run.args = prompts.args; run.brief = prompts.brief;
       this.#arm(run);
     }
+    this.#checkpoint(run);
     this.#preserve(run);
     this.#mark(run, restored === 'complete' ? 'complete' : 'settled');
   }
@@ -1640,7 +1823,7 @@ export class PhaseRunner {
     // A recorded receipt is itself a committed fact, so it is preserved now rather than waiting
     // for a phase transition that an interrupted conversation may never reach.
     const run = this.#runs.get(sessionID);
-    if (run) this.#preserve(run);
+    if (run) { this.#checkpoint(run); this.#preserve(run); }
   }
 
   /** Reuse guards from a run this process never saw. Restoring them can only reject, never allow. */
@@ -1666,9 +1849,76 @@ export class PhaseRunner {
     // A released attempt still has to record that it ended, so the last dispatched call is kept.
     // A run carried out inline has no call at all, and must still be marked: skipping it is what
     // made an interrupted inline phase indistinguishable from a conversation that never started.
-    const callID = run.callID ?? run.lastCallID;
-    try { this.options.progress.write(run.runtime.sessionID, { runID: run.id, ...(callID ? { callID } : {}), state, userMessageID: run.userMessageID }); }
+    const inline = run.mode === 'inline' && !run.callID;
+    const callID = inline ? undefined : run.callID ?? run.lastCallID;
+    // A side investigation has its own call ID. Never correlate its pending marker with the last
+    // settled main-phase attempt, even though that attempt remains in this run's history.
+    try { this.options.progress.write(run.runtime.sessionID, { runID: run.id, ...(callID ? { callID } : {}),
+      ...(run.attemptID && !run.side && (inline || run.callID === run.attemptID ||
+        (state !== 'pending' && run.lastCallID === run.attemptID)) ? { attemptID: run.attemptID } : {}),
+      state, userMessageID: run.userMessageID }); }
     catch (error) { run.uncertain = true; throw error; }
+  }
+
+  /** No restored capability is stored here: artifact bytes are bound to the ordered result history. */
+  #checkpoint(run: Run, attemptState?: 'pending' | 'settled' | 'released', staged?: Workflow): void {
+    if (!this.options.checkpoint || run.side) return;
+    if (run.checkpointFailed) throw new Error('Checkpoint durability remains unconfirmed.');
+    try {
+      const body = (item: ArtifactResult) => ({ phase: item.ref.phase, content: item.content,
+        digest: createHash('sha256').update(item.content).digest('hex') });
+      const data: ResumeData = {
+        directory: run.runtime.directory, worktree: run.runtime.worktree, userMessageID: run.userMessageID,
+        ...(run.memory ? { memoryProject: run.memory.project } : {}),
+        requirements: run.requirements, context: structuredClone(run.context),
+        dependencies: run.history.map(body),
+        contexts: run.contexts.map(item => ({ explorationID: item.explorationID, outcome: item.outcome,
+          summary: item.summary, concerns: structuredClone(item.concerns), content: item.artifact.content,
+          digest: createHash('sha256').update(item.artifact.content).digest('hex') })),
+        ...(run.acceptance ? { acceptance: structuredClone(run.acceptance) } : {}),
+        decisions: structuredClone(run.decisions), planned: structuredClone(run.planned), evidence: { ...run.evidence },
+        ...(run.verification ? { verification: structuredClone(run.verification) } : {}),
+        executedChecks: structuredClone(run.executedChecks), changedFiles: run.changedFiles,
+        calls: [...run.calls], usedMessages: [...(this.#consent.get(run.runtime.sessionID)?.usedMessages ?? [])],
+        proposed: [...(this.#consent.get(run.runtime.sessionID)?.proposed ?? [])],
+        ...(run.rework ? { rework: { ...run.rework } } : {}),
+      };
+      const workflow = staged ?? run.workflow;
+      const events = workflow.history();
+      const next = workflow.nextAction();
+      const advanced = next.kind === 'execute' && next.phase !== run.phase;
+      const stable: StableRunnerState = {
+        phase: next.kind === 'finished' ? workflow.snapshot().results.at(-1)!.phase : next.phase,
+        state: { execute: 'ready', approve: 'await-approval', 'await-result': 'await-result', blocked: 'blocked', finished: 'complete' }[next.kind] as StableRunnerState['state'],
+        mode: advanced ? 'delegate' : run.mode, attempts: advanced ? 0 : run.attempts, spent: run.spent,
+        malformed: advanced ? 0 : run.malformed, report: structuredClone(run.report),
+        changedList: structuredClone(run.changedList), concerns: structuredClone(run.concerns),
+        ...(run.delivered ? { delivered: { ...run.delivered } } : {}),
+        ...(!advanced && run.nativeUsed ? { nativeUsed: true as const } : {}),
+        ...(run.fallbackExhausted ? { fallbackExhausted: true as const } : {}),
+        ...(run.reportRepairExhausted ? { reportRepairExhausted: true as const } : {}),
+        ...(!advanced && run.lastFailure ? { lastFailure: run.lastFailure } : {}),
+        ...(run.reason ? { reason: run.reason } : {}),
+        ...(run.rejected ? { rejected: { ...run.rejected } } : {}),
+      };
+      const checkpoint: StableCheckpoint = {
+        version: STABLE_CHECKPOINT_VERSION, runID: run.id, parent: run.runtime.sessionID, sequence: (run.checkpointSequence ?? -1) + 1,
+        request: structuredClone(run.checkpointRequest), events, data, stable,
+        dataDigest: sealResumeData(data, run.id, run.runtime.sessionID, events, stable),
+        ...(attemptState && run.attemptID ? { attempt: { id: run.attemptID,
+          phase: attemptState === 'settled' ? workflow.snapshot().results.at(-1)!.phase : run.phase, state: attemptState } } : {}),
+      };
+      this.options.checkpoint.write(run.runtime.sessionID, checkpoint);
+      run.checkpointSequence = checkpoint.sequence;
+    } catch {
+      run.checkpointFailed = true;
+      run.uncertain = true;
+      run.state = 'blocked';
+      run.evidence = invalidateEvidence(run.evidence, this.#affected(run.phase));
+      run.report = { ...run.report, status: 'blocked', evidence: run.evidence };
+      run.reason = 'Checkpoint durability is unconfirmed. No result is authorized to advance and no phase may be retried. Inspect local state; only explicit run discard remains.';
+      throw new Error(run.reason);
+    }
   }
 
   #prepare(run: Run): void {

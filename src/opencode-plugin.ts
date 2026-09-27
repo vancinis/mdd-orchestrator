@@ -13,6 +13,9 @@ import { recordTelemetry } from './telemetry.js';
 import type { TelemetryUsage } from './telemetry.js';
 import { ProgressGuard } from './progress.js';
 import { RunDossierStore } from './run-dossier.js';
+import { assessTransfer } from './transfer.js';
+import { CheckpointStore } from './checkpoint.js';
+import { QuestionCheckpointStore } from './question-checkpoint.js';
 import { prBodyRequest, renderPRBody } from './pr-body.js';
 import { TranslationError } from './pr-translation.js';
 import { mddDataRoot } from './engram-http.js';
@@ -485,6 +488,9 @@ const plugin: Plugin = async input => {
   // in. A linked git worktree is removed as soon as its task is done; anchored there, the dossier
   // and the lessons went with it. For an ordinary checkout this is byte-for-byte today's directory.
   const dataRoot = mddDataRoot(input.directory);
+  // Explicit experimental opt-in only. Existing runs retain their v1 data-only behavior until
+  // replacement and every restart boundary have an end-to-end contract.
+  const checkpoint = process.env.MDD_EXPERIMENTAL_RESUME === '1' ? new CheckpointStore(dataRoot) : undefined;
   const runner = new PhaseRunner(inspector, {
     // The runner passes the run's own checkout directory to these callbacks; MDD writes to the
     // shared anchor instead, so a worktree's telemetry and lessons join the repository's own rather
@@ -492,10 +498,12 @@ const plugin: Plugin = async input => {
     telemetry: (_directory, value, now) => recordTelemetry(dataRoot, value, now),
     progress: new ProgressGuard(dataRoot),
     dossier: new RunDossierStore(dataRoot),
+    ...(checkpoint ? { checkpoint } : {}),
     lessons: (_directory, value, now) => recordLessonQuietly(dataRoot, value, now),
     ledger: (_directory, value, now) => recordRunQuietly(dataRoot, value, now),
   });
-  const intake = new NativeIntake(runner, inspector, settings);
+  const intake = new NativeIntake(runner, inspector, settings, checkpoint
+    ? { checkpoint, questions: new QuestionCheckpointStore(dataRoot) } : {});
   /**
    * The workspace only ever learned that MDD had been used here once a phase had already produced
    * a telemetry event, so every conversation that died earlier — at a question the host never
@@ -552,6 +560,22 @@ const plugin: Plugin = async input => {
       pinPhaseAgents(config as Parameters<typeof pinPhaseAgents>[0]);
     },
     tool: {
+      mdd_transfer: tool({
+        description: 'Fail-closed new-parent continuation preflight. The native user must explicitly name sourceSessionID and runID in userText. This version never transfers: durable exclusive ownership across both parents is not yet proven. It does not copy a checkpoint, authorize a phase or reuse consent.',
+        args: {
+          sourceSessionID: tool.schema.string().min(1),
+          runID: tool.schema.string().min(1),
+          userText: tool.schema.string().min(1),
+        },
+        async execute(args, context) {
+          enter(context, 'mdd_transfer');
+          if (context.abort.aborted) throw new Error('Transfer preflight was aborted.');
+          if (!checkpoint) return reply({ state: 'transfer-blocked', diagnostic: 'ownership-unproven',
+            reason: 'Cross-parent continuation is not enabled. No transfer occurred.' });
+          await inspector.intake(context, boundedText(args.userText, 'actual native transfer request', 12000), context.messageID);
+          return reply(assessTransfer(args, context, checkpoint, new ProgressGuard(dataRoot), new QuestionCheckpointStore(dataRoot)));
+        },
+      }),
       mdd_pr_body: tool({
         description: 'Draft only a PR body using the exact local skill/template and recorded current-run evidence. Two calls: without translations it returns the recorded text to translate into Spanish; with them it renders the body. Never commits, pushes or publishes. Optional notes must quote whole lines of the actual latest user text; unknown facts remain unverified.',
         args: {
@@ -661,7 +685,13 @@ const plugin: Plugin = async input => {
         args: { detail: tool.schema.enum(['compact', 'full']).optional().describe('compact (default) returns protocol fields and what the next call needs; full adds the held workflow snapshot, acceptance, decisions, plan, concerns, artifacts and previous runs.') },
         async execute(args, context) {
           enter(context, 'mdd_status');
+          const resumed = await runner.restore(context, project => intake.boundRunMemory(context, project));
+          try { if (resumed.restored) intake.recover(context); }
+          catch { return reply({ state: 'recovery-blocked', sessionID: context.sessionID, task: undefined,
+            reason: 'Native question recovery could not be confirmed; do not ask, approve or dispatch. Inspect local question and checkpoint files.' }, args.detail ?? 'compact'); }
           const status = record(intake.status(context.sessionID), 'status');
+          if (resumed.reason) return reply({ ...status, state: 'recovery-blocked', task: undefined,
+            next: { kind: 'wait' }, reason: resumed.reason }, args.detail ?? 'compact');
           let recovery = {};
           // A live intake in this session is the answer: probing native history there could only
           // report an unrecoverable objective for a run that is healthy and waiting for an answer.
@@ -755,6 +785,7 @@ const plugin: Plugin = async input => {
             attested = args.scope !== 'rework';
           }
           const seen = await runner.confirmStopped(context.sessionID, context, attested);
+          if (checkpoint && args.scope !== 'run') await runner.restore(context, project => intake.boundRunMemory(context, project));
           try { return reply({ ...record(intake.reset(context, args.scope), 'reset'), ...(seen ? { liveness: seen } : {}) }); }
           catch (error) {
             if (!seen || seen.verdict === 'stopped') throw error;
