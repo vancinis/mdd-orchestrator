@@ -111,6 +111,19 @@ with or without an accepted run, so a status block never leaves the conversation
 read-only answer. A quoted path neither changes the loaded workspace nor authorizes
 cross-project access or configuration edits.
 
+A precise, small change the user already spelled out is not a run either, whatever its kind:
+text, a style, a value, a prop, a condition, a rename or a configuration key, with its place
+either named or findable from the request itself ("change the `/dashboard` title to *Buen día X*"
+is one example among many). The coordinator skips `mdd_start`, preflight and every phase: it
+locates the target itself with search and read tools and, on one unambiguous match, edits it at
+once, including the places that repeat that value (a translation entry, a test asserting it). With no match or several
+candidates it asks through the native question tool, listing the `file:line` candidates, instead
+of guessing. If the change turns out larger than it was described — new logic, features,
+dependencies, data or security — it stops and offers a normal run with the user's own text. It
+never does this while a phase task is in flight or an MDD question is pending, and its reply is a
+few Spanish lines naming `file:line`, before and after. Native edit permissions still apply, and
+because no run is recorded there is no coverage, ledger row or `mdd_pr_body` evidence for it.
+
 ### Bootstrap the actual parent
 
 Only when memory is enabled, MDD checks health and `GET /project/current?cwd=<native-root>`.
