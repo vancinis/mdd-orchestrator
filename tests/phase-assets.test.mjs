@@ -166,6 +166,23 @@ test('assets: the coordinator delivers a recorded run without a new run or prefl
   assert.match(skill, /A user request naming them is that authority/);
 });
 
+// "En /dashboard cambia el título de Hola X a Buen día X" asked five preflight questions and ran
+// explore, plan, apply and verify for a one-line edit: a precise, located change is not a run.
+test('assets: the coordinator makes a precise small edit directly, without preflight or phases', () => {
+  const text = fs.readFileSync('assets/opencode/agents/mdd-orchestrator.md', 'utf8');
+  assert.match(text, /Quick edits skip the run/);
+  // The dashboard title is one example; the rule covers any precise change, located or findable.
+  assert.match(text, /of any kind \(text,\nstyle, a value, a prop, a condition, a rename, a config key\)/);
+  assert.match(text, /named or findable\nfrom the request/);
+  assert.match(text, /never call mdd_start: no\npreflight, no phases/);
+  assert.match(text, /One unambiguous match: edit\nit right away/);
+  assert.match(text, /No match or\nseveral candidates: ask with the native question tool/);
+  assert.match(text, /If it proves larger[\s\S]*offer an MDD run with their text/);
+  assert.match(text, /Not while a phase task is in flight or an MDD question is\npending/);
+  assert.match(text, /For any other implementation request, call mdd_start once/);
+  assert.ok(Buffer.byteLength(text) <= 16000, 'the coordinator must fit the installer asset limit');
+});
+
 // An interrupted subagent locked a conversation for good: the user knew it stopped, OpenCode had
 // no trace proving it, and the coordinator was told no reset could ever pass.
 test('assets: the coordinator releases an interrupted subagent on the user\'s own word', () => {
