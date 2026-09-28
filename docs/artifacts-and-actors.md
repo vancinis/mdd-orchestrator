@@ -35,8 +35,10 @@ The HTTP client rechecks the active native-parent binding on observation writes/
 References are frozen, instance-local live capabilities. Pass the **original returned
 reference**, not a spread copy or JSON-decoded object, to that same store's `read`.
 This prevents callers from substituting paths, observation IDs or ownership. References
-remain stable diagnostic identifiers, but are not restart/resume authorization. A future
-resume feature needs an explicit authenticated import contract; do not bypass this guard.
+remain stable diagnostic identifiers, but are not restart/resume authorization. Resume does not
+bypass this guard: the resume checkpoint carries each dependency's exact bytes with their digest,
+and a restored run hands those bytes to the next phase as data. A restored store never reads a
+serialized reference.
 
 The run dossier (`.mdd/run-<SHA256(parentID)>.json`) serializes refs alongside the artifact
 content it already holds. That does not weaken the paragraph above: a serialized ref is exactly

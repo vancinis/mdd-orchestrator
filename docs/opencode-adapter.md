@@ -662,14 +662,89 @@ contract leaves no local trace of any kind. Engram is not the primary home: memo
 `save()` stops at 40000 bytes, and there is no per-session search — without an observation ID
 held locally nothing can be found, which is the exact circle that caused the loss.
 
-**The run is not resumed, by design.** After dying mid-`mdd-apply` MDD does not know what reached
-the working tree, so restoring a controller would fake a continuity that does not exist. With no
-live run, `mdd_status` reports `state: 'recoverable'`, `recovery: 'data-only'` and a `priorRun`
-marked `capability: 'data-only'`, plus `limits` stating plainly that the working tree may hold
-partial changes MDD never recorded and must be inspected with `git status`/`git diff`, that no
-approval survived, and that any task still running will never report. The way forward is
-`mdd_start` with the original objective as actual new native user text — which still requires a
-fresh preflight — or `mdd_reset` with `scope: run`, which discards the record.
+### Restart resume
+
+Every settled transition also writes a resume checkpoint (`.mdd/checkpoint-<SHA256(parentID)>.json`):
+the workflow events, the dependency artifact bytes, the held plan and evidence, and the runner's
+settled state, sealed by a digest. After OpenCode restarts, the first `mdd_status` in the same
+conversation validates that checkpoint against the progress marker and the durable run owner and,
+when everything agrees, restores the run exactly where it settled: a ready phase is dispatchable
+again (with a fresh dispatch handle), an awaiting approval is asked again as a *new* native
+question, and a finished run reports `complete`. Nothing is ever replayed: a phase whose child
+never reported stays `recovery-blocked` until OpenCode confirms it stopped or the user says so in
+their own latest message (`mdd_reset` with `userText`), and a question or coordinator operation that
+died holding the run's writer is released the same way. A complete run closes itself when the
+user starts a new objective in that conversation; its record is set aside, not deleted.
+
+A checkpoint write that keeps failing (a scanner holding the file, a full disk) is retried and
+then **degrades** the run instead of stopping it: the progress marker records `resumable: false`,
+the stale checkpoint is withdrawn, and the live run carries on with the marker as its
+duplicate-dispatch guard. The next successful write makes it resumable again. Only a conflicting
+writer — another process that advanced the same run — still fails closed, because continuing
+could duplicate work.
+
+**When the checkpoint cannot be used, the run is data only.** After dying mid-`mdd-apply` with no
+usable checkpoint MDD does not know what reached the working tree, so restoring a controller would
+fake a continuity that does not exist. With no live run, `mdd_status` reports
+`state: 'recoverable'`, `recovery: 'data-only'` and a `priorRun` marked `capability: 'data-only'`,
+plus `limits` stating plainly that the working tree may hold partial changes MDD never recorded and
+must be inspected with `git status`/`git diff`, that no approval survived, and that any task still
+running will never report. The way forward is `mdd_start` with the original objective as actual
+new native user text — which still requires a fresh preflight — or `mdd_reset` with `scope: run`,
+which discards the record.
+
+### Continuing a run in a new conversation
+
+A run belongs to the conversation that owns it, but it can be moved:
+
+1. In the old conversation, `mdd_status` shows `sessionID` (under `runtime`) and `runID`.
+2. In a new conversation, the user asks to continue it and names both, for example
+   `Continue sourceSessionID=ses_abc123 runID=6f1e… here.` The coordinator calls `mdd_transfer`
+   with that exact message.
+3. MDD verifies the old run is settled (no child or question in flight), fences the old
+   conversation, publishes a projection of the checkpoint into the new one bound to that exact
+   message, and records a receipt. Any approval is asked again in the new conversation; old consent
+   is never reused, and the old conversation can no longer dispatch.
+
+The receipt is written only after both checkpoints were proven correlated, under the owner lock,
+and from then on it is self-contained: the target's ownership is confirmed from the owner record
+and its own claim, not from checkpoint bytes. A later checkpoint, a degraded (non-resumable) one,
+or none at all never breaks it — the target keeps working live, and after a restart it is either
+resumed (bytes must descend from the published target) or shown as data only and can be discarded
+with `mdd_reset` scope run and the user's exact message. The source conversation, meanwhile,
+reports `state: 'transferred'`; any late callback, approval or dispatch there is refused, and the
+user can start a new objective in it (the old claim is retired automatically) or free it with
+`mdd_reset` scope run. Neither touches the transferred run.
+
+A run can move again (A → B → C). The new receipt supersedes the previous one when the new
+transfer finishes, and the owner keeps the list of every former owner: A and B stay fenced for
+good, B is fenced from the moment the new transfer begins, and a conversation that only holds a
+pending claim is reported as an ambiguous claim, never as one the run moved away from.
+
+If a transfer is interrupted, `mdd_status` in the new conversation reports it as ambiguous with its
+`operationID`. The user then asks to recover it, naming `sourceSessionID`, `runID` and
+`operationID` and saying it stopped, and the coordinator calls `mdd_transfer_recover`:
+`release-claim` frees a claim that fenced nothing, `abort-fenced` returns the run to the old
+conversation (removing published target bytes only when they are exactly the transfer projection),
+and `finish-published` completes a published transfer, regenerating its deterministic progress
+marker if the crash lost it. A finished transfer never revives the old conversation.
+
+### Durable ownership and locks
+
+The durable owner (`.mdd/owner-*.json`, `.mdd/parent-owner-*.json`) fences every writer: one
+process at a time holds a run's writer for a native task, a question or a coordinator operation.
+Read-only tools (`mdd_status`, `mdd_improvements`, `mdd_pr_body`, `mdd_improve`,
+`mdd_check_report`) never take it. Lock files name their holder (pid, host, platform — WSL told
+apart from Windows — boot time or Linux boot ID, and a nonce). On the same host and platform, a
+lock from a previous boot is reclaimed (its pid may belong to an unrelated process now), and one
+from this boot only when the OS says its pid does not exist; locks from another machine or with
+an incomplete identity are never reclaimed, and no lock is reclaimed by age alone. Reclaim runs
+under an exclusive slot named for the dead holder, so racing reclaimers can never remove a lock a
+live writer has just taken; a slot orphaned by a reclaimer that died is reclaimed by the same
+rule, and a slot that cannot be removed is reported instead of ignored. Finishing and aborting a transfer both decide and mutate
+while holding the owner lock, so an abort can never delete bytes a concurrent finish vouched for. Readers see the last committed record while a writer holds the lock,
+because every replacement is an atomic rename; transient Windows sharing errors on rename or unlock
+are retried a bounded number of times.
 
 A `pending` marker takes precedence over a dossier, because it is the more restrictive of the
 two: it reports an attempt of unknown outcome and must gate a start, while a dossier reports only

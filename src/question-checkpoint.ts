@@ -15,6 +15,8 @@ export type QuestionRecord = {
   version: 1; parent: string; sequence: number; runID?: string;
   requirements: string; userMessageID?: string; known: Partial<Answers>; context?: { label: string; content: string };
   checkpoint?: { sequence: number; digest: string };
+  /** The run (and its settled state) whose durable writer this issued question holds. */
+  reservation?: { runID: string; stable: 'ready' | 'await-approval' | 'blocked' | 'complete' };
   state: 'prepared' | 'pending' | 'answered' | 'cancelled' | 'settled' | 'withdrawn';
   slot: { kind: Kind; phase?: Phase; requirements?: string; args: QuestionEnvelope };
   clarifications: Clarification[]; deferred: Clarification[];
@@ -24,9 +26,9 @@ export type QuestionRecord = {
 };
 
 const PHASES = ['mdd-explore', 'mdd-plan', 'mdd-propose', 'mdd-spec', 'mdd-design', 'mdd-tasks', 'mdd-apply', 'mdd-verify'];
+/** Same rule as the runtime's boundedText: JSON stores control characters losslessly. */
 function text(value: unknown, max: number): value is string {
-  return typeof value === 'string' && !!value.trim() && Buffer.byteLength(value) <= max &&
-    Buffer.from(value).toString('utf8') === value && !/[\x00-\x08\x0b-\x1f\x7f]/.test(value);
+  return typeof value === 'string' && !!value.trim() && Buffer.byteLength(value) <= max;
 }
 function array(value: unknown, max: number): unknown[] {
   if (!Array.isArray(value) || value.length > max) throw new ValidationError('Invalid native question record.');
@@ -62,7 +64,7 @@ function clarification(value: unknown): void {
 }
 
 export function validateQuestionRecord(value: unknown): QuestionRecord {
-  const item = objectWithKeys(value, 'native question record', ['version', 'parent', 'sequence', 'runID', 'requirements', 'userMessageID', 'known', 'context', 'checkpoint', 'state', 'slot',
+  const item = objectWithKeys(value, 'native question record', ['version', 'parent', 'sequence', 'runID', 'requirements', 'userMessageID', 'known', 'context', 'checkpoint', 'reservation', 'state', 'slot',
     'clarifications', 'deferred', 'clarificationAnswers', 'callID', 'answer', 'retiredCalls']);
   if (item.version !== QUESTION_CHECKPOINT_VERSION || !text(item.parent, 256) ||
       !Number.isSafeInteger(item.sequence) || (item.sequence as number) < 0 ||
@@ -83,9 +85,15 @@ export function validateQuestionRecord(value: unknown): QuestionRecord {
       (slot.requirements !== undefined && !text(slot.requirements, 12000))) throw new ValidationError('Question slot does not match its kind.');
   if ((slot.kind === 'preflight') !== (item.runID === undefined) ||
       (item.runID !== undefined && !text(item.runID, 256))) throw new ValidationError('Question run binding is missing.');
+  if (item.reservation !== undefined) {
+    const reservation = objectWithKeys(item.reservation, 'question reservation', ['runID', 'stable']);
+    if (!text(reservation.runID, 256) || (item.runID !== undefined && reservation.runID !== item.runID) ||
+        !['ready', 'await-approval', 'blocked', 'complete'].includes(String(reservation.stable)) ||
+        ['prepared', 'withdrawn'].includes(String(item.state))) throw new ValidationError('Invalid question reservation.');
+  }
   if (item.checkpoint !== undefined) {
     const checkpoint = objectWithKeys(item.checkpoint, 'question checkpoint binding', ['sequence', 'digest']);
-    if (item.runID === undefined || !Number.isSafeInteger(checkpoint.sequence) || (checkpoint.sequence as number) < 0 ||
+    if ((item.runID === undefined && item.reservation === undefined) || !Number.isSafeInteger(checkpoint.sequence) || (checkpoint.sequence as number) < 0 ||
         typeof checkpoint.digest !== 'string' || !/^[a-f0-9]{64}$/.test(checkpoint.digest)) throw new ValidationError('Invalid question checkpoint binding.');
   }
   if (['prepared', 'withdrawn'].includes(String(item.state)) ? item.callID !== undefined || item.answer !== undefined : !text(item.callID, 256)) throw new ValidationError('Invalid native question call correlation.');
@@ -139,9 +147,15 @@ export class QuestionCheckpointStore {
               (['cancelled', 'withdrawn'].includes(old.state) && record.state !== 'prepared') ||
               (old.state === 'settled' && !['prepared', 'settled'].includes(record.state)) ||
               (['prepared', 'pending'].includes(old.state) && record.state !== 'prepared' &&
-                (!isDeepStrictEqual(old.slot, record.slot) || old.runID !== record.runID || !isDeepStrictEqual(old.checkpoint, record.checkpoint) ||
+                (!isDeepStrictEqual(old.slot, record.slot) || old.runID !== record.runID ||
                   old.requirements !== record.requirements || old.userMessageID !== record.userMessageID ||
                   !isDeepStrictEqual(old.known, record.known) || !isDeepStrictEqual(old.context, record.context))) ||
+              // Issuing a prepared question binds it to the checkpoint as it is now, never an older one.
+              (old.state === 'prepared' && record.state !== 'prepared' && old.checkpoint && record.checkpoint &&
+                record.checkpoint.sequence < old.checkpoint.sequence) ||
+              // An issued question's outcome keeps exactly the binding and reservation it was issued with.
+              (old.state === 'pending' && record.state !== 'prepared' &&
+                (!isDeepStrictEqual(old.checkpoint, record.checkpoint) || !isDeepStrictEqual(old.reservation, record.reservation))) ||
               (old.state === 'answered' && record.state === 'settled' &&
                 (!isDeepStrictEqual(old.slot, record.slot) || old.callID !== record.callID || old.runID !== record.runID)) ||
               (old.state === 'pending' && record.state === 'prepared' &&

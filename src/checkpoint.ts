@@ -5,6 +5,7 @@ import { Workflow } from './workflow.js';
 import type { WorkflowEvent } from './workflow.js';
 import { objectWithKeys, ValidationError } from './validation.js';
 import type { Progress } from './progress.js';
+import { ProgressGuard } from './progress.js';
 import { acceptance, decisions, validatePlan, verification } from './acceptance.js';
 import type { Acceptance, Decision, Verification } from './acceptance.js';
 import { deliverables, delivered, executed } from './phase-evidence.js';
@@ -18,7 +19,30 @@ import type { Concern } from './concerns.js';
 export const CHECKPOINT_VERSION = 1;
 export const RESUME_CHECKPOINT_VERSION = 2;
 export const STABLE_CHECKPOINT_VERSION = 3;
-export const CHECKPOINT_MAX_BYTES = 400000;
+/**
+ * A sanity ceiling, not a working budget. A checkpoint holds every recorded artifact of the run
+ * (16 KB each before JSON escaping, which can multiply control characters sixfold) plus the
+ * coordinator context; a long reworked route must fit or the run silently stops being resumable.
+ */
+export const CHECKPOINT_MAX_BYTES = 16 * 1024 * 1024;
+/**
+ * Runtime caps shared with PhaseRunner, so a list the runner holds can always be checkpointed.
+ * The runner deduplicates and trims to these limits before a checkpoint is ever built.
+ */
+export const CHANGED_LIST_MAX = 64;
+export const CONCERNS_MAX = 64;
+export const CONTEXT_ENTRIES_MAX = 512;
+/** Explanations are clipped to this size when checkpointed; they describe, they never authorize. */
+export const EXPLANATION_MAX_BYTES = 65536;
+/** A rejected report is kept verbatim up to this size so it can be restated without rework. */
+export const REJECTED_TEXT_MAX_BYTES = 262144;
+
+/** The value itself is not checkpointable; the run can continue without a resumable record. */
+export class CheckpointInvalidError extends Error {}
+/** Another writer or an unexpected record occupies the slot; continuing could duplicate work. */
+export class CheckpointConflictError extends Error {}
+/** Local storage refused the write (EPERM, disk full, …); retry, then degrade to data-only. */
+export class CheckpointStorageError extends Error {}
 export type Checkpoint = {
   version: 1;
   runID: string;
@@ -78,11 +102,11 @@ function validateStable(value: unknown, workflow: Workflow, data: ResumeData): S
   }
   if (item.mode === 'native' && item.nativeUsed !== true) throw new ValidationError('Native mode needs a recorded fallback.');
   for (const key of ['lastFailure', 'reason'] as const) {
-    if (item[key] !== undefined && !bounded(item[key], 8000)) throw new ValidationError('Invalid stable runner explanation.');
+    if (item[key] !== undefined && !bounded(item[key], EXPLANATION_MAX_BYTES)) throw new ValidationError('Invalid stable runner explanation.');
   }
   if (item.rejected !== undefined) {
     const rejected = objectWithKeys(item.rejected, 'rejected report', ['reason', 'text']);
-    if (!bounded(rejected.reason, 8000) || !bounded(rejected.text, 20000)) throw new ValidationError('Invalid rejected report.');
+    if (!bounded(rejected.reason, EXPLANATION_MAX_BYTES) || !bounded(rejected.text, REJECTED_TEXT_MAX_BYTES)) throw new ValidationError('Invalid rejected report.');
   }
   const report = objectWithKeys(item.report, 'stable report', ['phase', 'summary', 'how', 'status', 'evidence']);
   const last = workflow.snapshot().results.at(-1);
@@ -90,21 +114,27 @@ function validateStable(value: unknown, workflow: Workflow, data: ResumeData): S
     throw new ValidationError('Stable report is not bound to this run.');
   }
   renderReport(workflow.snapshot().answers.summary, item.report as PhaseReport);
-  const files = list(item.changedList, 64, 'changed files').map(value => {
+  const files = list(item.changedList, CHANGED_LIST_MAX, 'changed files').map(value => {
     const file = objectWithKeys(value, 'changed file', ['path', 'reason']);
     if (!bounded(file.path, 400) || (file.reason !== undefined && !bounded(file.reason, 500))) throw new ValidationError('Invalid changed file.');
     return file;
   });
-  if (new Set(files.map(file => file.path)).size !== files.length || files.length !== data.changedFiles) throw new ValidationError('Changed-file count does not match stable state.');
-  const advisory = list(item.concerns, 64, 'stable concerns').map(value => concerns([value])[0]);
+  // The count is every distinct file the run changed; the list keeps the most recent 64 of them.
+  if (new Set(files.map(file => file.path)).size !== files.length ||
+      files.length !== Math.min(data.changedFiles, CHANGED_LIST_MAX)) throw new ValidationError('Changed-file count does not match stable state.');
+  const advisory = list(item.concerns, CONCERNS_MAX, 'stable concerns').map(value => concerns([value])[0]);
   if (!isDeepStrictEqual(advisory, item.concerns)) throw new ValidationError('Invalid stable concerns.');
   if (item.delivered !== undefined && !isDeepStrictEqual(delivered(item.delivered), item.delivered)) throw new ValidationError('Invalid delivered summary.');
   return structuredClone(value) as StableRunnerState;
 }
 
+/**
+ * Any nonempty text within its byte budget. The runtime accepts carriage returns, tabs, ANSI
+ * escapes and other control characters in artifacts and requirements, and JSON escapes every one
+ * of them losslessly, so refusing them here only made a valid run silently non-resumable.
+ */
 function bounded(value: unknown, max: number): value is string {
-  return typeof value === 'string' && value.length > 0 && Buffer.byteLength(value) <= max &&
-    Buffer.from(value).toString('utf8') === value && !/[\x00-\x08\x0b-\x1f\x7f]/.test(value);
+  return typeof value === 'string' && value.length > 0 && Buffer.byteLength(value) <= max;
 }
 function list(value: unknown, max: number, subject: string): unknown[] {
   if (!Array.isArray(value) || value.length > max) throw new ValidationError(`Invalid checkpoint ${subject}.`);
@@ -125,7 +155,7 @@ function validateData(value: unknown, workflow: Workflow): ResumeData {
       !bounded(data.requirements, 12000)) throw new ValidationError('Invalid checkpoint identity or requirements.');
   if (data.memoryProject !== undefined && (typeof data.memoryProject !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(data.memoryProject))) throw new ValidationError('Invalid checkpoint memory project.');
   if (['engram', 'both'].includes(workflow.snapshot().answers.artifactStore) && data.memoryProject === undefined) throw new ValidationError('Engram artifact backend needs a bound memory project.');
-  for (const entry of list(data.context, 16, 'context')) {
+  for (const entry of list(data.context, CONTEXT_ENTRIES_MAX, 'context')) {
     const item = objectWithKeys(entry, 'checkpoint context', ['label', 'content', 'source']);
     if (!bounded(item.label, 1000) || !bounded(item.content, 96000) || item.source !== 'coordinator') throw new ValidationError('Invalid checkpoint context.');
   }
@@ -137,7 +167,7 @@ function validateData(value: unknown, workflow: Workflow): ResumeData {
     if (item.phase !== results[index]!.phase) throw new ValidationError('Checkpoint dependency phase mismatch.');
     body({ content: item.content, digest: item.digest });
   }
-  for (const entry of list(data.contexts, 32, 'contextual findings')) {
+  for (const entry of list(data.contexts, 256, 'contextual findings')) {
     const item = objectWithKeys(entry, 'checkpoint finding', ['explorationID', 'outcome', 'summary', 'concerns', 'content', 'digest']);
     if (!identifier(item.explorationID) || !['passed', 'failed'].includes(String(item.outcome)) || !bounded(item.summary, 8000)) throw new ValidationError('Invalid checkpoint finding.');
     concerns(item.concerns);
@@ -167,10 +197,14 @@ function validateData(value: unknown, workflow: Workflow): ResumeData {
     if (matched !== checked.matched) throw new ValidationError('Checkpoint verification match is inconsistent.');
   }
   if (!Number.isSafeInteger(data.changedFiles) || (data.changedFiles as number) < 0 || (data.changedFiles as number) > 100000) throw new ValidationError('Invalid checkpoint changed-file count.');
-  for (const key of ['calls', 'usedMessages', 'proposed'] as const) {
-    const entries = list(data[key], 512, key);
+  for (const key of ['calls', 'usedMessages'] as const) {
+    const entries = list(data[key], 4096, key);
     if (new Set(entries).size !== entries.length || entries.some(item => !identifier(item))) throw new ValidationError('Invalid checkpoint replay guards.');
   }
+  // A proposal guard is the serialized proposal itself (it carries the proposed requirements), so
+  // it is bounded by the requirements budget, not by the size of an identifier.
+  const proposals = list(data.proposed, 1024, 'proposed');
+  if (new Set(proposals).size !== proposals.length || proposals.some(item => !bounded(item, 65536))) throw new ValidationError('Invalid checkpoint replay guards.');
   if (data.rework !== undefined) {
     const item = objectWithKeys(data.rework, 'checkpoint rework', ['after', 'summary']);
     if (item.after !== 'mdd-verify' || !bounded(item.summary, 8000)) throw new ValidationError('Invalid checkpoint rework.');
@@ -178,8 +212,9 @@ function validateData(value: unknown, workflow: Workflow): ResumeData {
   return structuredClone(value) as ResumeData;
 }
 
+/** The same rule the runtime applies to native IDs (boundedText, 256 bytes). */
 function identifier(value: unknown): value is string {
-  return typeof value === 'string' && value.length > 0 && value.length <= 256 && !/[\x00-\x1f\x7f]/.test(value);
+  return typeof value === 'string' && !!value.trim() && Buffer.byteLength(value) <= 256;
 }
 
 /** Validate the complete record and derive its state from replay, not from stored authority. */
@@ -215,41 +250,81 @@ export function validateCheckpoint(value: unknown): { checkpoint: AnyCheckpoint;
 
 export class CheckpointStore {
   readonly #files: LocalFiles;
-  constructor(root: string) { this.#files = new LocalFiles(root); }
+  readonly #progress: ProgressGuard;
+  constructor(root: string) { this.#files = new LocalFiles(root); this.#progress = new ProgressGuard(root); }
   #name(parent: string): `.mdd/checkpoint-${string}.json` {
     if (!identifier(parent)) throw new ValidationError('Invalid checkpoint parent.');
     return `.mdd/checkpoint-${createHash('sha256').update(parent).digest('hex')}.json`;
   }
+  #readRaw(parent: string): ReturnType<typeof validateCheckpoint> | undefined {
+    const text = this.#files.read(this.#name(parent), CHECKPOINT_MAX_BYTES);
+    if (text === undefined) return undefined;
+    const result = validateCheckpoint(JSON.parse(text));
+    if (result.checkpoint.parent !== parent) throw new Error('Parent mismatch.');
+    return result;
+  }
+  /**
+   * The resumable record for this parent, or undefined. A progress marker that says the live run
+   * could not keep its checkpoint current (resumable: false) makes whatever file is here stale: a
+   * restart must fall back to data-only recovery instead of resuming an older state.
+   */
   read(parent: string): ReturnType<typeof validateCheckpoint> | undefined {
     try {
-      const text = this.#files.read(this.#name(parent), CHECKPOINT_MAX_BYTES);
-      if (text === undefined) return undefined;
-      const result = validateCheckpoint(JSON.parse(text));
-      if (result.checkpoint.parent !== parent) throw new Error('Parent mismatch.');
+      const result = this.#readRaw(parent);
+      if (result && this.unusable(parent)) return undefined;
       return result;
     } catch { throw new Error('Checkpoint cannot be read safely; do not resume or dispatch.'); }
   }
-  /** Only explicit run discard releases the durable slot. */
+  /** True when the parent's progress marker has withdrawn resumability from its checkpoint. */
+  unusable(parent: string): boolean {
+    try { return this.#progress.read(parent)?.resumable === false; }
+    // A damaged marker is reported by every path that reads it; it never grants resumption here.
+    catch { return false; }
+  }
+  /** Only explicit run discard, a finished run closing, or degradation releases the durable slot. */
   clear(parent: string): void {
     try { this.#files.remove(this.#name(parent)); }
     catch { throw new Error('Checkpoint could not be cleared; the run remains reserved.'); }
   }
-  write(parent: string, value: AnyCheckpoint): void {
+  /**
+   * `replaces` names the run a confirmed replacement supersedes in the same parent: only that
+   * exact run's record may be overwritten by a different run ID. Errors are typed so the runner can
+   * tell a storage fault (retry, then degrade) from a conflicting writer (fail closed).
+   */
+  write(parent: string, value: AnyCheckpoint, replaces?: string): void {
+    let checkpoint: AnyCheckpoint;
     try {
-      const { checkpoint } = validateCheckpoint(value);
+      checkpoint = validateCheckpoint(value).checkpoint;
       if (checkpoint.parent !== parent) throw new Error('Parent mismatch.');
-      const text = JSON.stringify(checkpoint);
+    } catch { throw new CheckpointInvalidError('Checkpoint value cannot be recorded; this run is not resumable.'); }
+    const text = JSON.stringify(checkpoint);
+    // A record the progress marker already withdrew is stale by definition; any owner may replace it.
+    const stale = this.unusable(parent);
+    let conflict = false;
+    try {
       this.#files.update(this.#name(parent), previous => {
-        if (previous !== undefined) {
-          const old = validateCheckpoint(JSON.parse(previous)).checkpoint;
-          if (old.parent !== parent || old.runID !== checkpoint.runID || old.sequence > checkpoint.sequence ||
-              (old.version > checkpoint.version) ||
-              (old.sequence === checkpoint.sequence && !isDeepStrictEqual(old, checkpoint))) throw new Error('Checkpoint conflict.');
+        if (previous !== undefined && !stale) {
+          let old: AnyCheckpoint;
+          try { old = validateCheckpoint(JSON.parse(previous)).checkpoint; }
+          catch { conflict = true; throw new Error('Unreadable previous checkpoint.'); }
+          const replacing = replaces !== undefined && old.runID === replaces && old.runID !== checkpoint.runID;
+          if (old.parent !== parent || (!replacing && (old.runID !== checkpoint.runID || old.sequence > checkpoint.sequence ||
+              old.version > checkpoint.version ||
+              (old.sequence === checkpoint.sequence && !isDeepStrictEqual(old, checkpoint))))) {
+            conflict = true;
+            throw new Error('Checkpoint conflict.');
+          }
         }
         return text;
       }, CHECKPOINT_MAX_BYTES);
-      if (!isDeepStrictEqual(this.read(parent)?.checkpoint, checkpoint)) throw new Error('Checkpoint readback mismatch.');
-    } catch { throw new Error('Checkpoint could not be confirmed; do not dispatch or advance.'); }
+    } catch (error) {
+      if (conflict) throw new CheckpointConflictError('Checkpoint could not be confirmed; do not dispatch or advance.');
+      throw new CheckpointStorageError(`Checkpoint storage refused the write: ${error instanceof Error ? error.message : 'unknown error'}`);
+    }
+    let readback: AnyCheckpoint | undefined;
+    try { readback = this.#readRaw(parent)?.checkpoint; }
+    catch { throw new CheckpointStorageError('Checkpoint readback failed.'); }
+    if (!isDeepStrictEqual(readback, checkpoint)) throw new CheckpointConflictError('Checkpoint could not be confirmed; do not dispatch or advance.');
   }
 }
 

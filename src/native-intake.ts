@@ -15,17 +15,23 @@ import { concerns } from './concerns.js';
 import { STABLE_CHECKPOINT_VERSION } from './checkpoint.js';
 import type { CheckpointStore } from './checkpoint.js';
 import type { QuestionCheckpointStore, QuestionRecord } from './question-checkpoint.js';
+import type { RunOwnershipStore } from './run-ownership.js';
 
 export type IntakeInspect = {
   setupPending?(runtime: Runtime, requirements?: string, messageID?: string): Promise<{ requirements: string; userMessageID: string } | undefined>;
   intake(runtime: Runtime, requirements: string, messageID: string, scope?: 'latest' | 'objective'): Promise<void | string>;
   question(runtime: Runtime, call: TaskCall, args: QuestionEnvelope): Promise<void>;
+  transferLiveness?(runtime: Runtime, sourceSessionID: string, runID: string, requestDigest: string,
+    assistantMessageID?: string): Promise<'running' | 'stopped' | 'unknown'>;
 };
-type Runner = Pick<PhaseRunner, 'start' | 'status' | 'approveNative' | 'block'> & Partial<Pick<PhaseRunner, 'approvalStopped' | 'assertChangeable' | 'assertFreshStart' | 'contribute' | 'explore' | 'priorGuards' | 'recordConsent' | 'reset' | 'submit'>>;
+type Runner = Pick<PhaseRunner, 'start' | 'status' | 'approveNative' | 'block'> & Partial<Pick<PhaseRunner, 'approvalStopped' | 'assertChangeable' | 'assertFreshStart' | 'closeForFreshStart' | 'contribute' | 'explore' | 'movedAway' | 'priorGuards' | 'recordConsent' | 'reset' | 'resumable' | 'submit' | 'owner' | 'reserve' | 'release' | 'handoffRecoveredQuestion'>>;
+/** The run and settled state a native question reserved the durable writer against. */
+type Reservation = NonNullable<QuestionRecord['reservation']>;
 type Slot = { kind: 'preflight' | 'approval' | 'change' | 'clarification'; args: QuestionEnvelope; phase?: Phase; callID?: string; requirements?: string };
 type Clarification = { question: string; options: { label: string; description: string; recommended?: boolean }[]; deferrable?: boolean };
 type Intake = {
   runtime: Runtime; requirements: string;
+  intakeToken?: string;
   state: 'starting' | 'question-ready' | 'review-ready' | 'paused' | 'await-answer' | 'accepting' | 'active' | 'blocked' | 'stopped';
   slot?: Slot; reason?: string;
   provenance?: { requirements: 'native-user'; preflight: 'startup-profile' | 'native-question'; profile: string };
@@ -35,6 +41,8 @@ type Intake = {
   memory?: { endpoint: string; project: string }; context?: { label: string; content: string };
   clarifications: Clarification[]; deferred: Clarification[];
   clarificationAnswers: { question: string; answer: string; phase: Phase; disposition: 'answered' | 'deferred' }[];
+  /** Set while a native question holds the durable run writer; persisted with its record. */
+  reserved?: Reservation;
 };
 
 /**
@@ -99,18 +107,97 @@ export function nativeQuestionAnswers(args: QuestionEnvelope, raw: unknown): str
 
 export class NativeIntake {
   readonly #sessions = new Map<string, Intake>();
+  readonly #reissued = new Set<string>();
   readonly #questionOwners = new Map<QuestionEnvelope, string>();
   readonly #settings;
   readonly #profile;
   readonly #managed;
   constructor(readonly runner: Runner, readonly inspect: IntakeInspect, settings: unknown,
-    readonly durable: { questions?: QuestionCheckpointStore; checkpoint?: CheckpointStore } = {}) {
+    readonly durable: { questions?: QuestionCheckpointStore; checkpoint?: CheckpointStore; ownership?: RunOwnershipStore } = {}) {
     this.#settings = parseSettings(settings);
     this.#profile = freezeProfile(this.#settings);
     this.#managed = this.#settings.engram && 'mode' in this.#settings.engram ? new ManagedMemory(this.#settings.engram) : undefined;
   }
 
   async close(): Promise<void> { await this.#managed?.close(); }
+
+  /**
+   * Frees a parent whose run moved to another conversation: its unresolved question record (if
+   * any) and in-memory intake are dropped. Nothing here can approve or answer for that run.
+   */
+  forgetMovedAway(sessionID: string): void {
+    this.durable.questions?.clear(sessionID);
+    this.#forget(sessionID);
+  }
+
+  /**
+   * Whether an unresolved native question (approval, clarification, change or a re-preflight of an
+   * existing run) holds this parent's durable writer. Only then is its binding checked; a question
+   * that no longer holds the writer is answered by `orphanQuestion` instead of locking the parent.
+   */
+  pendingQuestionOwner(sessionID: string): boolean {
+    const record = this.durable.questions?.read(sessionID);
+    if (!record || !['pending', 'answered'].includes(record.state) || !record.callID) return false;
+    const runID = record.runID ?? record.reservation?.runID;
+    const ownership = this.durable.ownership;
+    if (!runID || !ownership) return false;
+    const owner = ownership.read(runID);
+    if (!owner || owner.state !== 'reserved' || owner.callID !== record.callID || owner.ownerSessionID !== sessionID ||
+        ownership.parent(sessionID) !== runID) return false;
+    const saved = this.durable.checkpoint?.read(sessionID)?.checkpoint;
+    // Without a resumable checkpoint there is no bound run to hand off to; the reservation is then
+    // released as a crashed reservation (run discard only) on the user's word.
+    if (!saved) return false;
+    if (record.checkpoint && (saved?.version !== STABLE_CHECKPOINT_VERSION || saved.runID !== runID || saved.parent !== sessionID ||
+        record.checkpoint.sequence > saved.sequence ||
+        (saved.sequence === record.checkpoint.sequence && (saved.dataDigest !== record.checkpoint.digest ||
+          (record.reservation !== undefined && saved.stable.state !== record.reservation.stable)))))
+      throw new Error('Pending question and run checkpoint disagree; no reservation may be released.');
+    return true;
+  }
+
+  /** An unresolved question record whose reservation is gone (released, or its process died). */
+  #orphanQuestion(sessionID: string): QuestionRecord | undefined {
+    const record = this.durable.questions?.read(sessionID);
+    if (!record || !['pending', 'answered'].includes(record.state) || !record.callID) return undefined;
+    const runID = record.runID ?? record.reservation?.runID;
+    const owner = runID ? this.durable.ownership?.read(runID) : undefined;
+    return owner?.state === 'reserved' && owner.callID === record.callID ? undefined : record;
+  }
+
+  /** Settle a question record on user attestation: pending is cancelled, an unapplied answer is re-presented. */
+  #retireQuestionRecord(sessionID: string, record: QuestionRecord): void {
+    if (record.state === 'answered') {
+      const { callID: _callID, answer: _answer, reservation: _reservation, ...rest } = record;
+      const slot = structuredClone(record.slot);
+      slot.args.questions[0]!.question += ` [MDD re-present ${randomUUID()}]`;
+      this.durable.questions!.write(sessionID, { ...rest, sequence: record.sequence + 1, state: 'prepared', slot,
+        retiredCalls: [...(record.retiredCalls ?? []), record.callID!] });
+    } else this.durable.questions!.write(sessionID, { ...record, state: 'cancelled', sequence: record.sequence + 1 });
+  }
+
+  releasePendingQuestion(sessionID: string, attested: boolean, resetCallID?: string): boolean {
+    if (!this.pendingQuestionOwner(sessionID)) {
+      // The writer is no longer held for it, so there is nothing to hand off; the record itself
+      // still has to be settled, and only on the user's word, never by inference.
+      const orphan = this.#sessions.has(sessionID) ? undefined : this.#orphanQuestion(sessionID);
+      if (!orphan || !attested) return false;
+      this.#retireQuestionRecord(sessionID, orphan);
+      return true;
+    }
+    if (!attested) throw new Error('Releasing an interrupted native question needs the exact latest user attestation.');
+    const record = this.durable.questions!.read(sessionID)!;
+    if (!resetCallID) throw new Error('A reset reservation is required before question recovery.');
+    this.runner.handoffRecoveredQuestion?.(sessionID, record.callID!, resetCallID);
+    if (record.state === 'answered') {
+      const { callID: _callID, answer: _answer, reservation: _reservation, ...rest } = record;
+      const slot = structuredClone(record.slot);
+      slot.args.questions[0]!.question += ` [MDD re-present ${randomUUID()}]`;
+      this.durable.questions!.write(sessionID, { ...rest, sequence: record.sequence + 1, state: 'prepared', slot,
+        retiredCalls: [...(record.retiredCalls ?? []), record.callID!] });
+    } else this.durable.questions!.write(sessionID, { ...record, state: 'cancelled', sequence: record.sequence + 1 });
+    return true;
+  }
 
   /** Restore only an already registered session; never bootstrap a replacement memory identity. */
   async boundRunMemory(runtime: Runtime, project: string): Promise<EngramHttp> {
@@ -121,6 +208,7 @@ export class NativeIntake {
     await client.checkBinding();
     return client;
   }
+
 
   /** Reissue only the question envelope, never its historical answer or approval. */
   recover(runtime: Runtime): void {
@@ -155,12 +243,16 @@ export class NativeIntake {
         slot.args.questions[0]!.question += ` [MDD re-present ${randomUUID()}]`;
         this.#slot(entry, slot, true);
         entry.notice = 'The earlier native question is not consent. Ask this newly issued question and use only its fresh native answer.';
+        this.#reissued.add(runtime.sessionID);
       }
+      if (recorded?.state === 'cancelled') this.#reissued.add(runtime.sessionID);
     } catch (error) { this.#sessions.delete(runtime.sessionID); throw error; }
   }
 
   async start(value: unknown, runtime: Runtime, messageID: string): Promise<unknown> {
     if (runtime.agent !== 'mdd-orchestrator') throw new Error('Only mdd-orchestrator may start MDD.');
+    // The intake of a run that moved to another conversation governs nothing here any more.
+    if (this.runner.movedAway?.(runtime.sessionID)) this.#forget(runtime.sessionID);
     if (!this.#sessions.has(runtime.sessionID) && this.#unresolved(runtime.sessionID)) throw new Error('A native question in this parent has an unresolved outcome. Inspect mdd_status and explicitly discard the run before starting another.');
     this.runner.assertFreshStart?.(runtime.sessionID);
     const previous = this.#sessions.get(runtime.sessionID);
@@ -180,6 +272,7 @@ export class NativeIntake {
     const engram = this.#settings.engram;
     const pending = !previous && this.runner.status?.(runtime.sessionID).state !== 'complete' ? await this.inspect.setupPending?.(runtime, requirements, boundedText(messageID, 'native messageID', 256)) : undefined;
     if (pending && pending.requirements !== requirements) throw new Error('The original objective is pending. Resubmit its exact pendingStart arguments, not continuation text. For a different objective, use a fresh parent.');
+    this.runner.owner?.(runtime.sessionID);
     if (this.#sessions.get(runtime.sessionID) !== previous) throw new Error('Intake changed during setup inspection; read mdd_status.');
     // A restarted process has no previous intake, but the run it lost may have consumed user
     // messages and change proposals. Those guards are restored; the receipts that recorded actual
@@ -192,9 +285,13 @@ export class NativeIntake {
       // An objective may be older than the last thing the user said: a continuation message never
       // replaces the request it continues. Consent paths keep requiring the latest user text.
       const userID = pending?.userMessageID ?? await this.inspect.intake(entry.runtime, requirements, boundedText(messageID, 'native messageID', 256), 'objective');
+      this.runner.owner?.(runtime.sessionID);
       if (typeof userID === 'string') {
         if (entry.usedMessages.has(userID)) throw new Error('This user message was already used; wait for an actual new request.');
         entry.userMessageID = userID; entry.usedMessages.add(userID);
+        // A finished run a restart left unloaded is closed now, as the same run would be replaced
+        // in process: the new objective is proven native, and the old evidence is set aside.
+        if (!previous) this.runner.closeForFreshStart?.(runtime.sessionID);
         this.runner.assertFreshStart?.(runtime.sessionID, userID);
       } else if (previous) throw new Error('A fresh native user identity is required for another run.');
       if (!engram && ['engram', 'both'].includes(entry.known.artifactStore ?? '')) {
@@ -209,6 +306,8 @@ export class NativeIntake {
         entry.memory = { endpoint, project: client.project };
       }
       if (entry.state !== 'starting') throw new Error('Intake became uncertain during initialization.');
+      if (previous?.intakeToken && ['blocked', 'stopped'].includes(previous.state))
+        this.durable.ownership?.retireIntake(runtime.sessionID, previous.intakeToken);
       const args = questionEnvelope(entry.known, !!engram);
       if (args.questions.length) {
         const id = randomUUID();
@@ -239,6 +338,7 @@ export class NativeIntake {
     entry.state = 'accepting';
     try {
       const userID = await this.inspect.intake(runtime, userText, boundedText(messageID, 'native messageID', 256));
+      this.runner.owner?.(runtime.sessionID);
       const status = this.runner.status(runtime.sessionID);
       // A fresh user message asking for the change is authority enough. Only when that message was
       // already spent must the proposal rest on concerns a phase actually recorded.
@@ -333,8 +433,9 @@ export class NativeIntake {
     if (!('workflow' in status) || status.workflow.nextAction.kind !== 'approve') throw new Error('No phase is awaiting approval.');
     const phase = status.workflow.nextAction.phase;
     const item = entry.clarifications[0];
-    this.#slot(entry, { kind: item ? 'clarification' : 'approval', phase,
-      args: item ? clarificationEnvelope(item) : approvalEnvelope(status.runID, phase, status.reportDetail !== 'detailed') });
+    const args = item ? clarificationEnvelope(item) : approvalEnvelope(status.runID, phase, status.reportDetail !== 'detailed');
+    if (this.#reissued.delete(entry.runtime.sessionID)) args.questions[0]!.question += ` [MDD re-present ${randomUUID()}]`;
+    this.#slot(entry, { kind: item ? 'clarification' : 'approval', phase, args });
   }
 
   /** The coordinator reports a phase it carried out itself instead of delegating it. */
@@ -364,8 +465,15 @@ export class NativeIntake {
       entry.notice = 'The pending question was re-opened. Nothing was approved or recorded: ask it again exactly as mdd_status returns it.';
       return { ...this.status(runtime.sessionID), reset: { scope: 'phase' as const } };
     }
+    const intakeToken = this.durable.ownership?.intake(runtime.sessionID)?.token;
     const applied = this.runner.reset?.(runtime.sessionID, scope) ?? { scope: 'run' as const };
-    if (applied.scope === 'run') { this.durable.questions?.clear(runtime.sessionID); this.#forget(runtime.sessionID); }
+    if (applied.scope === 'run') {
+      if (intakeToken) {
+        const current = this.durable.ownership?.intake(runtime.sessionID);
+        if (current?.state !== 'retired') this.durable.ownership?.retireIntake(runtime.sessionID, intakeToken);
+      }
+      this.durable.questions?.clear(runtime.sessionID); this.#forget(runtime.sessionID);
+    }
     else if (entry) {
       delete entry.slot; delete entry.reason; delete entry.restore; delete entry.replacing;
       entry.state = 'active';
@@ -486,9 +594,19 @@ export class NativeIntake {
     };
   }
 
+  /** An MDD question of a run that moved to another conversation can never answer anything here. */
+  #refuseMovedAway(call: TaskCall, args: unknown): void {
+    if (!this.runner.movedAway?.(call.sessionID)) return;
+    if (this.#sessions.has(call.sessionID) || this.#owned(args))
+      throw new Error('This conversation\'s run moved to another conversation; its native questions cannot approve or answer anything here.');
+  }
+
   async beforeQuestion(call: TaskCall, args: unknown): Promise<void> {
+    this.#refuseMovedAway(call, args);
+    const owner = this.runner.owner?.(call.sessionID);
     const entry = this.#entry(call, args);
-    if (!entry) return;
+    if (!entry) { if (owner) throw new Error('Native question has no restored intake; no answer is authorized.'); return; }
+    if (entry.slot?.kind === 'preflight') this.#assertIntake(entry);
     // While MDD has a question pending, that one is the only question that may run: anything else
     // leaves the user answering two things at once, and an altered copy of it is a forgery.
     // Otherwise a question MDD never issued belongs to the coordinator, and asking the user
@@ -503,6 +621,11 @@ export class NativeIntake {
     const status = this.runner.status(call.sessionID);
     if ('contextual' in status && status.contextual) throw new Error('Wait for the contextual exploration before answering the main approval.');
     if (entry.state !== 'question-ready') return this.#fail(entry, new Error('Unexpected, duplicate, or changed native question.'));
+    const reserved = this.runner.reserve?.(call.sessionID, call.callID);
+    const held = this.runner.status(call.sessionID).state;
+    // Recorded with the question so a restart can prove which run and settled state it holds.
+    if (reserved && ['ready', 'await-approval', 'blocked', 'complete'].includes(held)) entry.reserved = { runID: reserved.runID, stable: held as Reservation['stable'] };
+    else delete entry.reserved;
     entry.state = 'accepting';
     try {
       entry.slot!.callID = boundedText(call.callID, 'native question callID', 256);
@@ -510,21 +633,47 @@ export class NativeIntake {
       if (this.durable.questions?.read(call.sessionID)?.retiredCalls?.includes(call.callID)) throw new Error('Native question call ID belongs to an earlier question.');
       this.#persistQuestion(entry, 'pending');
       await this.inspect.question(entry.runtime, call, entry.slot!.args);
+      this.runner.owner?.(call.sessionID, call.callID);
       if (entry.state !== 'accepting') throw new Error('Question became uncertain before execution.');
       entry.state = 'await-answer';
-    } catch (error) { this.#fail(entry, error); }
+    } catch (error) { this.runner.release?.(call.sessionID, call.callID); delete entry.reserved; this.#fail(entry, error); }
+  }
+
+  /**
+   * A native question whose answer could not be accepted still ended. Its durable record is
+   * settled first — a pending one is cancelled, an answered one keeps its unapplied answer — and
+   * only then is the writer released, so the parent is never left locked by a finished call.
+   */
+  #abandonQuestion(entry: Intake, call: TaskCall): void {
+    try {
+      const record = this.durable.questions?.read(call.sessionID);
+      if (record?.callID === call.callID && record.state === 'pending')
+        this.durable.questions!.write(call.sessionID, { ...record, state: 'cancelled', sequence: record.sequence + 1 });
+      const settled = this.durable.questions?.read(call.sessionID);
+      if (!this.durable.questions || (settled?.callID === call.callID && ['cancelled', 'answered', 'settled'].includes(settled.state)) ||
+          (settled && settled.callID !== call.callID)) {
+        this.runner.release?.(call.sessionID, call.callID);
+        delete entry.reserved;
+      }
+    } catch { /* The record is unconfirmed: the reservation stays, and reset needs the user's word. */ }
   }
 
   async afterQuestion(call: TaskCall, args: unknown, output: unknown): Promise<void> {
+    this.#refuseMovedAway(call, args);
+    const owner = this.runner.owner?.(call.sessionID, call.callID);
     const entry = this.#entry(call, args);
-    if (!entry || !this.#owned(args)) return;
+    if (!entry || !this.#owned(args)) { if (owner) throw new Error('Native question callback has no current issued question; no answer was accepted.'); return; }
+    if (this.durable.questions?.read(call.sessionID)?.retiredCalls?.includes(call.callID))
+      throw new Error('Native question call was retired; its old answer cannot affect the fresh question.');
     const slot = entry.slot;
+    if (slot?.kind === 'preflight') this.#assertIntake(entry);
     if (entry.state !== 'await-answer' || !slot || slot.callID !== call.callID || !isDeepStrictEqual(args, slot.args)) {
       return this.#fail(entry, new Error('Native answer does not match the pending parent, call, and question.'));
     }
     entry.state = 'accepting';
     try {
       await this.inspect.question(entry.runtime, call, slot.args);
+      this.runner.owner?.(call.sessionID, call.callID);
       if (entry.state !== 'accepting') throw new Error('Question became uncertain during result inspection.');
       let selections: string[][];
       try { selections = nativeQuestionAnswers(slot.args, output); }
@@ -576,8 +725,11 @@ export class NativeIntake {
       entry.receipts.push({ kind: slot.kind, ...(slot.phase ? { phase: slot.phase } : {}), callID: call.callID, answers: selections });
       this.#recordConsent(entry);
       if (entry.slot === slot) this.#persistQuestion(entry, 'settled');
+      this.runner.release?.(call.sessionID, call.callID);
+      delete entry.reserved;
     } catch (error) {
-      if (error instanceof UnselectedAnswer) return this.#unanswered(entry, slot, call);
+      if (error instanceof UnselectedAnswer) { this.#unanswered(entry, slot, call); this.runner.release?.(call.sessionID, call.callID); delete entry.reserved; return; }
+      this.#abandonQuestion(entry, call);
       this.#fail(entry, error);
     }
   }
@@ -631,11 +783,14 @@ export class NativeIntake {
   }
 
   nativeError(call: TaskCall): void {
+    this.runner.owner?.(call.sessionID, call.callID);
     const entry = this.#sessions.get(call.sessionID);
     if (!entry || entry.slot?.callID !== call.callID || !['accepting', 'await-answer'].includes(entry.state)) return;
     this.#persistQuestion(entry, 'cancelled');
     entry.receipts.push({ kind: entry.slot.kind, callID: call.callID, answers: [], cancelled: true });
     this.#recordConsent(entry);
+    this.runner.release?.(call.sessionID, call.callID);
+    delete entry.reserved;
     if (entry.restore) { this.#restore(entry, 'Change cancelled; the current plan and approval are unchanged.'); return; }
     if (['approval', 'clarification'].includes(entry.slot.kind)) {
       entry.state = 'paused';
@@ -665,6 +820,7 @@ export class NativeIntake {
    * for the life of the process and slow down every question that has to be matched against it.
    */
   #forget(sessionID: string): void {
+    this.#reissued.delete(sessionID);
     for (const [question, owner] of this.#questionOwners) if (owner === sessionID) this.#questionOwners.delete(question);
     this.#sessions.delete(sessionID);
   }
@@ -680,7 +836,26 @@ export class NativeIntake {
       usedMessages: [...entry.usedMessages], proposed: [...entry.proposed] });
   }
 
+  #claimIntake(entry: Intake): void {
+    if (!this.durable.ownership) return;
+    const parent = entry.runtime.sessionID;
+    const current = this.durable.ownership.intake(parent);
+    if (entry.intakeToken && current?.state === 'pending' && current.token === entry.intakeToken) return;
+    if (!entry.userMessageID) throw new Error('Native intake needs a proven user message before reserving its question.');
+    const token = randomUUID();
+    this.durable.ownership.claimIntake(parent, token, entry.userMessageID);
+    entry.intakeToken = token;
+  }
+
+  #assertIntake(entry: Intake): void {
+    if (!this.durable.ownership) return;
+    const current = this.durable.ownership.intake(entry.runtime.sessionID);
+    if (!entry.intakeToken || current?.token !== entry.intakeToken || current.state !== 'pending')
+      throw new Error('The native preflight question is no longer owned by this intake.');
+  }
+
   #slot(entry: Intake, slot: Slot, reissued = false): void {
+    if (slot.kind === 'preflight') this.#claimIntake(entry);
     const next = structuredClone(slot);
     // Ownership compares envelope values across all parents. Equal wording and options must not
     // let another session's first registered question claim this one.
@@ -705,17 +880,33 @@ export class NativeIntake {
     const status = this.runner.status(parent);
     const runID = slot.kind === 'preflight' ? undefined : 'runID' in status ? status.runID as string : undefined;
     if (slot.kind !== 'preflight' && !runID) throw new Error('Native question cannot be bound to a live run.');
-    const checkpoint = runID ? this.durable.checkpoint?.read(parent)?.checkpoint : undefined;
-    if (runID && this.durable.checkpoint && (checkpoint?.version !== STABLE_CHECKPOINT_VERSION || checkpoint.runID !== runID)) {
-      throw new Error('Native question cannot be bound to the current durable run checkpoint.');
+    // A question that holds the writer records which run and settled state it reserved, including
+    // a re-preflight of an existing run, which has no runID of its own.
+    const reservation = entry.reserved && !['prepared', 'withdrawn'].includes(state) ? entry.reserved : undefined;
+    // The outcome of an issued question keeps the binding it was issued against; only preparing or
+    // issuing a question binds it to the checkpoint as it is now.
+    const inherited = !['prepared', 'withdrawn', 'pending'].includes(state) && old?.callID !== undefined && old.callID === slot.callID;
+    let binding: QuestionRecord['checkpoint'];
+    if (inherited) binding = old!.checkpoint;
+    else {
+      const bound = runID ?? reservation?.runID;
+      const checkpoint = bound ? this.durable.checkpoint?.read(parent)?.checkpoint : undefined;
+      // A run whose checkpoint was degraded to data-only has nothing to bind; its question still records.
+      const unbound = !!bound && !checkpoint && this.runner.resumable?.(parent) === false;
+      if (bound && this.durable.checkpoint && !unbound && (checkpoint?.version !== STABLE_CHECKPOINT_VERSION || checkpoint.runID !== bound)) {
+        throw new Error('Native question cannot be bound to the current durable run checkpoint.');
+      }
+      binding = checkpoint && checkpoint.version === STABLE_CHECKPOINT_VERSION ? { sequence: checkpoint.sequence, digest: checkpoint.dataDigest } : undefined;
     }
+    const held = inherited ? old!.reservation : reservation;
     const record: QuestionRecord = {
       version: 1, parent, sequence: (old?.sequence ?? -1) + 1,
       requirements: entry.requirements, known: structuredClone(entry.known),
       ...(entry.userMessageID ? { userMessageID: entry.userMessageID } : {}),
       ...(entry.context ? { context: { ...entry.context } } : {}),
       ...(runID ? { runID } : {}),
-      ...(checkpoint && checkpoint.version === STABLE_CHECKPOINT_VERSION ? { checkpoint: { sequence: checkpoint.sequence, digest: checkpoint.dataDigest } } : {}),
+      ...(held ? { reservation: { ...held } } : {}),
+      ...(binding ? { checkpoint: { ...binding } } : {}),
       state, slot: (({ callID: _callID, ...data }) => structuredClone(data))(slot), clarifications: structuredClone(entry.clarifications),
       deferred: structuredClone(entry.deferred), clarificationAnswers: structuredClone(entry.clarificationAnswers),
       ...(!['prepared', 'withdrawn'].includes(state) ? { callID: slot.callID! } : {}),
@@ -734,7 +925,8 @@ export class NativeIntake {
     this.#recordConsent(entry);
     await this.runner.start({ requirements: entry.requirements, preflight: { answers: answersFromLabels(entry.known, selections) },
       ...(entry.context ? { context: entry.context } : {}),
-      ...(engram ? { engramEndpoint: engram.endpoint, project: engram.project } : {}) }, entry.runtime, { requirementsConfirmed: true, ...(entry.replacing ? { replace: true } : {}), ...(entry.userMessageID ? { userMessageID: entry.userMessageID } : {}) });
+      ...(engram ? { engramEndpoint: engram.endpoint, project: engram.project } : {}) }, entry.runtime, { requirementsConfirmed: true, ...(entry.replacing ? { replace: true } : {}), ...(entry.userMessageID ? { userMessageID: entry.userMessageID } : {}), ...(entry.slot?.callID ? { authorityCallID: entry.slot.callID } : {}) });
+    if (entry.intakeToken) this.durable.ownership?.settleIntake(entry.runtime.sessionID, entry.intakeToken);
     if (entry.state !== expectedState) throw new Error('Intake became uncertain during runner initialization.');
     entry.provenance = { requirements: 'native-user', preflight: source, profile: this.#profile.name };
     entry.state = 'active';

@@ -171,6 +171,8 @@ For explicit recovery, mdd_reset scope phase retries settled work or reopens the
 scope run forgets the run. Recorded artifacts and memory are preserved; inspect partial changes.
 An exhausted fallback requires explicit recovery, not an automatic reset loop.
 After failed Verify, if the user asks to fix it, use scope rework with their exact userText.
+After a restart read mdd_status first; settled work resumes. Moving a run to another
+conversation follows the mdd_transfer and mdd_transfer_recover descriptions exactly.
 Present the report string mdd_status returns, at the detail the user asked for. status.reportDetail
 says which: low is the summary paragraph alone, medium adds Cómo, detailed adds Estado and
 Cobertura. Do not add sections that level omits or collapse sections it includes; the level is the

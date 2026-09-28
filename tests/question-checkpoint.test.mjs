@@ -134,7 +134,7 @@ test('a stale checkpoint or failed prepared write prevents question exposure', a
   assert.equal(f.inspected(), 0);
 });
 
-test('failed answer write retains a pending call and cannot approve', async t => {
+test('failed answer write cancels the call instead of locking the parent, and cannot approve', async t => {
   const f = fixture(t);
   const intake = f.gate();
   const args = await f.start(intake);
@@ -146,9 +146,13 @@ test('failed answer write retains a pending call and cannot approve', async t =>
     return original(parent, value);
   };
   await assert.rejects(intake.afterQuestion(call, args, output(args, [['Continuar']])), /Simulated readback failure/);
-  assert.equal(f.store.read(runtime.sessionID).state, 'pending');
+  // The call ended without a recorded answer: it is cancelled, never approved, and nothing is left pending.
+  assert.equal(f.store.read(runtime.sessionID).state, 'cancelled');
+  assert.equal(f.store.read(runtime.sessionID).answer, undefined);
   assert.equal(f.approvals(), 0);
-  assert.equal(f.gate().status(runtime.sessionID).state, 'recovery-blocked');
+  assert.notEqual(f.gate().status(runtime.sessionID).state, 'recovery-blocked');
+  await assert.rejects(intake.afterQuestion(call, args, output(args, [['Continuar']])));
+  assert.equal(f.approvals(), 0);
 });
 
 test('deferred clarification and its native response remain unresolved through the next approval', async t => {

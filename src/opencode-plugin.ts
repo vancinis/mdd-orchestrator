@@ -1,7 +1,8 @@
 import { tool } from '@opencode-ai/plugin';
 import type { Plugin, PluginInput } from '@opencode-ai/plugin';
 import { isDeepStrictEqual } from 'node:util';
-import { boundedText, PhaseRunner } from './phase-runner.js';
+import { createHash, randomUUID } from 'node:crypto';
+import { boundedText, movedMessage, PhaseRunner } from './phase-runner.js';
 import type { Inspect, Liveness, Runtime } from './phase-runner.js';
 import { freezeProfile, setupDiagnostic } from './settings.js';
 import { loadGlobalSettings } from './global-settings.js';
@@ -13,9 +14,10 @@ import { recordTelemetry } from './telemetry.js';
 import type { TelemetryUsage } from './telemetry.js';
 import { ProgressGuard } from './progress.js';
 import { RunDossierStore } from './run-dossier.js';
-import { assessTransfer } from './transfer.js';
-import { CheckpointStore } from './checkpoint.js';
+import { assessTransfer, projectTargetTransfer } from './transfer.js';
+import { CheckpointStore, STABLE_CHECKPOINT_VERSION } from './checkpoint.js';
 import { QuestionCheckpointStore } from './question-checkpoint.js';
+import { RunOwnershipStore } from './run-ownership.js';
 import { prBodyRequest, renderPRBody } from './pr-body.js';
 import { TranslationError } from './pr-translation.js';
 import { mddDataRoot } from './engram-http.js';
@@ -65,7 +67,7 @@ const CONCERN_SCHEMA = tool.schema.object({
 });
 
 /** MDD tools belong to the MDD coordinator. Other agents share the registry but not this state. */
-export const MDD_TOOLS = ['mdd_start', 'mdd_status', 'mdd_prepare_advance', 'mdd_revisit', 'mdd_phase_result', 'mdd_reset', 'mdd_change_request', 'mdd_contextual_explore', 'mdd_context', 'mdd_pr_body', 'mdd_improve', 'mdd_improvements'] as const;
+export const MDD_TOOLS = ['mdd_start', 'mdd_status', 'mdd_prepare_advance', 'mdd_revisit', 'mdd_phase_result', 'mdd_reset', 'mdd_change_request', 'mdd_contextual_explore', 'mdd_context', 'mdd_pr_body', 'mdd_improve', 'mdd_improvements', 'mdd_transfer', 'mdd_transfer_recover'] as const;
 /**
  * The one MDD tool that is not the coordinator's alone. It is kept out of `MDD_TOOLS` because
  * that list is what `restrictTools` switches off everywhere else, and this one has to reach the
@@ -194,6 +196,19 @@ export function createInspector(input: PluginInput, timeout = 5000, now: () => n
     }), timeout);
     return list(response.data, 'message history', HISTORY_MAX);
   };
+  /** The installed SDK exposes GET /session/{id}/message/{messageID}; no tail scan proves an older ID. */
+  const exactMessage = async (sessionID: string, messageID: string, directory: string) => {
+    try {
+      const response = await readSdk(signal => input.client.session.message({
+        path: { id: sessionID, messageID }, query: { directory }, signal, throwOnError: true,
+      }), timeout);
+      const message = record(response.data, 'exact native message');
+      const info = record(message.info, 'exact native message info');
+      if (info.id !== messageID || info.sessionID !== sessionID) throw new Error('Exact native message identity changed.');
+      list(message.parts, 'exact message parts', PARTS_MAX);
+      return message;
+    } catch { throw new Error('Exact native message lookup is unavailable or malformed. Do not infer the transfer outcome; inspect the native session.'); }
+  };
   /**
    * What OpenCode can say about the child of one dispatched task. A child is stopped when it
    * finished its last message and the host reports it idle — or, for a task the host left marked
@@ -303,6 +318,58 @@ export function createInspector(input: PluginInput, timeout = 5000, now: () => n
     return candidates;
   };
   const inspector: Inspect & IntakeInspect = {
+    async transferLiveness(runtime, sourceSessionID, runID, requestDigest, assistantMessageID) {
+      await inspector.parent(runtime);
+      const statuses = await readSdk(signal => input.client.session.status({ query: { directory: runtime.directory }, signal, throwOnError: true }), timeout);
+      const state = record(statuses.data, 'session statuses')[runtime.sessionID];
+      if (state !== undefined && record(state, 'target status').type !== 'idle') return 'running';
+      const history = assistantMessageID ? [await exactMessage(runtime.sessionID, assistantMessageID, runtime.directory)]
+        : await messages(runtime.sessionID, runtime.directory);
+      if (!assistantMessageID && history.length >= HISTORY_MAX) throw new Error('Transfer liveness history is incomplete.');
+      if (assistantMessageID) {
+        const info = record(history[0]!.info, 'transfer assistant message');
+        const path = record(info.path, 'transfer assistant path');
+        if (info.role !== 'assistant' || info.agent !== COORDINATOR || path.cwd !== runtime.directory || path.root !== runtime.worktree)
+          throw new Error('Transfer call was not issued by this native coordinator.');
+      }
+      const calls = history.flatMap(message => {
+        const info = record(message.info, 'transfer assistant message');
+        return list(message.parts, 'message parts', PARTS_MAX).filter(part => {
+          if (part.type !== 'tool' || part.tool !== 'mdd_transfer') return false;
+          const path = record(info.path, 'transfer assistant path');
+          if (info.role !== 'assistant' || info.agent !== COORDINATOR || info.sessionID !== runtime.sessionID ||
+              path.cwd !== runtime.directory || path.root !== runtime.worktree ||
+              part.sessionID !== runtime.sessionID || part.messageID !== info.id ||
+              typeof part.callID !== 'string' || !part.callID.trim())
+            throw new Error('Native transfer tool call does not belong to this target coordinator message.');
+          const args = record(record(part.state, 'transfer call state').input, 'transfer call input');
+          return args.sourceSessionID === sourceSessionID && args.runID === runID &&
+            typeof args.userText === 'string' && createHash('sha256').update(canonicalNativeText(args.userText)).digest('hex') === requestDigest;
+        });
+      });
+      if (calls.length !== 1) return 'unknown';
+      const status = record(calls[0]!.state, 'transfer call state').status;
+      return status === 'running' || status === 'pending' ? 'running' :
+        status === 'completed' || status === 'error' ? 'stopped' : 'unknown';
+    },
+    async confirmTransfer(runtime, receipt, runID) {
+      await inspector.parent(runtime);
+      const message = await exactMessage(runtime.sessionID, receipt.nativeUserMessageID, runtime.directory);
+      const info = record(message.info, 'message');
+      if (info.role !== 'user' || info.sessionID !== runtime.sessionID || receipt.targetSessionID !== runtime.sessionID)
+        throw new Error('Transfer receipt does not belong to this native target.');
+      const parts = list(message.parts, 'message parts', PARTS_MAX).filter(part => part.type === 'text');
+      const authored = authoredNativeText(parts, runtime.sessionID, receipt.nativeUserMessageID);
+      const canonical = authored === undefined ? '' : canonicalNativeText(authored);
+      const tokens = canonical.split(/\s+/);
+      const checkpoint = new CheckpointStore(mddDataRoot(runtime.directory)).read(runtime.sessionID)?.checkpoint;
+      if (createHash('sha256').update(canonical).digest('hex') !== receipt.requestDigest ||
+          !tokens.includes(`sourceSessionID=${receipt.sourceSessionID}`) || !tokens.includes(`runID=${runID}`))
+        throw new Error('Transfer receipt is not backed by the exact native target request.');
+      if (checkpoint?.version === 3 && checkpoint.events.at(-1)?.kind === 'rework' &&
+          !tokens.some(token => /^rework[.!?]?$/i.test(token)))
+        throw new Error('Target rework lacks an explicit native rework request.');
+    },
     /**
      * Recovers the objective of a start that only failed because MDD was not set up yet. That is a
      * narrow, legacy shape: one completed `mdd_start` whose own output says it stopped at setup.
@@ -488,9 +555,11 @@ const plugin: Plugin = async input => {
   // in. A linked git worktree is removed as soon as its task is done; anchored there, the dossier
   // and the lessons went with it. For an ordinary checkout this is byte-for-byte today's directory.
   const dataRoot = mddDataRoot(input.directory);
-  // Explicit experimental opt-in only. Existing runs retain their v1 data-only behavior until
-  // replacement and every restart boundary have an end-to-end contract.
-  const checkpoint = process.env.MDD_EXPERIMENTAL_RESUME === '1' ? new CheckpointStore(dataRoot) : undefined;
+  // Resume checkpoints and durable run ownership are always on. A checkpoint that cannot be
+  // written degrades that run to data-only recovery (see PhaseRunner#checkpoint) instead of
+  // blocking live work; the progress marker remains the duplicate-dispatch guard either way.
+  const checkpoint = new CheckpointStore(dataRoot);
+  const ownership = new RunOwnershipStore(dataRoot);
   const runner = new PhaseRunner(inspector, {
     // The runner passes the run's own checkout directory to these callbacks; MDD writes to the
     // shared anchor instead, so a worktree's telemetry and lessons join the repository's own rather
@@ -498,12 +567,11 @@ const plugin: Plugin = async input => {
     telemetry: (_directory, value, now) => recordTelemetry(dataRoot, value, now),
     progress: new ProgressGuard(dataRoot),
     dossier: new RunDossierStore(dataRoot),
-    ...(checkpoint ? { checkpoint } : {}),
+    checkpoint, ownership,
     lessons: (_directory, value, now) => recordLessonQuietly(dataRoot, value, now),
     ledger: (_directory, value, now) => recordRunQuietly(dataRoot, value, now),
   });
-  const intake = new NativeIntake(runner, inspector, settings, checkpoint
-    ? { checkpoint, questions: new QuestionCheckpointStore(dataRoot) } : {});
+  const intake = new NativeIntake(runner, inspector, settings, { checkpoint, questions: new QuestionCheckpointStore(dataRoot), ownership });
   /**
    * The workspace only ever learned that MDD had been used here once a phase had already produced
    * a telemetry event, so every conversation that died earlier — at a question the host never
@@ -532,6 +600,35 @@ const plugin: Plugin = async input => {
    * to inspect the run, and only that call pays for the whole thing.
    */
   const reply = (value: unknown, view: StatusView = 'compact'): string => payload(value, assets, view);
+  /**
+   * `restoreFailed`: the target could not re-confirm its native request or bytes this time. A
+   * receipt still proves ownership, but that restore failure is reported, not hidden as confirmed.
+   */
+  const ambiguousTransfer = (sessionID: string, restoreFailed = false): Record<string, unknown> => {
+    try {
+      const saved = checkpoint?.read(sessionID)?.checkpoint;
+      const claim = ownership?.parentClaim(sessionID);
+      const runID = saved?.version === 3 ? saved.runID : claim?.transfer ? claim.runID : undefined;
+      if (!runID) return {};
+      const owner = ownership?.read(runID);
+      // A finished transfer is settled by its self-contained receipt, whatever the target's
+      // checkpoint is now (current, a later descendant, degraded, or cleared).
+      if (!restoreFailed && owner?.receipt?.targetSessionID === sessionID && owner.ownerSessionID === sessionID && owner.state !== 'transferring' &&
+          claim?.runID === runID && !claim.retired)
+        return { transfer: { state: 'confirmed', sourceSessionID: owner.receipt.sourceSessionID, operationID: owner.receipt.operationID } };
+      if (claim?.transfer || owner?.transfer?.targetSessionID === sessionID || owner?.receipt?.targetSessionID === sessionID) {
+        const published = !!saved || !!new ProgressGuard(dataRoot).read(sessionID);
+        const stage = owner?.receipt?.targetSessionID === sessionID ? 'finished-unconfirmed' :
+          published ? 'published' : owner?.state === 'transferring' ? 'owner-fenced' : 'claim-only';
+        return { transfer: { state: 'ambiguous', stage } };
+      }
+      if (owner?.originSessionID === sessionID && owner.ownerSessionID !== sessionID)
+        return { transfer: { state: 'source-retired', targetSessionID: owner.ownerSessionID } };
+      if (owner?.state === 'transferring' && owner.ownerSessionID === sessionID)
+        return { transfer: { state: 'source-fenced', targetSessionID: owner.transfer?.targetSessionID } };
+      return {};
+    } catch { return {}; }
+  };
   const opened = new Set<string>();
   const nativeChildren = new Set<string>();
   const notify = async (sessionID: string, message: string, variant: 'success' | 'error' | 'info' = 'info'): Promise<void> => {
@@ -547,13 +644,22 @@ const plugin: Plugin = async input => {
   const translationAttempts = new Map<string, number>();
   const enter = (context: { agent: string; sessionID: string; directory: string; worktree: string }, name: string): void => {
     coordinatorOnly(context.agent, name);
+    // A conversation whose run moved away by a finished transfer can only start over (or read
+    // status, or record/list improvements); nothing may act on the run it handed over.
+    const moved = runner.movedAway(context.sessionID);
+    if (moved && !['mdd_status', 'mdd_start', 'mdd_reset', 'mdd_improve', 'mdd_improvements'].includes(name))
+      throw new Error(movedMessage(moved.runID, moved.targetSessionID));
+    // Every coordinator tool (including consent preparation and inline results) must reject a
+    // source whose durable owner is no longer idle, before it can mutate local state. Reset and
+    // transfer recovery establish their own authority: they exist to resolve a held writer.
+    if (!['mdd_status', 'mdd_transfer_recover', 'mdd_reset'].includes(name)) runner.owner(context.sessionID);
     if (opened.has(context.sessionID)) return;
     opened.add(context.sessionID);
     // Never throws, and its result is deliberately unused: instrumentation that can fail a run is
     // instrumentation that ends up being removed.
     recordSession(dataRoot, { sessionID: context.sessionID, agent: context.agent, directory: context.directory, worktree: context.worktree });
   };
-  return {
+  const hooks: Awaited<ReturnType<Plugin>> = {
     config: async config => {
       applyModelOverrides(config, profile);
       restrictTools(config as Parameters<typeof restrictTools>[0]);
@@ -561,7 +667,7 @@ const plugin: Plugin = async input => {
     },
     tool: {
       mdd_transfer: tool({
-        description: 'Fail-closed new-parent continuation preflight. The native user must explicitly name sourceSessionID and runID in userText. This version never transfers: durable exclusive ownership across both parents is not yet proven. It does not copy a checkpoint, authorize a phase or reuse consent.',
+        description: 'Continue an MDD run from another conversation in this new one. Use it only when the user\'s latest message in this conversation explicitly names sourceSessionID=<id> and runID=<id> (mdd_status in the old conversation shows both); pass that message unchanged as userText. The run moves here with its evidence, the old conversation is fenced, and any approval is asked again here — old consent is never reused. If the result says publication is unknown, read mdd_status in both conversations instead of retrying.',
         args: {
           sourceSessionID: tool.schema.string().min(1),
           runID: tool.schema.string().min(1),
@@ -570,10 +676,146 @@ const plugin: Plugin = async input => {
         async execute(args, context) {
           enter(context, 'mdd_transfer');
           if (context.abort.aborted) throw new Error('Transfer preflight was aborted.');
-          if (!checkpoint) return reply({ state: 'transfer-blocked', diagnostic: 'ownership-unproven',
-            reason: 'Cross-parent continuation is not enabled. No transfer occurred.' });
-          await inspector.intake(context, boundedText(args.userText, 'actual native transfer request', 12000), context.messageID);
-          return reply(assessTransfer(args, context, checkpoint, new ProgressGuard(dataRoot), new QuestionCheckpointStore(dataRoot)));
+          const request = boundedText(args.userText, 'actual native transfer request', 12000);
+          const userMessageID = await inspector.intake(context, request, context.messageID);
+          if (typeof userMessageID !== 'string') throw new Error('Transfer needs the exact native target user message ID.');
+          const assessment = assessTransfer(args, context, checkpoint, new ProgressGuard(dataRoot), new QuestionCheckpointStore(dataRoot));
+          if (assessment.diagnostic !== 'ownership-unproven') return reply(assessment);
+          try { await inspector.parent({ ...context, sessionID: args.sourceSessionID }); }
+          catch { return reply({ state: 'transfer-blocked', diagnostic: 'source-unavailable',
+            reason: 'The named source is not a native top-level MDD parent in this workspace. No transfer occurred.' }); }
+          const saved = checkpoint.read(args.sourceSessionID)?.checkpoint;
+          if (saved?.version !== STABLE_CHECKPOINT_VERSION || saved.runID !== args.runID)
+            return reply({ state: 'transfer-blocked', diagnostic: 'source-unavailable', reason: 'The source checkpoint changed before transfer. No transfer occurred.' });
+          if (saved.data.memoryProject) {
+            try { await intake.boundRunMemory(context, saved.data.memoryProject); }
+            catch { return reply({ state: 'transfer-blocked', diagnostic: 'memory-unavailable',
+              reason: 'The target has no independently bound Engram session for this project. No transfer occurred.' }); }
+          }
+          const progress = new ProgressGuard(dataRoot);
+          let projection: ReturnType<typeof projectTargetTransfer>;
+          try { projection = projectTargetTransfer(saved, progress.read(args.sourceSessionID), context,
+            { sessionID: context.sessionID, userMessageID, userText: request, latest: true, authored: true }); }
+          catch { return reply({ state: 'transfer-blocked', diagnostic: 'source-unavailable',
+            reason: 'The source has no eligible settled target-consent projection. No owner was transferred.' }); }
+          const intent = { operationID: randomUUID(), nativeUserMessageID: userMessageID, assistantMessageID: context.messageID,
+            requestDigest: createHash('sha256').update(canonicalNativeText(request)).digest('hex') };
+          const sourceOwner = ownership!.read(args.runID);
+          if (!sourceOwner || sourceOwner.ownerSessionID !== args.sourceSessionID || sourceOwner.state !== 'idle')
+            return reply({ state: 'transfer-blocked', diagnostic: 'ownership-unproven', reason: 'The source owner is not idle. No transfer occurred.' });
+          try {
+            const reserved = ownership!.reserveVerifiedTransfer(args.runID, args.sourceSessionID, context,
+              { sequence: saved.sequence, digest: saved.dataDigest }, sourceOwner.epoch, intent);
+            checkpoint.write(context.sessionID, projection.checkpoint);
+            if (!isDeepStrictEqual(checkpoint.read(context.sessionID)?.checkpoint, projection.checkpoint)) throw new Error('Target checkpoint readback differs.');
+            if (projection.progress) {
+              progress.write(context.sessionID, projection.progress);
+              if (!isDeepStrictEqual(progress.read(context.sessionID), projection.progress)) throw new Error('Target progress readback differs.');
+            }
+            ownership!.finishVerifiedTransfer(args.runID, args.sourceSessionID, context.sessionID, reserved.epoch,
+              { sourceSequence: saved.sequence, sourceDigest: saved.dataDigest,
+                targetSequence: projection.checkpoint.sequence, targetDigest: projection.checkpoint.dataDigest }, intent);
+            const restored = await runner.restore(context, project => intake.boundRunMemory(context, project));
+            if (!restored.restored || restored.reason) throw new Error('The committed target run could not be restored; inspect mdd_status.');
+            intake.recover(context);
+            const current = record(intake.status(context.sessionID), 'transferred status');
+            const ready = current.state === 'review-ready'
+              ? record(intake.prepareAdvance({ questions: [] }, context), 'fresh target approval') : current;
+            return reply({ ...ready, transfer: { state: 'confirmed', sourceSessionID: args.sourceSessionID, operationID: intent.operationID } });
+          } catch {
+            return reply({ state: 'transfer-blocked', diagnostic: 'publication-unknown',
+              reason: 'Transfer publication or restoration is unconfirmed. Inspect mdd_status in both parents; never retry this transfer blindly.' });
+          }
+        },
+      }),
+      mdd_transfer_recover: tool({
+        description: 'Resolve a transfer that was interrupted, only on the user\'s word: pass their latest message unchanged as userText; it must name sourceSessionID, runID and operationID (mdd_status in this conversation shows them) and say the transfer stopped. release-claim frees this conversation when nothing was fenced; abort-fenced returns the run to the old conversation, removing target bytes only when they are exactly the transfer projection; finish-published completes a published transfer, regenerating a missing deterministic progress marker. A finished transfer never revives the old conversation.',
+        args: {
+          sourceSessionID: tool.schema.string().min(1), runID: tool.schema.string().min(1),
+          operationID: tool.schema.string().min(1),
+          action: tool.schema.enum(['release-claim', 'abort-fenced', 'finish-published']),
+          userText: tool.schema.string().min(1),
+        },
+        async execute(args, context) {
+          enter(context, 'mdd_transfer_recover');
+          const text = boundedText(args.userText, 'native recovery request', 12000);
+          const tokens = canonicalNativeText(text).split(/\s+/);
+          if (!tokens.includes(`sourceSessionID=${args.sourceSessionID}`) || !tokens.includes(`runID=${args.runID}`) ||
+              !tokens.includes(`operationID=${args.operationID}`) || !/\b(stopped|interrupted)\b/i.test(text))
+            throw new Error('Recovery needs an explicit native request naming the exact source, run and operation and saying the transfer stopped.');
+          const userID = await inspector.intake(context, text, context.messageID);
+          if (!userID) throw new Error('Recovery could not confirm the latest target-authored user message.');
+          const claim = ownership.parentClaim(context.sessionID);
+          const owner = ownership.read(args.runID);
+          const unfinished = owner?.recoveringTransfer;
+          const settled = owner?.recoveredTransfer;
+          const intent = claim?.transfer ?? unfinished;
+          const alreadySettled = claim?.retired && claim.runID === args.runID && settled?.operationID === args.operationID &&
+            settled.targetSessionID === context.sessionID && owner?.ownerSessionID === args.sourceSessionID;
+          if ((!claim || claim.runID !== args.runID || !intent || intent.sourceSessionID !== args.sourceSessionID ||
+              intent.operationID !== args.operationID || unfinished && unfinished.targetSessionID !== context.sessionID) && !alreadySettled)
+            return reply({ state: 'transfer-blocked', diagnostic: 'source-unavailable', reason: 'No matching target transfer claim exists; nothing was cleared.' });
+          try { await inspector.parent({ ...context, sessionID: args.sourceSessionID }); }
+          catch { return reply({ state: 'transfer-blocked', diagnostic: 'source-unavailable', reason: 'The native source parent cannot be confirmed; no claim was cleared.' }); }
+          if (claim.retired && settled?.operationID === args.operationID && settled.targetSessionID === context.sessionID &&
+              settled.action === args.action && owner?.ownerSessionID === args.sourceSessionID)
+            return reply({ state: 'transfer-recovered', action: args.action, sourceSessionID: args.sourceSessionID,
+              runID: args.runID, ownerEpoch: owner.epoch,
+              note: 'This exact recovery was already confirmed. No owner or checkpoint was changed.' });
+          if (!intent) return reply({ state: 'transfer-blocked', diagnostic: 'source-unavailable', reason: 'Recovery intent is unavailable.' });
+          if (owner?.receipt?.targetSessionID === context.sessionID)
+            return reply({ state: 'transfer-blocked', diagnostic: 'target-occupied', reason: 'The target transfer already finished. Read mdd_status; this recovery never revives the source.' });
+          const published = checkpoint.read(context.sessionID)?.checkpoint;
+          const publishedProgress = new ProgressGuard(dataRoot).read(context.sessionID);
+          const publishedQuestion = new QuestionCheckpointStore(dataRoot).read(context.sessionID);
+          // Published bytes can be finished, or removed by abort when they are exactly the
+          // deterministic projection; a bare target-claim release never touches them.
+          if ((published || publishedProgress || publishedQuestion) && (args.action === 'release-claim' || publishedQuestion))
+            return reply({ state: 'transfer-blocked', diagnostic: 'pending-unknown', reason: 'Target publication exists. Inspect it; this recovery cannot discard or replay published work.' });
+          let liveness: 'running' | 'stopped' | 'unknown';
+          try { liveness = await inspector.transferLiveness!(context, args.sourceSessionID, args.runID,
+            intent.requestDigest, intent.assistantMessageID); }
+          catch { return reply({ state: 'transfer-blocked', diagnostic: 'pending-unknown',
+            reason: 'Native transfer liveness is unavailable or outside the complete 100-message window. Keep the claim and inspect the full native history.' }); }
+          if (liveness === 'running') return reply({ state: 'transfer-blocked', diagnostic: 'pending-unknown', reason: 'OpenCode still reports the transfer running; keep the claim.' });
+          const confirmation = claim.transfer ? { operationID: claim.transfer.operationID,
+            nativeUserMessageID: claim.transfer.nativeUserMessageID, requestDigest: claim.transfer.requestDigest,
+            ...(claim.transfer.assistantMessageID ? { assistantMessageID: claim.transfer.assistantMessageID } : {}) } : undefined;
+          try {
+            if (args.action === 'abort-fenced' && (published || publishedProgress)) {
+              if (!claim.transfer || !confirmation) throw new Error('Only a fenced transfer claim can remove its projection.');
+              ownership.removeUnfinishedPublication(args.runID, args.sourceSessionID, context.sessionID, claim.transfer.ownerEpoch + 1, confirmation);
+            }
+          } catch { return reply({ state: 'transfer-blocked', diagnostic: 'pending-unknown',
+            reason: 'The published target is not exactly the transfer projection, so it was kept. Inspect it; nothing was removed.' }); }
+          try {
+            if (args.action === 'finish-published') {
+              if (!claim.transfer || !confirmation || published?.version !== STABLE_CHECKPOINT_VERSION || publishedQuestion)
+                throw new Error('Target publication is missing or has an unresolved question.');
+              const expected = { sourceSequence: claim.transfer.sourceSequence, sourceDigest: claim.transfer.sourceDigest,
+                targetSequence: published.sequence, targetDigest: published.dataDigest };
+              // A crash between the checkpoint and its progress marker left a partial publication.
+              ownership.completePartialPublication(args.runID, args.sourceSessionID, context.sessionID,
+                claim.transfer.ownerEpoch + 1, expected, confirmation);
+              ownership.finishVerifiedTransfer(args.runID, args.sourceSessionID, context.sessionID,
+                claim.transfer.ownerEpoch + 1, expected, confirmation);
+              const restored = await runner.restore(context, project => intake.boundRunMemory(context, project));
+              if (!restored.restored || restored.reason) throw new Error('Committed target could not be restored.');
+              intake.recover(context);
+              const current = record(intake.status(context.sessionID), 'recovered transfer status');
+              const ready = current.state === 'review-ready'
+                ? record(intake.prepareAdvance({ questions: [] }, context), 'recovered target approval') : current;
+              return reply({ ...ready, transfer: { state: 'confirmed', sourceSessionID: args.sourceSessionID,
+                operationID: args.operationID }, recovery: { action: args.action } });
+            }
+            const recovered = unfinished
+              ? ownership.reconcileTransferRecovery(args.runID, context.sessionID, args.operationID, args.action)
+              : ownership.recoverUnpublishedTransfer(args.runID, context.sessionID, args.operationID, claim.transfer!, args.action);
+            return reply({ state: 'transfer-recovered', action: args.action, sourceSessionID: args.sourceSessionID,
+              runID: args.runID, ownerEpoch: recovered.epoch,
+              note: 'The exact recovery was confirmed. No work was re-run and no consent was reused.' });
+          } catch { return reply({ state: 'transfer-blocked', diagnostic: 'pending-unknown',
+            reason: 'Recovery durability is unconfirmed. Inspect owner, checkpoint, progress and target claim; never retry blindly.' }); }
         },
       }),
       mdd_pr_body: tool({
@@ -590,6 +832,7 @@ const plugin: Plugin = async input => {
           if (context.abort.aborted) throw new Error('The PR body draft was aborted.');
           const current = runner.prFacts(context.sessionID);
           await inspector.intake(context, boundedText(args.userText, 'actual user request', 12000), context.messageID);
+          runner.owner(context.sessionID);
           const facts = runner.prFacts(context.sessionID);
           if (facts.runID !== current.runID) throw new Error('The current run changed while drafting; no draft was produced.');
           // Asking again for the recorded text is how a stuck translation is restarted, so it
@@ -627,6 +870,7 @@ const plugin: Plugin = async input => {
           // The same proof mdd_pr_body requires: an improvement attributed to the user has to be
           // one the user actually asked for, not one the model decided to write down for them.
           await inspector.intake(context, boundedText(args.userText, 'actual user request', 12000), context.messageID);
+          runner.owner(context.sessionID);
           return reply(await intake.improve({
             title: boundedText(args.title, 'improvement title', 200),
             detail: boundedText(args.detail, 'improvement detail', 4000),
@@ -662,6 +906,7 @@ const plugin: Plugin = async input => {
           enter(context, 'mdd_start');
           if (context.abort.aborted) throw new Error('MDD start was aborted.');
           const status = record(await intake.start(args, context, context.messageID), 'start status');
+          runner.owner(context.sessionID);
           if (status.setupOrigin) status.setupOrigin = { ...record(status.setupOrigin, 'setup origin'), projectID: input.project.id };
           return reply(status);
         },
@@ -685,13 +930,36 @@ const plugin: Plugin = async input => {
         args: { detail: tool.schema.enum(['compact', 'full']).optional().describe('compact (default) returns protocol fields and what the next call needs; full adds the held workflow snapshot, acceptance, decisions, plan, concerns, artifacts and previous runs.') },
         async execute(args, context) {
           enter(context, 'mdd_status');
-          const resumed = await runner.restore(context, project => intake.boundRunMemory(context, project));
+          const moved = runner.movedAway(context.sessionID);
+          if (moved) return reply({ state: 'transferred', sessionID: context.sessionID, task: undefined, question: undefined,
+            transfer: { state: 'source-retired', targetSessionID: moved.targetSessionID, runID: moved.runID },
+            reason: movedMessage(moved.runID, moved.targetSessionID) }, args.detail ?? 'compact');
+          let resumed: Awaited<ReturnType<typeof runner.restore>>;
+          try { resumed = await runner.restore(context, project => intake.boundRunMemory(context, project)); }
+          catch { return reply({ state: 'recovery-blocked', sessionID: context.sessionID, task: undefined, ...ambiguousTransfer(context.sessionID, true),
+            reason: 'Durable run owner cannot be confirmed for this parent; no task or question was exposed.' }, args.detail ?? 'compact'); }
           try { if (resumed.restored) intake.recover(context); }
           catch { return reply({ state: 'recovery-blocked', sessionID: context.sessionID, task: undefined,
             reason: 'Native question recovery could not be confirmed; do not ask, approve or dispatch. Inspect local question and checkpoint files.' }, args.detail ?? 'compact'); }
           const status = record(intake.status(context.sessionID), 'status');
-          if (resumed.reason) return reply({ ...status, state: 'recovery-blocked', task: undefined,
-            next: { kind: 'wait' }, reason: resumed.reason }, args.detail ?? 'compact');
+          let targetCheckpointPresent = true;
+          try { targetCheckpointPresent = !!checkpoint?.read(context.sessionID); }
+          catch { /* A corrupt checkpoint must keep the restore failure, not look like an empty target. */ }
+          if (!resumed.restored && !targetCheckpointPresent && status.state === 'not-started' && (ambiguousTransfer(context.sessionID).transfer as { state?: string } | undefined)?.state === 'ambiguous')
+            return reply({ ...status, state: 'recovery-blocked', task: undefined, question: undefined,
+              next: { kind: 'wait' }, ...ambiguousTransfer(context.sessionID),
+              reason: 'A target transfer claim is unresolved. Inspect the exact source owner and target publication; do not start or dispatch.' }, args.detail ?? 'compact');
+          if (resumed.reason) {
+            let operationReason: string | undefined;
+            try { operationReason = runner.operationCrash(context.sessionID); }
+            catch { /* The checkpoint failure already blocks restoration; do not hide it. */ }
+            // A pending child is where the user asks whether it still runs: say what OpenCode sees.
+            let seen = {};
+            try { const probe = await runner.probe(context.sessionID, context); if (probe) seen = { liveness: probe }; }
+            catch { /* Status never fails because a probe did. */ }
+            return reply({ ...status, state: 'recovery-blocked', task: undefined, ...ambiguousTransfer(context.sessionID, true), ...seen,
+              next: { kind: 'wait' }, reason: operationReason ?? resumed.reason }, args.detail ?? 'compact');
+          }
           let recovery = {};
           // A live intake in this session is the answer: probing native history there could only
           // report an unrecoverable objective for a run that is healthy and waiting for an answer.
@@ -711,6 +979,8 @@ const plugin: Plugin = async input => {
           }
           return reply({
             ...status, ...recovery, ...liveness,
+            ...(() => { const receipt = runner.owner(context.sessionID)?.receipt;
+              return receipt ? { transfer: { state: 'confirmed', sourceSessionID: receipt.sourceSessionID, operationID: receipt.operationID } } : ambiguousTransfer(context.sessionID); })(),
             runtime: { sessionID: context.sessionID, directory: context.directory, worktree: context.worktree, agent: context.agent },
           }, args.detail ?? 'compact');
         },
@@ -772,6 +1042,21 @@ const plugin: Plugin = async input => {
         },
         async execute(args, context) {
           enter(context, 'mdd_reset');
+          const discard = args.scope === 'run';
+          // The run left for another conversation: only freeing this one is meaningful here, and it
+          // needs no attestation because nothing of that run can be touched from this side.
+          const moved = runner.movedAway(context.sessionID);
+          if (moved) {
+            if (!discard) throw new Error(movedMessage(moved.runID, moved.targetSessionID));
+            const preserved = runner.retireMovedAway(context.sessionID);
+            intake.forgetMovedAway(context.sessionID);
+            return reply({ ...record(intake.status(context.sessionID), 'status'),
+              reset: { scope: 'run', movedTo: moved.targetSessionID, ...(preserved ? { preserved } : {}) } });
+          }
+          if (discard && ownership?.parentClaim(context.sessionID)?.transfer &&
+              ownership.read(ownership.parentClaim(context.sessionID)!.runID)?.receipt?.targetSessionID === context.sessionID &&
+              args.userText === undefined)
+            throw new Error('Discarding a transferred target requires the exact latest native user request in userText. The source will not be reactivated.');
           if (args.scope === 'rework' && args.userText === undefined) throw new Error('Rework changes the route, so it needs the user\'s own word: pass userText with their exact latest message asking to fix what verification found. Nothing was changed.');
           let attested = false;
           if (args.userText !== undefined) {
@@ -784,13 +1069,34 @@ const plugin: Plugin = async input => {
             // A request to correct the implementation says nothing about a subagent having stopped.
             attested = args.scope !== 'rework';
           }
-          const seen = await runner.confirmStopped(context.sessionID, context, attested);
-          if (checkpoint && args.scope !== 'run') await runner.restore(context, project => intake.boundRunMemory(context, project));
-          try { return reply({ ...record(intake.reset(context, args.scope), 'reset'), ...(seen ? { liveness: seen } : {}) }); }
+          // Which held writer this reset has to account for: a checkpointed pending child, a
+          // native question, or otherwise a reservation whose process died without releasing it.
+          const pendingTask = !!runner.pendingOwner(context.sessionID);
+          const pendingQuestion = !pendingTask && intake.pendingQuestionOwner(context.sessionID);
+          const crash = pendingTask || pendingQuestion ? undefined : runner.crashedOperation(context.sessionID);
+          if (crash) {
+            if (!attested) throw new Error(`${crash.message} To release it, pass userText with the user's exact latest message confirming that nothing is still running. Nothing was changed.`);
+            if (!crash.unchanged && !discard) throw new Error(`${crash.message} Because its checkpoint changed, only a run discard is allowed (scope run): the run's evidence is set aside, never replayed. Nothing was changed.`);
+            runner.releaseCrashedOperation(context.sessionID, crash.owner);
+          }
+          if (!pendingTask && !pendingQuestion) runner.authorizeReset(context.sessionID, discard);
+          return runner.withReset(context.sessionID, async resetCallID => {
+          const questionReleased = intake.releasePendingQuestion(context.sessionID, attested, resetCallID);
+          const seen = await runner.confirmStopped(context.sessionID, context, attested, resetCallID);
+          if (!seen || seen.verdict === 'stopped' || (attested && seen.verdict !== 'running')) runner.authorizeReset(context.sessionID, discard);
+          if (!discard) await runner.restore(context, project => intake.boundRunMemory(context, project));
+          try {
+            if (questionReleased) intake.recover(context);
+            const reset = record(intake.reset(context, args.scope), 'reset');
+            const reviewing = questionReleased && args.scope === 'phase' && record(intake.status(context.sessionID), 'status').state === 'review-ready';
+            const ready = reviewing ? record(intake.prepareAdvance({ questions: [] }, context), 'question recovery') : reset;
+            return reply({ ...ready, ...(seen ? { liveness: seen } : {}) });
+          }
           catch (error) {
             if (!seen || seen.verdict === 'stopped') throw error;
             throw new Error(`${error instanceof Error ? error.message : 'Reset was refused.'} What OpenCode reports: ${seen.detail}`);
           }
+          }, discard);
         },
       }),
       mdd_context: tool({
@@ -828,6 +1134,7 @@ const plugin: Plugin = async input => {
       // unrelated name runs under instructions MDD never wrote and reports evidence MDD cannot
       // account for. Conversations MDD is not running are untouched: this only speaks for its own.
       // Exact runner-issued arguments authorize a fallback, never the native agent name alone.
+      runner.owner(input.sessionID);
       intake.guardTask(input.sessionID);
       const args = await runner.before(input, output.args);
       if (args) Object.assign(output.args, args);
@@ -835,18 +1142,21 @@ const plugin: Plugin = async input => {
     'tool.execute.after': async (input, output) => {
       if (input.tool === 'question') await intake.afterQuestion(input, input.args, output);
       if (input.tool === 'task') {
-        const previousState = runner.status(input.sessionID).state;
-        await runner.after(input, input.args, output);
-        intake.phaseRecorded(input.sessionID);
-        const current = runner.status(input.sessionID);
-        const phase = typeof input.args === 'object' && input.args !== null && 'subagent_type' in input.args &&
-          PHASE_AGENTS.includes(String(input.args.subagent_type)) ? input.args.subagent_type as Phase : undefined;
-        if (phase) {
-          output.title = visualTitle(phase, presentationSettings().ascii);
-          const state = current.state;
-          if (state !== previousState && (state === 'complete' || state === 'blocked' || state === 'await-approval'))
-            await notify(input.sessionID, `MDD ${state === 'complete' ? 'complete' : state === 'blocked' ? 'needs attention' : 'awaiting approval'}`, state === 'complete' ? 'success' : state === 'blocked' ? 'error' : 'info');
-        }
+        runner.owner(input.sessionID, input.callID);
+        try {
+          const previousState = runner.status(input.sessionID).state;
+          await runner.after(input, input.args, output);
+          intake.phaseRecorded(input.sessionID);
+          const current = runner.status(input.sessionID);
+          const phase = typeof input.args === 'object' && input.args !== null && 'subagent_type' in input.args &&
+            PHASE_AGENTS.includes(String(input.args.subagent_type)) ? input.args.subagent_type as Phase : undefined;
+          if (phase) {
+            output.title = visualTitle(phase, presentationSettings().ascii);
+            const state = current.state;
+            if (state !== previousState && (state === 'complete' || state === 'blocked' || state === 'await-approval'))
+              await notify(input.sessionID, `MDD ${state === 'complete' ? 'complete' : state === 'blocked' ? 'needs attention' : 'awaiting approval'}`, state === 'complete' ? 'success' : state === 'blocked' ? 'error' : 'info');
+          }
+        } finally { runner.releaseSettled(input.sessionID, input.callID); }
       }
     },
     // The handle keeps the phase prompt out of the message the coordinator writes; this keeps it
@@ -867,15 +1177,32 @@ const plugin: Plugin = async input => {
       // none of it was ever kept in the transcript; the coordinator's memory of the protocol is
       // not so lucky. Recording it is what lets the next status restate the run instead of
       // letting a model reconstruct it from a summary that was never written for that purpose.
-      if (event.type === 'session.compacted') { runner.compacted(event.properties.sessionID); return; }
+      if (event.type === 'session.compacted') { runner.owner(event.properties.sessionID); runner.compacted(event.properties.sessionID); return; }
       if (event.type !== 'message.part.updated') return;
       const part = event.properties.part;
       if (part.type === 'tool' && part.tool === 'task' && part.state.status === 'error') {
+        runner.owner(part.sessionID, part.callID);
         await runner.nativeError(part.sessionID, part.callID);
+        runner.releaseSettled(part.sessionID, part.callID);
       }
-      if (part.type === 'tool' && part.tool === 'question' && part.state.status === 'error') intake.nativeError(part);
+      if (part.type === 'tool' && part.tool === 'question' && part.state.status === 'error') { runner.owner(part.sessionID, part.callID); intake.nativeError(part); }
     },
   };
+  // Tools are created once at plugin startup. A scoped lease wraps their entire execution,
+  // including native inspection and persistence awaits, rather than only checking entry/exit.
+  // Status and pure report checks do not mutate run authority; reset has its own pending-child
+  // recovery path and cannot acquire an idle lease over an already reserved child.
+  // Read-only tools (status, improvement listing, PR drafting, recording a lesson in the local
+  // lessons file) never write a checkpoint, so they never hold the durable writer. Transfer and
+  // its recovery manage their own fenced reservations.
+  for (const name of MDD_TOOLS) {
+    if (['mdd_status', 'mdd_reset', 'mdd_improvements', 'mdd_improve', 'mdd_pr_body', 'mdd_transfer', 'mdd_transfer_recover'].includes(name)) continue;
+    const registered = hooks.tool![name]!;
+    const execute = registered.execute;
+    registered.execute = ((args: never, context: { sessionID: string }) =>
+      runner.withOperation(context.sessionID, name, () => execute(args, context as never))) as typeof execute;
+  }
+  return hooks;
 };
 
 export default plugin;

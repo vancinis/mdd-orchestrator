@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { isDeepStrictEqual } from 'node:util';
 import { EngramHttp } from './engram-http.js';
 import { objectWithKeys, ValidationError } from './validation.js';
@@ -21,13 +22,15 @@ import type { Acceptance, Decision, Verification } from './acceptance.js';
 import { concerns } from './concerns.js';
 import type { Concern } from './concerns.js';
 import type { ProgressGuard } from './progress.js';
-import { STABLE_CHECKPOINT_VERSION, reconcileProgress, sealResumeData } from './checkpoint.js';
+import { CHANGED_LIST_MAX, CheckpointConflictError, CheckpointStorageError, CONCERNS_MAX, EXPLANATION_MAX_BYTES, REJECTED_TEXT_MAX_BYTES,
+  STABLE_CHECKPOINT_VERSION, reconcileProgress, sealResumeData } from './checkpoint.js';
 import type { CheckpointStore, StableCheckpoint, StableRunnerState, ResumeData } from './checkpoint.js';
 import { DOSSIER_VERSION, priorRunView } from './run-dossier.js';
 import type { PriorReceipt, RunDossier, RunDossierStore } from './run-dossier.js';
 import type { PRFacts } from './pr-body.js';
 import { phaseVisual, presentationSettings } from './visual-ux.js';
 import { STATUS_BUDGET_BYTES } from './status-budget.js';
+import type { RunOwnershipStore, RunOwner } from './run-ownership.js';
 
 export type Runtime = { sessionID: string; agent: string; directory: string; worktree: string };
 export type TaskCall = { sessionID: string; callID: string };
@@ -187,6 +190,10 @@ type Run = {
   ledgered?: 'complete' | 'blocked';
   uncertain: boolean; userMessageID: string; concerns: Concern[]; contextReport?: string; context: RunContext[]; dossierDiagnostic?: string;
   checkpointRequest?: unknown; checkpointSequence?: number; checkpointFailed?: boolean; settledCheckpoint?: boolean; attemptID?: string;
+  /** The checkpoint could not be kept current; the run continues data-only until a write succeeds. */
+  checkpointDegraded?: true;
+  /** A confirmed replacement run may overwrite exactly this superseded run's checkpoint once. */
+  replacesRunID?: string;
   contexts: { explorationID: string; outcome: 'passed' | 'failed'; artifact: ArtifactResult; summary: string; concerns: Concern[] }[];
   side?: { id: string; purpose: string; phase: Phase; state: State; args: TaskArgs; report: PhaseReport; brief: string; attempts: number; mode: Run['mode']; nativeUsed?: boolean; lastFailure?: string; fallbackExhausted?: boolean; reason?: string; executor?: Executor };
 };
@@ -269,6 +276,8 @@ export type Liveness = { verdict: 'stopped' | 'running' | 'unknown'; child?: str
 type Released = Liveness & { released?: 'host' | 'user' };
 const ATTEST_HINT = 'If the user says the subagent is stopped or was interrupted, call mdd_reset again with userText set to their exact latest message: MDD stops it through OpenCode when it can and releases it, unless OpenCode still reports it busy.';
 export type Inspect = {
+  /** A transferred target must prove its original native user request, not only local receipt bytes. */
+  confirmTransfer?(runtime: Runtime, receipt: NonNullable<RunOwner['receipt']>, runID: string): Promise<void>;
   /** Positive host evidence only; an absent capability never releases a writer. */
   stopped?(runtime: Runtime, call: TaskCall, returned?: unknown): Promise<boolean>;
   /** The host's account of a dispatched child. Preferred over `stopped` when present. */
@@ -322,6 +331,39 @@ export function runContext(value: unknown): RunContext {
   return { label, content, source: 'coordinator' };
 }
 
+export function movedMessage(runID: string, targetSessionID: string): string {
+  return `This conversation's run ${runID} moved to conversation ${targetSessionID} and cannot be driven from here. Start a new objective with mdd_start, or free this conversation with mdd_reset scope run.`;
+}
+
+/** How many times one checkpoint transition is written before the run degrades to data-only. */
+const CHECKPOINT_ATTEMPTS = 3;
+
+/** Clips text to a byte budget on a character boundary; used only for explanations, never evidence. */
+function clip(text: string, max: number): string {
+  if (Buffer.byteLength(text) <= max) return text;
+  let kept = Buffer.from(text).subarray(0, max - 3).toString('utf8').replace(/\uFFFD$/, '');
+  while (Buffer.byteLength(kept) > max - 3) kept = kept.slice(0, -1);
+  return `${kept}…`;
+}
+
+/** Advisory concerns, deduplicated by content and capped at the most recent CONCERNS_MAX. */
+function mergeConcerns(held: readonly Concern[], added: readonly Concern[]): Concern[] {
+  const seen = new Set<string>();
+  const merged: Concern[] = [];
+  for (const item of [...held, ...added]) {
+    const key = JSON.stringify(item);
+    if (!seen.has(key)) { seen.add(key); merged.push(structuredClone(item)); }
+  }
+  return merged.slice(-CONCERNS_MAX);
+}
+
+/** Changed files, one entry per path (the latest reason wins), capped at the most recent CHANGED_LIST_MAX. */
+function mergeChangedFiles(held: readonly ChangedFile[], added: readonly ChangedFile[]): ChangedFile[] {
+  const byPath = new Map<string, ChangedFile>();
+  for (const file of [...held, ...added]) { byPath.delete(file.path); byPath.set(file.path, { ...file }); }
+  return [...byPath.values()].slice(-CHANGED_LIST_MAX);
+}
+
 export function boundedText(value: unknown, label: string, max: number): string {
   if (typeof value !== 'string' || !value.trim() || Buffer.byteLength(value) > max) {
     throw new ValidationError(`${label} must be nonempty text of at most ${max} bytes.`);
@@ -346,18 +388,295 @@ export function intentEnvelope(base: Record<string, unknown>, context: readonly 
 }
 
 export class PhaseRunner {
+  readonly #operation = new AsyncLocalStorage<{ sessionID: string; callID: string }>();
   readonly #runs = new Map<string, Run>();
   readonly #previous = new Map<string, Run[]>();
   readonly #solo = new Map<string, Solo>();
   readonly #consent = new Map<string, Consent>();
   readonly #inflight = new Map<string, string>();
   readonly #nativeDispatches = new Map<string, Map<string, TaskArgs>>();
-  constructor(readonly inspect: Inspect, readonly options: { now?: () => number; progress?: ProgressGuard; dossier?: RunDossierStore; checkpoint?: CheckpointStore; telemetry?: (root: string, value: TelemetryEvent, now: number) => TelemetryResult; lessons?: (root: string, value: LessonInput, now: number) => void; ledger?: (root: string, value: RunLedgerInput, now: number) => void } = {}) {}
+  readonly #reservations = new Map<string, { runID: string; callID: string }>();
+  /** Consumed native call IDs of a run closed for a fresh start; a replay guard only, never authority. */
+  readonly #inheritedCalls = new Map<string, string[]>();
+  constructor(readonly inspect: Inspect, readonly options: { now?: () => number; progress?: ProgressGuard; dossier?: RunDossierStore; checkpoint?: CheckpointStore; ownership?: RunOwnershipStore; telemetry?: (root: string, value: TelemetryEvent, now: number) => TelemetryResult; lessons?: (root: string, value: LessonInput, now: number) => void; ledger?: (root: string, value: RunLedgerInput, now: number) => void } = {}) {}
+
+  /** Check durable authority even when the local runner still holds a ready task. */
+  owner(sessionID: string, callID?: string): RunOwner | undefined {
+    return this.#ownerOf(sessionID, this.#runs.get(sessionID), callID);
+  }
+
+  /** The durable owner of one specific in-memory run (or, with none, of the parent's checkpoint). */
+  #ownerOf(sessionID: string, run: Run | undefined, callID?: string): RunOwner | undefined {
+    const active = this.#operation.getStore();
+    const effectiveCallID = callID ?? (active?.sessionID === sessionID ? active.callID : undefined);
+    const checkpoint = run ? undefined : this.options.checkpoint?.read(sessionID)?.checkpoint;
+    const saved = checkpoint?.version === STABLE_CHECKPOINT_VERSION ? checkpoint : undefined;
+    const runID = run?.id ?? saved?.runID;
+    if (!runID || !this.options.ownership) return undefined;
+    const runtime = run?.runtime ?? (saved ? { sessionID: saved.parent, directory: saved.data.directory, worktree: saved.data.worktree } : undefined);
+    const owner = this.options.ownership.read(runID);
+    // The run finished a transfer to another conversation. This parent holds nothing any more: a
+    // run still loaded here is evicted and its caller refused; with nothing loaded the parent is
+    // simply empty, so it can start over without ever touching the transferred run.
+    if (owner && owner.ownerSessionID !== sessionID && this.options.ownership.movedAway(sessionID)?.runID === runID) {
+      if (run) { this.#evict(sessionID); throw new Error(movedMessage(runID, owner.ownerSessionID)); }
+      return undefined;
+    }
+    // A reservation this process holds (its own in-flight child, question or operation) is still
+    // this parent's writer; every other process stays fenced by it.
+    const heldHere = owner?.state === 'reserved' && !!run && this.#reservations.get(sessionID)?.callID === owner.callID &&
+      this.#reservations.get(sessionID)?.runID === owner.runID;
+    if (!owner || this.options.ownership.parent(sessionID) !== runID || !runtime || owner.ownerSessionID !== sessionID || owner.directory !== runtime.directory ||
+        owner.worktree !== runtime.worktree || owner.state === 'transferring' ||
+        (owner.state === 'reserved' && owner.callID !== effectiveCallID && !heldHere)) {
+      if (owner?.state === 'reserved' && owner.ownerSessionID === sessionID && this.options.ownership.parent(sessionID) === runID)
+        throw new Error('This parent does not hold the durable run owner: an unfinished native call or operation still holds its writer. Read mdd_status; once it has stopped, release it with mdd_reset and the user\'s exact latest message.');
+      throw new Error('This parent does not hold the durable run owner; no MDD action is authorized.');
+    }
+    if (owner.originSessionID && owner.originSessionID !== owner.ownerSessionID)
+      this.options.ownership.confirmReceipt(runID, sessionID);
+    return owner;
+  }
+
+  /** Forget a run this process can no longer act on; its evidence stays where it was recorded. */
+  #evict(sessionID: string): void {
+    this.#runs.delete(sessionID);
+    this.#inflight.delete(sessionID);
+    this.#nativeDispatches.delete(sessionID);
+    this.#reservations.delete(sessionID);
+  }
+
+  /**
+   * The run this parent claimed moved away by a finished transfer. A loaded copy is evicted so
+   * nothing here can dispatch, approve or record for it; the answer says where it went.
+   */
+  movedAway(sessionID: string): { runID: string; targetSessionID: string } | undefined {
+    const moved = this.options.ownership?.movedAway(sessionID);
+    if (moved && this.#runs.get(sessionID)?.id === moved.runID) this.#evict(sessionID);
+    return moved;
+  }
+
+  /**
+   * Frees a parent whose run moved away (scope run discard or a new objective). The claim is
+   * retired, the stale source checkpoint cleared and its dossier set aside; the transferred run,
+   * its owner and its target are untouched.
+   */
+  retireMovedAway(sessionID: string): { file: string; runID: string } | undefined {
+    const moved = this.movedAway(sessionID);
+    if (!moved) return undefined;
+    const calls = this.#prior(sessionID)?.calls;
+    this.options.ownership!.retireMovedAwayParent(sessionID, moved.runID);
+    if (calls?.length) this.#inheritedCalls.set(sessionID, [...calls]);
+    this.options.checkpoint?.clear(sessionID);
+    this.#consent.delete(sessionID);
+    try { return this.options.dossier?.discard(sessionID, this.#now()); } catch { return undefined; }
+  }
+
+  reserve(sessionID: string, callID: string, operation?: RunOwner['operation']): RunOwner | undefined {
+    const owner = this.owner(sessionID);
+    if (!owner) return undefined;
+    const reserved = this.options.ownership?.reserve(owner.runID, sessionID, callID, owner.epoch, operation);
+    if (reserved) this.#reservations.set(sessionID, { runID: owner.runID, callID });
+    return reserved;
+  }
+
+  /** A coordinator operation owns the same CAS slot as native calls until its last async mutation. */
+  async withOperation<T>(sessionID: string, name: string, work: () => Promise<T>): Promise<T> {
+    const active = this.#operation.getStore();
+    if (active?.sessionID === sessionID) return work();
+    const callID = `operation-${randomUUID()}`;
+    // This process already holds the writer for a live child or question: the tool's own state
+    // checks refuse anything unsafe (as they did before durable ownership), so no second
+    // reservation is attempted over it.
+    if (this.#reservations.has(sessionID) && this.#runs.has(sessionID)) return work();
+    const saved = this.options.checkpoint?.read(sessionID)?.checkpoint;
+    const operation = saved?.version === STABLE_CHECKPOINT_VERSION
+      ? { name, checkpointSequence: saved.sequence, checkpointDigest: saved.dataDigest } : undefined;
+    const owner = this.reserve(sessionID, callID, operation);
+    if (!owner) return work();
+    return this.#operation.run({ sessionID, callID }, async () => {
+      try {
+        const result = await work();
+        this.owner(sessionID, callID);
+        return result;
+      } finally { this.release(sessionID, callID); }
+    });
+  }
+
+  /**
+   * A reset keeps one owner reservation from inspection through restored-state publication.
+   * `discard` (scope run) tolerates an unreadable checkpoint: discarding it is the documented way
+   * out, and the parent claim plus an idle owner still prove nothing else is writing.
+   */
+  async withReset<T>(sessionID: string, work: (resetCallID: string) => Promise<T>, discard = false): Promise<T> {
+    const resetCallID = `reset-${randomUUID()}`;
+    const owner = this.operationCrash(sessionID);
+    if (owner) throw new Error(owner);
+    const held = this.#resetSource(sessionID, discard)?.owner;
+    const checkpointBefore = held?.state === 'idle' ? this.options.checkpoint?.read(sessionID)?.checkpoint : undefined;
+    const progressBefore = held?.state === 'idle' ? this.options.progress?.read(sessionID) : undefined;
+    if (held?.state === 'idle') {
+      const saved = this.options.checkpoint?.read(sessionID)?.checkpoint;
+      const operation = saved?.version === STABLE_CHECKPOINT_VERSION
+        ? { name: 'mdd_reset', checkpointSequence: saved.sequence, checkpointDigest: saved.dataDigest } : undefined;
+      this.reserve(sessionID, resetCallID, operation);
+    }
+    // A transferred target whose checkpoint is not resumable (degraded or cleared) still owns its
+    // run through the receipt; discarding it needs the same reserved reset writer.
+    const discarding = !held && discard ? this.#reserveTransferredDiscard(sessionID, resetCallID) : false;
+    return this.#operation.run({ sessionID, callID: resetCallID }, async () => {
+      try {
+        const result = await work(resetCallID);
+        this.release(sessionID, resetCallID);
+        return result;
+      } catch (error) {
+        // A validation refusal before any checkpoint/progress transition may release its own
+        // operation. Changed or unreadable state is not evidence of a safe rollback.
+        if ((held?.state === 'idle' && isDeepStrictEqual(this.options.checkpoint?.read(sessionID)?.checkpoint, checkpointBefore) &&
+            isDeepStrictEqual(this.options.progress?.read(sessionID), progressBefore)) ||
+            (discarding && this.options.ownership?.parent(sessionID) !== undefined)) this.release(sessionID, resetCallID);
+        throw error;
+      }
+    });
+  }
+
+  #reserveTransferredDiscard(sessionID: string, resetCallID: string): boolean {
+    const ownership = this.options.ownership;
+    const claim = ownership?.parentClaim(sessionID);
+    if (!ownership || !claim?.transfer || claim.retired) return false;
+    const owner = ownership.read(claim.runID);
+    const receipt = owner?.receipt;
+    if (!owner || !receipt || receipt.targetSessionID !== sessionID || owner.ownerSessionID !== sessionID || owner.state !== 'idle') return false;
+    ownership.reserve(owner.runID, sessionID, resetCallID, owner.epoch,
+      { name: 'mdd_reset', checkpointSequence: receipt.targetSequence, checkpointDigest: receipt.targetDigest });
+    this.#reservations.set(sessionID, { runID: owner.runID, callID: resetCallID });
+    return true;
+  }
+
+  #resetSource(sessionID: string, tolerant = false): { owner: RunOwner; sequence: number; digest: string } | undefined {
+    let saved;
+    try { saved = this.options.checkpoint?.read(sessionID)?.checkpoint; }
+    catch (error) { if (!tolerant) throw error; return undefined; }
+    if (saved?.version !== STABLE_CHECKPOINT_VERSION || !this.options.ownership) return undefined;
+    const owner = this.options.ownership.read(saved.runID);
+    if (!owner || owner.ownerSessionID !== sessionID || this.options.ownership.parent(sessionID) !== saved.runID ||
+        owner.directory !== saved.data.directory || owner.worktree !== saved.data.worktree || owner.state === 'transferring')
+      throw new Error('Reset cannot confirm the durable run owner.');
+    return { owner, sequence: saved.sequence, digest: saved.dataDigest };
+  }
+  ownerForReset(sessionID: string): RunOwner | undefined { return this.#resetSource(sessionID)?.owner; }
+
+  #handoffReset(sessionID: string, sourceCallID: string, resetCallID: string, kind: 'task' | 'question'): void {
+    const source = this.#resetSource(sessionID);
+    if (!source || source.owner.state !== 'reserved' || source.owner.callID !== sourceCallID)
+      throw new Error('Reset source reservation changed; no handoff was made.');
+    this.options.ownership!.handoff(source.owner.runID, sessionID, sourceCallID, resetCallID, source.owner.epoch,
+      { sourceCallID, kind, checkpointSequence: source.sequence, checkpointDigest: source.digest });
+    this.#reservations.set(sessionID, { runID: source.owner.runID, callID: resetCallID });
+  }
+
+  /** An orphaned coordinator operation is diagnostic data, never permission to replay it. */
+  operationCrash(sessionID: string): string | undefined {
+    const crash = this.crashedOperation(sessionID, true);
+    return crash ? `${crash.message} Only an explicit mdd_reset carrying the user's exact latest message can release it.` : undefined;
+  }
+
+  /**
+   * A durable reservation on this parent's run that this process does not hold: a coordinator
+   * operation or reset handoff that died before releasing it, or (without `intentOnly`) any other
+   * reservation that no pending child or native question explains. `unchanged` says whether the
+   * checkpoint still matches the one the operation reserved; only then may the same phase resume.
+   */
+  crashedOperation(sessionID: string, intentOnly = false): { message: string; unchanged: boolean; owner: RunOwner } | undefined {
+    if (!this.options.ownership) return undefined;
+    const claim = this.options.ownership.parentClaim(sessionID);
+    if (!claim || claim.retired || claim.transfer) return undefined;
+    const owner = this.options.ownership.read(claim.runID);
+    if (!owner || owner.state !== 'reserved' || owner.ownerSessionID !== sessionID || owner.recoveringTransfer ||
+        this.#reservations.get(sessionID)?.callID === owner.callID) return undefined;
+    const intent = owner.operation ?? owner.recovery;
+    if (intentOnly && !intent) return undefined;
+    let saved;
+    try { saved = this.options.checkpoint?.read(sessionID)?.checkpoint; } catch { saved = undefined; }
+    const unchanged = !!intent && saved?.version === STABLE_CHECKPOINT_VERSION && saved.runID === owner.runID &&
+      intent.checkpointSequence === saved.sequence && intent.checkpointDigest === saved.dataDigest;
+    const name = owner.recovery ? 'reset handoff' : owner.operation?.name ?? `native call ${owner.callID}`;
+    return { owner, unchanged, message: `A ${name} reserved this run and did not confirm completion. Its checkpoint is ${unchanged ? 'unchanged' : 'different'} from the reserved sequence/digest. Nothing is replayed.` };
+  }
+
+  /** CAS release of exactly the reservation `crashedOperation` described, after user attestation. */
+  releaseCrashedOperation(sessionID: string, owner: RunOwner): void {
+    this.options.ownership!.release(owner.runID, sessionID, owner.callID!, owner.epoch);
+  }
+
+  /**
+   * The authority a reset needs before it may reserve: the live or checkpointed owner. A run
+   * discard may proceed past an unreadable checkpoint when the parent claim's owner is idle here.
+   */
+  authorizeReset(sessionID: string, discard: boolean): void {
+    try { this.owner(sessionID); }
+    catch (error) {
+      if (!discard || this.#runs.has(sessionID) || !this.options.ownership) throw error;
+      let readable = true;
+      try { this.options.checkpoint?.read(sessionID); } catch { readable = false; }
+      if (readable) throw error;
+      const claim = this.options.ownership.parentClaim(sessionID);
+      const owner = claim && !claim.retired ? this.options.ownership.read(claim.runID) : undefined;
+      if (claim?.transfer || (owner && (owner.ownerSessionID !== sessionID || owner.state !== 'idle'))) throw error;
+    }
+  }
+
+  release(sessionID: string, callID: string): void {
+    const reservation = this.#reservations.get(sessionID);
+    if (!reservation || reservation.callID !== callID) return;
+    const owner = this.options.ownership!.read(reservation.runID);
+    if (!owner || owner.ownerSessionID !== sessionID || owner.state !== 'reserved' || owner.callID !== callID)
+      throw new Error('The durable reservation changed; no callback may release it.');
+    this.options.ownership!.release(reservation.runID, sessionID, callID, owner.epoch);
+    this.#reservations.delete(sessionID);
+  }
+
+  releaseSettled(sessionID: string, callID: string): void {
+    const run = this.#runs.get(sessionID);
+    if (this.#inflight.has(sessionID) || (run && ['persisting-intent', 'persisting-result', 'await-result'].includes(run.state))) return;
+    this.release(sessionID, callID);
+  }
+
+  /** Only a checkpointed pending child may enter the explicit stopped-child recovery path. */
+  pendingOwner(sessionID: string): RunOwner | undefined {
+    if (!this.options.ownership || !this.options.checkpoint) return undefined;
+    const saved = this.options.checkpoint.read(sessionID)?.checkpoint;
+    if (saved?.version !== STABLE_CHECKPOINT_VERSION || saved.parent !== sessionID) return undefined;
+    const owner = this.options.ownership.read(saved.runID);
+    if (!owner || owner.ownerSessionID !== sessionID || owner.directory !== saved.data.directory ||
+        owner.worktree !== saved.data.worktree || this.options.ownership.parent(sessionID) !== saved.runID || owner.state === 'transferring')
+      throw new Error('The durable run owner does not authorize recovery.');
+    // A reset handoff or coordinator operation holds it: that is crash recovery, not a child.
+    if (owner.state !== 'reserved' || owner.operation || owner.recovery) return undefined;
+    const marker = this.options.progress?.read(sessionID);
+    if (!marker || marker.state !== 'pending') return undefined;
+    if (marker.runID !== saved.runID || marker.userMessageID !== saved.data.userMessageID ||
+        marker.callID !== owner.callID || marker.attemptID !== owner.callID || saved.attempt?.state !== 'pending' || saved.attempt.id !== owner.callID)
+      throw new Error('Reserved owner has no matching pending child checkpoint; no recovery is authorized.');
+    return owner;
+  }
+
+  /** Caller must first settle a correlated native question record on explicit user attestation. */
+  handoffRecoveredQuestion(sessionID: string, callID: string, resetCallID: string): void {
+    const saved = this.options.checkpoint?.read(sessionID)?.checkpoint;
+    if (saved?.version !== STABLE_CHECKPOINT_VERSION) throw new Error('No durable question run to release.');
+    const owner = this.owner(sessionID, callID);
+    if (!owner || owner.state !== 'reserved' || owner.callID !== callID || owner.runID !== saved.runID)
+      throw new Error('No matching native question reservation.');
+    this.#handoffReset(sessionID, callID, resetCallID, 'question');
+  }
 
   /** Opt-in, same-parent recovery of a fully settled ready phase. No saved ref is a capability. */
   async restore(runtime: Runtime, bindMemory?: (project: string) => Promise<EngramHttp>): Promise<{ restored: boolean; reason?: string }> {
-    if (this.#runs.has(runtime.sessionID)) return { restored: true };
+    if (this.#runs.has(runtime.sessionID)) { this.owner(runtime.sessionID); return { restored: true }; }
     if (!this.options.checkpoint) return { restored: false };
+    // Its run moved to another conversation: nothing here is restorable, and nothing is blocked.
+    if (this.movedAway(runtime.sessionID)) return { restored: false };
     try {
       const saved = this.options.checkpoint.read(runtime.sessionID);
       if (!saved) return { restored: false };
@@ -366,6 +685,23 @@ export class PhaseRunner {
       const { data, stable } = checkpoint;
       if (runtime.agent !== 'mdd-orchestrator' || runtime.directory !== data.directory || runtime.worktree !== data.worktree ||
           checkpoint.parent !== runtime.sessionID) throw new Error('Checkpoint parent or workspace differs from the native parent.');
+      if (this.options.ownership) {
+        const owner = this.options.ownership.read(checkpoint.runID) ?? this.options.ownership.claim({ runID: checkpoint.runID,
+          sessionID: runtime.sessionID, directory: runtime.directory, worktree: runtime.worktree });
+        if (owner.originSessionID && owner.originSessionID !== owner.ownerSessionID) {
+          const receipt = this.options.ownership.confirmReceipt(checkpoint.runID, runtime.sessionID);
+          // Restoring bytes (not just owning the run) needs them to descend from the published target.
+          this.options.ownership.confirmReceiptLineage(checkpoint.runID, runtime.sessionID, checkpoint);
+          if (!this.inspect.confirmTransfer || !receipt) throw new Error('Native transfer request cannot be confirmed.');
+          await this.inspect.confirmTransfer(runtime, receipt, checkpoint.runID);
+        }
+        const reset = this.#operation.getStore();
+        const resetOwns = owner.state === 'reserved' && owner.callID === reset?.callID && reset?.sessionID === runtime.sessionID &&
+          (owner.recovery !== undefined || owner.operation?.name === 'mdd_reset');
+        if (owner.ownerSessionID !== runtime.sessionID || owner.directory !== runtime.directory || owner.worktree !== runtime.worktree || (owner.state !== 'idle' && !resetOwns))
+          throw new Error('The durable run owner is not idle in this parent.');
+        this.options.ownership.bindParent(runtime.sessionID, checkpoint.runID);
+      }
       let marker = this.options.progress?.read(runtime.sessionID);
       if (marker?.state === 'pending') {
         if (reconcileProgress(marker, checkpoint) !== 'clear') return { restored: false, reason: 'A pending phase attempt is unconfirmed. Confirm its child stopped or provide explicit user attestation; no task was reissued.' };
@@ -440,8 +776,10 @@ export class PhaseRunner {
         }
       }
       this.#runs.set(runtime.sessionID, run);
+      this.owner(runtime.sessionID);
       return { restored: true };
-    } catch { return { restored: false, reason: 'Checkpoint or progress cannot be validated for this parent. No task was reissued; inspect local files and explicitly discard the run if needed.' }; }
+    } catch (error) { return { restored: false, reason: error instanceof Error && error.message.startsWith('Exact native message lookup')
+      ? error.message : 'Checkpoint or progress cannot be validated for this parent. No task was reissued; inspect local files and explicitly discard the run if needed.' }; }
   }
 
   status(sessionID: string) {
@@ -606,7 +944,7 @@ export class PhaseRunner {
    * latest message says it stopped: MDD then aborts it through the host when it can, and releases
    * it unless the host still reports it busy. Returns what the host said, for the caller to show.
    */
-  async confirmStopped(sessionID: string, runtime?: Runtime, attested = false): Promise<Liveness | undefined> {
+  async confirmStopped(sessionID: string, runtime?: Runtime, attested = false, resetCallID?: string): Promise<Liveness | undefined> {
     // Inline work has no child to probe. An unknown marker stays pending unless the user explicitly
     // attests the interruption; this is a user release, never a claim that OpenCode saw it stop.
     if (!this.#runs.has(sessionID) && !this.#solo.has(sessionID)) {
@@ -625,12 +963,22 @@ export class PhaseRunner {
     if (!released) return report;
     if (pending.marker) {
       if (!this.#runs.has(sessionID) && !this.#solo.has(sessionID) && isDeepStrictEqual(this.options.progress?.read(sessionID), pending.marker)) {
+        const owner = this.options.ownership?.read(pending.marker.runID);
+        if (owner?.state === 'reserved' && owner.ownerSessionID === sessionID && owner.callID === pending.call.callID &&
+            this.options.ownership?.parent(sessionID) === owner.runID) {
+          if (!resetCallID) throw new Error('A reset reservation is required before releasing a pending child.');
+          this.#handoffReset(sessionID, pending.call.callID, resetCallID, 'task');
+        }
         this.options.progress?.write(sessionID, { ...pending.marker, state: 'settled' });
       }
       return report;
     }
     const run = this.#runs.get(sessionID) ?? this.#solo.get(sessionID);
     if (this.#inflight.get(sessionID) === pending.call.callID && run?.state === 'await-result') {
+      if (this.#runs.has(sessionID) && this.options.ownership) {
+        if (!resetCallID) throw new Error('A reset reservation is required before releasing a live child.');
+        this.#handoffReset(sessionID, pending.call.callID, resetCallID, 'task');
+      }
       this.#inflight.delete(sessionID);
       this.block(sessionID, released === 'host'
         ? 'The host confirmed the child stopped. Partial changes remain and must be inspected before continuing.'
@@ -703,9 +1051,10 @@ export class PhaseRunner {
     return items.map(item => ({ ...structuredClone(item), artifact: { ref: structuredClone(item.artifact.ref) } }));
   }
 
-  async start(value: unknown, runtime: Runtime, trusted?: { requirementsConfirmed: true; replace?: true; userMessageID?: string }): Promise<unknown> {
+  async start(value: unknown, runtime: Runtime, trusted?: { requirementsConfirmed: true; replace?: true; userMessageID?: string; authorityCallID?: string }): Promise<unknown> {
     if (runtime.agent !== 'mdd-orchestrator') throw new ValidationError('Only mdd-orchestrator may start MDD.');
     const previous = this.#runs.get(runtime.sessionID);
+    this.owner(runtime.sessionID, trusted?.authorityCallID);
     if (previous && !trusted?.replace) throw new ValidationError('This parent already has an MDD run; use mdd_status.');
     if (previous) this.assertChangeable(runtime.sessionID);
     else this.assertFreshStart(runtime.sessionID, trusted?.userMessageID);
@@ -727,10 +1076,13 @@ export class PhaseRunner {
     const id = randomUUID();
     // Call IDs consumed by a run this process never saw still have to be refused, so a restart
     // inherits that guard. It can only reject a replay; it never authorizes anything.
-    const inherited = previous ? undefined : this.#prior(runtime.sessionID)?.calls;
+    const inherited = previous ? undefined : [...(this.#inheritedCalls.get(runtime.sessionID) ?? []), ...(this.#prior(runtime.sessionID)?.calls ?? [])];
+    this.#inheritedCalls.delete(runtime.sessionID);
     const run: Run = {
       id, runtime: { ...runtime }, workflow, phase: first.phase, requirements,
       ...(this.options.checkpoint ? { checkpointRequest: structuredClone(request.preflight), checkpointSequence: -1 } : {}),
+      // A confirmed replacement supersedes the previous run's checkpoint in this same parent.
+      ...(previous ? { replacesRunID: previous.id } : {}),
       memory, artifacts: new ArtifactStore(runtime.directory, workflow.snapshot().answers.artifactStore, memory),
       args: { description: '', subagent_type: first.phase, prompt: '' }, state: 'starting',
       history: [], calls: new Set(previous?.calls ?? inherited), planned: [], evidence: { ...emptyEvidence(), requirements: trusted?.requirementsConfirmed ? 'confirmed' : 'unearned' },
@@ -742,7 +1094,11 @@ export class PhaseRunner {
     try {
       await this.inspect.parent(run.runtime);
       await run.memory?.checkBinding();
+      // The run being replaced still holds the durable owner until claimParent moves the parent.
+      if (previous) this.#ownerOf(runtime.sessionID, previous, trusted?.authorityCallID);
       if (run.state !== 'starting') throw new Error('Run was blocked during initialization.');
+      this.options.ownership?.claimParent(runtime.sessionID, id, previous?.id);
+      this.options.ownership?.claim({ runID: id, sessionID: runtime.sessionID, directory: runtime.directory, worktree: runtime.worktree });
       this.#prepare(run);
       this.#checkpoint(run);
       if (previous) this.#previous.set(runtime.sessionID, [...(this.#previous.get(runtime.sessionID) ?? []), previous]);
@@ -794,7 +1150,7 @@ export class PhaseRunner {
     run.reason = error instanceof Error ? error.message : 'Unknown attempt outcome.';
     if (error instanceof MalformedReport && run.malformed >= MALFORMED_RESTATEMENTS) {
       run.reportRepairExhausted = true;
-      if (reported !== undefined) run.rejected = { reason: run.reason, text: reported };
+      if (reported !== undefined) run.rejected = { reason: run.reason, text: clip(reported, REJECTED_TEXT_MAX_BYTES) };
       this.block(run.runtime.sessionID, `Report repair is exhausted: ${run.reason}. The work must not be rerun automatically; inspect the retained report and request explicit recovery.`);
       throw new Error(run.reason);
     }
@@ -808,7 +1164,7 @@ export class PhaseRunner {
       run.uncertain = false;
       delete run.callID;
       delete run.dispatchedArgs;
-      if (reported !== undefined) run.rejected = { reason: run.reason, text: reported };
+      if (reported !== undefined) run.rejected = { reason: run.reason, text: clip(reported, REJECTED_TEXT_MAX_BYTES) };
       const phase = run.phase;
       if (run.started !== undefined) this.#event(run, 'phase-end', 'blocked', 'result-malformed');
       if (!this.#recover(run)) { this.#event(run, 'report', 'blocked', 'route-blocked'); this.#settle(run); throw new Error(`MDD could not read the ${phase} report and the route cannot continue: ${run.reason} Read mdd_status, then use mdd_reset.`); }
@@ -917,7 +1273,9 @@ export class PhaseRunner {
       let marker;
       try { marker = this.options.progress?.read(run.runtime.sessionID); }
       catch { this.#failSettlement(run, 'Progress cannot be correlated with the rejected attempt. Do not retry or dispatch.'); }
-      if (marker?.state === 'pending') {
+      // A side investigation's marker carries no attemptID: side attempts are never checkpointed,
+      // so there is no main attempt to release and the marker simply settles below.
+      if (marker?.state === 'pending' && (marker.attemptID !== undefined || marker.runID !== run.id)) {
         if (marker.runID !== run.id || !run.attemptID || marker.attemptID !== run.attemptID ||
             (marker.callID !== undefined && marker.callID !== run.lastCallID)) {
           this.#failSettlement(run, 'Pending progress does not match the rejected attempt. Do not retry or dispatch.');
@@ -945,8 +1303,18 @@ export class PhaseRunner {
     throw new Error(reason);
   }
 
+  /** Late native callbacks for a run that moved away are refused outright, never ignored. */
+  #refuseMovedAway(sessionID: string): void {
+    const moved = this.movedAway(sessionID);
+    if (moved) throw new ValidationError(movedMessage(moved.runID, moved.targetSessionID));
+  }
+
   async before(call: TaskCall, args: unknown): Promise<TaskArgs | undefined> {
+    this.#refuseMovedAway(call.sessionID);
+    this.owner(call.sessionID);
     const run = this.#runs.get(call.sessionID);
+    if (!run && this.options.ownership?.parentClaim(call.sessionID)?.transfer)
+      throw new ValidationError('The target has an unresolved transfer claim; no task may dispatch.');
     if (!run) return this.#soloBefore(call, args);
     if (run.rejected) throw new ValidationError('Only report restatement is pending; do not rerun the work.');
     if (run.state !== 'ready') {
@@ -974,7 +1342,10 @@ export class PhaseRunner {
     }
     boundedText(call.callID, 'native callID', 256);
     if (run.calls.has(call.callID)) throw new ValidationError('Native task call ID was already consumed.');
+    this.reserve(call.sessionID, call.callID);
     run.state = 'persisting-intent';
+    // A new attempt has no committed result yet, whichever route (main or side) it takes.
+    run.settledCheckpoint = false;
     if (!run.side) delete run.contextReport;
     try {
       run.callID = boundedText(call.callID, 'native callID', 256);
@@ -984,6 +1355,7 @@ export class PhaseRunner {
       run.dispatchedArgs = { ...run.args, prompt: `${run.args.prompt}\nNative callID=${JSON.stringify(call.callID)}` };
       if (!run.side) run.workflow.start(run.phase);
       await this.inspect.parent(run.runtime, call.callID);
+      this.owner(call.sessionID, call.callID);
       if (run.state !== 'persisting-intent') throw new Error('Dispatch became uncertain during inspection.');
       run.uncertain = true;
       if (!run.side && this.options.checkpoint) {
@@ -1000,6 +1372,7 @@ export class PhaseRunner {
         // it: the material the coordinator gathered survives in memory next to the requirements,
         // when it fits; otherwise intentEnvelope degrades it to a checkable reference instead.
       }, run.context)));
+      this.owner(call.sessionID, call.callID);
       if (run.state !== 'persisting-intent') throw new Error('Dispatch became uncertain during persistence.');
       run.state = 'await-result';
       run.report = { phase: run.phase, summary: `${phaseLabel(run.phase)} en curso.`, how: ['Con los requisitos acordados y la evidencia de plan disponible.'], status: 'in-progress', evidence: run.evidence };
@@ -1011,12 +1384,15 @@ export class PhaseRunner {
       this.#trackNative(call, run.dispatchedArgs);
       return { ...run.dispatchedArgs };
     } catch (error) {
+      if (!this.#inflight.has(call.sessionID)) this.release(call.sessionID, call.callID);
       if (this.#runs.get(call.sessionID) !== run || run.callID !== call.callID) throw new ValidationError('A stale dispatch callback was discarded without changing the current attempt.');
       return this.#degrade(run, error);
     }
   }
 
   async after(call: TaskCall, args: unknown, output: unknown): Promise<void> {
+    this.#refuseMovedAway(call.sessionID);
+    this.owner(call.sessionID, call.callID);
     const run = this.#runs.get(call.sessionID);
     if (!run) return this.#soloAfter(call, args, output);
     if (run.state !== 'await-result' || run.callID !== call.callID || !isDeepStrictEqual(args, run.dispatchedArgs)) {
@@ -1028,11 +1404,13 @@ export class PhaseRunner {
     // Measured before the result is judged, because an attempt whose result is rejected still
     // spent everything it spent, and that is the attempt worth knowing the price of.
     await this.#measure(run, output);
+    this.owner(call.sessionID, call.callID);
     // The reported text is kept out here so a refusal can hand it back. Reading the envelope and
     // reading the report are separate failures: only the second one has a document to restate.
     let reported: string | undefined;
     try {
       reported = await this.inspect.result(run.runtime, call, run.phase, output);
+      this.owner(call.sessionID, call.callID);
       this.#inflight.delete(call.sessionID);
       await this.#record(run, reported, call.callID);
     } catch (error) {
@@ -1071,6 +1449,7 @@ export class PhaseRunner {
     const text = typeof input.result === 'string' ? input.result : JSON.stringify(input.result);
     run.mode = 'inline';
     run.state = 'persisting-result';
+    run.settledCheckpoint = false;
     run.started = run.readyAt ?? this.#now();
     run.attemptID = randomUUID();
     try {
@@ -1234,14 +1613,13 @@ export class PhaseRunner {
       run.planned = planned;
       if (accepted) run.acceptance = accepted;
       run.decisions = choices;
-      run.concerns.push(...advisory);
+      // Bounded exactly as the checkpoint bounds them, so holding more can never stop resumption.
+      run.concerns = mergeConcerns(run.concerns, advisory);
       if (applied) {
         // A correction pass reports only what it touched; the first pass's files still changed.
-        const files = run.rework && run.phase === 'mdd-apply'
-          ? [...run.changedList.filter(file => !applied!.files.some(next => next.path === file.path)), ...applied.files]
-          : applied.files;
-        run.changedFiles = new Set([...(run.rework && run.phase === 'mdd-apply' ? run.changedList.map(file => file.path) : []), ...applied.paths]).size;
-        run.changedList = files;
+        const correcting = !!run.rework && run.phase === 'mdd-apply';
+        run.changedFiles = new Set([...(correcting ? run.changedList.map(file => file.path) : []), ...applied.paths]).size;
+        run.changedList = mergeChangedFiles(correcting ? run.changedList : [], applied.files);
       }
       if (run.phase === 'mdd-apply') delete run.rework;
       if (summary) run.delivered = summary;
@@ -1262,7 +1640,8 @@ export class PhaseRunner {
         const staged = Workflow.replay(run.checkpointRequest, [...run.workflow.history(),
           { kind: 'result', result: { phase: run.phase, outcome, evidenceSummary } }]);
         this.#checkpoint(run, 'settled', staged);
-        run.settledCheckpoint = true;
+        // Degraded runs have no durable result checkpoint; the progress marker settles them instead.
+        run.settledCheckpoint = !run.checkpointDegraded;
       }
       run.workflow.recordResult({ phase: run.phase, outcome, evidenceSummary });
       this.#event(run, 'phase-end', outcome, outcome === 'failed' ? 'phase-failed' : undefined);
@@ -1391,6 +1770,14 @@ export class PhaseRunner {
     }
     if (run) this.#event(run, 'reset');
     if (scope === 'run' || !run) {
+      if (run && this.options.ownership) {
+        const owner = this.owner(sessionID);
+        if (owner?.receipt) {
+          const reset = this.#operation.getStore();
+          if (!reset || reset.sessionID !== sessionID) throw new ValidationError('A transferred run needs an explicit reserved target reset.');
+          this.options.ownership.retireTransferredParent(sessionID, run.id, reset.callID, owner.epoch);
+        } else this.options.ownership.retireParent(sessionID, run.id);
+      } else if (!run) this.#retireUnloadedClaim(sessionID);
       this.options.checkpoint?.clear(sessionID);
       this.#runs.delete(sessionID);
       this.#solo.delete(sessionID);
@@ -1480,9 +1867,83 @@ export class PhaseRunner {
     }
   }
 
+  /**
+   * Discarding a run this process never loaded must still free its parent claim, or every later
+   * start is refused forever. The claim is retired only when it provably belongs to the discarded
+   * record — its checkpoint names the same run, or no checkpoint is left — and nothing but this
+   * reset holds the writer. A transferred source keeps its claim: the target's receipt needs it.
+   */
+  #retireUnloadedClaim(sessionID: string): void {
+    const ownership = this.options.ownership;
+    if (!ownership) return;
+    const claim = ownership.parentClaim(sessionID);
+    if (!claim || claim.retired) return;
+    let savedRunID: string | undefined;
+    try { savedRunID = this.options.checkpoint?.read(sessionID)?.checkpoint.runID; } catch { savedRunID = undefined; }
+    const owner = ownership.read(claim.runID);
+    if (owner && owner.ownerSessionID !== sessionID) return;
+    const reset = this.#operation.getStore();
+    const heldByReset = owner?.state === 'reserved' && reset?.sessionID === sessionID && owner.callID === reset.callID;
+    if (claim.transfer) {
+      if (owner?.receipt?.targetSessionID === sessionID && heldByReset) {
+        ownership.retireTransferredParent(sessionID, claim.runID, reset!.callID, owner.epoch);
+        return;
+      }
+      throw new ValidationError('This parent holds an unresolved transfer claim. Resolve it with mdd_transfer_recover; nothing was discarded.');
+    }
+    if ((savedRunID !== undefined && savedRunID !== claim.runID) || (owner && owner.state !== 'idle' && !heldByReset))
+      throw new ValidationError('The durable run owner of this parent is busy or belongs to another record; nothing was discarded. Read mdd_status.');
+    ownership.retireParent(sessionID, claim.runID);
+  }
+
+  /**
+   * A parent claim this process holds no run for, that a new native objective may take over:
+   * a finished run (complete checkpoint and complete marker), or a run that left no resumable
+   * checkpoint (data-only), with nothing pending and nothing holding its writer.
+   */
+  #closableClaim(sessionID: string): { runID: string; finished: boolean; moved?: true } | undefined {
+    const ownership = this.options.ownership;
+    if (!ownership || this.#runs.has(sessionID)) return undefined;
+    // A run that finished a transfer away left this parent nothing to protect.
+    const moved = ownership.movedAway(sessionID);
+    if (moved) return { runID: moved.runID, finished: true, moved: true };
+    const claim = ownership.parentClaim(sessionID);
+    if (!claim || claim.retired || claim.transfer) return undefined;
+    const saved = this.options.checkpoint?.read(sessionID)?.checkpoint;
+    const marker = this.options.progress?.read(sessionID);
+    const finished = saved?.version === STABLE_CHECKPOINT_VERSION && saved.runID === claim.runID &&
+      saved.stable.state === 'complete' && marker?.state === 'complete' && marker.runID === claim.runID;
+    if ((saved && !finished) || marker?.state === 'pending') return undefined;
+    const owner = ownership.read(claim.runID);
+    if (owner && (owner.ownerSessionID !== sessionID || owner.receipt || owner.originSessionID !== owner.ownerSessionID)) return undefined;
+    const active = this.#operation.getStore();
+    if (owner && owner.state !== 'idle' && !(owner.state === 'reserved' && active?.sessionID === sessionID && owner.callID === active.callID)) return undefined;
+    return { runID: claim.runID, finished };
+  }
+
+  /**
+   * Closes a finished (or data-only) run before a new native objective starts in its parent, the
+   * way an in-process run is replaced. Its evidence is set aside, never deleted: the dossier moves
+   * to the discarded slot and the run ledger already holds its final row. Call only after the new
+   * objective's native user message is proven.
+   */
+  closeForFreshStart(sessionID: string): void {
+    const closable = this.#closableClaim(sessionID);
+    if (!closable) return;
+    if (closable.moved) { this.retireMovedAway(sessionID); return; }
+    const calls = this.#prior(sessionID)?.calls;
+    this.options.ownership!.retireParent(sessionID, closable.runID);
+    if (calls?.length) this.#inheritedCalls.set(sessionID, [...calls]);
+    this.options.checkpoint?.clear(sessionID);
+    try { this.options.dossier?.discard(sessionID, this.#now()); } catch { /* The ledger row remains the evidence. */ }
+  }
+
   assertFreshStart(sessionID: string, userMessageID?: string): void {
     if (this.#runs.has(sessionID)) return;
-    if (this.options.checkpoint?.read(sessionID)) throw new Error('A durable run already occupies this parent. Read mdd_status; explicitly discard it before starting a new objective.');
+    // Before the native objective is proven nothing is mutated; a closable claim only passes.
+    const closable = this.#closableClaim(sessionID);
+    if (this.options.ownership?.parent(sessionID) && !closable) throw new Error('This parent already has a run or an unresolved target transfer claim. Inspect mdd_status before starting.');
+    if (this.options.checkpoint?.read(sessionID) && !closable?.finished) throw new Error('A durable run already occupies this parent. Read mdd_status; explicitly discard it before starting a new objective.');
     const marker = this.options.progress?.read(sessionID);
     if (!marker) return;
     if (marker.state === 'pending') throw new Error(`A previous attempt in this conversation never reported an outcome. Inspect mdd_status, then use mdd_reset to release it before starting new work. ${ATTEST_HINT}`);
@@ -1496,6 +1957,8 @@ export class PhaseRunner {
     if (runtime.agent !== 'mdd-orchestrator') throw new Error('Only mdd-orchestrator may request read-only investigation.');
     const run = this.#runs.get(runtime.sessionID);
     if (!run) {
+      if (this.options.ownership?.parentClaim(runtime.sessionID)?.transfer)
+        throw new ValidationError('The target has an unresolved transfer claim; no investigation may dispatch.');
       if (this.options.progress?.read(runtime.sessionID)?.state === 'pending') throw new ValidationError(`A previous child has unconfirmed liveness. Release it with mdd_reset before starting another investigation. ${ATTEST_HINT}`);
       return this.#soloStart(runtime, purpose);
     }
@@ -1856,15 +2319,95 @@ export class PhaseRunner {
     try { this.options.progress.write(run.runtime.sessionID, { runID: run.id, ...(callID ? { callID } : {}),
       ...(run.attemptID && !run.side && (inline || run.callID === run.attemptID ||
         (state !== 'pending' && run.lastCallID === run.attemptID)) ? { attemptID: run.attemptID } : {}),
-      state, userMessageID: run.userMessageID }); }
+      state, userMessageID: run.userMessageID, ...(run.checkpointDegraded ? { resumable: false as const } : {}) }); }
     catch (error) { run.uncertain = true; throw error; }
   }
 
-  /** No restored capability is stored here: artifact bytes are bound to the ordered result history. */
+  /** Whether this parent's live run still keeps a resumable checkpoint (true when there is no run). */
+  resumable(sessionID: string): boolean { return !this.#runs.get(sessionID)?.checkpointDegraded; }
+
+  /**
+   * Checkpoint writes are retried, then degraded. A storage fault (a Windows scanner holding the
+   * file, a full disk) must not stop a live run: the progress marker still guards against
+   * duplicate dispatch, so the run continues without a resumable record and a restart falls back to
+   * data-only recovery. A conflicting writer is different — another process advanced this run — so
+   * that alone still fails closed, because continuing could duplicate work.
+   */
   #checkpoint(run: Run, attemptState?: 'pending' | 'settled' | 'released', staged?: Workflow): void {
     if (!this.options.checkpoint || run.side) return;
     if (run.checkpointFailed) throw new Error('Checkpoint durability remains unconfirmed.');
+    let checkpoint: StableCheckpoint | undefined;
+    try { checkpoint = this.#stableCheckpoint(run, attemptState, staged); } catch { checkpoint = undefined; }
+    let conflict = false;
+    for (let attempt = 1; checkpoint && attempt <= CHECKPOINT_ATTEMPTS; attempt++) {
+      try {
+        this.options.checkpoint.write(run.runtime.sessionID, checkpoint, run.replacesRunID);
+        run.checkpointSequence = checkpoint.sequence;
+        delete run.replacesRunID;
+        if (run.checkpointDegraded) this.#restoreResumable(run);
+        return;
+      } catch (error) {
+        if (error instanceof CheckpointConflictError) { conflict = true; break; }
+        if (!(error instanceof CheckpointStorageError)) break;
+        if (attempt < CHECKPOINT_ATTEMPTS) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25 * attempt);
+      }
+    }
+    if (!conflict && this.#degradeCheckpoint(run)) {
+      // A write that failed after its rename may still have landed; never reuse its sequence.
+      if (checkpoint) run.checkpointSequence = checkpoint.sequence;
+      return;
+    }
+    run.checkpointFailed = true;
+    run.uncertain = true;
+    run.state = 'blocked';
+    run.evidence = invalidateEvidence(run.evidence, this.#affected(run.phase));
+    run.report = { ...run.report, status: 'blocked', evidence: run.evidence };
+    run.reason = conflict
+      ? 'Another writer changed this run\'s checkpoint. No result is authorized to advance and no phase may be retried. Inspect local state; only explicit run discard remains.'
+      : 'Checkpoint durability is unconfirmed and resumability could not be withdrawn. No result is authorized to advance and no phase may be retried. Inspect local state; only explicit run discard remains.';
+    throw new Error(run.reason);
+  }
+
+  /**
+   * Withdraws resumability: the marker says the checkpoint beside it is stale, and the stale file
+   * is removed when storage allows. Either one is enough for a restart to fall back to data-only
+   * recovery; if neither can be recorded the caller fails closed.
+   */
+  #degradeCheckpoint(run: Run): boolean {
+    const sessionID = run.runtime.sessionID;
+    let marked = false;
+    if (this.options.progress) {
+      try {
+        const marker = this.options.progress.read(sessionID);
+        this.options.progress.write(sessionID, marker && marker.runID === run.id
+          ? { ...marker, resumable: false }
+          : { runID: run.id, state: 'settled', userMessageID: run.userMessageID, resumable: false });
+        marked = true;
+      } catch { /* Clearing the stale checkpoint below can still make restart safe. */ }
+    }
+    let cleared = false;
+    try { this.options.checkpoint?.clear(sessionID); cleared = true; } catch { /* The marker already withdrew it. */ }
+    if (!marked && !cleared) return false;
+    run.checkpointDegraded = true;
+    delete run.replacesRunID;
+    return true;
+  }
+
+  /** A full checkpoint was written again after degradation: it is current, so it may be resumed. */
+  #restoreResumable(run: Run): void {
     try {
+      const marker = this.options.progress?.read(run.runtime.sessionID);
+      if (marker?.resumable === false) {
+        const { resumable: _resumable, ...current } = marker;
+        this.options.progress!.write(run.runtime.sessionID, current);
+      }
+      delete run.checkpointDegraded;
+    } catch { /* Still degraded: the next successful write tries again. */ }
+  }
+
+  /** No restored capability is stored here: artifact bytes are bound to the ordered result history. */
+  #stableCheckpoint(run: Run, attemptState?: 'pending' | 'settled' | 'released', staged?: Workflow): StableCheckpoint {
+    {
       const body = (item: ArtifactResult) => ({ phase: item.ref.phase, content: item.content,
         digest: createHash('sha256').update(item.content).digest('hex') });
       const data: ResumeData = {
@@ -1897,27 +2440,17 @@ export class PhaseRunner {
         ...(!advanced && run.nativeUsed ? { nativeUsed: true as const } : {}),
         ...(run.fallbackExhausted ? { fallbackExhausted: true as const } : {}),
         ...(run.reportRepairExhausted ? { reportRepairExhausted: true as const } : {}),
-        ...(!advanced && run.lastFailure ? { lastFailure: run.lastFailure } : {}),
-        ...(run.reason ? { reason: run.reason } : {}),
-        ...(run.rejected ? { rejected: { ...run.rejected } } : {}),
+        ...(!advanced && run.lastFailure ? { lastFailure: clip(run.lastFailure, EXPLANATION_MAX_BYTES) } : {}),
+        ...(run.reason ? { reason: clip(run.reason, EXPLANATION_MAX_BYTES) } : {}),
+        ...(run.rejected ? { rejected: { reason: clip(run.rejected.reason, EXPLANATION_MAX_BYTES), text: run.rejected.text } } : {}),
       };
-      const checkpoint: StableCheckpoint = {
+      return {
         version: STABLE_CHECKPOINT_VERSION, runID: run.id, parent: run.runtime.sessionID, sequence: (run.checkpointSequence ?? -1) + 1,
         request: structuredClone(run.checkpointRequest), events, data, stable,
         dataDigest: sealResumeData(data, run.id, run.runtime.sessionID, events, stable),
         ...(attemptState && run.attemptID ? { attempt: { id: run.attemptID,
           phase: attemptState === 'settled' ? workflow.snapshot().results.at(-1)!.phase : run.phase, state: attemptState } } : {}),
       };
-      this.options.checkpoint.write(run.runtime.sessionID, checkpoint);
-      run.checkpointSequence = checkpoint.sequence;
-    } catch {
-      run.checkpointFailed = true;
-      run.uncertain = true;
-      run.state = 'blocked';
-      run.evidence = invalidateEvidence(run.evidence, this.#affected(run.phase));
-      run.report = { ...run.report, status: 'blocked', evidence: run.evidence };
-      run.reason = 'Checkpoint durability is unconfirmed. No result is authorized to advance and no phase may be retried. Inspect local state; only explicit run discard remains.';
-      throw new Error(run.reason);
     }
   }
 

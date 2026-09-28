@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { Workflow } from '../dist/workflow.js';
-import { CheckpointStore, reconcileProgress, sealResumeData, validateCheckpoint } from '../dist/checkpoint.js';
+import { CheckpointStorageError, CheckpointStore, reconcileProgress, sealResumeData, validateCheckpoint } from '../dist/checkpoint.js';
 import { PhaseRunner } from '../dist/phase-runner.js';
 import { ProgressGuard } from '../dist/progress.js';
 import { memoryServer, request as nativeRequest, result as nativeResult, reportDocument, runtime, call, answers } from './adapter-fixture.mjs';
@@ -86,17 +86,24 @@ test('v2 binds every result to complete dependency bytes and rejects corruption 
   assert.throws(() => validateCheckpoint({ ...record, data: { ...data, requirements: 'Tampered' } }));
   assert.throws(() => validateCheckpoint({ ...record, runID: 'other' }));
   assert.throws(() => validateCheckpoint({ ...record, parent: 'other' }));
-  const oversized = { ...data, context: Array.from({ length: 5 }, (_, index) => ({ label: `source-${index}`, content: 'x'.repeat(95000), source: 'coordinator' })) };
+  // The ceiling is a sanity bound now, far above any real route; past it a record is still refused.
+  const oversized = { ...data, context: Array.from({ length: 180 }, (_, index) => ({ label: `source-${index}`, content: 'x'.repeat(95000), source: 'coordinator' })) };
   assert.throws(() => validateCheckpoint({ ...record, data: oversized, dataDigest: sealResumeData(oversized, 'run-1', parent, workflow.history()) }));
+  // Text the runtime accepts — carriage returns, tabs, ANSI escapes — is recorded losslessly.
+  const escaped = { ...data, requirements: 'Colour \u001b[1mbold\u001b[0m\r\n\ttext', dependencies: [{ phase: 'mdd-explore', content: 'Body \u001b[31mred\u001b[0m\r\n',
+    digest: createHash('sha256').update('Body \u001b[31mred\u001b[0m\r\n').digest('hex') }] };
+  const accepted = { ...record, data: escaped, dataDigest: sealResumeData(escaped, 'run-1', parent, workflow.history()) };
+  assert.deepEqual(validateCheckpoint(accepted).checkpoint, accepted);
 });
 
-test('checkpoint write failure after a phase result leaves its marker pending and cannot authorize retry', async t => {
+test('a checkpoint write that keeps failing after a result degrades the run to data-only instead of blocking it', async t => {
   const memory = await memoryServer(t);
   const root = mkdtempSync(join(tmpdir(), 'mdd-durability-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const durable = new CheckpointStore(root);
+  let refused = 0;
   const checkpointStore = { write(parent, value) {
-    if (value.sequence === 2) throw new Error('Simulated disk fault after result.');
+    if (value.sequence === 2) { refused++; throw new CheckpointStorageError('Simulated disk fault after result.'); }
     durable.write(parent, value);
   }, read: parent => durable.read(parent), clear: parent => durable.clear(parent) };
   const inspect = { parent: async () => {}, result: async (_runtime, _call, _phase, output) => output, stopped: async () => true };
@@ -104,17 +111,22 @@ test('checkpoint write failure after a phase result leaves its marker pending an
   const ready = await runner.start(nativeRequest(memory.endpoint), runtime, { requirementsConfirmed: true, userMessageID: 'message-1' });
   const dispatched = await runner.before(call, ready.task);
   assert.equal(durable.read(runtime.sessionID).checkpoint.attempt.state, 'pending');
-  await assert.rejects(runner.after(call, dispatched, nativeResult(ready)), /Checkpoint outcome is unconfirmed/);
+  await runner.after(call, dispatched, nativeResult(ready));
+  assert.ok(refused > 1, 'the result checkpoint was retried before degrading');
   const status = runner.status(runtime.sessionID);
-  assert.equal(status.state, 'blocked');
-  assert.equal(status.uncertain, true);
-  assert.equal(status.workflow.results.length, 0);
-  assert.equal(status.workflow.nextAction.kind, 'await-result');
-  assert.equal(status.task, undefined);
-  assert.equal(durable.read(runtime.sessionID).checkpoint.events.at(-1).kind, 'start');
-  assert.equal(new ProgressGuard(root).read(runtime.sessionID).state, 'pending');
+  // The result stands: the progress marker is its durable record and the live run moves on.
+  assert.equal(status.workflow.results.length, 1);
+  assert.equal(status.state, 'ready');
+  assert.equal(status.phase, 'mdd-apply');
+  const marker = new ProgressGuard(root).read(runtime.sessionID);
+  assert.equal(marker.state, 'settled');
+  // The old dispatch handle can never run the recorded phase again.
   await assert.rejects(runner.before({ ...call, callID: 'next' }, ready.task));
-  assert.throws(() => runner.reset(runtime.sessionID, 'phase'), /Checkpoint durability/);
+  // A restart never resumes the stale pending-attempt checkpoint.
+  const restarted = new PhaseRunner(inspect, { checkpoint: durable, progress: new ProgressGuard(root) });
+  const restored = await restarted.restore(runtime);
+  if (marker.resumable === false) assert.equal(restored.restored, false);
+  else assert.equal(durable.read(runtime.sessionID).checkpoint.sequence > 2, true, 'resumable again only after a newer full checkpoint');
 });
 
 test('checkpoint-ready plan records complete bytes and held acceptance before approving Apply', async t => {
@@ -187,27 +199,33 @@ test('checkpoint-ready Verify receives complete plan and Apply dependencies with
   assert.equal(JSON.stringify(saved.checkpoint).includes('questionReceipts'), false);
 });
 
-test('failed approval checkpoint cannot expose an approved task', async t => {
+test('a failed approval checkpoint keeps the live approval but never lets a restart replay it', async t => {
   const memory = await memoryServer(t);
   const root = mkdtempSync(join(tmpdir(), 'mdd-approval-checkpoint-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const durable = new CheckpointStore(root);
   const store = { write(parent, value) {
-    if (value.sequence === 3) throw new Error('Approval readback fault.');
+    if (value.sequence === 3) throw new CheckpointStorageError('Approval write fault.');
     durable.write(parent, value);
   }, read: parent => durable.read(parent), clear: parent => durable.clear(parent) };
-  const runner = new PhaseRunner({ parent: async () => {}, result: async (_runtime, _call, _phase, output) => output },
-    { checkpoint: store, progress: new ProgressGuard(root) });
+  const inspect = { parent: async () => {}, result: async (_runtime, _call, _phase, output) => output };
+  const runner = new PhaseRunner(inspect, { checkpoint: store, progress: new ProgressGuard(root) });
   const input = nativeRequest(memory.endpoint);
   input.preflight.answers = { ...answers, mode: 'interactive' };
   const ready = await runner.start(input, runtime, { requirementsConfirmed: true, userMessageID: 'message-1' });
   const dispatched = await runner.before(call, ready.task);
   await runner.after(call, dispatched, nativeResult(ready));
   assert.equal(durable.read(runtime.sessionID).workflow.nextAction().kind, 'approve');
-  assert.throws(() => runner.approveNative(runtime.sessionID, 'mdd-apply'), /Checkpoint durability/);
-  assert.equal(runner.status(runtime.sessionID).state, 'blocked');
-  assert.equal(runner.status(runtime.sessionID).task, undefined);
-  assert.equal(durable.read(runtime.sessionID).workflow.nextAction().kind, 'approve');
+  runner.approveNative(runtime.sessionID, 'mdd-apply');
+  // The user's approval was given in this process, so the live run continues.
+  assert.equal(runner.status(runtime.sessionID).state, 'ready');
+  assert.equal(runner.status(runtime.sessionID).phase, 'mdd-apply');
+  // The approval was never checkpointed: a restart must not resume from the stale pre-approval
+  // record as though nothing happened, nor from an approval it cannot prove.
+  assert.equal(new ProgressGuard(root).read(runtime.sessionID).resumable, false);
+  assert.equal(durable.read(runtime.sessionID), undefined);
+  const restarted = new PhaseRunner(inspect, { checkpoint: durable, progress: new ProgressGuard(root) });
+  assert.equal((await restarted.restore(runtime)).restored, false);
 });
 
 test('rejected result commits its retry before settling and restores the same phase', async t => {
@@ -260,23 +278,25 @@ test('malformed completed report restores only restatement, never a fresh actor 
   assert.equal(settled.workflow.results.length, 1);
 });
 
-test('rejected-result checkpoint failure cannot settle progress or expose a retry', async t => {
+test('a rejected-result checkpoint failure settles the stopped attempt data-only and never resumes it', async t => {
   const root = mkdtempSync(join(tmpdir(), 'mdd-rejected-write-fault-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const durable = new CheckpointStore(root);
   const store = { read: parent => durable.read(parent), clear: parent => durable.clear(parent),
-    write(parent, value) { if (value.attempt?.state === 'released') throw new Error('Retry checkpoint fault.'); durable.write(parent, value); } };
+    write(parent, value) { if (value.attempt?.state === 'released') throw new CheckpointStorageError('Retry checkpoint fault.'); durable.write(parent, value); } };
   const progress = new ProgressGuard(root);
   const runner = new PhaseRunner({ parent: async () => {}, result: async () => { throw new Error('Rejected result.'); }, stopped: async () => true },
     { checkpoint: store, progress });
   const ready = await runner.start({ preflight: { answers }, requirements: 'Plan a safe change.' }, runtime,
     { requirementsConfirmed: true, userMessageID: 'message-1' });
   const dispatched = await runner.before(call, ready.task);
-  await assert.rejects(runner.after(call, dispatched, nativeResult(ready)), /Checkpoint durability/);
-  assert.equal(runner.status(runtime.sessionID).state, 'blocked');
-  assert.equal(runner.status(runtime.sessionID).task, undefined);
-  assert.equal(progress.read(runtime.sessionID).state, 'pending');
-  assert.equal(durable.read(runtime.sessionID).checkpoint.attempt.state, 'pending');
+  await assert.rejects(runner.after(call, dispatched, nativeResult(ready)), /Rejected result/);
+  // The child is confirmed stopped, so the live run offers the ordinary retry.
+  assert.equal(runner.status(runtime.sessionID).state, 'ready');
+  assert.equal(progress.read(runtime.sessionID).state, 'settled');
+  assert.equal(progress.read(runtime.sessionID).resumable, false);
+  // The stale pending-attempt checkpoint is gone or withdrawn: a restart cannot resume it.
+  assert.equal(durable.read(runtime.sessionID), undefined);
   const restarted = new PhaseRunner({ parent: async () => {}, result: async () => '', stopped: async () => true },
     { checkpoint: durable, progress });
   assert.equal((await restarted.restore(runtime)).restored, false);

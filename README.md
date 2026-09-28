@@ -114,7 +114,13 @@ console.log(workflow.snapshot()); // Captured answers/evaluation, nextAction, re
 
 `Workflow` accepts the same request as `evaluate`. Its first phase is ready immediately. `nextAction()` returns `execute`, `approve`, `await-result`, or `blocked` with the exact phase, or `finished` without one. Reads do not advance state. Interactive callers must use `approve(phase)` for each pending phase; automatic mode makes the next phase ready without approval. Neither mode dispatches it automatically. A recorded failed result stops the route; `retry()` releases an attempt that never produced a recorded result so the same phase can run again.
 
-Preflight reuse and state inspection work only within the live controller. New requirements need a new controller. The controller itself holds no persistence, contextual rerouting or substantive-change detection, and it is never resumed after process loss; the OpenCode adapter preserves what a lost run produced as read-only evidence and restarts with fresh consent. Adapters must eventually enforce real phase evidence; this proof only validates caller-supplied result structure.
+Preflight reuse and state inspection work only within the live controller. New requirements need a new controller. The controller itself holds no persistence, contextual rerouting or substantive-change detection; `Workflow.replay` rebuilds one only from validated events. Adapters must eventually enforce real phase evidence; this proof only validates caller-supplied result structure.
+
+### Resuming after a restart, or in a new conversation
+
+The OpenCode adapter checkpoints every settled step of a run. After OpenCode restarts, ask for the status in the same conversation and the run continues where it settled: a ready phase can be dispatched again, a pending approval is asked again, and nothing that was in flight is replayed — if a subagent or question was interrupted, MDD waits until OpenCode confirms it stopped or you say so yourself (`mdd_reset` with your own message). If a checkpoint cannot be written, the run keeps going and a restart falls back to showing its evidence as read-only data.
+
+To continue a run in a **new conversation**, read `mdd_status` in the old one for its `sessionID` and `runID`, then write in the new conversation something like `Continue sourceSessionID=<sessionID> runID=<runID> here.` The coordinator transfers the run with `mdd_transfer`: the old conversation is fenced, the evidence moves, and any approval is asked again. An interrupted transfer is resolved with `mdd_transfer_recover` on your explicit request. See [the adapter guide](docs/opencode-adapter.md#restart-resume).
 
 ## Implementation boundaries
 

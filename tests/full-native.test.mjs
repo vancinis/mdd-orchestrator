@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { mkdtemp, mkdir, rm, writeFile, readFile, readdir, cp } from 'node:fs/promises';
+import fs from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -13,11 +14,14 @@ import { ManagedMemory } from '../dist/managed-memory.js';
 import { STATUS_BUDGET_BYTES, STATUS_COMPACT_KEEP, STATUS_DROP_ORDER, STATUS_PROTECTED_FIELDS } from '../dist/status-budget.js';
 import { retroReport } from '../dist/retro.js';
 import { collapsedPrompt } from '../dist/dispatch-transcript.js';
+import { QuestionCheckpointStore } from '../dist/question-checkpoint.js';
+import { RunOwnershipStore } from '../dist/run-ownership.js';
+import { CheckpointStore } from '../dist/checkpoint.js';
+import { ProgressGuard } from '../dist/progress.js';
+import { projectApprovalTransfer, projectTargetTransfer } from '../dist/transfer.js';
+import { Workflow } from '../dist/workflow.js';
 
 test('opt-in same-parent restart restores ready Verify from validated local dependencies, memory off', async t => {
-  const previous = process.env.MDD_EXPERIMENTAL_RESUME;
-  process.env.MDD_EXPERIMENTAL_RESUME = '1';
-  t.after(() => { if (previous === undefined) delete process.env.MDD_EXPERIMENTAL_RESUME; else process.env.MDD_EXPERIMENTAL_RESUME = previous; });
   const f = await fixture(t, { memoryEnabled: false, store: 'none' });
   await f.hooks.tool.mdd_context.execute({ label: 'Issue context', content: 'The validated input boundary must preserve prior behavior. '.repeat(200) }, f.context);
   await f.phase();
@@ -40,10 +44,7 @@ test('opt-in same-parent restart restores ready Verify from validated local depe
   assert.match(args.prompt, /validated input boundary must preserve prior behavior/);
 });
 
-test('opt-in pending child stays blocked until explicit release, then returns to its saved phase', async t => {
-  const previous = process.env.MDD_EXPERIMENTAL_RESUME;
-  process.env.MDD_EXPERIMENTAL_RESUME = '1';
-  t.after(() => { if (previous === undefined) delete process.env.MDD_EXPERIMENTAL_RESUME; else process.env.MDD_EXPERIMENTAL_RESUME = previous; });
+test('opt-in pending child releases only after explicit stopped-child confirmation', async t => {
   const f = await fixture(t, { memoryEnabled: false, store: 'none' });
   await f.phase();
   const ready = await f.status();
@@ -60,16 +61,125 @@ test('opt-in pending child stays blocked until explicit release, then returns to
   assert.equal(released.state, 'ready');
   assert.equal(released.runID, ready.runID);
   assert.equal(released.phase, 'mdd-apply');
-  assert.equal(released.workflow.results.length, 1);
-  assert.equal(released.workflow.nextAction.kind, 'execute');
-  assert.equal(released.task.subagent_type, 'mdd-apply');
   assert.notEqual(released.task.prompt, ready.task.prompt);
 });
 
+test('two restored plugins racing reset never both replay a pending child', async t => {
+  const f = await fixture(t, { memoryEnabled: false, store: 'none' });
+  await f.phase();
+  const ready = await f.status();
+  const task = structuredClone(ready.task);
+  const call = { sessionID: f.runtime.sessionID, callID: 'task-racing-reset', tool: 'task' };
+  f.parent[1].parts = [{ type: 'tool', tool: 'task', callID: call.callID, state: { status: 'running', input: structuredClone(task) } }];
+  await f.hooks['tool.execute.before'](call, { args: task });
+  const plugins = await Promise.all([plugin(f.input), plugin(f.input)]);
+  f.user('I stopped the interrupted subagent.');
+  const results = await Promise.allSettled(plugins.map(instance => instance.tool.mdd_reset.execute(
+    { scope: 'phase', userText: 'I stopped the interrupted subagent.' }, f.context)));
+  assert.ok(results.filter(item => item.status === 'fulfilled').length <= 1);
+  const owner = new RunOwnershipStore(f.root).read(ready.runID);
+  assert.ok(owner.state === 'idle' || (owner.state === 'reserved' && !!owner.recovery));
+  await assert.rejects(plugins[0]['tool.execute.after']({ ...call, args: task }, { output: 'stale' }));
+});
+
+test('a reset handoff that crashed is released only on the user\'s word and never replays the old child', async t => {
+  const f = await fixture(t, { memoryEnabled: false, store: 'none' });
+  await f.phase();
+  const ready = await f.status();
+  const args = structuredClone(ready.task);
+  const call = { sessionID: f.runtime.sessionID, callID: 'task-before-reset-crash', tool: 'task' };
+  f.parent[1].parts = [{ type: 'tool', tool: 'task', callID: call.callID, state: { status: 'running', input: structuredClone(args) } }];
+  await f.hooks['tool.execute.before'](call, { args });
+  const checkpoint = new CheckpointStore(f.root).read(f.runtime.sessionID).checkpoint;
+  const owners = new RunOwnershipStore(f.root);
+  const owner = owners.read(ready.runID);
+  const recovery = { sourceCallID: call.callID, kind: 'task', checkpointSequence: checkpoint.sequence, checkpointDigest: checkpoint.dataDigest };
+  owners.handoff(ready.runID, f.runtime.sessionID, call.callID, 'reset-interrupted', owner.epoch, recovery);
+  const resumed = await plugin(f.input);
+  assert.match(JSON.parse(await resumed.tool.mdd_status.execute({}, f.context)).reason, /reset handoff.*unchanged/);
+  await assert.rejects(f.hooks['tool.execute.after']({ ...call, args }, { output: 'old child result' }));
+  // Without the user's own word nothing is released.
+  await assert.rejects(resumed.tool.mdd_reset.execute({ scope: 'phase' }, f.context), /reset handoff.*userText/);
+  assert.equal(owners.read(ready.runID).callID, 'reset-interrupted');
+  f.user(STOPPED);
+  const released = JSON.parse(await resumed.tool.mdd_reset.execute({ scope: 'phase', userText: STOPPED }, f.context));
+  assert.equal(released.state, 'ready');
+  assert.equal(released.runID, ready.runID);
+  assert.equal(released.phase, 'mdd-apply');
+  assert.equal(owners.read(ready.runID).state, 'idle');
+  assert.equal(new ProgressGuard(f.root).read(f.runtime.sessionID).state, 'settled');
+  // The old child cannot report into the released attempt.
+  await assert.rejects(resumed['tool.execute.after']({ ...call, args }, { output: 'old child result' }));
+});
+
+test('a crashed coordinator operation whose checkpoint drifted allows only an attested run discard', async t => {
+  const f = await fixture(t, { memoryEnabled: false, store: 'none' });
+  await f.phase();
+  const ready = await f.status();
+  const saved = new CheckpointStore(f.root).read(f.runtime.sessionID).checkpoint;
+  const owners = new RunOwnershipStore(f.root);
+  owners.reserve(ready.runID, f.runtime.sessionID, 'operation-crashed', owners.read(ready.runID).epoch,
+    { name: 'mdd_context', checkpointSequence: saved.sequence - 1, checkpointDigest: 'a'.repeat(64) });
+  const resumed = await plugin(f.input);
+  assert.match(JSON.parse(await resumed.tool.mdd_status.execute({}, f.context)).reason, /mdd_context.*different/);
+  f.user(STOPPED);
+  await assert.rejects(resumed.tool.mdd_reset.execute({ scope: 'phase', userText: STOPPED }, f.context), /only.*scope run/);
+  assert.equal(owners.read(ready.runID).callID, 'operation-crashed');
+  await assert.rejects(resumed.tool.mdd_reset.execute({ scope: 'run' }, f.context), /userText/);
+  const discarded = JSON.parse(await resumed.tool.mdd_reset.execute({ scope: 'run', userText: STOPPED }, f.context));
+  assert.equal(discarded.reset.scope, 'run');
+  assert.ok(discarded.reset.preserved, 'the discarded evidence is set aside, not deleted');
+  assert.equal(owners.read(ready.runID).state, 'idle');
+  assert.equal(owners.parent(f.runtime.sessionID), undefined);
+});
+
+test('read-only coordinator tools never take the durable run reservation', async t => {
+  const f = await fixture(t, { memoryEnabled: false, store: 'none' });
+  await f.phase();
+  const reserve = t.mock.method(RunOwnershipStore.prototype, 'reserve');
+  f.user('Remember that the plan summary was too terse.');
+  await f.hooks.tool.mdd_improve.execute({ userText: 'Remember that the plan summary was too terse.', title: 'Terse plan', detail: 'The plan summary omitted the reasoning.' }, f.context);
+  f.user('Draft the PR body.');
+  await f.hooks.tool.mdd_pr_body.execute({ userText: 'Draft the PR body.' }, f.context);
+  await f.hooks.tool.mdd_check_report.execute({ phase: 'mdd-apply', result: 'not a report' }, f.context);
+  await f.hooks.tool.mdd_improvements.execute({}, f.context);
+  await f.hooks.tool.mdd_status.execute({}, f.context);
+  assert.equal(reserve.mock.callCount(), 0);
+});
+
+test('a crashed question reset handoff re-presents a fresh question on the user\'s word and never accepts the old answer', async t => {
+  const f = await fixture(t, { mode: 'interactive', store: 'none', memoryEnabled: false });
+  await f.phase();
+  const ready = await f.status();
+  const args = structuredClone(ready.question);
+  const call = { sessionID: f.runtime.sessionID, callID: 'question-before-reset-crash', tool: 'question' };
+  f.parent[1].parts = [{ type: 'tool', tool: 'question', callID: call.callID, sessionID: f.runtime.sessionID,
+    messageID: f.context.messageID, state: { status: 'running', input: structuredClone(args) } }];
+  await f.hooks['tool.execute.before'](call, { args });
+  const questions = new QuestionCheckpointStore(f.root);
+  const pending = questions.read(f.runtime.sessionID);
+  const checkpoint = new CheckpointStore(f.root).read(f.runtime.sessionID).checkpoint;
+  const owners = new RunOwnershipStore(f.root);
+  const owner = owners.read(ready.runID);
+  owners.handoff(ready.runID, f.runtime.sessionID, call.callID, 'reset-question-interrupted', owner.epoch,
+    { sourceCallID: call.callID, kind: 'question', checkpointSequence: checkpoint.sequence, checkpointDigest: checkpoint.dataDigest });
+  const resumed = await plugin(f.input);
+  assert.match(JSON.parse(await resumed.tool.mdd_status.execute({}, f.context)).reason, /reset handoff/);
+  const oldAnswer = { title: 'Asked 1 question', output: `User has answered your questions: "${args.questions[0].question}"="Continuar". You can now continue with the user's answers in mind.`,
+    metadata: { answers: [['Continuar']], truncated: false } };
+  await assert.rejects(f.hooks['tool.execute.after']({ ...call, args }, oldAnswer));
+  assert.equal(questions.read(f.runtime.sessionID).state, pending.state);
+  await assert.rejects(resumed.tool.mdd_reset.execute({ scope: 'phase' }, f.context), /reset handoff.*userText/);
+  f.user('I stopped the interrupted question.');
+  const recovered = JSON.parse(await resumed.tool.mdd_reset.execute({ scope: 'phase', userText: 'I stopped the interrupted question.' }, f.context));
+  assert.equal(recovered.state, 'question-ready');
+  assert.notEqual(recovered.question.questions[0].question, args.questions[0].question);
+  assert.equal(owners.read(ready.runID).state, 'idle');
+  await assert.rejects(resumed['tool.execute.after']({ ...call, args }, oldAnswer));
+  assert.equal(JSON.parse(await resumed.tool.mdd_status.execute({}, f.context)).workflow.nextAction.kind, 'approve');
+});
+
 test('opt-in restart refuses a corrupt checkpoint instead of granting dossier authority', async t => {
-  const previous = process.env.MDD_EXPERIMENTAL_RESUME;
-  process.env.MDD_EXPERIMENTAL_RESUME = '1';
-  t.after(() => { if (previous === undefined) delete process.env.MDD_EXPERIMENTAL_RESUME; else process.env.MDD_EXPERIMENTAL_RESUME = previous; });
   const f = await fixture(t, { memoryEnabled: false, store: 'none' });
   await f.phase();
   const name = `checkpoint-${createHash('sha256').update(f.runtime.sessionID).digest('hex')}.json`;
@@ -82,10 +192,7 @@ test('opt-in restart refuses a corrupt checkpoint instead of granting dossier au
   await assert.rejects(resumed.tool.mdd_start.execute({ requirements: f.requirements }, f.context));
 });
 
-test('opt-in native approval is re-presented with a new call and ignores the stale callback', async t => {
-  const previous = process.env.MDD_EXPERIMENTAL_RESUME;
-  process.env.MDD_EXPERIMENTAL_RESUME = '1';
-  t.after(() => { if (previous === undefined) delete process.env.MDD_EXPERIMENTAL_RESUME; else process.env.MDD_EXPERIMENTAL_RESUME = previous; });
+test('opt-in pending native approval requires attestation, then re-presents without old consent', async t => {
   const f = await fixture(t, { mode: 'interactive', store: 'none', memoryEnabled: false });
   await f.phase();
   const before = await f.status();
@@ -97,32 +204,189 @@ test('opt-in native approval is re-presented with a new call and ignores the sta
   await f.hooks['tool.execute.before'](oldCall, { args: oldArgs });
   const resumed = await plugin(f.input);
   const status = JSON.parse(await resumed.tool.mdd_status.execute({ detail: 'full' }, f.context));
-  assert.equal(status.state, 'question-ready');
-  assert.equal(status.workflow.nextAction.kind, 'approve');
+  assert.equal(status.state, 'recovery-blocked');
   assert.equal(status.task, undefined);
-  assert.notEqual(status.question.questions[0].question, oldArgs.questions[0].question);
+  assert.equal(status.question, undefined);
   const answer = (args, callID) => {
     const formatted = args.questions.map(q => `"${q.question}"="Continuar"`).join(', ');
     return { title: 'Asked 1 question', output: `User has answered your questions: ${formatted}. You can now continue with the user's answers in mind.`,
       metadata: { answers: [['Continuar']], truncated: false } };
   };
-  await resumed['tool.execute.after']({ ...oldCall, args: oldArgs }, answer(oldArgs, oldCall.callID));
-  assert.equal(JSON.parse(await resumed.tool.mdd_status.execute({ detail: 'full' }, f.context)).workflow.nextAction.kind, 'approve');
-  const freshCall = { sessionID: f.runtime.sessionID, callID: 'question-after-restart', tool: 'question' };
-  f.parent[1].parts = [{ type: 'tool', tool: 'question', callID: freshCall.callID, sessionID: f.runtime.sessionID,
-    messageID: f.context.messageID, state: { status: 'running', input: structuredClone(status.question) } }];
-  await resumed['tool.execute.before'](freshCall, { args: status.question });
-  await resumed['tool.execute.after']({ ...freshCall, args: status.question }, answer(status.question, freshCall.callID));
-  const approved = JSON.parse(await resumed.tool.mdd_status.execute({ detail: 'full' }, f.context));
-  assert.equal(approved.state, 'ready');
-  assert.equal(approved.phase, 'mdd-apply');
-  assert.equal(approved.workflow.results.length, 1);
+  await assert.rejects(resumed['tool.execute.after']({ ...oldCall, args: oldArgs }, answer(oldArgs, oldCall.callID)), /no current issued question/);
+  assert.equal(JSON.parse(await resumed.tool.mdd_status.execute({ detail: 'full' }, f.context)).state, 'recovery-blocked');
+  await assert.rejects(resumed['tool.execute.before']({ sessionID: f.runtime.sessionID, callID: 'question-after-restart', tool: 'question' },
+    { args: oldArgs }), /durable run owner/);
+  await assert.rejects(resumed.tool.mdd_reset.execute({ scope: 'phase' }, f.context), /attestation/);
+  f.user('I stopped the interrupted question.');
+  const recovered = JSON.parse(await resumed.tool.mdd_reset.execute({ scope: 'phase', userText: 'I stopped the interrupted question.' }, f.context));
+  assert.equal(recovered.state, 'question-ready');
+  assert.notEqual(recovered.question.questions[0].question, oldArgs.questions[0].question);
+  await assert.rejects(resumed['tool.execute.after']({ ...oldCall, args: oldArgs }, answer(oldArgs, oldCall.callID)));
+  assert.equal(JSON.parse(await resumed.tool.mdd_status.execute({}, f.context)).workflow.nextAction.kind, 'approve');
+});
+
+test('transfer projection retains work but carries no source approval into a target', async t => {
+  const f = await fixture(t, { mode: 'interactive', store: 'none', memoryEnabled: false });
+  const checkpoints = new CheckpointStore(f.root);
+  const before = checkpoints.read(f.runtime.sessionID).checkpoint;
+  assert.throws(() => projectApprovalTransfer(before, undefined,
+    { ...f.runtime, sessionID: 'ses-fresh-target' }, 'user-fresh-target'), /settled interactive approval/);
+  await f.phase();
+  const source = checkpoints.read(f.runtime.sessionID).checkpoint;
+  const marker = new ProgressGuard(f.root).read(f.runtime.sessionID);
+  const projected = projectApprovalTransfer(source, marker,
+    { ...f.runtime, sessionID: 'ses-fresh-target' }, 'user-fresh-target');
+  assert.equal(projected.checkpoint.data.userMessageID, 'user-fresh-target');
+  assert.deepEqual(projected.checkpoint.data.usedMessages, ['user-fresh-target']);
+  assert.deepEqual(projected.checkpoint.data.proposed, []);
+  assert.equal(projected.progress.userMessageID, 'user-fresh-target');
+  assert.equal(new Workflow(source.request).snapshot().answers.mode, 'interactive');
+  assert.equal(Workflow.replay(projected.checkpoint.request, projected.checkpoint.events).nextAction().kind, 'approve');
+  assert.equal(checkpoints.read('ses-fresh-target'), undefined);
+  assert.equal(checkpoints.read(f.runtime.sessionID).checkpoint.dataDigest, source.dataDigest);
+  await f.answer('Continuar');
+  const approved = checkpoints.read(f.runtime.sessionID).checkpoint;
+  assert.equal(approved.events.at(-1).kind, 'approve');
+  const userText = `Continue sourceSessionID=${f.runtime.sessionID} runID=${approved.runID}`;
+  const reasked = projectTargetTransfer(approved, new ProgressGuard(f.root).read(f.runtime.sessionID),
+    { ...f.runtime, sessionID: 'ses-fresh-target' },
+    { sessionID: 'ses-fresh-target', userMessageID: 'user-fresh-target', userText, latest: true, authored: true });
+  assert.equal(reasked.checkpoint.stable.state, 'await-approval');
+  assert.equal(reasked.checkpoint.events.length, approved.events.length - 1);
+  assert.equal(Workflow.replay(reasked.checkpoint.request, reasked.checkpoint.events).nextAction().kind, 'approve');
+  assert.equal(reasked.resumeConsent, undefined);
+  assert.equal(checkpoints.read(f.runtime.sessionID).checkpoint.events.at(-1).kind, 'approve');
+  const owners = new RunOwnershipStore(f.root);
+  const intent = { operationID: 'interactive-reask', nativeUserMessageID: 'user-fresh-target',
+    requestDigest: createHash('sha256').update(userText).digest('hex') };
+  const reserved = owners.reserveVerifiedTransfer(approved.runID, f.runtime.sessionID,
+    { sessionID: 'ses-fresh-target', directory: f.root, worktree: f.root },
+    { sequence: approved.sequence, digest: approved.dataDigest }, owners.read(approved.runID).epoch, intent);
+  checkpoints.write('ses-fresh-target', reasked.checkpoint);
+  new ProgressGuard(f.root).write('ses-fresh-target', reasked.progress);
+  const finished = owners.finishVerifiedTransfer(approved.runID, f.runtime.sessionID, 'ses-fresh-target', reserved.epoch,
+    { sourceSequence: approved.sequence, sourceDigest: approved.dataDigest,
+      targetSequence: reasked.checkpoint.sequence, targetDigest: reasked.checkpoint.dataDigest }, intent);
+  assert.equal(finished.ownerSessionID, 'ses-fresh-target');
+  assert.equal(checkpoints.read('ses-fresh-target').workflow.nextAction().kind, 'approve');
+});
+
+test('automatic target resume records only the exact target-authored request', async t => {
+  const f = await fixture(t, { mode: 'automatic', store: 'none', memoryEnabled: false });
+  await f.phase();
+  const source = new CheckpointStore(f.root).read(f.runtime.sessionID).checkpoint;
+  const marker = new ProgressGuard(f.root).read(f.runtime.sessionID);
+  const target = { ...f.runtime, sessionID: 'ses-auto-target' };
+  const userText = `Continue sourceSessionID=${f.runtime.sessionID} runID=${source.runID}`;
+  const proof = { sessionID: target.sessionID, userMessageID: 'user-auto-target', userText, latest: true, authored: true };
+  const projected = projectTargetTransfer(source, marker, target, proof);
+  assert.equal(projected.checkpoint.stable.state, 'ready');
+  assert.deepEqual(projected.checkpoint.events, source.events);
+  assert.equal(projected.resumeConsent.sessionID, target.sessionID);
+  assert.equal(projected.resumeConsent.userMessageID, proof.userMessageID);
+  assert.equal(projected.checkpoint.data.usedMessages.includes(source.data.userMessageID), false);
+  for (const wrong of [
+    { ...proof, sessionID: f.runtime.sessionID },
+    { ...proof, userText: 'Continue without the source and run identifiers.' },
+    { ...proof, userMessageID: source.data.userMessageID },
+    { ...proof, latest: false },
+  ]) assert.throws(() => projectTargetTransfer(source, marker, target, wrong));
+  assert.throws(() => projectTargetTransfer({ ...source, dataDigest: 'a'.repeat(64) }, marker, target, proof));
+  assert.equal(new CheckpointStore(f.root).read(target.sessionID), undefined);
+  const owners = new RunOwnershipStore(f.root);
+  const intent = { operationID: 'auto-transfer', nativeUserMessageID: proof.userMessageID,
+    requestDigest: projected.resumeConsent.digest };
+  const reserved = owners.reserveVerifiedTransfer(source.runID, f.runtime.sessionID, target,
+    { sequence: source.sequence, digest: source.dataDigest }, owners.read(source.runID).epoch, intent);
+  new CheckpointStore(f.root).write(target.sessionID, projected.checkpoint);
+  new ProgressGuard(f.root).write(target.sessionID, projected.progress);
+  const finished = owners.finishVerifiedTransfer(source.runID, f.runtime.sessionID, target.sessionID, reserved.epoch,
+    { sourceSequence: source.sequence, sourceDigest: source.dataDigest,
+      targetSequence: projected.checkpoint.sequence, targetDigest: projected.checkpoint.dataDigest }, intent);
+  assert.equal(finished.receipt.nativeUserMessageID, proof.userMessageID);
+  assert.equal(finished.receipt.requestDigest, projected.resumeConsent.digest);
+});
+
+test('failed Verify projects only an explicit target-authored rework request', async t => {
+  const f = await fixture(t, { mode: 'automatic', store: 'none', memoryEnabled: false });
+  await f.phase(); await f.phase(); await f.phase({ outcome: 'failed' });
+  const source = new CheckpointStore(f.root).read(f.runtime.sessionID).checkpoint;
+  const marker = new ProgressGuard(f.root).read(f.runtime.sessionID);
+  const target = { ...f.runtime, sessionID: 'ses-rework-target' };
+  const userText = `Rework sourceSessionID=${f.runtime.sessionID} runID=${source.runID}`;
+  const proof = { sessionID: target.sessionID, userMessageID: 'user-rework-target', userText, latest: true, authored: true };
+  assert.throws(() => projectTargetTransfer(source, marker, target, { ...proof,
+    userText: `Continue sourceSessionID=${f.runtime.sessionID} runID=${source.runID}` }));
+  const projected = projectTargetTransfer(source, marker, target, proof);
+  assert.equal(projected.checkpoint.stable.state, 'ready');
+  assert.equal(projected.checkpoint.stable.phase, 'mdd-apply');
+  assert.equal(projected.checkpoint.events.at(-1).kind, 'rework');
+  assert.equal(projected.checkpoint.attempt, undefined);
+  assert.equal(projected.resumeConsent.userMessageID, proof.userMessageID);
+  const owners = new RunOwnershipStore(f.root);
+  const intent = { operationID: 'rework-transfer', nativeUserMessageID: proof.userMessageID,
+    requestDigest: createHash('sha256').update(userText).digest('hex') };
+  const reserved = owners.reserveVerifiedTransfer(source.runID, f.runtime.sessionID, target,
+    { sequence: source.sequence, digest: source.dataDigest }, owners.read(source.runID).epoch, intent);
+  new CheckpointStore(f.root).write(target.sessionID, projected.checkpoint);
+  new ProgressGuard(f.root).write(target.sessionID, projected.progress);
+  const finished = owners.finishVerifiedTransfer(source.runID, f.runtime.sessionID, target.sessionID, reserved.epoch,
+    { sourceSequence: source.sequence, sourceDigest: source.dataDigest,
+      targetSequence: projected.checkpoint.sequence, targetDigest: projected.checkpoint.dataDigest }, intent);
+  assert.equal(finished.ownerSessionID, target.sessionID);
+});
+
+test('pending, unrequested blocked and complete source checkpoints cannot project target authority', async t => {
+  const f = await fixture(t, { mode: 'automatic', store: 'none', memoryEnabled: false });
+  const target = { ...f.runtime, sessionID: 'ses-refused-target' };
+  const proof = { sessionID: target.sessionID, userMessageID: 'user-refused-target',
+    userText: `Rework sourceSessionID=${f.runtime.sessionID} runID=${(await f.status()).runID}`, latest: true, authored: true };
+  const task = structuredClone((await f.status()).task);
+  const call = { sessionID: f.runtime.sessionID, callID: 'pending-transfer-task', tool: 'task' };
+  f.parent[1].parts = [{ type: 'tool', tool: 'task', callID: call.callID, state: { status: 'running', input: structuredClone(task) } }];
+  await f.hooks['tool.execute.before'](call, { args: task });
+  const pending = new CheckpointStore(f.root).read(f.runtime.sessionID).checkpoint;
+  assert.throws(() => projectTargetTransfer(pending, new ProgressGuard(f.root).read(f.runtime.sessionID), target, proof));
+  assert.equal(new CheckpointStore(f.root).read(target.sessionID), undefined);
+  const failed = await fixture(t, { mode: 'automatic', store: 'none', memoryEnabled: false });
+  await failed.phase({ outcome: 'failed' });
+  const blocked = new CheckpointStore(failed.root).read(failed.runtime.sessionID).checkpoint;
+  assert.throws(() => projectTargetTransfer(blocked, new ProgressGuard(failed.root).read(failed.runtime.sessionID),
+    { ...failed.runtime, sessionID: target.sessionID }, { ...proof,
+      userText: `Rework sourceSessionID=${failed.runtime.sessionID} runID=${blocked.runID}` }));
+  const complete = await fixture(t, { mode: 'automatic', store: 'none', memoryEnabled: false });
+  await complete.phase(); await complete.phase(); await complete.phase();
+  const finished = new CheckpointStore(complete.root).read(complete.runtime.sessionID).checkpoint;
+  assert.throws(() => projectTargetTransfer(finished, new ProgressGuard(complete.root).read(complete.runtime.sessionID),
+    { ...complete.runtime, sessionID: target.sessionID }, { ...proof,
+      userText: `Continue sourceSessionID=${complete.runtime.sessionID} runID=${finished.runID}` }));
+});
+
+test('answered but unapplied native approval is retired and re-asked, never accepted from history', async t => {
+  const f = await fixture(t, { mode: 'interactive', store: 'none', memoryEnabled: false });
+  await f.phase();
+  const oldArgs = (await f.status()).question;
+  const call = { sessionID: f.runtime.sessionID, callID: 'answered-before-crash', tool: 'question' };
+  f.parent[1].parts = [{ type: 'tool', tool: 'question', callID: call.callID, sessionID: f.runtime.sessionID,
+    messageID: f.context.messageID, state: { status: 'running', input: structuredClone(oldArgs) } }];
+  await f.hooks['tool.execute.before'](call, { args: oldArgs });
+  const questions = new QuestionCheckpointStore(f.root);
+  const pending = questions.read(f.runtime.sessionID);
+  questions.write(f.runtime.sessionID, { ...pending, state: 'answered', sequence: pending.sequence + 1, answer: [['Continuar']] });
+  const resumed = await plugin(f.input);
+  assert.equal(JSON.parse(await resumed.tool.mdd_status.execute({}, f.context)).state, 'recovery-blocked');
+  f.user('I stopped the interrupted question.');
+  const recovered = JSON.parse(await resumed.tool.mdd_reset.execute({ scope: 'phase', userText: 'I stopped the interrupted question.' }, f.context));
+  assert.equal(recovered.state, 'question-ready');
+  assert.notEqual(recovered.question.questions[0].question, oldArgs.questions[0].question);
+  const oldAnswer = { title: 'Asked 1 question', output: `User has answered your questions: "${oldArgs.questions[0].question}"="Continuar". You can now continue with the user's answers in mind.`,
+    metadata: { answers: [['Continuar']], truncated: false } };
+  await assert.rejects(resumed['tool.execute.after']({ ...call, args: oldArgs }, oldAnswer));
+  assert.equal(JSON.parse(await resumed.tool.mdd_status.execute({}, f.context)).state, 'question-ready');
+  assert.equal(questions.read(f.runtime.sessionID).state, 'prepared');
 });
 
 test('opt-in OpenSpec ready Verify restores without using serialized artifact refs', async t => {
-  const previous = process.env.MDD_EXPERIMENTAL_RESUME;
-  process.env.MDD_EXPERIMENTAL_RESUME = '1';
-  t.after(() => { if (previous === undefined) delete process.env.MDD_EXPERIMENTAL_RESUME; else process.env.MDD_EXPERIMENTAL_RESUME = previous; });
   const f = await fixture(t, { memoryEnabled: false, store: 'openspec' });
   await f.phase(); await f.phase();
   const resumed = await plugin(f.input);
@@ -139,9 +403,6 @@ test('opt-in OpenSpec ready Verify restores without using serialized artifact re
 
 for (const store of ['engram', 'both']) {
   test(`opt-in ${store} ready Verify requires a fresh bound Engram session`, async t => {
-    const previous = process.env.MDD_EXPERIMENTAL_RESUME;
-    process.env.MDD_EXPERIMENTAL_RESUME = '1';
-    t.after(() => { if (previous === undefined) delete process.env.MDD_EXPERIMENTAL_RESUME; else process.env.MDD_EXPERIMENTAL_RESUME = previous; });
     const f = await fixture(t, { memoryEnabled: true, store });
     await f.phase(); await f.phase();
     const resumed = await plugin(f.input);
@@ -154,9 +415,6 @@ for (const store of ['engram', 'both']) {
 }
 
 test('opt-in Engram project mismatch blocks restoration without rebinding', async t => {
-  const previous = process.env.MDD_EXPERIMENTAL_RESUME;
-  process.env.MDD_EXPERIMENTAL_RESUME = '1';
-  t.after(() => { if (previous === undefined) delete process.env.MDD_EXPERIMENTAL_RESUME; else process.env.MDD_EXPERIMENTAL_RESUME = previous; });
   const f = await fixture(t, { memoryEnabled: true, store: 'engram' });
   await f.phase(); await f.phase();
   f.memory.binding.project = 'different-project';
@@ -167,9 +425,6 @@ test('opt-in Engram project mismatch blocks restoration without rebinding', asyn
 });
 
 test('opt-in rejected result survives restart as a retry of the same phase', async t => {
-  const previous = process.env.MDD_EXPERIMENTAL_RESUME;
-  process.env.MDD_EXPERIMENTAL_RESUME = '1';
-  t.after(() => { if (previous === undefined) delete process.env.MDD_EXPERIMENTAL_RESUME; else process.env.MDD_EXPERIMENTAL_RESUME = previous; });
   const f = await fixture(t, { memoryEnabled: false, store: 'none' });
   await assert.rejects(f.phase({ badEnvelope: true }));
   const current = await f.status();
@@ -185,9 +440,6 @@ test('opt-in rejected result survives restart as a retry of the same phase', asy
 });
 
 test('opt-in malformed completed report restores report-only restatement, not dispatch', async t => {
-  const previous = process.env.MDD_EXPERIMENTAL_RESUME;
-  process.env.MDD_EXPERIMENTAL_RESUME = '1';
-  t.after(() => { if (previous === undefined) delete process.env.MDD_EXPERIMENTAL_RESUME; else process.env.MDD_EXPERIMENTAL_RESUME = previous; });
   const f = await fixture(t, { memoryEnabled: false, store: 'none' });
   const malformed = 'I finished the plan, but did not use the report headings.';
   await assert.rejects(f.phase({ reportText: malformed }));
@@ -208,9 +460,6 @@ test('opt-in malformed completed report restores report-only restatement, not di
 });
 
 test('opt-in failed Verify restores rework and complete runs close before a fresh objective', async t => {
-  const previous = process.env.MDD_EXPERIMENTAL_RESUME;
-  process.env.MDD_EXPERIMENTAL_RESUME = '1';
-  t.after(() => { if (previous === undefined) delete process.env.MDD_EXPERIMENTAL_RESUME; else process.env.MDD_EXPERIMENTAL_RESUME = previous; });
   const failed = await fixture(t, { memoryEnabled: false, store: 'none' });
   await failed.phase(); await failed.phase(); await failed.phase({ outcome: 'failed' });
   const resumed = await plugin(failed.input);
@@ -457,9 +706,12 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
         if (options.coverageFault === 'partial') result.outcome = 'failed';
       }
     }
+    if (options.artifact !== undefined) result.artifact = options.artifact;
     if (options.large) {
       const suffix = traceArtifact(phase, '', trace.acceptance, trace.decisions, trace.deliverables, result.verification);
-      result.artifact += 'x'.repeat(16000 - Buffer.byteLength(result.artifact) - Buffer.byteLength(suffix));
+      // `fill` lets a test choose characters JSON must escape, so serialized size exceeds raw size.
+      const fill = options.fill ?? 'x';
+      result.artifact += fill.repeat(Math.floor((16000 - Buffer.byteLength(result.artifact) - Buffer.byteLength(suffix)) / Buffer.byteLength(fill)));
     }
     if (options.mismatch) child[0].info.modelID = 'substituted';
     const text = options.reportText ?? reportDocument(result);
@@ -552,17 +804,27 @@ test('memory off contextual exploration keeps local provenance, and a restart le
   await f.phase();
   assert.equal((await f.status()).workflow.results.length, 0);
   await f.phase();
+  const live = await f.status();
   const restarted = await plugin(f.input);
-  // Settled work is not in flight: the conversation is free, it simply does not resume by itself.
-  // Its evidence is preserved as data, which must not turn into a block on starting new work.
-  const after = JSON.parse(await restarted.tool.mdd_status.execute({}, f.context));
-  assert.equal(after.state, 'recoverable');
-  assert.equal(after.priorRun.capability, 'data-only');
-  assert.equal(after.task, undefined, 'a preserved run is never runnable');
+  // Settled work resumes where it stopped, with the investigation's findings still attached.
+  const after = JSON.parse(await restarted.tool.mdd_status.execute({ detail: 'full' }, f.context));
+  assert.equal(after.state, 'ready');
+  assert.equal(after.runID, live.runID);
+  assert.equal(after.contexts.length, 1);
+  assert.ok(after.task, 'the resumed phase is dispatchable');
+  // A different objective needs the user's explicit discard of the unfinished run first.
   f.user('A different objective for this conversation.');
+  await assert.rejects(restarted.tool.mdd_start.execute({ requirements: 'A different objective for this conversation.' }, f.context));
+  await restarted.tool.mdd_reset.execute({ scope: 'run' }, f.context);
   const fresh = JSON.parse(await restarted.tool.mdd_start.execute({ requirements: 'A different objective for this conversation.' }, f.context));
   assert.equal(fresh.state, 'ready');
 });
+
+/** What a checkpoint write that kept failing leaves behind: the marker withdraws resumability. */
+function withdrawResume(f) {
+  const progress = new ProgressGuard(f.root);
+  progress.write(f.runtime.sessionID, { ...progress.read(f.runtime.sessionID), resumable: false });
+}
 
 for (const route of ['low', 'high']) for (const mode of ['automatic', 'interactive']) for (const store of ['none', 'openspec', 'engram', 'both']) {
   test(`complete native contract: ${route}/${mode}/${store} exact route and grounded coverage`, async t => {
@@ -1071,14 +1333,23 @@ test('a restarted conversation still answers read-only investigation', async t =
   const f = await fixture(t, { memoryEnabled: false });
   await f.phase();
   const restarted = await plugin(f.input);
-  // The lost run is reported as recoverable data, and that must not occupy the dispatch slot:
-  // read-only investigation stays reachable exactly as it was when nothing had been preserved.
-  assert.equal(JSON.parse(await restarted.tool.mdd_status.execute({}, f.context)).state, 'recoverable');
+  // The run resumes, and read-only investigation stays reachable on it.
+  assert.equal(JSON.parse(await restarted.tool.mdd_status.execute({}, f.context)).state, 'ready');
   await restarted.tool.mdd_contextual_explore.execute({ purpose: 'Explain the recorded project state.' }, f.context);
   const ready = JSON.parse(await restarted.tool.mdd_status.execute({}, f.context));
   assert.equal(ready.contextual, true);
   assert.equal(ready.task.subagent_type, 'mdd-explore');
   await assert.rejects(restarted.tool.mdd_start.execute({ requirements: 'Continue the old work.' }, f.context));
+  // A run that could not keep a resumable checkpoint is reported as data; investigation still works.
+  const g = await fixture(t, { memoryEnabled: false });
+  await g.phase();
+  withdrawResume(g);
+  const dataOnly = await plugin(g.input);
+  assert.equal(JSON.parse(await dataOnly.tool.mdd_status.execute({}, g.context)).state, 'recoverable');
+  await dataOnly.tool.mdd_contextual_explore.execute({ purpose: 'Explain the recorded project state.' }, g.context);
+  const side = JSON.parse(await dataOnly.tool.mdd_status.execute({}, g.context));
+  assert.equal(side.contextual, true);
+  assert.equal(side.task.subagent_type, 'mdd-explore');
 });
 
 test('a run lost mid-route keeps its plan reachable as read-only data', async t => {
@@ -1091,6 +1362,13 @@ test('a run lost mid-route keeps its plan reachable as read-only data', async t 
   const live = await f.status();
   assert.equal(live.state, 'ready');
   assert.equal(live.task.subagent_type, 'mdd-apply');
+  // With its checkpoint current, a restarted plugin resumes the run at mdd-apply.
+  const resumed = JSON.parse(await (await plugin(f.input)).tool.mdd_status.execute({}, f.context));
+  assert.equal(resumed.state, 'ready');
+  assert.equal(resumed.runID, live.runID);
+  assert.equal(resumed.task.subagent_type, 'mdd-apply');
+  // When the checkpoint could not be kept current, the plan must still be reachable as data.
+  withdrawResume(f);
   // Fresh instances over the same directory hold empty maps, exactly like a restarted plugin.
   const restarted = await plugin(f.input);
   const status = JSON.parse(await restarted.tool.mdd_status.execute({}, f.context));
@@ -1133,6 +1411,15 @@ test('a preserved run restores no approval and no live consent receipt', async t
   await f.answer();
   const live = await f.status();
   assert.ok(live.questionReceipts.some(item => item.kind === 'approval'));
+  // Resumed in the same conversation: the approval that was applied stays applied, but no receipt
+  // is reloaded as live consent and no question is re-asked from history.
+  const resumed = JSON.parse(await (await plugin(f.input)).tool.mdd_status.execute({}, f.context));
+  assert.equal(resumed.state, 'ready');
+  assert.equal(resumed.runID, live.runID);
+  assert.deepEqual(resumed.questionReceipts, []);
+  assert.equal(resumed.question, undefined);
+  // As data only (checkpoint withdrawn), nothing at all is authorized.
+  withdrawResume(f);
   const restarted = await plugin(f.input);
   const status = JSON.parse(await restarted.tool.mdd_status.execute({}, f.context));
   assert.equal(status.state, 'recoverable');
@@ -1158,18 +1445,22 @@ test('mdd_reset with scope run frees the conversation and sets the record aside,
   const names = async () => readdir(join(f.root, '.mdd')).catch(() => []);
   assert.ok((await names()).some(name => name.startsWith('run-')), 'evidence is preserved without memory');
   const restarted = await plugin(f.input);
-  const status = JSON.parse(await restarted.tool.mdd_status.execute({}, f.context));
-  assert.equal(status.state, 'recoverable');
+  const status = JSON.parse(await restarted.tool.mdd_status.execute({ detail: 'full' }, f.context));
+  assert.equal(status.state, 'ready');
   assert.equal(status.memory, 'off');
-  assert.equal(status.priorRun.results.length, 1);
+  assert.equal(status.workflow.results.length, 1);
   JSON.parse(await restarted.tool.mdd_reset.execute({ scope: 'run' }, f.context));
   // The live record is gone, so nothing holds the conversation or offers a recovery it cleared.
   assert.ok(!(await names()).some(name => /^run-[a-f0-9]{64}\.json$/.test(name)), 'the live record no longer occupies the conversation');
+  assert.ok(!(await names()).some(name => /^checkpoint-[a-f0-9]{64}\.json$/.test(name)), 'the checkpoint no longer occupies the conversation');
   // What the run produced is not destroyed by the request to start something else.
   assert.ok((await names()).some(name => name.endsWith('.discarded.json')), 'the evidence is set aside, not deleted');
   assert.equal(JSON.parse(await restarted.tool.mdd_status.execute({}, f.context)).state, 'not-started');
+  // The discarded run's old plugin instance is fenced: it no longer owns the conversation.
+  await assert.rejects(f.phase());
   // A second discard replaces that slot instead of filling the directory with one file per reset.
-  await f.phase();
+  f.user('A second objective to discard.');
+  await restarted.tool.mdd_start.execute({ requirements: 'A second objective to discard.' }, f.context);
   JSON.parse(await restarted.tool.mdd_reset.execute({ scope: 'run' }, f.context));
   assert.equal((await names()).filter(name => name.endsWith('.discarded.json')).length, 1);
 });
@@ -1991,4 +2282,270 @@ test('PR-body tool preserves pending approval and refuses wrong user/parent evid
   await assert.rejects(f.hooks.tool.mdd_pr_body.execute({ userText: 'The work was approved and deployed.' }, f.context));
   await assert.rejects(f.hooks.tool.mdd_pr_body.execute({ userText: 'Draft a preliminary PR body.' }, { ...f.context, sessionID: 'other-parent' }));
   assert.deepEqual(await f.status(), before);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Resume hardening: each test reproduces one defect an independent audit found with checkpoint,
+// ownership and restore always on. They are named after the audit finding they pin down.
+// ---------------------------------------------------------------------------------------------
+const STOPPED = 'I stopped the interrupted subagent.';
+const questionAnswer = (args, label) => ({ title: `Asked ${args.questions.length} question${args.questions.length > 1 ? 's' : ''}`,
+  output: `User has answered your questions: ${args.questions.map(q => `"${q.question}"="${label}"`).join(', ')}. You can now continue with the user's answers in mind.`,
+  metadata: { answers: args.questions.map(() => [label]), truncated: false } });
+function dispatchQuestion(f, callID, args) {
+  f.parent[1].parts = [{ type: 'tool', tool: 'question', callID, sessionID: f.runtime.sessionID, messageID: f.context.messageID,
+    state: { status: 'running', input: structuredClone(args) } }];
+  return f.hooks['tool.execute.before']({ sessionID: f.runtime.sessionID, callID, tool: 'question' }, { args });
+}
+function dispatchTask(f, callID, args) {
+  f.parent[1].parts = [{ type: 'tool', tool: 'task', callID, state: { status: 'running', input: structuredClone(args) } }];
+  return f.hooks['tool.execute.before']({ sessionID: f.runtime.sessionID, callID, tool: 'task' }, { args });
+}
+
+test('audit D1: run discard after restart, without reading status first, frees the parent for a new objective', async t => {
+  const f = await fixture(t, { memoryEnabled: false, store: 'none' });
+  await f.phase();
+  const ready = await f.status();
+  await dispatchTask(f, 'task-before-discard-restart', structuredClone(ready.task));
+  const resumed = await plugin(f.input);
+  f.user(STOPPED);
+  const discarded = JSON.parse(await resumed.tool.mdd_reset.execute({ scope: 'run', userText: STOPPED }, f.context));
+  assert.equal(discarded.reset.scope, 'run');
+  assert.equal(new RunOwnershipStore(f.root).parent(f.runtime.sessionID), undefined);
+  assert.equal(new CheckpointStore(f.root).read(f.runtime.sessionID), undefined);
+  f.user('Build a different objective after the discard.');
+  const fresh = JSON.parse(await resumed.tool.mdd_start.execute({ requirements: 'Build a different objective after the discard.' }, f.context));
+  assert.equal(fresh.state, 'ready');
+  assert.notEqual(fresh.runID, ready.runID);
+});
+
+test('audit D1: run discard after a restore blocked by unavailable Engram frees the parent', async t => {
+  const f = await fixture(t, { memoryEnabled: true, store: 'engram' });
+  await f.phase();
+  const ready = await f.status();
+  const project = f.memory.binding.project;
+  f.memory.binding.project = 'different-project';
+  const resumed = await plugin(f.input);
+  const blocked = JSON.parse(await resumed.tool.mdd_status.execute({}, f.context));
+  assert.equal(blocked.state, 'recovery-blocked');
+  await resumed.tool.mdd_reset.execute({ scope: 'run' }, f.context);
+  assert.equal(new RunOwnershipStore(f.root).parent(f.runtime.sessionID), undefined);
+  f.memory.binding.project = project;
+  f.user('Start again with the memory service back.');
+  const fresh = JSON.parse(await resumed.tool.mdd_start.execute({ requirements: 'Start again with the memory service back.' }, f.context));
+  assert.equal(fresh.state, 'ready');
+  assert.notEqual(fresh.runID, ready.runID);
+});
+
+test('audit D2: a pending change question survives restart and an attested reset releases it', async t => {
+  const f = await fixture(t, { memoryEnabled: false, store: 'none' });
+  await f.phase();
+  const ready = await f.status();
+  f.user('Please rerun the preflight for this task.');
+  const args = structuredClone((await f.change()).question);
+  assert.equal(args.questions[0].header, 'Cambio');
+  await dispatchQuestion(f, 'change-before-restart', args);
+  const resumed = await plugin(f.input);
+  assert.equal(JSON.parse(await resumed.tool.mdd_status.execute({}, f.context)).state, 'recovery-blocked');
+  f.user('I stopped the interrupted question.');
+  const released = JSON.parse(await resumed.tool.mdd_reset.execute({ scope: 'phase', userText: 'I stopped the interrupted question.' }, f.context));
+  assert.equal(released.state, 'ready');
+  assert.equal(released.runID, ready.runID);
+  assert.equal(new RunOwnershipStore(f.root).read(ready.runID).state, 'idle');
+  // The old native answer can never be turned into a confirmed change afterwards.
+  await assert.rejects(resumed['tool.execute.after']({ sessionID: f.runtime.sessionID, callID: 'change-before-restart', tool: 'question', args },
+    questionAnswer(args, 'Confirmar el cambio')));
+  const after = JSON.parse(await resumed.tool.mdd_status.execute({ detail: 'full' }, f.context));
+  assert.equal(after.state, 'ready');
+  assert.equal(after.runID, ready.runID);
+  assert.equal(after.task.subagent_type, 'mdd-apply');
+});
+
+test('audit D2: a pending re-preflight question on an existing run survives restart and an attested reset', async t => {
+  const f = await fixture(t, { memoryEnabled: false, store: 'none' });
+  await f.phase();
+  const ready = await f.status();
+  f.user('Please rerun the preflight for this task.');
+  await f.change();
+  await f.answer();
+  const preflight = await f.status();
+  assert.equal(preflight.question.questions.length, 5);
+  await dispatchQuestion(f, 'preflight-before-restart', structuredClone(preflight.question));
+  const resumed = await plugin(f.input);
+  assert.equal(JSON.parse(await resumed.tool.mdd_status.execute({}, f.context)).state, 'recovery-blocked');
+  f.user('I stopped the interrupted question.');
+  const released = JSON.parse(await resumed.tool.mdd_reset.execute({ scope: 'run', userText: 'I stopped the interrupted question.' }, f.context));
+  assert.equal(released.reset.scope, 'run');
+  assert.equal(new RunOwnershipStore(f.root).parent(f.runtime.sessionID), undefined);
+  assert.equal(new RunOwnershipStore(f.root).read(ready.runID).state, 'idle');
+  f.user('A new objective after the interrupted preflight.');
+  const fresh = JSON.parse(await resumed.tool.mdd_start.execute({ requirements: 'A new objective after the interrupted preflight.' }, f.context));
+  assert.equal(fresh.state, 'ready');
+});
+
+test('audit D2: a change answer that cannot be inspected releases the reservation instead of locking the parent', async t => {
+  const f = await fixture(t, { memoryEnabled: false, store: 'none' });
+  await f.phase();
+  const ready = await f.status();
+  f.user('Please rerun the preflight for this task.');
+  const args = structuredClone((await f.change()).question);
+  await dispatchQuestion(f, 'change-uninspectable', args);
+  assert.equal(new RunOwnershipStore(f.root).read(ready.runID).state, 'reserved');
+  // The native call can no longer be confirmed in the parent history, so the answer is refused.
+  f.parent[1].parts = [];
+  await assert.rejects(f.hooks['tool.execute.after']({ sessionID: f.runtime.sessionID, callID: 'change-uninspectable', tool: 'question', args },
+    questionAnswer(args, 'Confirmar el cambio')), /intake stopped/);
+  assert.equal(new RunOwnershipStore(f.root).read(ready.runID).state, 'idle');
+  assert.equal(new QuestionCheckpointStore(f.root).read(f.runtime.sessionID).state, 'cancelled');
+  assert.notEqual(JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context)).state, 'recovery-blocked');
+  const reset = JSON.parse(await f.hooks.tool.mdd_reset.execute({ scope: 'run' }, f.context));
+  assert.equal(reset.reset.scope, 'run');
+  f.user('A fresh objective once the question failed.');
+  assert.equal(JSON.parse(await f.hooks.tool.mdd_start.execute({ requirements: 'A fresh objective once the question failed.' }, f.context)).state, 'ready');
+});
+
+test('audit D4: an artifact with ANSI escapes and carriage returns is checkpointed and restored', async t => {
+  const f = await fixture(t, { memoryEnabled: false, store: 'none' });
+  const artifact = 'Artifact for mdd-plan: \u001b[31mred\u001b[0m output\r\nwith a tab\tand a bell\u0007.';
+  await f.phase({ artifact });
+  const live = await f.status();
+  assert.equal(live.state, 'ready');
+  assert.equal(live.phase, 'mdd-apply');
+  const resumed = await plugin(f.input);
+  const restored = JSON.parse(await resumed.tool.mdd_status.execute({ detail: 'full' }, f.context));
+  assert.equal(restored.state, 'ready');
+  assert.equal(restored.runID, live.runID);
+  assert.equal(restored.phase, 'mdd-apply');
+  const args = structuredClone(restored.task);
+  f.parent[1].parts = [{ type: 'tool', tool: 'task', callID: 'task-after-ansi', state: { status: 'running', input: structuredClone(args) } }];
+  await resumed['tool.execute.before']({ sessionID: f.runtime.sessionID, callID: 'task-after-ansi', tool: 'task' }, { args });
+  // The dependency travels as JSON-escaped data inside the prompt; either form keeps the exact bytes.
+  assert.ok(args.prompt.includes('\u001b[31mred') || args.prompt.includes('\\u001b[31mred'), 'the restored dependency keeps its exact bytes');
+});
+
+test('audit D4: requirements with ANSI escapes survive interactive approval and restart', async t => {
+  const f = await fixture(t, { memoryEnabled: false, store: 'none', mode: 'interactive', start: false });
+  const requirements = 'Colour the \u001b[1mCLI\u001b[0m banner\r\nand keep the tab\tsafe.';
+  f.user(requirements);
+  const started = JSON.parse(await f.hooks.tool.mdd_start.execute({ requirements }, f.context));
+  assert.equal(started.state, 'ready');
+  await f.phase();
+  const review = await f.status();
+  assert.equal(review.state, 'question-ready');
+  const resumed = await plugin(f.input);
+  const restored = JSON.parse(await resumed.tool.mdd_status.execute({ detail: 'full' }, f.context));
+  assert.equal(restored.runID, review.runID);
+  assert.equal(restored.workflow.nextAction.kind, 'approve');
+});
+
+test('audit D4: more than 64 concerns are deduplicated and capped at runtime, and the run still restores', async t => {
+  const f = await fixture(t, { memoryEnabled: false, store: 'none' });
+  let serial = 0;
+  const batch = () => Array.from({ length: 8 }, () => ({ category: 'integrations', evidence: `Distinct integration evidence ${++serial}.`, impact: 'Needs attention later.' }));
+  await f.phase({ concerns: batch() });
+  await f.phase({ concerns: batch() });
+  for (let round = 0; round < 3; round++) {
+    await f.phase({ coverageFault: 'partial', concerns: batch() });
+    f.user(`Rework round ${round}: correct what verification found.`);
+    await f.hooks.tool.mdd_reset.execute({ scope: 'rework', userText: f.parent[0].parts[0].text }, f.context);
+    await f.phase({ concerns: batch() });
+  }
+  // A repeated concern is recorded once.
+  await f.phase({ concerns: [...batch().slice(0, 7), { category: 'integrations', evidence: 'Distinct integration evidence 1.', impact: 'Needs attention later.' }] });
+  const live = await f.status();
+  assert.ok(serial > 64);
+  assert.equal(live.concerns.length, 64);
+  assert.equal(new Set(live.concerns.map(item => JSON.stringify(item))).size, 64);
+  const resumed = await plugin(f.input);
+  const restored = JSON.parse(await resumed.tool.mdd_status.execute({ detail: 'full' }, f.context));
+  assert.equal(restored.runID, live.runID);
+  assert.equal(restored.state, live.state);
+  assert.deepEqual(restored.concerns, live.concerns);
+});
+
+test('audit D4: a long reworked route of maximum escaped artifacts plus context still checkpoints and restores', async t => {
+  const f = await fixture(t, { route: 'high', memoryEnabled: false, store: 'none' });
+  // Context input refuses terminal control characters; quotes and newlines are what JSON escapes.
+  await f.hooks.tool.mdd_context.execute({ label: 'Issue body', content: 'Quoted "context" line\n'.repeat(1500) }, f.context);
+  // Verify reports its own acceptance links, which share the artifact bound, so it is not filled.
+  for (let i = 0; i < 6; i++) await f.phase({ large: true, fill: '"' });
+  await f.phase({ coverageFault: 'partial' });
+  const rounds = 7;
+  for (let round = 0; round < rounds; round++) {
+    f.user(`Rework round ${round} of the long route.`);
+    await f.hooks.tool.mdd_reset.execute({ scope: 'rework', userText: f.parent[0].parts[0].text }, f.context);
+    await f.phase({ large: true, fill: '"' });
+    await f.phase({ coverageFault: round === rounds - 1 ? undefined : 'partial' });
+  }
+  const live = await f.status();
+  assert.equal(live.workflow.results.length, 7 + 2 * rounds);
+  assert.equal(live.state, 'complete');
+  const saved = new CheckpointStore(f.root).read(f.runtime.sessionID).checkpoint;
+  assert.ok(Buffer.byteLength(JSON.stringify(saved)) > 400000, 'the route really exceeds the old 400 KB budget');
+  const resumed = await plugin(f.input);
+  const restored = JSON.parse(await resumed.tool.mdd_status.execute({ detail: 'full' }, f.context));
+  assert.equal(restored.state, 'complete');
+  assert.equal(restored.runID, live.runID);
+  assert.equal(restored.workflow.results.length, 7 + 2 * rounds);
+});
+
+test('audit D4: a checkpoint that cannot be written degrades to data-only recovery instead of blocking the live run', async t => {
+  const f = await fixture(t, { memoryEnabled: false, store: 'none' });
+  await f.phase();
+  const rename = fs.renameSync;
+  let failing = true; let refused = 0;
+  t.mock.method(fs, 'renameSync', (from, to) => {
+    if (failing && /checkpoint-[a-f0-9]{64}\.json$/.test(String(to))) { refused++; throw Object.assign(new Error('locked by scanner'), { code: 'EPERM' }); }
+    return rename(from, to);
+  });
+  await f.phase();
+  const live = await f.status();
+  assert.ok(refused > 1, 'the write was retried before degrading');
+  assert.equal(live.state, 'ready', 'the live run is not blocked by a checkpoint write failure');
+  assert.equal(live.phase, 'mdd-verify');
+  assert.equal(new ProgressGuard(f.root).read(f.runtime.sessionID).resumable, false);
+  // A restart now must not resume the stale checkpoint; it falls back to data-only recovery.
+  const stale = await plugin(f.input);
+  const dataOnly = JSON.parse(await stale.tool.mdd_status.execute({ detail: 'full' }, f.context));
+  assert.notEqual(dataOnly.phase, 'mdd-apply');
+  assert.equal(dataOnly.task, undefined);
+  assert.equal(dataOnly.state, 'recoverable');
+  // The transient failure ends; the live run writes a full checkpoint again and becomes resumable.
+  failing = false;
+  await f.phase();
+  assert.equal((await f.status()).state, 'complete');
+  assert.equal(new ProgressGuard(f.root).read(f.runtime.sessionID).resumable, undefined);
+  const recovered = await plugin(f.input);
+  const restored = JSON.parse(await recovered.tool.mdd_status.execute({ detail: 'full' }, f.context));
+  assert.equal(restored.state, 'complete');
+  assert.equal(restored.runID, live.runID);
+});
+
+test('audit D7: after restart a complete run closes for a new native objective and keeps its evidence', async t => {
+  const f = await fixture(t, { memoryEnabled: false, store: 'none' });
+  await f.phase(); await f.phase(); await f.phase();
+  const done = await f.status();
+  assert.equal(done.state, 'complete');
+  const resumed = await plugin(f.input);
+  f.user('A new independent requested outcome after restart.');
+  const next = JSON.parse(await resumed.tool.mdd_start.execute({ requirements: 'A new independent requested outcome after restart.' }, f.context));
+  assert.equal(next.state, 'ready');
+  assert.notEqual(next.runID, done.runID);
+  assert.equal(new RunOwnershipStore(f.root).parent(f.runtime.sessionID), next.runID);
+  const discarded = (await readdir(join(f.root, '.mdd'))).filter(name => name.endsWith('.discarded.json'));
+  assert.equal(discarded.length, 1);
+  assert.equal(JSON.parse(await readFile(join(f.root, '.mdd', discarded[0]), 'utf8')).runID, done.runID);
+  const ledger = (await readFile(join(f.root, '.mdd', 'runs.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  assert.ok(ledger.some(row => row.runID === done.runID && row.state === 'complete'));
+});
+
+test('audit D7: an unfinished run is never auto-closed by a new objective after restart', async t => {
+  const f = await fixture(t, { memoryEnabled: false, store: 'none' });
+  await f.phase();
+  const ready = await f.status();
+  const resumed = await plugin(f.input);
+  f.user('Try to replace unfinished work silently.');
+  await assert.rejects(resumed.tool.mdd_start.execute({ requirements: 'Try to replace unfinished work silently.' }, f.context));
+  assert.equal(new RunOwnershipStore(f.root).parent(f.runtime.sessionID), ready.runID);
+  assert.equal(new CheckpointStore(f.root).read(f.runtime.sessionID).checkpoint.runID, ready.runID);
 });
