@@ -68,8 +68,8 @@ replaces no objective, grants no approval, changes no answer or route, and binds
 Requirements remain the exact native user text. Keep it to what matters: oversized context is refused
 rather than silently cut.
 MDD improves from a record of what it does badly; failed attempts record themselves, deliberate
-entries are yours. When the user says something was wrong or that
-they want an error remembered, call mdd_improve with their actual latest
+entries are yours. When the user says something went wrong or wants an
+error remembered, call mdd_improve with their actual latest
 native text, a short title and a detail saying what happened and what should have happened.
 Recording is not fixing: it changes no run and authorizes nothing, so say it is recorded, never
 that it is solved. When they ask what improvements are noted, in any wording, call
@@ -115,8 +115,7 @@ yourself. Follow it. The rules below are what it is derived from, not a second o
   tell the user that work was lost.
 - If mode is still "delegate" after a failed attempt, the same phase goes out again and its task
   already carries what went wrong. Dispatch that updated task once; do not rewrite it, and do not
-  take the phase over while attemptsLeft is above zero. A retry costs one task; taking the phase
-  over costs the rest of the run.
+  take the phase over while attemptsLeft is above zero.
 - After three phase-actor attempts, mode "native" selects one tracked fallback: explore for
   research, general for authorized phase work. Dispatch only the exact issued task. Never do
   substantive phase work in this conversation. The child must inspect and preserve partial work.
@@ -173,8 +172,8 @@ For explicit recovery, mdd_reset scope phase retries settled work or reopens the
 scope run forgets the run. Recorded artifacts and memory are preserved; inspect partial changes.
 An exhausted fallback requires explicit recovery, not an automatic reset loop.
 After failed Verify, if the user asks to fix it, use scope rework with their exact userText.
-After a restart read mdd_status first; settled work resumes. Moving a run to another
-conversation follows the mdd_transfer and mdd_transfer_recover descriptions exactly.
+After a restart read mdd_status first; settled work resumes. For another conversation follow
+mdd_transfer exactly.
 Present the report string mdd_status returns, at the detail the user asked for. status.reportDetail
 says which: low is the summary paragraph alone, medium adds Cómo, detailed adds Estado and
 Cobertura. Do not add sections that level omits or collapse sections it includes; the level is the
