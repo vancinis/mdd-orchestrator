@@ -192,6 +192,30 @@ test('init refuses foreign content at each namespaced Judgment Day destination w
     assert.deepEqual(snapshot(root), before);
   }
 });
+
+test('init installs the complete Judgment Day skill/reference pair and keeps unrelated shared skills', t => {
+  const root = fixture(t);
+  fs.mkdirSync(join(root, 'skills/judgment-day'), { recursive: true });
+  fs.writeFileSync(join(root, 'skills/judgment-day/SKILL.md'), 'foreign standalone skill');
+  initProject(root);
+  for (const file of ['SKILL.md', 'references/prompts-and-formats.md']) {
+    const source = `assets/opencode/skills/mdd-judgment-day/${file}`;
+    assert.ok(MDD_ASSETS.includes(source));
+    assert.equal(fs.readFileSync(join(root, `skills/mdd-judgment-day/${file}`), 'utf8'), fs.readFileSync(source, 'utf8'));
+  }
+  const before = snapshot(root);
+  assert.equal(initProject(root).created, 0); assert.deepEqual(snapshot(root), before);
+  assert.equal(fs.readFileSync(join(root, 'skills/judgment-day/SKILL.md'), 'utf8'), 'foreign standalone skill');
+});
+
+for (const file of ['SKILL.md', 'references/prompts-and-formats.md']) {
+  test(`init preserves foreign Judgment Day ${file} before any partial installation`, t => {
+    const root = fixture(t); const path = join(root, `skills/mdd-judgment-day/${file}`);
+    fs.mkdirSync(join(path, '..'), { recursive: true }); fs.writeFileSync(path, 'foreign content');
+    const before = snapshot(root);
+    assert.throws(() => initProject(root), /refuses to overwrite/); assert.deepEqual(snapshot(root), before);
+  });
+}
 test('init refuses linked target directories without writing outside the target', t => {
   const root = fixture(t); const outside = fixture(t, false);
   fs.symlinkSync(outside, join(root, 'agents'), process.platform === 'win32' ? 'junction' : 'dir');

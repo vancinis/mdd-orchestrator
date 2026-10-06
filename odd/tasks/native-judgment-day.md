@@ -17,7 +17,7 @@ MDD already configures models per actor but lacks Judgment Day actors and native
 
 - [x] JD-1 — Package configurable judge/fix actors and preserve phase-role separation. Model round trips, config editor, schema, installation, assets, telemetry and existing phase membership verified.
 - [x] JD-2 — Enable exact standalone actor dispatch with native read-only inspection and workflow guards. Full regression fixture corrected and unresolved native actor identity now fails closed; independent verification confirms the correction.
-- [ ] JD-3 — Package the explicit-request protocol, coordinator routing and usage documentation. Check complete installed skill/reference paths, immutable targets, authorization, round limits and full regression suite.
+- [x] JD-3 — Package the explicit-request protocol, coordinator routing and usage documentation. Installed skill/reference paths, immutable targets, authorization, round limits and full regression suite verified; independent source/contract check passed.
 
 Each task uses delegated direct execution: preparation requires repository exploration and each work unit touches multiple non-trivial files. One writer works sequentially; the parent owns commits and native review.
 
@@ -40,7 +40,7 @@ Each task uses delegated direct execution: preparation requires repository explo
 - Forecast: 550–800 authored changed lines, advisory only; never omit tests or compress source to fit.
 - User-selected delivery: multiple Conventional Commits on one branch toward main; `single-pr` organization. No push, PR creation, merge or global installation authorized.
 - RDD was on at implementation start; current effective mode is off, decided by clone-local preference. Do not reactivate it. Current checking/delivery is ordinary and unmanaged; the earlier native transaction is not approved or closed.
-- Running authored lines: 1,058 (JD-1: 394; JD-2: 664). Commits: `7c58cb9` — `feat(config): add configurable Judgment Day actors`; `a7900f4` — `feat(judgment): enable guarded native dual review`.
+- Running authored lines: 1,206 (JD-1: 394; JD-2: 664; correction: 148). Commits: `7c58cb9` — `feat(config): add configurable Judgment Day actors`; `a7900f4` — `feat(judgment): enable guarded native dual review`; `ff3f634` — `fix(judgment): reject unresolved native actor identity`.
 - JD-1 native assessment: medium, `review_due=false`, `under_budget`; pending review slice retains the initial boundary.
 - JD-2 native assessment: high (`process_boundary`), review due. Exact committed range: 22 paths / 1,010 net authored diff lines. Candidate consent granted for lineage `review-fe95a8346d0656ec`; review remains blocked and no review approval or delivery authority exists.
 
@@ -64,6 +64,6 @@ Final writer checks: build and typecheck passed; 250 focused native tests passed
 
 Final worktree assessment explicitly included the new skill/reference inventory: medium, 18 paths / 797 authored lines. No returned review transition was executed because RDD is disabled. Conservative high-risk independent verification was completed; neither check produces native authority. Native-host/model-backed smoke remains unverified without separate authorization.
 
-Next: commit verified JD-2 correction and JD-3 on the same branch, then record commit identities. No push, merge or global installation is authorized.
+Next: commit the verified JD-3 packaging, then record its commit identity. The corrected candidate is functionally verified and delivery remains ordinary disabled/unmanaged, not native-approved. No push, merge or global installation is authorized.
 
 The memory service binds this runtime session to project `mdd`, despite the repository detector returning `mdd-orchestrator`; recovery mirrors follow that existing session binding without inventing a session.

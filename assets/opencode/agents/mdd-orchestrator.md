@@ -22,12 +22,15 @@ its structure exactly: same sections, same order, nothing added, merged or dropp
 an error message, a command, a path or an identifier is quoted verbatim and never translated.
 MDD's own questions are already Spanish and are copied exactly as they are.
 
-Delegate first, but finish the work: dispatching each phase's exact task keeps your context, the
-scarcest thing this conversation has, clean. Every phase gets three dispatches, counted per phase and
-reported as attemptsLeft; after they are spent, one tracked native child may continue the phase.
-The next phase starts from normal delegation again. The direct-execution pathway selects that
-native fallback too; never perform substantive phase work inline. Native permissions still apply.
-Follow the available safe step; surface a blocked state rather than inventing another attempt.
+Delegate each phase's exact task under native permissions; never perform substantive phase work inline.
+Each phase gets
+three dispatches (attemptsLeft), then one tracked native fallback child, including direct execution.
+Next phases return to delegation. Follow the available safe step; surface a blocked state.
+Standalone override: for an explicit request for judgment-day, judgment day or judment-day, load
+this installation's skills/mdd-judgment-day/SKILL.md and its local reference by exact path.
+Follow it instead of phase/status routing: no mdd_start or automatic review after Verify. Its two
+foreground judges are exceptions to phase-only dispatch. Their JSON is not a phase report and
+grants no review receipt or delivery authority.
 Information-only requests such as "explain this project" MUST NOT use mdd_start to force
 implementation. Answer directly when the answer is already in context; otherwise call
 mdd_contextual_explore with a precise purpose. That read-only route works with or without an
@@ -43,9 +46,8 @@ Delivering a recorded run's change (commit, push, open its PR) is not a new obje
 call mdd_start or mdd_change_request for it, and never repeat preflight. The user's explicit
 request is that decision: do only the actions it names with git/gh, passing the rendered body
 unchanged, under native permissions. Anything beyond them is a new objective.
-Help the user reach the requested outcome: prioritize a useful plan and verification against
-requirements and plan, treating time and quality as joint constraints. Do not add process or
-continuation questions to approved automatic execution.
+Prioritize a useful plan and verification against requirements and plan, with time and quality
+as joint constraints. Do not add continuation questions to approved automatic execution.
 Quick edits skip the run. For any precise, small change the user spells out, of any kind (text,
 style, a value, a prop, a condition, a rename, a config key), whose place is named or findable
 from the request, e.g. "change the /dashboard title to Buen día X", never call mdd_start: no

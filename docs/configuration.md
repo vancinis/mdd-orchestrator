@@ -140,14 +140,42 @@ PATH entries and checkout-supplied executables are never launched.
 Each Git command is bounded to 128 KiB and five seconds; binary/invalid UTF-8, missing or oversized
 material fails without partial evidence. Git must support `--no-lazy-fetch` and `--attr-source`
 (unsupported versions fail closed). Live source reads, shell, delegation, memory, MCP and all other tools are denied in
-native hooks as well as actor permissions. Skills must be supplied by value or read at committed
-paths through the inspection tool, not resolved from the live shared registry.
+native hooks as well as actor permissions. The parent loads matching project skills before dispatch
+and supplies identical relevant standards by value with path/digest provenance. Judges never read
+skill/reference documents themselves; the inspection tool cannot load arbitrary live skill documents.
 
-The complete explicit-request protocol, immutable dirty/untracked snapshot authorization, finding
-corroboration and correction-round coordination are pending the subsequent packaged skill unit.
-Native hooks alone do not establish those protocol decisions. The fix actor still requests native
-consent for edits and shell, which is not a sandbox. Configuration or judgment never authorizes
-correction, commit, push, PR creation, or release, and Judgment Day does not run automatically after Verify.
+#### Explicit activation and installed protocol
+
+In `mdd-orchestrator`, ask: **"Run judgment-day on the complete committed delta from <base commit>
+to <target commit>, including tests and relevant dependencies."** Natural-language `judgment day`
+and the spelling `judment-day` also activate only on an explicit request, never an incidental mention,
+ordinary review, implementation request or completed Verify.
+
+Existing setup/update installs the namespaced pair under the OpenCode config root:
+
+- `skills/mdd-judgment-day/SKILL.md`
+- `skills/mdd-judgment-day/references/prompts-and-formats.md`
+
+The source copies are under `assets/opencode/skills/mdd-judgment-day/`. The parent loads those
+installation-owned files by exact path; a different registry skill is not a substitute. See
+[setup](setup.md) for consent-driven installation; configuration alone installs or launches nothing.
+
+The parent freezes the complete target and standards, issues both foreground judge calls in one
+response, waits for both fresh results, strictly validates neutral JSON and corroborates causality.
+Malformed/incomplete/inspection-unavailable outputs, unresolved suspects, contradictions or unknown
+causality cannot produce APPROVED. Warnings are informational. The packaged reference includes a
+parent-only validation recipe; it is not a new native tool, semantic proof or an automatic runner.
+Functional checks belong to the parent or an independent ordinary verifier, never the read-only judges.
+
+Dirty/untracked target material requires a separately authorized complete committed snapshot;
+never quietly drop it from scope. Snapshot authorization is separate from review and correction
+consent. Confirmed severe introduced defects may be corrected only after explicit authorization,
+within exact allowed surfaces, with one writer and at most two correction/scoped rejudgment rounds.
+An unfinished workflow still owns implementation; no review result overrides native ownership guards.
+The fix actor requests native consent for edits and shell, which is not a sandbox. No refuter or
+RDD dependency, and no receipt/delivery approval: configuration or judgment never authorizes commit,
+push, PR creation or release. Native-host model/concurrency/permission smoke remains unverified and
+requires separate authorization; packaging/contract tests are not model-run proof.
 
 ## Optional memory
 
