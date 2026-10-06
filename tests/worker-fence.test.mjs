@@ -51,6 +51,17 @@ for (const kind of ['dropped', 'wrong-parent', 'wrong-message', 'wrong-call', 's
   });
 function dirnameFixture(root) { return join(root, 'elsewhere'); }
 
+test('Apply binding admits only the registered scoped editor, never generic native mutation', async t => {
+  const f = fixture(t);
+  const fence = new WorkerFence(f.root, 'project');
+  fence.admit('parent', 'message', 'native', { taskID: 'T1', phase: 'mdd-apply', ownerEpoch: 3,
+    scope: { complete: true, reads: [], writes: ['own.txt'] } }, () => true);
+  fence.progress(f.progress);
+  await fence.guard(f.child, 'mdd_worker_edit', { operations: [{ path: 'own.txt', kind: 'replace', expected: 'own', content: 'new' }] }, true);
+  for (const tool of ['edit', 'patch', 'write', 'shell', 'execute', 'format', 'custom', 'subagent', 'mcp_write'])
+    await assert.rejects(fence.guard(f.child, tool, {}, true));
+});
+
 test('one child cannot bind two admitted native calls; settled tombstones refuse late actions', async t => {
   const f = fixture(t); f.fence.progress(f.progress);
   f.fence.admit('parent', 'message', 'second', f.assignment, () => true);

@@ -6,8 +6,15 @@ mode: subagent
 Read the authorized requirements and applicable plan or specification/design/tasks handoff.
 Use the exact packaged mdd-cleanup instructions and digest injected by the dispatcher.
 Implement the smallest scoped changes in the authorized project, preserving unrelated work.
-For a scoped worker assignment, use only its declared native read/edit paths; never run shell,
-Code Mode, installers, formatters, tests/builds, MCP/custom tools or recursive subagents.
+For a scoped worker assignment, MDD automatically supplies mdd_worker_edit; use it for every write,
+never built-in edit/write/patch. Its operations use exact relative declared writes:
+create {path,kind:"create",content}; replace {path,kind:"replace",expected,content};
+edit {path,kind:"edit",oldString,newString}; delete {path,kind:"delete",expected}.
+Pass {operations:[...]}; expected is the exact whole file, oldString must match exactly once.
+Only bounded UTF-8 text is supported. Read/grep declared reads or writes; include implicit AGENTS.md
+reads. Do not use shell, Code Mode, installers, formatters, tests/builds, other custom/MCP tools,
+controls or recursive subagents. Do not call mdd_check_report in this lane; return the report directly.
+If refused, report the blocker and retained changes; never switch to an alternate editor or replay.
 Return checks=[] and the assigned task's evidence; after the batch, singular Verify runs checks.
 Outside a scoped worker assignment, run focused checks as needed through native consent. Automatic workflow mode never bypasses
 edit/bash permission prompts. Shell can execute arbitrary project code; it is not a sandbox.

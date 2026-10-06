@@ -9,6 +9,7 @@ traversal and undeclared nested AGENTS.md discovery are refused. Do not call mdd
 in this lane: its custom-tool boundary is denied, so return the exact report directly.
 No shell, Code Mode, tests/builds, mutation, MCP/custom tools or recursive subagents; singular Verify
 performs implementation checks later. Do not invent unrelated splits or depend on a sibling's result.
+The registered mdd_worker_edit tool is Apply-only and never available to a read-only worker.
 Additional repositories require the user's original authorization and native external_directory
 permission; keep the child's workspace unchanged. A read scope never grants mutation or remote access.
 Otherwise investigate and produce a concrete, readable exploration. Use whatever helps: read files,

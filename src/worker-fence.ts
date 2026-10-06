@@ -1,12 +1,16 @@
 import { existsSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
-import { explorationFiles, type ReadTarget } from './worker-batch.js';
+import { applyScopeFiles, explorationFiles, type ParallelScope, type ReadTarget } from './worker-batch.js';
 import { objectWithKeys } from './validation.js';
+import { WorkerEdit, workerEdits } from './worker-edit.js';
 
 export type ReadAssignment = { taskID: string; phase: 'mdd-explore'; reads: ReadTarget[]; ownerEpoch: number };
+export type ApplyAssignment = { taskID: string; phase: 'mdd-apply'; scope: ParallelScope; ownerEpoch: number };
+export type WorkerAssignment = ReadAssignment | ApplyAssignment;
 export type WorkerHost = { fence: WorkerFence; protectedParent?: (sessionID: string) => boolean;
-  assignment?: (sessionID: string, callID: string) => ReadAssignment | undefined };
-type Admission = { parentSessionID: string; messageID: string; callID: string; assignment: ReadAssignment;
+  applyEditing?: true; assignment?: (sessionID: string, callID: string) => WorkerAssignment | undefined };
+type Child = { id: string; parentID?: string; projectID: string; location: { directory: string } };
+type Admission = { parentSessionID: string; messageID: string; callID: string; assignment: WorkerAssignment;
   active: () => boolean; childID?: string; denied?: boolean };
 
 /** Ephemeral progress is authority only while the exact native admission is active. Never restored. */
@@ -19,7 +23,7 @@ export class WorkerFence {
   readonly #refusedChildren = new Set<string>();
   #available = true;
   constructor(readonly directory: string, readonly projectID: string, readonly timeout = 1000) {}
-  admit(parentSessionID: string, messageID: string, callID: string, assignment: ReadAssignment, active: () => boolean): void {
+  admit(parentSessionID: string, messageID: string, callID: string, assignment: WorkerAssignment, active: () => boolean): void {
     if (!this.#available || !messageID || this.#calls.has(callID) || !active()) throw new Error('Read-only native admission is unavailable.');
     this.#calls.set(callID, { parentSessionID, messageID, callID, assignment: structuredClone(assignment), active });
   }
@@ -54,12 +58,29 @@ export class WorkerFence {
   }
   completedChild(callID: string): string | undefined { return this.#completed.get(callID); }
   observeChild(childID: string): void { this.#protectedChildren.add(childID); }
+  assignment(session: Child): WorkerAssignment | undefined {
+    const admission = this.#children.get(session.id);
+    try {
+      if (this.#available && admission && !admission.denied && !this.#refusedChildren.has(session.id) && admission.active() &&
+          session.parentID === admission.parentSessionID && session.projectID === this.projectID && session.location.directory === this.directory)
+        return structuredClone(admission.assignment);
+    } catch { /* Lost durable owner is never live authority. */ }
+    return undefined;
+  }
+  async edit(session: Child, input: unknown, signal?: AbortSignal): Promise<{ changed: string[] }> {
+    if (!session.parentID) throw new Error('Only a bound Apply child may use the scoped editor.');
+    const assignment = await this.guard(session, 'mdd_worker_edit', input, true);
+    if (assignment?.phase !== 'mdd-apply') throw new Error('Only a bound Apply worker may use the scoped editor.');
+    return new WorkerEdit(this.directory).execute(assignment.scope, input, () => {
+      const current = this.assignment(session);
+      return !signal?.aborted && current?.phase === 'mdd-apply' && current.ownerEpoch === assignment.ownerEpoch;
+    });
+  }
   close(): void {
     this.#available = false;
     for (const wake of this.#wake) wake();
   }
-  async guard(session: { id: string; parentID?: string; projectID: string; location: { directory: string } },
-    tool: string, input: unknown, protectedParent: boolean): Promise<void> {
+  async guard(session: Child, tool: string, input: unknown, protectedParent: boolean): Promise<WorkerAssignment | undefined> {
     if (protectedParent) this.observeChild(session.id);
     const tracked = this.#children.has(session.id) || this.#protectedChildren.has(session.id);
     if (!protectedParent && !tracked) return;
@@ -80,7 +101,12 @@ export class WorkerFence {
       this.#refusedChildren.add(session.id);
       throw new Error('Read-only worker has no exact active native progress binding.');
     }
-    const files = explorationFiles(admission.assignment.reads);
+    const assignment = admission.assignment;
+    if (tool === 'mdd_worker_edit' && assignment.phase === 'mdd-apply') {
+      workerEdits(this.directory, assignment.scope, input);
+      return structuredClone(assignment);
+    }
+    const files = assignment.phase === 'mdd-explore' ? explorationFiles(assignment.reads) : applyScopeFiles(this.directory, assignment.scope).reads;
     const exact = (value: unknown): string => {
       if (typeof value !== 'string' || !value || /[\x00-\x1f]|^[\\/]{2}|:\/\//.test(value) ||
           value.split(/[\\/]/).includes('..')) throw new Error('Read-only query path cannot be bounded safely.');
@@ -102,7 +128,7 @@ export class WorkerFence {
         if (existsSync(instructions) && instructions !== path && !files.includes(instructions))
           throw new Error('Native instruction discovery exceeds the declared read scope.');
       }
-      return;
+      return structuredClone(assignment);
     }
     if (tool === 'grep') {
       const args = objectWithKeys(input, 'native grep', ['pattern', 'path', 'include', 'literal', 'caseSensitive', 'limit']);
@@ -111,7 +137,7 @@ export class WorkerFence {
           args.include !== undefined || args.literal !== true || args.caseSensitive !== undefined && typeof args.caseSensitive !== 'boolean' ||
           args.limit !== undefined && (!Number.isInteger(args.limit) || (args.limit as number) < 1))
         throw new Error('Native grep query cannot be bounded safely; use literal search on one declared file.');
-      return;
+      return structuredClone(assignment);
     }
     // Native glob walks a directory; no directory footprint is authorized by exact-file metadata.
     throw new Error(`Read-only worker denies native ${tool}; only scoped read and literal file grep are supported.`);

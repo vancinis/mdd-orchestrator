@@ -594,7 +594,8 @@ const plugin: Plugin = async input => {
   const ownership = new RunOwnershipStore(dataRoot);
   const runner = new PhaseRunner(inspector, {
     workers: profile.workers,
-    ...(workerHost ? { workerCapability: { phase: 'mdd-explore' as const, readOnly: true as const } } : {}),
+    ...(workerHost ? { workerCapability: { phase: 'mdd-explore' as const, readOnly: true as const,
+      ...(workerHost.applyEditing ? { applyEditing: true as const } : {}) } } : {}),
     // The runner passes the run's own checkout directory to these callbacks; MDD writes to the
     // shared anchor instead, so a worktree's telemetry and lessons join the repository's own rather
     // than dying with it. Within a session the two are the same checkout, so nothing else shifts.
@@ -607,10 +608,10 @@ const plugin: Plugin = async input => {
   });
   const intake = new NativeIntake(runner, inspector, settings, { checkpoint, questions: new QuestionCheckpointStore(dataRoot), ownership });
   if (workerHost) {
-    workerHost.protectedParent = sessionID => runner.readOnlyWorkers(sessionID);
+    workerHost.protectedParent = sessionID => runner.scopedWorkers(sessionID);
     workerHost.assignment = (sessionID, callID) => {
       const assignment = runner.workerAssignment({ sessionID, callID });
-      return assignment?.phase === 'mdd-explore' ? assignment : undefined;
+      return assignment;
     };
   }
   /**
@@ -1167,7 +1168,7 @@ const plugin: Plugin = async input => {
     // Actors work with their own tools under native permissions. MDD only observes the two calls
     // that carry its own state: the phase task and the consent question.
     'tool.execute.before': async (input, output) => {
-      if (nativeChildren.has(input.sessionID) && (['task', 'skill', CHECK_TOOL].includes(input.tool) || input.tool.startsWith('mdd_'))) {
+      if (nativeChildren.has(input.sessionID) && (['task', 'skill', CHECK_TOOL].includes(input.tool) || input.tool.startsWith('mdd_') && input.tool !== 'mdd_worker_edit')) {
         throw new Error('A tracked native fallback must work directly and return its report to the parent. Recursive orchestration, skill loading, and MDD tools are not allowed.');
       }
       if (input.tool === 'question') return intake.beforeQuestion(input, output.args);
@@ -1183,10 +1184,12 @@ const plugin: Plugin = async input => {
       const assignment = workerHost?.assignment?.(input.sessionID, input.callID);
       if (assignment && workerHost) {
         const messageID = (input as typeof input & { messageID?: string }).messageID;
-        if (!messageID) throw new Error('Native exploration needs its exact assistant message identity.');
+        if (!messageID) throw new Error('Native worker needs its exact assistant message identity.');
         workerHost.fence.admit(input.sessionID, messageID, input.callID, assignment, () => {
-          const current = workerHost.assignment?.(input.sessionID, input.callID);
-          return !!current && current.ownerEpoch === assignment.ownerEpoch;
+          try {
+            const current = workerHost.assignment?.(input.sessionID, input.callID);
+            return !!current && isDeepStrictEqual(current, assignment);
+          } catch { return false; }
         });
       }
       if (args) Object.assign(output.args, args);

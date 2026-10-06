@@ -1,4 +1,4 @@
-// Default: pinned native-boundary probe only. --exploration-workers proves production overlap.
+// Default: pinned native-boundary probe. --exploration-workers/--apply-workers prove production overlap.
 // Test-owned loopback provider, isolated HOME, no external model or user credentials.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -12,19 +12,27 @@ import { spawn, spawnSync } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { opencodeBinary } from '../dist/model-catalog.js';
 import { defaultSettings } from '../dist/settings.js';
-import { reportDocument } from './adapter-fixture.mjs';
+import { reportDocument, traceFixture } from './adapter-fixture.mjs';
 
 const formatterBoundary = process.argv.includes('--formatter-boundary');
 const explorationWorkers = process.argv.includes('--exploration-workers');
+const applyWorkers = process.argv.includes('--apply-workers');
+const workersProbe = explorationWorkers || applyWorkers;
 const nativeCase = process.argv.find(arg => arg.startsWith('--native-case='))?.split('=')[1];
-assert.ok(process.argv.slice(2).every(arg => ['--formatter-boundary', '--exploration-workers'].includes(arg) || arg.startsWith('--native-case=')), 'Unknown probe argument.');
-if (explorationWorkers && !nativeCase) {
-  for (const scenario of ['main', 'contextual', 'delayed', 'dropped', 'conflicting', 'external-denied', 'disabled']) {
-    const result = spawnSync(process.execPath, [process.argv[1], '--exploration-workers', `--native-case=${scenario}`],
+assert.ok(process.argv.slice(2).every(arg => ['--formatter-boundary', '--exploration-workers', '--apply-workers'].includes(arg) || arg.startsWith('--native-case=')), 'Unknown probe argument.');
+assert.ok(!(explorationWorkers && applyWorkers), 'Choose one worker phase.');
+const applyCases = ['main', 'failure', 'progress-loss', 'disabled', 'dependent', 'overlap', 'missing-metadata', 'implicit'];
+const explorationCases = ['main', 'contextual', 'delayed', 'dropped', 'conflicting', 'external-denied', 'disabled'];
+assert.ok(!formatterBoundary || !workersProbe, 'Formatter RED is separate from worker proof.');
+assert.ok(!nativeCase || workersProbe && (applyWorkers ? applyCases : explorationCases).includes(nativeCase), 'Unknown native scenario.');
+const serialApply = applyWorkers && ['disabled', 'dependent', 'overlap', 'missing-metadata', 'implicit'].includes(nativeCase);
+if (workersProbe && !nativeCase) {
+  for (const scenario of applyWorkers ? applyCases : explorationCases) {
+    const result = spawnSync(process.execPath, [process.argv[1], applyWorkers ? '--apply-workers' : '--exploration-workers', `--native-case=${scenario}`],
       { stdio: 'inherit', timeout: 180000 });
     assert.ifError(result.error); assert.equal(result.status, 0, `Native ${scenario} proof failed.`);
   }
-  console.log('Production native exploration scenarios passed. Apply concurrency is not enabled.');
+  console.log(applyWorkers ? 'Production native formatter-free Apply scenarios passed.' : 'Production native exploration scenarios passed.');
   process.exit(0);
 }
 const binary = opencodeBinary();
@@ -46,16 +54,25 @@ const formatterMarker = join(root, 'formatter-executed.json');
 const secret = randomUUID();
 const stages = new Map();
 const requests = [];
+const mcpMethods = [];
 let host; let hostEnv; let stdout = ''; let stderr = '';
 let fixtureError;
 const live = new Map();
-let releaseBoth, releaseFirst, releaseProgress;
+let releaseBoth, releaseFirst, releaseProgress, releaseWatcher;
 const bothLive = new Promise(resolve => { releaseBoth = resolve; });
 const secondSettled = new Promise(resolve => { releaseFirst = resolve; });
 const childRequested = new Promise(resolve => { releaseProgress = resolve; });
+const watchedEdit = new Promise(resolve => { releaseWatcher = resolve; });
 const independentItems = ['a', 'b'].map((name, index) => ({ id: `E${index + 1}`, purpose: `Inspect ${name} independently`,
   dependsOn: [], independent: true, complete: true, reads: [{ root: index ? reference : project, files: [`${name}.txt`] }] }));
-const scopedFile = item => join(item === 'a' ? project : reference, `${item}.txt`);
+const scopedFile = item => join(applyWorkers || item === 'a' ? project : reference, `${item}.txt`);
+const applyTrace = traceFixture('a.txt', 'T1');
+applyTrace.deliverables = ['a', 'b'].map((name, index) => ({ ...applyTrace.deliverables[0], id: `T${index + 1}`, path: `${name}.txt`, dependsOn: [],
+  parallel: { complete: true, reads: [], writes: [`${name}.txt`] } }));
+if (nativeCase === 'dependent') applyTrace.deliverables[1].dependsOn = ['T1'];
+if (nativeCase === 'overlap') applyTrace.deliverables[1].parallel.writes = ['a.txt'];
+if (nativeCase === 'missing-metadata') delete applyTrace.deliverables[1].parallel;
+if (nativeCase === 'implicit') applyTrace.deliverables[0].parallel.writes.push('AGENTS.md');
 const provider = http.createServer(async (req, res) => {
   try {
     if (req.url === '/fixture/requested') {
@@ -63,6 +80,27 @@ const provider = http.createServer(async (req, res) => {
     }
     if (req.url === '/fixture/settled') {
       releaseFirst(); res.writeHead(204).end(); return;
+    }
+    if (req.url === '/fixture/watched') {
+      releaseWatcher(); res.writeHead(204).end(); return;
+    }
+    if (req.url === '/mcp') {
+      assert.equal(req.headers.authorization, `Bearer ${secret}`);
+      if (req.method !== 'POST') { res.writeHead(405).end(); return; }
+      const chunks = []; for await (const chunk of req) chunks.push(chunk);
+      const request = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      mcpMethods.push(request.method);
+      if (request.id === undefined) { res.writeHead(204).end(); return; }
+      let result;
+      if (request.method === 'initialize') result = { protocolVersion: '2025-03-26', capabilities: { tools: {} }, serverInfo: { name: 'test-owned-worker-boundary', version: '1' } };
+      else if (request.method === 'tools/list') result = { tools: [{ name: 'mutate', description: 'Test-owned forbidden MCP mutation', inputSchema: { type: 'object', properties: {}, additionalProperties: false } }] };
+      else if (request.method === 'tools/call') {
+        fs.writeFileSync(join(root, 'mcp-executed'), 'unsafe');
+        result = { content: [{ type: 'text', text: 'unsafe' }] };
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(result ? { jsonrpc: '2.0', id: request.id, result } : { jsonrpc: '2.0', id: request.id, error: { code: -32601, message: 'Unknown method' } }));
+      return;
     }
     if (!req.url.startsWith('/v1/')) { res.writeHead(404).end(); return; }
     assert.equal(req.headers.authorization, `Bearer ${secret}`);
@@ -76,7 +114,60 @@ const provider = http.createServer(async (req, res) => {
     requests.push({ session, step, input });
     const role = req.headers['x-fixture-agent'];
     let calls; let text = 'Boundary probe complete.';
-    if (explorationWorkers && role === 'mdd-orchestrator' && step === 0) {
+    if (applyWorkers && role === 'mdd-orchestrator' && step === 3) {
+      calls = [{ name: 'mdd_status', arguments: {} }];
+    } else if (applyWorkers && role === 'mdd-orchestrator' && step === 4) {
+      const output = input.messages.filter(message => message.role === 'tool').at(-1)?.content;
+      const ready = JSON.parse(typeof output === 'string' ? output : output.map(part => part.text).join(''));
+      if (serialApply) {
+        assert.equal(ready.tasks, undefined); assert.equal(ready.task.agent, 'mdd-apply');
+        calls = [{ name: 'subagent', arguments: ready.task }];
+      } else {
+        assert.equal(ready.tasks?.length, 2, JSON.stringify(ready));
+        calls = ready.tasks.map(task => ({ name: 'subagent', arguments: task }));
+      }
+    } else if (applyWorkers && role === 'mdd-plan') {
+      text = reportDocument({ phase: 'mdd-plan', evidenceSummary: 'Two bounded independent Apply tasks.', artifact: 'Implement only the two explicit boundaries.', ...applyTrace });
+    } else if (applyWorkers && role === 'mdd-apply') {
+      const material = input.messages.map(message => typeof message.content === 'string' ? message.content : JSON.stringify(message.content)).join('\n');
+      const assigned = material.split('Assigned worker task: ').at(-1);
+      const item = serialApply || assigned.match(/"id":"([^"]+)"/)?.[1] === 'T1' ? 'a' : 'b';
+      const ownEdit = { operations: [{ path: `${item}.txt`, kind: 'replace', expected: `OWN_${item.toUpperCase()}_READ_SENTINEL`, content: `EDITED_${item.toUpperCase()}` }] };
+      if (nativeCase === 'failure' && item === 'a') ownEdit.operations[0].expected = 'wrong precondition';
+      if (step === 0) {
+        live.set(item, session); releaseProgress();
+        if (live.size === 2 || serialApply) releaseBoth();
+        await bothLive;
+        if (item === 'a' && !serialApply) await secondSettled;
+        calls = serialApply ? [{ name: 'edit', arguments: { path: scopedFile(item), oldString: `OWN_${item.toUpperCase()}_READ_SENTINEL`, newString: `EDITED_${item.toUpperCase()}` } }]
+          : [{ name: 'read', arguments: { path: scopedFile(item) } }];
+      } else if (!serialApply && step === 1) calls = [{ name: 'mdd_worker_edit', arguments: ownEdit }];
+      else if (!serialApply && step <= 13) {
+        if (item === 'b' && step === 2) await watchedEdit;
+        const other = item === 'a' ? 'b' : 'a';
+        const hostile = [
+          { name: 'read', arguments: { path: scopedFile(other) } },
+          { name: 'mdd_worker_edit', arguments: { operations: [{ path: `${other}.txt`, kind: 'replace', expected: 'anything', content: 'unsafe' }] } },
+          { name: 'mdd_worker_edit', arguments: { operations: [{ path: `${item}.txt`, kind: 'replace', expected: `EDITED_${item.toUpperCase()}`, content: 'unsafe' },
+            { path: `${other}.txt`, kind: 'replace', expected: 'anything', content: 'unsafe' }] } },
+          { name: 'edit', arguments: { path: formattedFile, oldString: 'before', newString: 'unsafe' } },
+          { name: 'patch', arguments: { patchText: `*** Begin Patch\n*** Update File: ${formattedFile}\n@@\n-before\n+unsafe\n*** End Patch` } },
+          { name: 'write', arguments: { path: formattedFile, content: 'unsafe' } },
+          { name: 'shell', arguments: { command: 'echo FORBIDDEN_APPLY_SHELL' } },
+          { name: 'execute', arguments: { code: 'return 1' } },
+          { name: 'uncontrolled', arguments: {} },
+          { name: 'fixture_mutate', arguments: {} },
+          { name: 'opencode_session_list', arguments: {} },
+          { name: 'subagent', arguments: { agent: 'mdd-apply', description: 'Forbidden recursion', prompt: 'Mutate a' } },
+        ];
+        calls = [hostile[step - 2]];
+      } else {
+        const failed = ['failure', 'progress-loss'].includes(nativeCase) && item === 'a';
+        text = reportDocument({ phase: 'mdd-apply', outcome: failed ? 'failed' : 'passed', evidenceSummary: `Apply ${item} outcome.`,
+          artifact: `Bounded Apply ${item} evidence.`, changes: failed ? [] : [`${item}.txt`],
+          ...(failed ? { noChangeReason: 'The scoped operation was refused.' } : {}), checks: [] });
+      }
+    } else if (explorationWorkers && role === 'mdd-orchestrator' && step === 0) {
       calls = nativeCase === 'contextual' ? [{ name: 'mdd_contextual_explore', arguments: { purpose: 'Inspect both independently', workItems: independentItems } }]
         : [{ name: 'mdd_start', arguments: { requirements: 'Explore both independent components.', exploration: { workItems: independentItems } } }];
     } else if (explorationWorkers && role === 'mdd-orchestrator' && step === 2) {
@@ -160,7 +251,7 @@ try {
   settings.profiles.default.answers = { certainty: 'very-sure', artifactStore: 'none', mode: 'automatic', summary: 'low' };
   if (explorationWorkers) settings.profiles.default.answers.certainty = 'not-sure';
   if (nativeCase === 'disabled') settings.workers.enabled = false;
-  for (const agent of ['orchestrator', 'mdd-plan', 'mdd-explore']) settings.profiles.default.models[agent] = 'fixture/boundary';
+  for (const agent of ['orchestrator', 'mdd-plan', 'mdd-explore', 'mdd-apply']) settings.profiles.default.models[agent] = 'fixture/boundary';
   fs.writeFileSync(join(config, 'mdd', 'mdd.config.json'), JSON.stringify(settings));
   fs.writeFileSync(join(project, 'denied.txt'), 'TEST_OWNED_DENIED_READ_SENTINEL');
   fs.writeFileSync(formattedFile, 'before\n');
@@ -170,9 +261,11 @@ fs.writeFileSync(${JSON.stringify(formatterMarker)}, JSON.stringify({file:proces
   fs.writeFileSync(join(config, 'opencode.json'), JSON.stringify({ update: 'disable' }));
   fs.writeFileSync(join(project, 'opencode.json'), JSON.stringify({
     model: 'fixture/boundary', default_agent: 'mdd-orchestrator', lsp: false, snapshots: false,
-    formatter: formatterBoundary ? { fixture: { command: [process.execPath, formatterScript, '$FILE'], extensions: ['.mdd-fixture'] } } : false,
+    formatter: formatterBoundary || applyWorkers ? { fixture: { command: [process.execPath, formatterScript, '$FILE'], extensions: ['.mdd-fixture', '.txt'] } } : false,
     permissions: [{ action: '*', resource: '*', effect: 'allow' },
       ...(nativeCase === 'external-denied' ? [{ action: 'external_directory', resource: '*', effect: 'deny' }] : [])],
+    ...(applyWorkers ? { mcp: { servers: { fixture: { type: 'remote', url: `${origin}/mcp`, oauth: false, codemode: false,
+      headers: { Authorization: `Bearer ${secret}` } } } } } : {}),
     providers: {
       fixture: { env: ['MDD_FIXTURE_KEY'], package: '@opencode/ai/providers/openai-compatible',
         settings: { baseURL: `${origin}/v1` }, models: { boundary: { capabilities: { tools: true }, limit: { context: 128000, output: 4096 } } } },
@@ -182,13 +275,14 @@ fs.writeFileSync(${JSON.stringify(formatterMarker)}, JSON.stringify({file:proces
       vllm: { settings: { baseURL: `${origin}/disabled/vllm/v1` } },
     },
   }));
-  fs.writeFileSync(join(config, 'plugins', 'mdd.ts'), explorationWorkers ?
+  fs.writeFileSync(join(config, 'plugins', 'mdd.ts'), workersProbe ?
     `import production from ${JSON.stringify(pathToFileURL(resolve('dist/opencode-plugin.js')).href)};
 export default { id: production.id, setup(ctx) {
   const events = ctx.event;
   return production.setup({ ...ctx, event: { ...events, async *subscribe(options) {
     for await (const event of events.subscribe(options)) {
-      if (event.type === 'session.tool.progress' && event.data.metadata?.status === 'running') {
+       if (event.type === 'session.tool.progress' && event.data.metadata?.status === 'running') {
+         if (${applyWorkers} && ${JSON.stringify(nativeCase)} === 'progress-loss' && event.data.id === 'fixture-mdd-orchestrator-4-0') continue;
         if (${JSON.stringify(nativeCase)} === 'dropped') continue;
         if (${JSON.stringify(nativeCase)} === 'delayed') {
           await fetch(${JSON.stringify(origin + '/fixture/requested')});
@@ -209,10 +303,14 @@ export default { id: 'mdd.worker-boundary-probe', async setup(ctx) {
   const controller = new AbortController();
   const events = (async () => {
     for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+       if (${applyWorkers} && event.type === 'filesystem.changed' && /[\\\\/]\\.git[\\\\/]HEAD$/.test(event.data.file)) {
+        record({ boundary: 'native-watcher', ...event });
+        await fetch(${JSON.stringify(origin + '/fixture/watched')}, { method: 'POST' });
+      }
       if (event.type === 'session.tool.progress') record({ boundary: 'progress', data: event.data });
-      if (${explorationWorkers} && ['session.tool.success', 'session.tool.failed'].includes(event.type)) {
+      if (${workersProbe} && ['session.tool.success', 'session.tool.failed'].includes(event.type)) {
         record({ boundary: 'durable-native-outcome', type: event.type, data: event.data });
-        if (event.data.id === 'fixture-mdd-orchestrator-2-1') await fetch(${JSON.stringify(origin + '/fixture/settled')}, { method: 'POST' });
+        if (event.data.id === ${JSON.stringify(applyWorkers ? 'fixture-mdd-orchestrator-4-1' : 'fixture-mdd-orchestrator-2-1')}) await fetch(${JSON.stringify(origin + '/fixture/settled')}, { method: 'POST' });
       }
     }
   })();
@@ -220,7 +318,7 @@ export default { id: 'mdd.worker-boundary-probe', async setup(ctx) {
     record({ boundary: 'shell-refused' });
     throw new Error('TEST_BOUNDARY_ALL_SHELL_DENIED');
   });
-  if (${explorationWorkers}) await ctx.tool.transform(editor => editor.add({ name: 'uncontrolled', description: 'Test-owned hostile custom tool',
+  if (${workersProbe}) await ctx.tool.transform(editor => editor.add({ name: 'uncontrolled', description: 'Test-owned hostile custom tool',
     input: { type: 'object', properties: {}, additionalProperties: false }, options: { codemode: false },
     execute: async () => { record({ boundary: 'CUSTOM_EXECUTED' }); return { content: 'unsafe' }; } }));
   await ctx.provider.transform(editor => {
@@ -241,15 +339,21 @@ export default { id: 'mdd.worker-boundary-probe', async setup(ctx) {
       childRecords: messages.map(({ text, content, ...header }) => header),
       calls: parent.filter(message => message.type === 'assistant').flatMap(message =>
         message.content.filter(part => part.type === 'tool' && part.name === 'subagent')) });
-    if (!${explorationWorkers}) throw new Error('TEST_BOUNDARY_READ_DENIED');
+    if (!${workersProbe}) throw new Error('TEST_BOUNDARY_READ_DENIED');
   });
   await ctx.tool.hook('execute.after', async event => {
+    if (${applyWorkers} && event.tool === 'mdd_worker_edit' && event.status === 'completed') {
+      // Pinned LocationWatcher watches HEAD, not edited regular files. Trigger it with identical
+      // test-owned bytes: no ref, branch or authority changes, and no synthetic watcher event.
+      const head = ${JSON.stringify(join(project, '.git', 'HEAD'))};
+      fs.writeFileSync(head, fs.readFileSync(head));
+    }
     if (event.tool === 'read') record({ boundary: 'after-read', status: event.status,
       ...(event.status === 'completed' ? { result: event.result } : { error: event.error }) });
     if (event.tool === 'edit') record({ boundary: 'after-edit', status: event.status });
-    if (${explorationWorkers}) record({ boundary: 'native-outcome', tool: event.tool, sessionID: event.sessionID,
+    if (${workersProbe}) record({ boundary: 'native-outcome', tool: event.tool, sessionID: event.sessionID,
       status: event.status, input: event.input, ...(event.status === 'completed' ? { result: event.result } : { error: event.error }) });
-    if (${explorationWorkers} && event.tool === 'subagent') {
+    if (${workersProbe} && event.tool === 'subagent') {
       const childID = event.status === 'completed' ? event.result.output?.sessionID : undefined;
       const child = childID ? await ctx.session.context({ sessionID: childID }) : [];
       if (JSON.stringify(child).includes('Inspect b independently') || ${JSON.stringify(nativeCase)} === 'disabled')
@@ -264,6 +368,12 @@ export default { id: 'mdd.worker-boundary-probe', async setup(ctx) {
     XDG_DATA_HOME: join(root, 'data'), XDG_CACHE_HOME: join(root, 'cache'), XDG_STATE_HOME: join(root, 'state'),
     OPENCODE_CONFIG_DIR: config, OPENCODE_CONFIG: join(project, 'opencode.json'),
     OPENCODE_DISABLE_MODELS_FETCH: 'true', MDD_FIXTURE_KEY: secret };
+  if (applyWorkers) {
+    // Native watcher initialization depends on a real project/VCS root, not a loose temp folder.
+    const initialized = spawnSync('git', ['init', '--initial-branch=fixture', project], { encoding: 'utf8', timeout: 10000,
+      env: { ...hostEnv, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: join(root, 'absent-git-config') } });
+    assert.ifError(initialized.error); assert.equal(initialized.status, 0, initialized.stderr);
+  }
   host = spawn(binary, ['serve', '--service', '--port', '0'], { cwd: project, env: hostEnv });
   host.stdout.on('data', data => { stdout += data; });
   host.stderr.on('data', data => { stderr += data; });
@@ -295,10 +405,10 @@ export default { id: 'mdd.worker-boundary-probe', async setup(ctx) {
   let records = [];
   while (Date.now() < deadline && !fixtureError) {
     if (fs.existsSync(evidence)) records = fs.readFileSync(evidence, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse);
-    if (explorationWorkers) {
+    if (workersProbe) {
       const settled = records.filter(item => item.boundary === 'durable-native-outcome' && item.data.sessionID === session.id &&
-        item.data.id.startsWith('fixture-mdd-orchestrator-2-'));
-      if (settled.length === (nativeCase === 'disabled' ? 1 : 2)) break;
+        item.data.id.startsWith(applyWorkers ? 'fixture-mdd-orchestrator-4-' : 'fixture-mdd-orchestrator-2-'));
+      if (settled.length === (nativeCase === 'disabled' || serialApply ? 1 : 2)) break;
       await delay(100); continue;
     }
     const child = records.find(item => item.boundary === 'before-read');
@@ -308,7 +418,71 @@ export default { id: 'mdd.worker-boundary-probe', async setup(ctx) {
     await delay(100);
   }
   assert.ifError(fixtureError);
-  if (explorationWorkers) {
+  if (applyWorkers) {
+    const settled = records.filter(item => item.boundary === 'durable-native-outcome' && item.data.sessionID === session.id &&
+      item.data.id.startsWith('fixture-mdd-orchestrator-4-'));
+    assert.equal(settled.length, serialApply ? 1 : 2, `Apply did not settle: ${JSON.stringify(requests.map(({session,step}) => ({session,step})))} ${stdout} ${stderr}`);
+    assert.equal(live.size, serialApply ? 1 : 2);
+    const parts = (await Promise.all([...live.values()].map(async id => ({ id, data: (await api(`/api/session/${id}/context`)).data }))))
+      .flatMap(({ id, data }) => data.filter(message => message.type === 'assistant').flatMap(message =>
+        message.content.filter(part => part.type === 'tool').map(part => ({ sessionID: id, tool: part.name, ...part.state }))));
+    assert.equal(fs.readFileSync(formattedFile, 'utf8'), 'before\n');
+    const checkpoints = fs.readdirSync(join(project, '.mdd')).filter(name => name.startsWith('checkpoint-'))
+      .map(name => JSON.parse(fs.readFileSync(join(project, '.mdd', name), 'utf8')));
+    const checkpoint = checkpoints.find(record => record.data?.planned);
+    assert.ok(checkpoint);
+    if (serialApply) {
+      assert.equal(parts.find(part => part.tool === 'edit').status, 'completed');
+      assert.equal(fs.readFileSync(scopedFile('a'), 'utf8'), 'EDITED_A');
+      assert.equal(fs.existsSync(formatterMarker), true, 'Ordinary serial native editing retains its formatter behavior.');
+      assert.equal(checkpoint.stable.phase, 'mdd-verify');
+    } else {
+      assert.equal(fs.existsSync(formatterMarker), false, 'Scoped primitive must not invoke the configured native formatter.');
+      assert.ok(records.some(item => item.boundary === 'native-watcher'), 'Actual native HEAD watcher must be active while scoped edits run.');
+      assert.equal(fs.readFileSync(join(project, '.git', 'HEAD'), 'utf8'), 'ref: refs/heads/fixture\n');
+      assert.ok(records.every(item => item.boundary !== 'CUSTOM_EXECUTED' && item.boundary !== 'shell-refused'));
+      assert.equal(settled[0].data.id, 'fixture-mdd-orchestrator-4-1');
+      assert.equal(fs.readFileSync(scopedFile('b'), 'utf8'), 'EDITED_B');
+      assert.equal(fs.readFileSync(scopedFile('a'), 'utf8'), ['failure', 'progress-loss'].includes(nativeCase) ? 'OWN_A_READ_SENTINEL' : 'EDITED_A');
+      const ownEdits = parts.filter(part => part.tool === 'mdd_worker_edit' && part.input.operations.length === 1 &&
+        part.input.operations[0].path === `${[...live].find(([, id]) => id === part.sessionID)[0]}.txt`);
+      assert.equal(ownEdits.length, 2);
+      for (const part of ownEdits) assert.equal(part.status,
+        ['failure', 'progress-loss'].includes(nativeCase) && part.sessionID === live.get('a') ? 'error' : 'completed');
+      const attacks = parts.filter(part => !ownEdits.includes(part) && !(part.tool === 'read' &&
+        part.input.path === scopedFile([...live].find(([, id]) => id === part.sessionID)[0])));
+      assert.equal(attacks.length, 24);
+      assert.ok(attacks.every(part => part.status === 'error'));
+      assert.ok(mcpMethods.includes('initialize') && mcpMethods.includes('tools/list'), 'Actual native MCP catalog must connect to the test-owned transport.');
+      assert.equal(mcpMethods.includes('tools/call'), false);
+      assert.equal(fs.existsSync(join(root, 'mcp-executed')), false);
+      const ownSuccesses = records.filter(item => item.boundary === 'native-outcome' && item.tool === 'mdd_worker_edit' && item.status === 'completed');
+      assert.equal(ownSuccesses[0].sessionID, live.get('b'), 'The second worker edits before the first.');
+      const progress = records.filter(item => item.boundary === 'progress' && item.data.sessionID === session.id &&
+        item.data.metadata?.status === 'running' && item.data.id.startsWith('fixture-mdd-orchestrator-4-'));
+      assert.equal(progress.length, 2);
+      for (const [item, id] of live) assert.equal(progress.find(record => record.data.id === `fixture-mdd-orchestrator-4-${item === 'a' ? 0 : 1}`).data.metadata.sessionID, id);
+      assert.ok(records.indexOf(progress[1]) < records.indexOf(settled[0]), 'Both exact progress bindings exist before either outcome.');
+      if (['failure', 'progress-loss'].includes(nativeCase)) {
+        assert.ok(checkpoint.data.workerState.batch.blocked);
+        assert.equal(checkpoint.stable.phase, 'mdd-apply');
+        assert.deepEqual(checkpoint.data.workerState.completed.map(member => member.taskID), ['T2']);
+      } else {
+        assert.equal(checkpoint.stable.phase, 'mdd-verify');
+        const aggregate = checkpoint.events.filter(event => event.kind === 'result' && event.result.phase === 'mdd-apply');
+        assert.equal(aggregate.length, 1);
+        assert.deepEqual(checkpoint.stable.changedList.map(file => file.path), ['a.txt', 'b.txt']);
+        assert.deepEqual(checkpoint.data.executedChecks, []);
+        const artifact = checkpoint.data.dependencies.find(item => item.phase === 'mdd-apply').content;
+        assert.ok(artifact.indexOf('## T1') >= 0 && artifact.indexOf('## T1') < artifact.indexOf('## T2'));
+      }
+    }
+    console.log(JSON.stringify({ host: version.stdout.trim(), productionPlugin: 'active', nativeCase, liveNativeChildren: live.size,
+      completionOrder: settled.map(item => item.data.id), productionConcurrency: serialApply ? 'SERIAL FALLBACK' : 'ACTUAL FOREGROUND APPLY CHILDREN',
+      confinement: serialApply ? 'singular ordinary native edit and formatter completed; worker confinement not exercised'
+        : 'formatter-free own-file edits; scope/multi-file/native edit/shell/execution/custom/MCP/control/recursion attacks refused',
+      formatter: serialApply ? 'ordinary serial formatter preserved' : 'marker absent' }));
+  } else if (explorationWorkers) {
     const settled = records.filter(item => item.boundary === 'durable-native-outcome' && item.data.sessionID === session.id &&
       item.data.id.startsWith('fixture-mdd-orchestrator-2-'));
     assert.equal(settled.length, nativeCase === 'disabled' ? 1 : 2,

@@ -99,15 +99,16 @@ end-to-end execution or interactive permission/UI behavior.
 
 ### Bounded worker authority (internal host capability)
 
-**Production exploration supports read-only batches; Apply remains serial.** The captured
-`workers.enabled` preference alone never authorizes concurrent writes. Production supplies only
-`workerCapability: { phase: 'mdd-explore', readOnly: true }`. The old `{ confined: true }` constructor
-field remains for legacy synthetic Apply tests; production does not supply it. PW-4A must establish
-formatter-free editing and a separately scoped Apply capability before enabling native Apply.
+**Production supports read-only exploration and formatter-free bounded Apply batches.** The captured
+`workers.enabled` preference alone never authorizes concurrent writes. Production supplies
+`workerCapability: { phase: 'mdd-explore', readOnly: true, applyEditing: true }` only after registering
+the scoped native editing primitive on pinned 2.0.22. Other host versions omit `applyEditing` and keep
+Apply serial. The old `{ confined: true }` constructor field remains synthetic-only; production never
+enables that unfenced legacy role. Missing durable stores or incomplete scopes also keep dispatch serial.
 Capabilities are internal host attestations, never tool arguments or actor-controlled flags.
 `runner.workerAssignment({ sessionID, callID })` returns a detached assigned task/scope only for
 an admitted pending member. The confinement hook must bind that call to the actual native child,
-revalidate filesystem aliases, enforce read/write scope on native edits, and refuse uncontrolled
+revalidate filesystem aliases, enforce read/write scope on the registered editor, and refuse uncontrolled
 tools before supplying the capability. Status or a prompt claiming a scope is never a fence.
 
 With that explicit capability and checkpoint/ownership/progress stores, independent Apply tasks
@@ -175,9 +176,46 @@ and persistence faults retain successes and block. Restart never restores live p
 or automatically replays a member. Unresolved exploration is data-only: inspect its record and
 native children, then use a fresh parent rather than guessing or reconstructing a launch.
 
-#### Pinned progress provenance and native edit safety blocker
+#### Formatter-free Apply editing
 
-Native Apply enablement remains **blocked**. Run
+The adapter automatically exposes `mdd_worker_edit` to an exact live progress-bound Apply child,
+never to the parent, manual/unbound/stale/settled/quarantined or read-only children. Actor input carries
+no identity, owner, epoch or permission. The host executor derives session identity from its native
+tool context; the fence rechecks the exact admission and current batch/member reservation.
+Unknown fields and operations fail closed. A request is `{ operations: [...] }`, at most 16 operations
+and 256 KiB of serialized input; each operation names one exact root-relative declared write:
+
+| Operation | Required fields |
+|---|---|
+| Create | `{ path, kind: "create", content }`; target must not exist. |
+| Replace | `{ path, kind: "replace", expected, content }`; exact complete current text. |
+| Edit | `{ path, kind: "edit", oldString, newString }`; nonempty old text matches exactly once. |
+| Delete | `{ path, kind: "delete", expected }`; exact complete current text. |
+
+Only bounded regular UTF-8 text is supported. All paths, aliases, operations and preconditions validate
+before any mutation. Case aliases, traversal, absolute targets, links/hardlinks and nonregular files
+refuse. Calls serialize per workspace root; the queue rechecks live authority before mutation.
+Existing modes, BOM and CRLF conventions are preserved. Verified parent creation is convergent;
+replacements publish atomically per file without invoking a shell, native formatter or generic editor.
+Detected external drift or publication failure reports retained changes; it never blindly rolls back
+over human edits. Multi-file publication is not an all-files filesystem transaction or an OS sandbox.
+
+Scoped native reads/grep revalidate declared reads and writes, including nested `AGENTS.md` reads.
+Runtime/config/instruction and hidden-state writes conservatively stay serial because implicit
+bootstrap readers and shared effects are not proven by file disjointness. Bootstrap validation scans
+bounded local configuration ancestors/global/explicit locations without logging values; file/env
+substitutions, instruction declarations, intersecting local path/glob references, opaque JSONC or
+project-local plugins refuse batching. This conservative fallback can reject otherwise harmless
+configuration rather than guessing its effects. Generic native edit/write/
+patch, shell, execution/Code Mode, formatting, controls, recursive agents and other custom/MCP tools
+are denied at the pre-action boundary. Native permissions still govern reads and invocation of the
+registered tool; its own exact-write fence is the file authority, not builtin editor permission logic.
+An unsupported operation must report a blocker for explicit serial handling, not widen tools or
+automatically replay retained work. Ordinary serial Apply retains native editing/checks and consent.
+
+#### Pinned progress provenance and native proof
+
+Run
 `node tests/opencode-v2-workers-host-smoke.mjs` after building for the explicit local probe.
 It loads the actual production V2 plugin on a private **2.0.22** host, drives `mdd_start`,
 `mdd_status` and native foreground Plan using a test-owned loopback model fixture, and refuses
@@ -204,8 +242,22 @@ foreground exploration: main/contextual batches, a two-live-child barrier, rever
 own-scope reads, forbidden-tool refusal, delayed/dropped/conflicting progress, external-directory
 permission denial and disabled serial fallback. The fault scenarios wrap only event delivery,
 not the production motor or fences.
-Synthetic tests separately cover durable failures/restart and alias/schema denial. Neither proof
-establishes native editing confinement, arbitrary-script sandboxing or Apply overlap.
+Synthetic tests separately cover durable failures/restart and alias/schema denial. Exploration alone
+does not establish native editing confinement, arbitrary-script sandboxing or Apply overlap.
+
+Run `node tests/opencode-v2-workers-host-smoke.mjs --apply-workers` for the actual production Apply
+matrix: main, failure, progress-loss, disabled, dependent, overlap, missing-metadata and implicit
+instruction-write fallback. A two-live-child barrier and reversed edits/completion prove overlap,
+own-file edits and one held-plan-order aggregate. Out-of-scope reads/writes and multi-file requests,
+generic editors, shell, execution, custom/MCP/control tools and recursion refuse before target mutation.
+The MCP fixture uses the same test-owned loopback listener/token, with a real native initialize/catalog
+handshake; its mutation endpoint is never called. No ambient MCP server or credential is contacted.
+The actual native HEAD watcher is exercised with identical test-owned HEAD bytes, without changing
+refs; 2.0.22 does not watch ordinary edited files. A configured formatter marker remains absent in worker cases;
+ordinary serial fallback performs a native edit and still invokes that formatter. Failure/progress
+loss preserves the successful sibling's durable evidence and refuses uncertain writes. Unit tests
+separately establish create/delete, mode/encoding, linked paths, concurrent requests, external drift,
+partial publication and restart/transfer behavior; those are not claimed as actual-host matrix proof.
 
 Run `node tests/opencode-v2-workers-host-smoke.mjs --formatter-boundary` for the explicit
 **expected safety RED**, not a passing worker test. Its hostile local model fixture attempts a
@@ -214,9 +266,9 @@ the edit completes, the file changes and the test-owned formatter writes its mar
 shell-hook invocations. The native formatter calls `AppProcess.Service.run` directly, not the
 shell tool or shell hook. The public plugin context has no formatter gate or per-edit skip option.
 The assertion fails and cleanup still removes the private processes and test-owned files.
-Replacing the native executor with direct filesystem code would bypass the path-specific native
-permission assertions embedded in that executor; it is not an acceptable confinement fix.
-Production Apply capability stays absent. No arbitrary-script sandbox is claimed.
+The scoped worker route therefore denies that generic editor, rather than replacing its executor
+or globally disabling formatters. The separately registered primitive has its own native tool
+permission and exact-write authority fence. No arbitrary-script sandbox is claimed.
 
 The formatter bypass does not block the mutation-denying read-only exploration fence.
 Legacy investigation remains singular and never invents unrelated splits.
@@ -416,7 +468,7 @@ pending; no automated recovery is attempted. Unrelated sessions remain unaffecte
 | Boundary | Behavior |
 |---|---|
 | Dispatch | One live run per actual parent. Synchronous reservation precedes asynchronous persistence. A task that arrives while one is already running is refused without touching it; any other unexpected task ends the attempt and returns the phase to `ready`. |
-| Capabilities | Not MDD's concern. Phase actors ship no permission map; the user's native permissions decide what any actor may do. The coordinator adds only `question: allow`, the consent channel OpenCode otherwise denies it. |
+| Capabilities | Ordinary serial phase actors ship no permission map; the user's native permissions decide what they may do. The coordinator adds only `question: allow`, the consent channel OpenCode otherwise denies it. Scoped workers are the explicit exception: the [bounded worker fence](#bounded-worker-authority-internal-host-capability) restricts tools and paths, and Apply uses only the formatter-free `mdd_worker_edit` primitive. |
 | Correlation | Confirms the conversation is a top-level `mdd-orchestrator` session in this workspace, and that a native question is the exact running call being answered. Phase results are bound by phase, runID and, when delegated, callID. |
 | Models | Configured per role through the startup profile and applied to the agent config. Runtime model identity is not policed. |
 | Consent | Complete startup profile or exact correlated native preflight answers; later interactive Proceed/Stop applies only to the currently waiting phase. No repeat preflight or implicit approval. An answer that names nothing on offer selects nothing: the user wrote their own words, or a host reordered the result, and MDD cannot tell those apart. Neither is consent, so the receipt is recorded as cancelled and the same question stays open to be asked again. A question MDD did not compose is the coordinator's own and touches no MDD state, except while an MDD question is pending, when it is the only question that may run. |
@@ -521,14 +573,18 @@ held verified content supplies subsequent handoffs, including `none`.
 
 | Actor | Capability |
 |---|---|
-| Every phase actor | Whatever the phase needs. Phase actors ship no permission map, so the user's own OpenCode permissions decide. |
+| Ordinary serial phase actor | Whatever the phase needs. Phase actors ship no permission map, so the user's own OpenCode permissions decide. Scoped workers instead follow the [bounded worker fence](#bounded-worker-authority-internal-host-capability), with formatter-free `mdd_worker_edit` as Apply's only editing primitive. |
 | Coordinator | The same, plus its MDD tools and `question`. It ships exactly one rule, `question: allow`, because OpenCode denies that tool for non-native agents and hides denied tools from the model; without it no preflight or approval can be asked. It may delegate a phase or carry it out itself. |
 
-MDD no longer polices tools, commands or paths. It used to: an allowlist per phase, a command
+For ordinary serial execution, MDD does not police tools, commands or paths. It used to: an allowlist per phase, a command
 denylist, root-scoped path checks and resolved-permission validation of every agent. That
 stopped unsafe work only in theory, while in practice it stopped ordinary work, and each
 check was one more way for a run to die with no way back. Capability is a native decision,
 and the permission prompt is where the user makes it.
+
+Scoped workers are the explicit bounded exception: their worker fence checks live authority,
+tools and declared paths, and Apply edits only through the formatter-free `mdd_worker_edit`
+primitive. This is not an arbitrary-script sandbox; scoped workers cannot execute scripts.
 
 **Shell executes real project code, not a sandbox.** A project script can have side effects;
 the native permission request is the moment to assess that. Indirect behaviour is never

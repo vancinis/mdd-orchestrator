@@ -1,5 +1,6 @@
-import { lstatSync, readdirSync, realpathSync } from 'node:fs';
-import { isAbsolute, join, resolve } from 'node:path';
+import { lstatSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { homedir } from 'node:os';
 import { objectWithKeys } from './validation.js';
 import type { Deliverable } from './phase-evidence.js';
 
@@ -63,7 +64,7 @@ export function independentExploration(value: readonly ExplorationWorkItem[]): b
 }
 type CompleteScope = { complete: true; reads: string[]; writes: string[] };
 
-function scopePath(value: unknown): string {
+export function scopePath(value: unknown): string {
   if (typeof value !== 'string' || !value.length || value.length > 400 ||
       /[^\x20-\x7e]|[\\:*?"<>|\[\]{}~]/.test(value) || value.split('/').some(part =>
         !part || part === '.' || part === '..' || part.trim() !== part || part.endsWith('.') ||
@@ -131,7 +132,7 @@ export function scopesConflict(a: unknown, b: unknown): boolean {
 }
 
 /** Read-only filesystem snapshot, not an edit fence. Reject aliases rather than resolving them. */
-function exactFiles(root: string, scope: CompleteScope): boolean {
+export function exactFiles(root: string, scope: CompleteScope): boolean {
   try {
     if (!lstatSync(root).isDirectory() || lstatSync(root).isSymbolicLink()) return false;
     const canonicalRoot = realpathSync(root);
@@ -151,6 +152,71 @@ function exactFiles(root: string, scope: CompleteScope): boolean {
     }
     return true;
   } catch { return false; }
+}
+
+/** Runtime/bootstrap inputs have implicit readers and side effects, not a proven file footprint. */
+export function safeApplyWrite(path: string): boolean {
+  return !path.split('/').some(part => part.startsWith('.') || /^(?:AGENTS\.md|CLAUDE\.md|GEMINI\.md|node_modules|vendor)$/i.test(part)) &&
+    !/(?:^|\/)(?:package(?:-lock)?\.json|[^/]*lock(?:file)?|[^/]*config[^/]*|[^/]*instructions?[^/]*)$/i.test(path) &&
+    !/\.(?:json[cl]?|ya?ml|toml|ini|lock|env)$/i.test(path);
+}
+
+/** Unknown bootstrap references/effects are serial, even when declared filenames are disjoint. */
+function safeApplyBootstrap(root: string, writes: string[]): boolean {
+  try {
+    for (const name of ['plugins', 'plugin']) {
+      const path = join(root, '.opencode', name);
+      if (lstatSync(path, { throwIfNoEntry: false })) return false;
+    }
+    const files = new Set<string>();
+    const add = (dir: string) => { for (const name of ['opencode.json', 'opencode.jsonc']) files.add(join(dir, name)); };
+    add(join(homedir(), '.config', 'opencode'));
+    if (process.env.XDG_CONFIG_HOME) add(join(process.env.XDG_CONFIG_HOME, 'opencode'));
+    if (process.env.OPENCODE_CONFIG_DIR) add(resolve(process.env.OPENCODE_CONFIG_DIR));
+    if (process.env.OPENCODE_CONFIG) {
+      if (!isAbsolute(process.env.OPENCODE_CONFIG)) return false;
+      files.add(process.env.OPENCODE_CONFIG);
+    }
+    for (let dir = resolve(root); ; dir = dirname(dir)) {
+      add(dir); add(join(dir, '.opencode'));
+      if (dirname(dir) === dir) break;
+    }
+    const known = (value: unknown, base: string): boolean => {
+      if (typeof value === 'string') {
+        if (/\{(?:file|env):|^file:|[\x00-\x1f]/.test(value)) return false;
+        if (!value || /^[*?]+$/.test(value)) return true; // Generic policy values, not local path declarations.
+        // Treat local path/glob-like config values conservatively; bootstrap may import or read them.
+        const candidate = resolve(base, value.replace(/\\/g, '/').split(/[*?]/)[0]!).replace(/\\/g, '/');
+        return !writes.some(path => overlap(path.replace(/\\/g, '/'), candidate) ||
+          value.replace(/\\/g, '/').toLowerCase().includes(relative(root, path).replace(/\\/g, '/').toLowerCase()));
+      }
+      if (Array.isArray(value)) return value.every(item => known(item, base));
+      if (value && typeof value === 'object') return Object.entries(value).every(([key, item]) =>
+        key !== 'instructions' && known(item, base));
+      return true;
+    };
+    if (process.env.OPENCODE_CONFIG_CONTENT && !known(JSON.parse(process.env.OPENCODE_CONFIG_CONTENT), root)) return false;
+    for (const file of files) {
+      const stat = lstatSync(file, { throwIfNoEntry: false });
+      if (!stat) continue;
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.size > 512 * 1024 ||
+          writes.some(path => overlap(path.replace(/\\/g, '/'), resolve(file).replace(/\\/g, '/')))) return false;
+      // Opaque JSONC/substitution/custom bootstrap falls back rather than inventing implicit reads.
+      if (!known(JSON.parse(readFileSync(file, 'utf8')), dirname(file))) return false;
+    }
+    return true;
+  } catch { return false; }
+}
+
+/** Used only by production scoped editing; legacy synthetic hosts keep their existing semantics. */
+export function applyScopeFiles(root: string, scope: ParallelScope | undefined): { reads: string[]; writes: string[] } {
+  const complete = completeScope(scope);
+  if (!complete || !complete.writes.length || realpathSync(root) !== resolve(root) ||
+      !complete.writes.every(safeApplyWrite) || !exactFiles(root, complete) ||
+      !safeApplyBootstrap(root, complete.writes.map(path => resolve(root, path))))
+    throw new Error('Apply scope has unproven paths or implicit runtime/instruction effects; use serial execution.');
+  return { reads: [...new Set([...complete.reads, ...complete.writes])].map(path => resolve(root, path)),
+    writes: complete.writes.map(path => resolve(root, path)) };
 }
 
 /**

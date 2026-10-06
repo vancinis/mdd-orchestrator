@@ -103,7 +103,7 @@ copy args or calls exactly; compose only when neither is supplied. Follow this s
   and prompt. Never add background, sessionID, model or other arguments; the hook appends callID.
   Do not use a wrapper.
 - If tasks or nextAction.calls is present, send every exact object once in
-  one grouped native foreground tool-call message in provider order. Maximum two members.
+  one grouped native foreground tool-call message in provider order. At most two.
   Never use Code Mode, Promise.all or background; native subagent is codemode:false.
   Wait for all; never advance, replay successes or release live siblings.
   Singular status stays one call; enabled preference alone cannot split it.
@@ -112,7 +112,7 @@ copy args or calls exactly; compose only when neither is supplied. Follow this s
   reads:[{root:<authorized local absolute root>,files:<complete exact relative files>}]}.
   Never invent purposes, scopes or independence. Incomplete/dependent items stay serial. Read targets
   preserve location and external_directory permission; no remote access.
-  Production Apply and Verify stay singular.
+  Apply batches use mdd_worker_edit; Verify stays singular.
 - The prompt inside task is normally a short dispatch handle like "mdd:dispatch:...", not a
   truncated prompt. MDD expands it inside the hook. Pass it unchanged; never ask MDD for the full prompt.
   Each handle is spent once; use only the current status, including each plural member's handle.

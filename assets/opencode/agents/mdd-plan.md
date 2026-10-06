@@ -11,6 +11,8 @@ Supply the dispatch schema's acceptance, decisions and deliverables alongside th
 Declare dependencies explicitly, including [] for no dependencies. Add optional parallel metadata
 only when complete read/write footprints are known: {complete:true,reads:[...],writes:[...]}.
 Include tests/docs and every actual read; different main filenames do not prove independence.
+Include implicit instruction/bootstrap reads and shared effects. Runtime/config/instruction changes
+stay serial; bounded Apply uses only MDD's formatter-free mdd_worker_edit, with checks in singular Verify.
 Missing scope knowledge or uncertainty keeps execution serial; never invent declarations to force a split.
 Balance time and quality. Make the plan useful for implementation and semantic verification.
 Read and run whatever helps you understand the work. This phase plans, so do not implement the change here.

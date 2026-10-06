@@ -120,7 +120,7 @@ startup snapshot does not change when the settings file changes.
 
 Existing version-1 files without `workers` remain valid and default to enabled in memory;
 reads never rewrite legacy files. An explicit save materializes the effective preference.
-**Production OpenCode 2.0.22 supports independent read-only exploration; Apply stays serial.**
+**Production OpenCode 2.0.22 supports bounded independent exploration and Apply workers.**
 The default-on preference permits at most two explicitly declared independent exploration items,
 both for `mdd_start.exploration.workItems` (when the route begins with exploration) and
 `mdd_contextual_explore.workItems`. It never invents a split or adds an exploration phase.
@@ -133,13 +133,26 @@ directories, glob traversal, mutations, shell, execution, controls, recursive ag
 tools. Unknown schemas or paths deny rather than widen the scope. Nested native `AGENTS.md`
 discovery must also fit declared files. Native user permissions remain in force.
 
+Apply uses held-plan/task declarations: `dependsOn: []` and
+`parallel: { complete: true, reads: [<exact relative files>], writes: [<exact relative files>] }`.
+Include tests/docs, implicit reads and shared effects, not just different main files. Eligible Apply
+children automatically receive the registered **formatter-free `mdd_worker_edit`** tool; there is
+no additional human workflow step. It supports bounded UTF-8 create, exact replace/edit and delete
+within declared writes. Generic native editing, patches and all alternate execution routes are denied.
+Runtime/config/instruction writes, aliases and unproven effects stay serial. Bootstrap file/env
+substitutions, instruction declarations, overlapping local config paths, opaque JSONC and project-local
+plugin effects also stay serial; the adapter does not guess their dependency footprint. Unproven host versions
+also stay serial; the scoped editor capability is attested only on pinned 2.0.22. A refused operation
+reports its blocker and retained work rather than switching editors or replaying a sibling.
+
 The internal capable-host contract caps each phase batch at **two** independent foreground
 members. Explicit complete scopes and dependencies are mandatory; disabled, unsupported,
 legacy, incomplete, overlapping or dependent work stays serial. Scope selection is not an edit
-fence. Scoped workers cannot run shell, installers, formatters, tests/builds, write-capable
-MCP/custom tools or recursive subagents; checks belong to after-batch singular Verify.
+fence. Scoped workers cannot run shell, installers, formatters, tests/builds, other custom/MCP
+tools or recursive subagents; `checks=[]` and checks belong to after-batch singular Verify.
 Completed member evidence survives failure/restart; uncertain live siblings block and successful
-tasks are never replayed implicitly. See [worker authority and the native blocker](opencode-adapter.md#bounded-worker-authority-internal-host-capability).
+tasks are never replayed implicitly. Ordinary serial Apply keeps native editing/checks and consent.
+See [worker authority and native proof](opencode-adapter.md#bounded-worker-authority-internal-host-capability).
 
 A separately authorized repository remains a read-only target, not a new child workspace.
 Native `external_directory` approval is still required; enabling workers grants neither mutation

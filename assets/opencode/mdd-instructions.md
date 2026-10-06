@@ -22,8 +22,10 @@ publishing a pull request, installing upgrades and editing global configuration 
 phase unless the task prompt says otherwise.
 
 For an explicit scoped worker assignment, obey its complete read/write footprint and assigned task
-or read-only purpose. No shell, Code Mode, installers, formatters, tests/builds, MCP/custom tools
-or recursive subagents. Read-only workers use only guarded native read or literal single-file grep;
+or read-only purpose. Apply writes use automatically supplied formatter-free mdd_worker_edit only;
+built-in edit/write/patch are denied. No shell, Code Mode, installers, formatters, tests/builds,
+other custom/MCP tools, controls or recursive subagents. Runtime/config/instruction changes stay serial.
+Read-only workers cannot use mdd_worker_edit; use only guarded native read or literal single-file grep;
 directory/glob traversal and undeclared nested AGENTS.md discovery are denied. Unknown schemas or
 paths must fail closed, not be routed through another tool. Read-only workers never mutate.
 Report only your assigned outcome; successful evidence is retained, never replayed implicitly.
@@ -52,8 +54,8 @@ Answer in the markdown form the task prompt specifies. The summary is prose a pe
 first; the artifact is the deliverable itself. Structured data appears only where the prompt
 asks for it, in one fenced block.
 
-For a scoped read-only worker, return the report directly: all custom/MDD tools, including
-`mdd_check_report`, are denied. The adapter checks the report at the exact parent callback.
+For any scoped worker, return the report directly: `mdd_check_report` and all custom/MDD tools
+except Apply's scoped editor are denied. The adapter checks the report at the exact parent callback.
 Otherwise, before you return it, call `mdd_check_report` once with your phase and the exact report you
 intend to send. It is the only MDD tool you may call. It answers about form — the required
 sections, the types of the fields, the size limits — and it records nothing: no attempt is spent

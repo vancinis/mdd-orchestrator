@@ -20,7 +20,7 @@ test('plural task payloads map native arguments without a wrapper or single-memb
 });
 
 // Public host fakes follow @opencode/plugin/client/core 2.0.22, not the V1 hooks.
-async function fixture(t, completeProfile = true, workersEnabled = true) {
+async function fixture(t, completeProfile = true, workersEnabled = true, version = '2.0.22') {
   isolateHome(t);
   const root = await mkdtemp(join(tmpdir(), 'mdd-v2-'));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -36,6 +36,7 @@ async function fixture(t, completeProfile = true, workersEnabled = true) {
   const agents = ['mdd-orchestrator', 'mdd-plan', 'mdd-apply', 'mdd-verify', 'general'].map(id => ({ id, permissions: [], request: {} }));
   const queue = []; let wake;
   const ctx = {
+    app: { version },
     location: { directory: root, project: { id: 'project', directory: root, canonical: root } },
     session: {
       get: async ({ sessionID }) => structuredClone(sessions.get(sessionID)),
@@ -85,13 +86,14 @@ test('V2 setup registers native tools, model variants and ordered isolation perm
   assert.equal(f.tools.get('mdd_start').options.codemode, false);
   assert.equal(typeof f.tools.get('mdd_start').input.safeParse, 'function');
   assert.deepEqual(f.agents.find(agent => agent.id === 'mdd-plan').model, { providerID: 'openai', id: 'test-model', variant: 'high' });
-  assert.deepEqual(f.agents.find(agent => agent.id === 'mdd-apply').permissions.slice(-3).map(rule => [rule.action, rule.effect]),
-    [['subagent', 'deny'], ['skill', 'deny'], ['mdd_check_report', 'allow']]);
+  assert.deepEqual(f.agents.find(agent => agent.id === 'mdd-apply').permissions.slice(-4).map(rule => [rule.action, rule.effect]),
+    [['subagent', 'deny'], ['skill', 'deny'], ['mdd_check_report', 'allow'], ['mdd_worker_edit', 'allow']]);
+  assert.equal(f.tools.get('mdd_worker_edit').options.codemode, false);
   assert.equal(f.agents.find(agent => agent.id === 'general').permissions.at(-1).effect, 'deny');
 });
 
-for (const enabled of [true, false]) test(`production V2 stays serial without trusted confinement (workers=${enabled})`, async t => {
-  const f = await fixture(t, true, enabled);
+for (const [enabled, version] of [[true, '2.0.22'], [false, '2.0.22'], [true, 'unproven']]) test(`production V2 captures bounded Apply capability and preference (workers=${enabled}, host=${version})`, async t => {
+  const f = await fixture(t, true, enabled, version);
   f.user('Implement the requested change.');
   await f.call('mdd_start', { requirements: 'Implement the requested change.' });
   const ready = await f.call('mdd_status', {});
@@ -107,6 +109,12 @@ for (const enabled of [true, false]) test(`production V2 stays serial without tr
     content: `<subagent sessionID="plan-child" state="completed">\n${text}\n</subagent>`,
   } });
   const apply = await f.call('mdd_status', {});
+  if (enabled && version === '2.0.22') {
+    assert.equal(apply.tasks?.length, 2, 'Registered formatter-free editor enables the two independent Apply members.');
+    assert.equal(apply.task, undefined);
+    assert.ok(f.tools.has('mdd_worker_edit'));
+    return;
+  }
   assert.equal(apply.task.agent, 'mdd-apply');
   assert.equal(apply.tasks, undefined);
   assert.equal(apply.nextAction.calls, undefined);
@@ -251,8 +259,9 @@ test('V2 model context collapse uses native messages and never mutates persisted
   const input = { agent: 'mdd-plan', description: 'Plan', prompt: 'x'.repeat(3000) };
   const messages = [{ role: 'assistant', content: [{ type: 'tool-call', id: 'call', name: 'subagent', input }] },
     { role: 'tool', content: [{ type: 'tool-result', id: 'call', name: 'subagent', result: { type: 'text', value: 'Done' } }] }];
-  const event = { agent: 'mdd-orchestrator', messages };
+  const event = { agent: 'mdd-orchestrator', messages, tools: { mdd_worker_edit: {} } };
   await f.sessionHooks.get('context')(event);
+  assert.equal(event.tools.mdd_worker_edit, undefined);
   assert.match(event.messages[0].content[0].input.prompt, /mdd:dispatch:delivered/);
   assert.equal(input.prompt.length, 3000);
   assert.equal(contentText([{ type: 'text', text: 'a' }, { type: 'text', text: 'b' }]), 'a\nb');

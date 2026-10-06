@@ -12,6 +12,8 @@ Map every accepted scenario and relevant decision to applicable work; add no unr
 Declare dependencies explicitly, including [] for no dependencies. Add optional parallel metadata
 only when complete read/write footprints are known: {complete:true,reads:[...],writes:[...]}.
 Include tests/docs and every actual read; different main filenames do not prove independence.
+Include implicit instruction/bootstrap reads and shared effects. Runtime/config/instruction changes
+stay serial; bounded Apply uses only MDD's formatter-free mdd_worker_edit, with checks in singular Verify.
 Missing scope knowledge or uncertainty keeps execution serial; never invent declarations to force a split.
 Read and run whatever helps you size the work honestly. This phase breaks work down, so do
 not implement the change here.

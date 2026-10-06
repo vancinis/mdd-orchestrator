@@ -170,6 +170,20 @@ export async function setupV2(ctx: Plugin.Context, createMotor: LegacyPlugin): P
       },
     } },
   } as unknown as PluginInput;
+  // Register the only scoped mutation route before attesting capability to the motor.
+  await ctx.tool.transform(editor => editor.add({
+    name: 'mdd_worker_edit', description: 'Formatter-free exact UTF-8 file operations for a live scoped MDD Apply child only.',
+    input: z.object({ operations: z.array(z.object({ path: z.string(), kind: z.enum(['create', 'replace', 'edit', 'delete']),
+      expected: z.string().optional(), content: z.string().optional(), oldString: z.string().optional(), newString: z.string().optional() }).strict()).min(1).max(16) }).strict(),
+    options: { codemode: false },
+    async execute(args, context) {
+      const session = await ctx.session.get({ sessionID: context.sessionID }, { signal: context.signal });
+      return { content: JSON.stringify(await workerHost.fence.edit(session, args, context.signal)) };
+    },
+  }));
+  // Bootstrap instruction/config behavior is part of the attestation, not just tool syntax.
+  // Unproven host versions keep Apply serial; the packaged dependency is exactly 2.0.22.
+  if (ctx.app.version === '2.0.22') workerHost.applyEditing = true;
   const hooks = await createMotor(input);
   const profile = freezeProfile(loadGlobalSettings());
   const agentPolicy: Parameters<typeof ctx.agent.transform>[0] = editor => {
@@ -182,6 +196,7 @@ export async function setupV2(ctx: Plugin.Context, createMotor: LegacyPlugin): P
       if (PINNED_AGENTS.includes(id as typeof PINNED_AGENTS[number])) draft.permissions.push(
         { action: 'subagent', resource: '*', effect: 'deny' }, { action: 'skill', resource: '*', effect: 'deny' },
         { action: 'mdd_check_report', resource: '*', effect: 'allow' });
+      if (id === 'mdd-apply') draft.permissions.push({ action: 'mdd_worker_edit', resource: '*', effect: 'allow' });
     });
   };
   let agentRegistration = await ctx.agent.transform(agentPolicy);
@@ -290,8 +305,13 @@ export async function setupV2(ctx: Plugin.Context, createMotor: LegacyPlugin): P
     finally { workerHost.fence.close(); statuses.clear(); }
   })();
   // V2 supplies model messages, not durable parts. Only settled tool calls with matching results are collapsed.
-  await ctx.session.hook('context', event => {
-    if (event.agent !== COORDINATOR) return;
+  await ctx.session.hook('context', async event => {
+    if (event.agent !== COORDINATOR) {
+      const session = await ctx.session.get({ sessionID: event.sessionID });
+      if (workerHost.fence.assignment(session)?.phase !== 'mdd-apply') delete event.tools.mdd_worker_edit;
+      return;
+    }
+    delete event.tools.mdd_worker_edit;
     const results = new Set(event.messages.flatMap(message => message.content.flatMap(part => part.type === 'tool-result' ? [part.id] : [])));
     event.messages = event.messages.map(message => {
       if (message.role !== 'assistant') return message;

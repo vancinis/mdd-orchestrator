@@ -32,7 +32,7 @@ import { phaseVisual, presentationSettings } from './visual-ux.js';
 import { STATUS_BUDGET_BYTES } from './status-budget.js';
 import type { RunOwnershipStore, RunOwner } from './run-ownership.js';
 import type { WorkerPolicy } from './settings.js';
-import { selectWorkerBatch, explorationItems, independentExploration, type ExplorationWorkItem } from './worker-batch.js';
+import { applyScopeFiles, selectWorkerBatch, explorationItems, independentExploration, type ExplorationWorkItem } from './worker-batch.js';
 import { aggregateWorkerReports, workerReport, ExplorationWorkers } from './worker-state.js';
 import type { ReadAssignment } from './worker-fence.js';
 import type { WorkerState } from './worker-state.js';
@@ -142,7 +142,7 @@ type State = 'starting' | 'ready' | 'persisting-intent' | 'await-result' | 'pers
 type Run = {
   explorationItems?: ExplorationWorkItem[];
   workerPolicy?: WorkerPolicy; workerState?: WorkerState;
-  workerTasks?: { taskID: string; token: string; args: TaskArgs; dispatchedArgs?: TaskArgs }[];
+  workerTasks?: { taskID: string; token: string; args: TaskArgs; dispatchedArgs?: TaskArgs; ownerEpoch?: number }[];
   id: string; runtime: Runtime; workflow: Workflow; phase: Phase;
   requirements: string; memory: EngramHttp | undefined; args: TaskArgs; state: State;
   /**
@@ -412,14 +412,16 @@ export class PhaseRunner {
   readonly #explorations = new Map<string, ExplorationWorkers>();
   constructor(readonly inspect: Inspect, readonly options: { workers?: WorkerPolicy;
     /** Phase-scoped production read fence. confined:true is retained only for legacy synthetic Apply hosts. */
-    workerCapability?: Readonly<{ confined: true } | { phase: 'mdd-explore'; readOnly: true }>;
+    workerCapability?: Readonly<{ confined: true } | { phase: 'mdd-explore'; readOnly: true; applyEditing?: true }>;
     now?: () => number; progress?: ProgressGuard; dossier?: RunDossierStore; checkpoint?: CheckpointStore; ownership?: RunOwnershipStore; telemetry?: (root: string, value: TelemetryEvent, now: number) => TelemetryResult; lessons?: (root: string, value: LessonInput, now: number) => void; ledger?: (root: string, value: RunLedgerInput, now: number) => void } = {}) {}
 
   #captureWorkers(): WorkerPolicy { return Object.freeze({ enabled: this.options.workers?.enabled ?? true }); }
 
   #explorationBlocked(sessionID: string): boolean {
     const saved = this.options.checkpoint?.readExploration?.(sessionID);
-    return !!saved && (saved.state !== 'settled' || this.options.ownership?.read(saved.ownerRunID)?.state !== 'idle');
+    const owner = saved ? this.options.ownership?.read(saved.ownerRunID) : undefined;
+    return !!saved && (saved.state !== 'settled' || !owner || owner.state === 'transferring' ||
+      owner.state === 'reserved' && owner.callID === saved.workerState.batch?.id);
   }
 
   readOnlyWorkers(sessionID: string): boolean {
@@ -431,7 +433,17 @@ export class PhaseRunner {
       this.options.workerCapability.phase === 'mdd-explore' && this.options.workerCapability.readOnly === true;
   }
 
-  #applyCapability(): boolean { return !!this.options.workerCapability && 'confined' in this.options.workerCapability && this.options.workerCapability.confined === true; }
+  #applyCapability(): boolean {
+    const capability = this.options.workerCapability;
+    return !!capability && ('confined' in capability ? capability.confined === true : capability.applyEditing === true);
+  }
+
+  scopedWorkers(sessionID: string): boolean {
+    if (this.readOnlyWorkers(sessionID)) return true;
+    const run = this.#runs.get(sessionID);
+    const saved = !run ? this.options.checkpoint?.read(sessionID)?.checkpoint : undefined;
+    return !!run?.workerTasks || !!run?.workerState?.batch || !!(saved && 'data' in saved && saved.data.workerState?.batch);
+  }
 
   #explorationEligible(items: ExplorationWorkItem[] | undefined, enabled: boolean | undefined): items is ExplorationWorkItem[] {
     return !!enabled && this.#readCapability() && typeof this.options.checkpoint?.readExploration === 'function' &&
@@ -1140,7 +1152,7 @@ export class PhaseRunner {
   }
 
   /** PW-4 binds native child edit/tool fences to this exact admitted parent call, never actor text. */
-  workerAssignment(call: TaskCall): ReadAssignment | { taskID: string; phase: 'mdd-apply'; scope: Deliverable['parallel'] } | undefined {
+  workerAssignment(call: TaskCall): ReadAssignment | { taskID: string; phase: 'mdd-apply'; scope: NonNullable<Deliverable['parallel']>; ownerEpoch: number } | undefined {
     const exploration = this.#explorations.get(call.sessionID);
     if (exploration) return exploration.assignment(call.callID);
     const run = this.#runs.get(call.sessionID);
@@ -1148,7 +1160,11 @@ export class PhaseRunner {
     if (!run || !member || member.state !== 'pending' || !this.#applyCapability()) return undefined;
     this.owner(call.sessionID);
     const task = run.planned.find(task => task.id === member.taskID)!;
-    return { taskID: task.id, phase: 'mdd-apply', scope: structuredClone(task.parallel) };
+    const owner = this.options.ownership?.read(run.id);
+    const epoch = run.workerTasks?.find(task => task.taskID === member.taskID)?.ownerEpoch;
+    if (!owner || epoch === undefined || owner.state !== 'reserved' || owner.callID !== run.workerState!.batch!.id ||
+        owner.epoch < epoch || owner.workers?.find(item => item.callID === call.callID)?.state !== 'pending') return undefined;
+    return { taskID: task.id, phase: 'mdd-apply', scope: structuredClone(task.parallel!), ownerEpoch: epoch };
   }
 
   #trackNative(call: TaskCall, args: TaskArgs): void {
@@ -2713,14 +2729,18 @@ export class PhaseRunner {
       throw new Error('Retained worker evidence cannot become an unfenced whole-phase replay. Restore with a confined host or explicitly discard.');
     if (run.phase !== 'mdd-apply' || run.side || run.mode !== 'delegate' || !run.workerPolicy?.enabled ||
         !this.#applyCapability() || !this.options.checkpoint || !this.options.ownership || !this.options.progress) return;
-    const tasks = selectWorkerBatch(run.runtime.directory, run.planned, run.workerState?.completed.map(member => member.taskID) ?? []);
+    let tasks = selectWorkerBatch(run.runtime.directory, run.planned, run.workerState?.completed.map(member => member.taskID) ?? []);
+    if (this.options.workerCapability && 'phase' in this.options.workerCapability) {
+      try { for (const task of tasks) applyScopeFiles(run.runtime.directory, task.parallel); }
+      catch { if (run.workerState) throw new Error('Retained Apply scope is no longer provably safe; no whole-phase replay.'); else tasks = []; }
+    }
     // Unknown/legacy plans remain the existing singular phase unless a batch already earned work.
     if (!run.workerState && tasks.length !== 2) return;
     if (!tasks.length) throw new Error('No remaining ready worker task.');
     run.workerState ??= { completed: [] };
     run.workerTasks = tasks.map(task => ({ taskID: task.id, token: `${DISPATCH_HANDLE_PREFIX}${randomUUID()}`,
       args: { ...run.args, description: `${run.args.description} / ${task.id}`,
-        prompt: `${run.args.prompt}\nAssigned worker task: ${JSON.stringify(task)}\nImplement ONLY this assigned task, not the other applicable deliverables. Report changes only within its declared writes. Report checks=[]; commands, tests and builds remain singular in Verify. Return the existing Apply report for this task only.` } }));
+        prompt: `${run.args.prompt}\nAssigned worker task: ${JSON.stringify(task)}\nImplement ONLY this task using mdd_worker_edit({operations:[{path,kind:"create",content}|{path,kind:"replace",expected,content}|{path,kind:"edit",oldString,newString}|{path,kind:"delete",expected}]}). Exact relative declared writes only; UTF-8 text, unique exact edit match, exact full expected text for replace/delete. Read/grep declared reads or writes only. No built-in edit/write/patch, shell, execution, controls, recursion or other custom/MCP tools. Do not invoke mdd_check_report in this lane. Report changes only within its declared writes. Report checks=[]; commands, tests and builds remain singular in Verify. Return the existing Apply report for this task only.` } }));
   }
 
   #pendingWorkers(sessionID: string, runtime?: Runtime): PendingWorkers | undefined {
@@ -2802,6 +2822,8 @@ export class PhaseRunner {
       throw new ValidationError('Worker batch is blocked or not ready; no dispatch is authorized.');
     const task = run.workerTasks?.find(task => isDeepStrictEqual(args, { ...task.args, prompt: task.token }));
     if (!task) throw new ValidationError('Worker arguments do not match an exact issued handle.');
+    if (this.options.workerCapability && 'phase' in this.options.workerCapability)
+      applyScopeFiles(run.runtime.directory, run.planned.find(item => item.id === task.taskID)!.parallel);
     boundedText(call.callID, 'native worker call ID', 256);
     if (run.calls.has(call.callID) || task.dispatchedArgs) throw new ValidationError('Worker dispatch was already consumed.');
     const state = run.workerState!;
@@ -2819,7 +2841,8 @@ export class PhaseRunner {
       const member = state.batch.members.find(member => member.taskID === task.taskID)!;
       if (member.state !== 'ready') throw new ValidationError('Worker member is not ready.');
       const owner = this.owner(call.sessionID)!;
-      this.options.ownership!.admitWorker(run.id, call.sessionID, state.batch.id, task.taskID, call.callID, owner.epoch);
+      const admitted = this.options.ownership!.admitWorker(run.id, call.sessionID, state.batch.id, task.taskID, call.callID, owner.epoch);
+      task.ownerEpoch = admitted.epoch;
       member.callID = call.callID; member.state = 'pending'; run.calls.add(call.callID);
       run.state = 'persisting-intent'; run.uncertain = true;
       this.#inflight.set(call.sessionID, state.batch.id);

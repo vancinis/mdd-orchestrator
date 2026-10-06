@@ -11,10 +11,14 @@ test('assets: worker instructions preserve exact grouped dispatch and bounded me
   assert.match(coordinator, /tasks or nextAction\.calls/);
   assert.match(coordinator, /one grouped native foreground tool-call message in provider order/);
   assert.match(coordinator, /Never use Code Mode, Promise\.all or background/);
+  assert.match(coordinator, /Apply batches use mdd_worker_edit; Verify stays singular/);
+  assert.doesNotMatch(coordinator, /Production Apply and Verify stay singular/);
   for (const role of ['plan', 'tasks']) {
     const text = fs.readFileSync(`assets/opencode/agents/mdd-${role}.md`, 'utf8');
     assert.match(text, /complete read\/write footprints/);
     assert.match(text, /uncertainty keeps execution serial/);
+    assert.match(text, /implicit instruction\/bootstrap reads and shared effects/);
+    assert.match(text, /formatter-free mdd_worker_edit/);
   }
   for (const path of ['assets/opencode/mdd-instructions.md', 'assets/opencode/agents/mdd-apply.md', 'assets/opencode/agents/mdd-explore.md']) {
     const text = fs.readFileSync(path, 'utf8');
@@ -22,6 +26,15 @@ test('assets: worker instructions preserve exact grouped dispatch and bounded me
     assert.match(text, /shell/);
     assert.match(text, /singular Verify/);
   }
+  const apply = fs.readFileSync('assets/opencode/agents/mdd-apply.md', 'utf8');
+  assert.match(apply, /automatically supplies mdd_worker_edit/);
+  assert.match(apply, /never built-in edit\/write\/patch/);
+  assert.match(apply, /exact whole file, oldString must match exactly once/);
+  assert.match(apply, /Do not call mdd_check_report in this lane/);
+  assert.match(apply, /Return checks=\[\]/);
+  const common = fs.readFileSync('assets/opencode/mdd-instructions.md', 'utf8');
+  assert.match(common, /For any scoped worker, return the report directly/);
+  assert.match(common, /Read-only workers cannot use mdd_worker_edit/);
 });
 
 // Capability is the user's native decision, not MDD's. No packaged agent may ship its own
