@@ -130,7 +130,7 @@ test('V2 foreground phase hooks complete plan, Apply and Verify with durable mot
     assert.equal(call.input.subagent_type, undefined);
     const result = { phase, runID: ready.runID, callID: call.id, outcome: 'passed', evidenceSummary: 'Scoped contract evidence.', artifact: `Artifact for ${phase}.` };
     if (phase === 'mdd-plan') Object.assign(result, trace);
-    if (phase === 'mdd-apply') { result.changes = [{ path: join(f.root, 'feature.txt'), reason: 'Implement the planned boundary.' }]; result.delivered = { what: 'Requested behavior is implemented.', implies: 'Consumers use the new boundary.' }; }
+    if (phase === 'mdd-apply') { result.completed = ['feature']; result.changes = [{ path: join(f.root, 'feature.txt'), reason: 'Implement the planned boundary.' }]; result.delivered = { what: 'Requested behavior is implemented.', implies: 'Consumers use the new boundary.' }; }
     if (phase === 'mdd-verify') {
       result.checks = [{ command: 'npm test', exit: 0 }];
       const assessment = { status: 'verified', checks: ['npm test'], assessment: 'Scoped checks support the expected behavior.' };
@@ -158,6 +158,45 @@ test('V2 dispatch rejects extra capabilities and fabricated completion envelopes
   } }), /completed foreground/);
   assert.equal((await f.call('mdd_status', {})).state, 'await-result');
 });
+
+for (const failed of [false, true]) {
+  test(`V2 sequential Apply uses fresh foreground children and ${failed ? 'blocks on failure' : 'advances only after the full plan'}`, async t => {
+    const f = await fixture(t);
+    f.user('Implement two dependent deliverables.');
+    await f.call('mdd_start', { requirements: 'Implement two dependent deliverables.' });
+    const trace = traceFixture(join(f.root, 'first.txt'), 'first');
+    trace.deliverables[0].scenarios = ['S1'];
+    trace.deliverables.push({ ...trace.deliverables[0], id: 'second', path: join(f.root, 'second.txt'), scenarios: ['S2'], dependsOn: ['first'] });
+    const children = new Set();
+    for (const [index, step] of ['plan', 'first', 'second'].entries()) {
+      const ready = await f.call('mdd_status', {});
+      const phase = index ? 'mdd-apply' : 'mdd-plan';
+      assert.equal(ready.task.agent, phase);
+      assert.deepEqual(Object.keys(ready.task).sort(), ['agent', 'description', 'prompt']);
+      const call = f.begin('subagent', ready.task);
+      await f.toolHooks.get('execute.before')(call);
+      if (index) assert.deepEqual(JSON.parse(call.input.prompt.match(/^Applicable deliverables: (.*)$/m)[1]).map(item => item.id), [step]);
+      const outcome = failed && step === 'second' ? 'failed' : 'passed';
+      const text = reportDocument({ phase, runID: ready.runID, outcome, evidenceSummary: `Completed ${step}.`, artifact: `Artifact ${step}.`,
+        ...(index ? { ...(outcome === 'passed' ? { completed: [step] } : {}), changes: [join(f.root, `${step}.txt`)] } : trace) });
+      const child = `child-batch-${index}`;
+      assert.equal(children.has(child), false);
+      children.add(child);
+      await f.toolHooks.get('execute.after')({ ...call, status: 'completed', result: {
+        output: { sessionID: child, status: 'completed', output: text }, content: `<subagent sessionID="${child}" state="completed">\n${text}\n</subagent>`,
+      } });
+      if (step === 'first') {
+        const next = await f.call('mdd_status', {});
+        assert.equal(next.phase, 'mdd-apply');
+        assert.equal(next.nextAction.tool, 'subagent');
+      }
+    }
+    const done = await f.call('mdd_status', {});
+    assert.equal(done.state, failed ? 'blocked' : 'ready');
+    assert.equal(done.phase, failed ? 'mdd-apply' : 'mdd-verify');
+    if (failed) assert.equal(done.task, undefined);
+  });
+}
 
 test('V2 tracked native fallback children cannot recursively orchestrate', async t => {
   const f = await fixture(t); f.user('Implement the requested change.');

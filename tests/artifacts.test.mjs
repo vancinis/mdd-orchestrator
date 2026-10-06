@@ -77,6 +77,27 @@ test('artifacts: side explorations are isolated and immutable content is idempot
   assert.equal(await store.read(saved.ref), text);
 });
 
+for (const mode of ['openspec', 'engram', 'both']) {
+  test(`artifacts: ${mode} batches retain distinct immutable identities and matching envelopes`, async t => {
+    const root = fixture(t);
+    const { client, writes } = await memory(t, root);
+    const store = new ArtifactStore(root, mode, client);
+    const first = await store.save({ runID: 'run-one', phase: 'mdd-apply', batchID: 'batch-one' }, 'First batch.');
+    const second = await store.save({ runID: 'run-one', phase: 'mdd-apply', batchID: 'batch-two' }, 'Second batch.');
+    assert.equal(await store.read(first.ref), 'First batch.');
+    assert.equal(await store.read(second.ref), 'Second batch.');
+    if (mode !== 'engram') {
+      assert.equal(first.ref.path, 'openspec/changes/run-one/apply/batch-one/apply-progress.md');
+      assert.notEqual(first.ref.path, second.ref.path);
+      await assert.rejects(store.save({ runID: 'run-one', phase: 'mdd-apply', batchID: 'batch-one' }, 'Overwrite.'), ArtifactWriteError);
+    }
+    if (mode !== 'openspec') {
+      assert.notEqual(first.ref.observationID, second.ref.observationID);
+      assert.deepEqual(writes.slice(0, 2).map(item => JSON.parse(item.content).batchID), ['batch-one', 'batch-two']);
+    }
+  });
+}
+
 for (const bad of [
   { ...key, runID: '../escape' }, { ...key, runID: 'CON' }, { ...key, runID: 'con' },
   { ...key, runID: 'run.' }, { ...key, runID: 'a/b' }, { ...key, runID: 'a\\b' },
@@ -85,6 +106,7 @@ for (const bad of [
   { ...key, explorationID: 'side' }, { ...key, extra: true },
   { ...key, phase: 'mdd-spec', domain: '../escape' },
   { ...key, phase: 'mdd-explore', explorationID: '../escape' },
+  { ...key, batchID: 'batch-one' }, { ...key, phase: 'mdd-apply', batchID: '../escape' },
 ]) {
   test(`artifacts: reject invalid identity ${JSON.stringify(bad)}`, async t => {
     const root = fixture(t);

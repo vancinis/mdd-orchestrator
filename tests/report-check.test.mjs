@@ -97,6 +97,14 @@ test('checking is pure: the same document checks the same way every time', () =>
   assert.deepEqual(first, second);
 });
 
+test('Apply report form requires exactly one stable completed ID without claiming to validate assignment', () => {
+  const data = { changes: ['src/first.ts'] };
+  for (const completed of [undefined, [], ['first', 'second'], ['first', 'first'], ['bad/id']]) {
+    assert.equal(checkReportForm('mdd-apply', reportDocument({ evidenceSummary: 'Implemented.', artifact: 'Batch.', ...data, completed })).ok, false);
+  }
+  assert.equal(checkReportForm('mdd-apply', reportDocument({ evidenceSummary: 'Implemented.', artifact: 'Batch.', ...data, completed: ['first'] })).ok, true);
+});
+
 const riskVerdict = (overrides = {}) => ({
   route: 'high', complexity: 'high',
   reason: 'The change touches authentication middleware shared by every route.',

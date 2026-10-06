@@ -198,3 +198,23 @@ test('construction shares strict kernel validation, including incomplete profile
     { answers, config: { threshold: -1 } },
   ]) assert.throws(() => new Workflow(request), ValidationError);
 });
+
+test('Apply completes exactly one dependency-ordered deliverable before Verify, with replay', () => {
+  const workflow = new Workflow({ answers });
+  workflow.start('mdd-plan');
+  workflow.recordResult({ ...result('mdd-plan'), applyPlan: [
+    { id: 'first', dependsOn: [] }, { id: 'second', dependsOn: ['first'] },
+  ] });
+  workflow.start('mdd-apply');
+  for (const completed of [[], ['second'], ['first', 'second'], ['invented'], ['first', 'first']]) {
+    rejectsUnchanged(workflow, () => workflow.recordResult({ ...result('mdd-apply'), completed, batchID: 'batch-one' }));
+  }
+  workflow.recordResult({ ...result('mdd-apply'), completed: ['first'], batchID: 'batch-one' });
+  assert.deepEqual(workflow.nextAction(), { kind: 'execute', phase: 'mdd-apply' });
+  const resumed = Workflow.replay({ answers }, workflow.history());
+  assert.deepEqual(resumed.applyProgress(), workflow.applyProgress());
+  resumed.start('mdd-apply');
+  rejectsUnchanged(resumed, () => resumed.recordResult({ ...result('mdd-apply'), completed: ['first'], batchID: 'batch-two' }));
+  resumed.recordResult({ ...result('mdd-apply'), completed: ['second'], batchID: 'batch-two' });
+  assert.deepEqual(resumed.nextAction(), { kind: 'execute', phase: 'mdd-verify' });
+});
