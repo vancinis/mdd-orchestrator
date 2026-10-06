@@ -342,16 +342,19 @@ export function createInspector(input: PluginInput, timeout = 5000, now: () => n
     return candidates;
   };
   const inspector: Inspect & IntakeInspect & {
-    nativeActor(sessionID: string): Promise<{ agent: unknown; session: Record<string, unknown> }>;
+    nativeActor(sessionID: string, liveAgent?: string): Promise<{ agent: string; session: Record<string, unknown> }>;
     judgeInspection(runtime: Runtime & { messageID: string }, args: unknown): Promise<void>;
   } = {
-    async nativeActor(sessionID) {
+    async nativeActor(sessionID, liveAgent) {
       const current = await session(sessionID, input.directory);
       const history = await messages(sessionID, input.directory);
       const latest = history.findLast(message => record(message.info, 'message').role === 'assistant');
-      const agent = latest ? record(latest.info, 'message').agent : current.agent;
+      const recordedAgent = latest ? record(latest.info, 'message').agent : current.agent;
       // Neither a session switch nor a stale message may relax an already identified judge.
-      return { session: current, agent: isJudge(current.agent) ? current.agent : agent };
+      const agent = isJudge(current.agent) ? current.agent : recordedAgent;
+      // V2's native hook identity can precede recorded history; tool arguments are never identity.
+      const resolvedAgent = typeof agent === 'string' && agent.trim() ? agent : liveAgent;
+      return { session: current, agent: boundedText(resolvedAgent, 'native actor identity', 256) };
     },
     async judgeInspection(runtime, args) {
       checkWorkspace(runtime);
@@ -1216,9 +1219,9 @@ const plugin: Plugin = async input => {
       if (nativeChildren.has(input.sessionID) && (['task', 'skill', CHECK_TOOL].includes(input.tool) || input.tool.startsWith('mdd_'))) {
         throw new Error('A tracked native fallback must work directly and return its report to the parent. Recursive orchestration, skill loading, and MDD tools are not allowed.');
       }
-      const actor = await inspector.nativeActor(input.sessionID);
       // V2 supplies the live hook actor before its assistant history necessarily catches up.
       const liveAgent = (input as typeof input & { agent?: string }).agent;
+      const actor = await inspector.nativeActor(input.sessionID, liveAgent);
       if (isJudge(actor.agent) || isJudge(liveAgent)) judgeSessions.add(input.sessionID);
       if (judgeSessions.has(input.sessionID)) {
         if (input.tool !== JD_INSPECT) throw new Error('A judge may use only immutable Git inspection; live reads, shell, delegation, memory and other tools are denied.');

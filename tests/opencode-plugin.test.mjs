@@ -456,6 +456,44 @@ test('judges deny arbitrary native/MCP tools live even when native permission is
   await assert.rejects(f.hooks.tool.mdd_jd_inspect.execute({ operation: 'tree', commit: 'a'.repeat(40) }, f.context), /judge/);
 });
 
+for (const [name, agent] of [['missing', undefined], ['empty', ''], ['whitespace', '   '], ['non-string', 42]]) {
+  test(`native actor identity refuses ${name} names in otherwise readable legacy records`, async t => {
+    const f = await pluginFixture(t);
+    f.child.agent = agent;
+    f.childMessages[0].info.agent = agent;
+    for (const tool of ['bash', 'read', 'edit']) {
+      const args = { agent: 'general', command: 'not executed', filePath: 'not accessed' };
+      const before = structuredClone(args);
+      await assert.rejects(f.hooks['tool.execute.before']({ sessionID: f.child.id, callID: tool, tool }, { args }),
+        /native actor identity/i);
+      assert.deepEqual(args, before, 'task/tool arguments cannot supply missing native identity');
+    }
+  });
+}
+
+test('native actor identity preserves completed assistant history fallback and known unrelated sessions', async t => {
+  const f = await pluginFixture(t);
+  delete f.child.agent;
+  f.childMessages[0].info.agent = 'general';
+  assert.equal(typeof f.childMessages[0].info.time.completed, 'number');
+  const args = { command: 'not executed' };
+  const before = structuredClone(args);
+  await f.hooks['tool.execute.before']({ sessionID: f.child.id, callID: 'history', tool: 'bash' }, { args });
+  assert.deepEqual(args, before);
+  f.child.agent = 'general';
+  f.childMessages.length = 0;
+  await f.hooks['tool.execute.before']({ sessionID: f.child.id, callID: 'session', tool: 'edit' }, { args });
+  assert.deepEqual(args, before);
+});
+
+test('native actor identity does not replace a nameless latest assistant with stale ordinary session identity', async t => {
+  const f = await pluginFixture(t);
+  f.child.agent = 'general';
+  delete f.childMessages[0].info.agent;
+  await assert.rejects(f.hooks['tool.execute.before']({ sessionID: f.child.id, callID: 'nameless', tool: 'edit' }, { args: {} }),
+    /native actor identity/i);
+});
+
 test('standalone judges preserve ready workflow bytes and do not record error callbacks as phases', async t => {
   const f = await pluginFixture(t);
   const ready = JSON.parse(await f.hooks.tool.mdd_start.execute({ requirements: f.requirements }, f.context));

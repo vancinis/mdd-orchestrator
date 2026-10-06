@@ -726,7 +726,7 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
   }
   if (start) await hooks.tool.mdd_start.execute({ requirements }, context);
   return { root, mainRoot, settings, hooks, status, phase, answer, user, change, input, context, parent, runtime, visited, requirements, memory,
-    delivered: () => delivered, writes: memory.writes, questions: () => questionCount };
+    sessions, histories, delivered: () => delivered, writes: memory.writes, questions: () => questionCount };
 }
 
 for (const route of ['low', 'high']) for (const store of ['none', 'openspec']) for (const mode of ['automatic', 'interactive']) {
@@ -1948,7 +1948,18 @@ test('tracked native children cannot recurse or use MDD tools; unrelated native 
   await assert.rejects(f.hooks.tool.mdd_check_report.execute({ phase: 'mdd-plan', result: 'anything' }, { ...f.context, sessionID: 'child-1', agent: 'general' }), /belongs to MDD phase actors/);
   const args = { subagent_type: 'general', description: 'Unrelated work', prompt: 'Independent native task' };
   const before = structuredClone(args);
-  await f.hooks['tool.execute.before']({ sessionID: 'unrelated-parent', callID: 'unrelated', tool: 'task' }, { args });
+  const call = { sessionID: 'unrelated-parent', callID: 'unrelated', tool: 'task' };
+  // Unresolved native identity fails closed; a valid unrelated conversation remains untouched.
+  await assert.rejects(f.hooks['tool.execute.before'](call, { args }), /Unknown OpenCode response structure/);
+  assert.deepEqual(args, before);
+  f.sessions.set(call.sessionID, { id: call.sessionID, agent: 'general', directory: f.root, projectID: 'project' });
+  f.histories.set(call.sessionID, [{
+    info: { id: 'msg_unrelated', sessionID: call.sessionID, agent: 'general', role: 'assistant',
+      providerID: 'contract-only', modelID: 'model', path: { cwd: f.root, root: f.root } },
+    parts: [{ type: 'tool', tool: call.tool, callID: call.callID, sessionID: call.sessionID,
+      messageID: 'msg_unrelated', state: { status: 'running', input: structuredClone(args) } }],
+  }]);
+  await f.hooks['tool.execute.before'](call, { args });
   assert.deepEqual(args, before);
 });
 

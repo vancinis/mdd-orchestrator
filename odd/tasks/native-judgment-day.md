@@ -16,7 +16,7 @@ MDD already configures models per actor but lacks Judgment Day actors and native
 ## Tasks
 
 - [x] JD-1 — Package configurable judge/fix actors and preserve phase-role separation. Model round trips, config editor, schema, installation, assets, telemetry and existing phase membership verified.
-- [x] JD-2 — Enable exact standalone actor dispatch with native read-only inspection and workflow guards. Parallel judge admission, model policy settling, ownership, phase-result exclusion and adversarial tool/command denial verified by deterministic adapter tests.
+- [x] JD-2 — Enable exact standalone actor dispatch with native read-only inspection and workflow guards. Full regression fixture corrected and unresolved native actor identity now fails closed; independent verification confirms the correction.
 - [ ] JD-3 — Package the explicit-request protocol, coordinator routing and usage documentation. Check complete installed skill/reference paths, immutable targets, authorization, round limits and full regression suite.
 
 Each task uses delegated direct execution: preparation requires repository exploration and each work unit touches multiple non-trivial files. One writer works sequentially; the parent owns commits and native review.
@@ -39,9 +39,10 @@ Each task uses delegated direct execution: preparation requires repository explo
 - Branch point / initial review boundary: `963895886e5786fb3af62ccb34ada3ecba4a9f51`.
 - Forecast: 550–800 authored changed lines, advisory only; never omit tests or compress source to fit.
 - User-selected delivery: multiple Conventional Commits on one branch toward main; `single-pr` organization. No push, PR creation, merge or global installation authorized.
-- RDD: on, decided by global preference. Native review selects risk and requests candidate-scoped consent where applicable.
-- Running authored lines: 394 (JD-1). Commit: `7c58cb9` — `feat(config): add configurable Judgment Day actors`.
+- RDD was on at implementation start; current effective mode is off, decided by clone-local preference. Do not reactivate it. Current checking/delivery is ordinary and unmanaged; the earlier native transaction is not approved or closed.
+- Running authored lines: 1,058 (JD-1: 394; JD-2: 664). Commits: `7c58cb9` — `feat(config): add configurable Judgment Day actors`; `a7900f4` — `feat(judgment): enable guarded native dual review`.
 - JD-1 native assessment: medium, `review_due=false`, `under_budget`; pending review slice retains the initial boundary.
+- JD-2 native assessment: high (`process_boundary`), review due. Exact committed range: 22 paths / 1,010 net authored diff lines. Candidate consent granted for lineage `review-fe95a8346d0656ec`; review remains blocked and no review approval or delivery authority exists.
 
 ## Progress and recovery
 
@@ -51,4 +52,18 @@ JD-2 complete: behavioral RED then GREEN; 123 focused tests passed. Build, typec
 
 The JD-2 diff exceeds the initial estimate (653 authored source/test/doc lines) because native ownership and immutable-read security boundaries require adversarial regression coverage; no tests were dropped or code compressed to fit.
 
-Next: commit and assess JD-2, then package the explicit protocol in JD-3. The memory service binds this runtime session to project `mdd`, despite the repository detector returning `mdd-orchestrator`; recovery mirrors follow that existing session binding without inventing a session.
+Recovery: the interrupted consent question was presented again and the user selected review. Exact START succeeded. One grouped foreground launch of all four provider-issued reviewer tasks returned `opencode_review_transport_relay_refused (reason: output_refused)` for every task. A single exact-bound read-only STATUS confirmed the same four slots remain pending; no result was admitted. Do not claim closure, substitute reviewers, synthesize captures or repeat launches in a loop.
+
+Diagnosis and report handoff: installed adapter inspection confirmed `output_refused` comes from the Gentle AI relay. The original child error remains unknown. User consented to report and separately authorized the current GitHub CLI session for the exact upstream repository. The privacy-scrubbed open/closed lookup found possible matches but a later search was incomplete; no issue/comment was created, no labels changed, and all further GitHub mutations stopped.
+
+The exact captured candidate-scoped decline was invoked once. It returned `rdd_disabled`, `mutation_outcome=not_started`, `next_action=stop`, `retry_safe=false`. Read-only mode status confirmed clone-local OFF with global ON. Do not retry that decline, invoke replacement lifecycle operations, change the preference, or claim native continuation/approval. All existing commits and review state are preserved.
+
+JD-3 implementation is present, not committed: packaged skill/reference, coordinator activation, parent-loaded standards by value, strict result/round contracts and documentation. Initial focused checks passed (84 tests). Initial full suite failed one missing-session fixture; it was corrected without weakening production policy. Independent verification then found otherwise readable records could lack resolved actor identity; that gap was closed with 12 regressions, preserving trusted V2 early identity and rejecting identity supplied in tool arguments.
+
+Final writer checks: build and typecheck passed; 250 focused native tests passed; full `npm test` passed 1,108 tests, failed 0, skipped 2 (Windows file-symlink privilege and opt-in managed Engram smoke). Independent corrected-candidate verification passed 426 tests, failed/skipped/cancelled 0; typecheck and diff check passed. Its earlier 120-second timeout remains incomplete historical evidence, superseded for the corrected candidate by the completed 600-second-budget run (actual 132 seconds). Parent re-ran typecheck and diff check successfully.
+
+Final worktree assessment explicitly included the new skill/reference inventory: medium, 18 paths / 797 authored lines. No returned review transition was executed because RDD is disabled. Conservative high-risk independent verification was completed; neither check produces native authority. Native-host/model-backed smoke remains unverified without separate authorization.
+
+Next: commit verified JD-2 correction and JD-3 on the same branch, then record commit identities. No push, merge or global installation is authorized.
+
+The memory service binds this runtime session to project `mdd`, despite the repository detector returning `mdd-orchestrator`; recovery mirrors follow that existing session binding without inventing a session.

@@ -116,6 +116,65 @@ test('V2 live judge identity denies tools even before assistant history has reco
     id: 'early-shell', tool: 'bash', input: {} }), /judge|immutable|inspection/);
 });
 
+test('V2 native actor identity refuses readable records with neither recorded nor live actor', async t => {
+  const f = await fixture(t);
+  delete f.sessions.get(f.sessionID).agent;
+  f.messages.set(f.sessionID, [{ id: 'nameless', type: 'assistant', content: [], time: { created: 1 } }]);
+  for (const tool of ['bash', 'read', 'edit']) {
+    await assert.rejects(f.toolHooks.get('execute.before')({ sessionID: f.sessionID, id: tool, tool,
+      input: { agent: 'general' } }), /native actor identity/i);
+  }
+});
+
+test('V2 native live ordinary identity remains usable before recorded actor history exists', async t => {
+  const f = await fixture(t);
+  delete f.sessions.get(f.sessionID).agent;
+  assert.deepEqual(f.messages.get(f.sessionID), []);
+  const event = { sessionID: f.sessionID, agent: 'general', id: 'early-edit', tool: 'edit', input: { filePath: 'not accessed' } };
+  const before = structuredClone(event.input);
+  await f.toolHooks.get('execute.before')(event);
+  assert.deepEqual(event.input, before);
+});
+
+test('V2 native live judge identity enforces inspection-only policy without any recorded actor', async t => {
+  const f = await fixture(t);
+  delete f.sessions.get(f.sessionID).agent;
+  for (const tool of ['bash', 'read', 'edit']) {
+    await assert.rejects(f.toolHooks.get('execute.before')({ sessionID: f.sessionID, agent: 'mdd-jd-judge-a',
+      id: tool, tool, input: { agent: 'general' } }), /judge.*only immutable/i);
+  }
+});
+
+for (const source of ['session', 'history']) {
+  test(`V2 recorded ${source} judge identity cannot be relaxed by a live ordinary actor`, async t => {
+    const f = await fixture(t);
+    f.sessions.get(f.sessionID).agent = source === 'session' ? 'mdd-jd-judge-a' : 'general';
+    f.messages.set(f.sessionID, [{ id: 'recorded', type: 'assistant', agent: source === 'history' ? 'mdd-jd-judge-a' : 'general',
+      content: [], time: { created: 1 } }]);
+    await assert.rejects(f.toolHooks.get('execute.before')({ sessionID: f.sessionID, agent: 'general',
+      id: 'conflicting-edit', tool: 'edit', input: {} }), /judge.*only immutable/i);
+  });
+}
+
+test('V2 native live fix identity still requires an admitted parent before early-history edits', async t => {
+  const f = await fixture(t);
+  f.agents.push({ id: 'mdd-jd-fix', permissions: [], request: {} });
+  const fix = { ...f.sessions.get(f.sessionID), id: 'early-fix', parentID: f.sessionID };
+  delete fix.agent;
+  f.sessions.set(fix.id, fix); f.messages.set(fix.id, []);
+  const edit = { sessionID: fix.id, agent: 'mdd-jd-fix', id: 'fix-edit', tool: 'edit', input: {} };
+  await assert.rejects(f.toolHooks.get('execute.before')(edit), /requires an admitted native fix task/);
+  f.user('Apply the explicitly authorized bounded correction.');
+  const dispatch = f.begin('subagent', { agent: 'mdd-jd-fix', description: 'Bounded fix', prompt: 'Authorized correction.' });
+  await f.toolHooks.get('execute.before')(dispatch);
+  await f.toolHooks.get('execute.before')(edit);
+  await f.toolHooks.get('execute.after')({ ...dispatch, status: 'completed', result: {
+    output: { sessionID: fix.id, status: 'completed', output: 'Correction handoff.' },
+    content: `<subagent sessionID="${fix.id}" state="completed">\nCorrection handoff.\n</subagent>`,
+  } });
+  await assert.rejects(f.toolHooks.get('execute.before')({ ...edit, id: 'late-edit' }), /requires an admitted native fix task/);
+});
+
 test('V2 judge inspection reaches immutable Git through the exact native tool call and hides other tools', async t => {
   const f = await fixture(t);
   const git = (...args) => execFileSync('git', args, { cwd: f.root, encoding: 'utf8' }).trim();
