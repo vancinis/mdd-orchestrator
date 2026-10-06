@@ -41,8 +41,8 @@ Each task uses delegated direct execution: preparation requires repository explo
 - Forecast: 550–800 authored changed lines, advisory only; never omit tests or compress source to fit.
 - User-selected delivery: multiple Conventional Commits on one branch toward main; `single-pr` organization. No push, PR creation, merge or global installation authorized.
 - RDD was on at implementation start; current effective mode is off, decided by clone-local preference. Do not reactivate it. Current checking/delivery is ordinary and unmanaged; the earlier native transaction is not approved or closed.
-- Running authored lines: 1,874 (JD-1: 394; JD-2: 664; correction: 148; JD-3: 659; final progress readback: 9). The estimate increased to preserve the complete protocol and adversarial coverage rather than omit tests or compress code.
-- Work-unit commits: `7c58cb9` — `feat(config): add configurable Judgment Day actors`; `a7900f4` — `feat(judgment): enable guarded native dual review`; `ff3f634` — `fix(judgment): reject unresolved native actor identity`; `9093e2d` — `feat(judgment): package standalone review protocol`.
+- Running authored lines: 3,657 (feature and progress: 1,874; upstream integration: 1,777; integration proof readback: 6). The total includes upstream sequential-Apply integration; tests and complete protocols were preserved rather than compressed to fit the initial estimate.
+- Work-unit commits: `7c58cb9` — `feat(config): add configurable Judgment Day actors`; `a7900f4` — `feat(judgment): enable guarded native dual review`; `ff3f634` — `fix(judgment): reject unresolved native actor identity`; `9093e2d` — `feat(judgment): package standalone review protocol`; `aece23e` — `chore: integrate latest main with native Judgment Day`.
 - JD-1 native assessment: medium, `review_due=false`, `under_budget`; pending review slice retains the initial boundary.
 - JD-2 native assessment: high (`process_boundary`), review due. Exact committed range: 22 paths / 1,010 net authored diff lines. Candidate consent granted for lineage `review-fe95a8346d0656ec`; review remains blocked and no review approval or delivery authority exists.
 
@@ -72,6 +72,6 @@ Delivery integration: fetched `origin/main` at `531ee36a475cd77469e5ab3c47be9f4e
 
 DEL-1 proof: merged the pinned upstream with both histories preserved, resolving only coordinator instructions and phase-asset tests. Combined coordinator remains within the 16,000-byte installation limit (15,996 bytes), preserving both contracts. Writer build/typecheck passed; full suite passed 1,166 tests, failed 0, skipped 2 (Windows file-symlink privilege and opt-in managed Engram smoke). Parent typecheck, staged/unstaged diff checks and conflict inventory passed. Native assessment: medium; RDD remains clone-local OFF, so no returned review transition is executed and no native approval is claimed.
 
-Next: refresh the authorized remote to detect races, commit the verified integration and record its identity, then publish normally to origin/main if it has not advanced. Model-backed native-host smoke remains pending without separate authorization.
+Delivery: normal direct-main push is explicitly authorized for this verified integration, without force or history rewrite. Preserve both histories and stop on unexpected remote advancement; publication outcome is recorded separately. Model-backed native-host smoke remains pending without separate authorization.
 
 The memory service binds this runtime session to project `mdd`, despite the repository detector returning `mdd-orchestrator`; recovery mirrors follow that existing session binding without inventing a session.
