@@ -1,5 +1,6 @@
 import { createRequire } from 'node:module';
-import type { TuiPluginModule, TuiPluginApi } from '@opencode-ai/plugin/tui';
+import type { TuiPluginModule, TuiPluginApi, TuiSlots } from '@opencode-ai/plugin/tui';
+import { Plugin } from '@opencode/plugin/tui';
 import { registerPhaseSidebar } from './tui-sidebar.js';
 import type { VisualStatus } from './visual-ux.js';
 
@@ -61,4 +62,51 @@ const plugin: TuiPluginModule = {
   },
 };
 
-export default plugin;
+export default {
+  ...plugin,
+  ...Plugin.define({
+    id: 'mdd.visual',
+    async setup(ctx) {
+      const statuses = new Map<string, VisualStatus>();
+      const last = new Map<string, string>();
+      let disposed = false;
+      let refresh: ((sessionID: string) => void) | undefined;
+      let removeSlot: (() => void) | undefined;
+      let pending = Promise.resolve();
+      try {
+        const runtime = '@opentui/solid/jsx-runtime';
+        const solid = 'solid-js/dist/solid.js';
+        const [elements, signals] = await Promise.all([import(runtime), import(solid)]);
+        refresh = registerPhaseSidebar({ slots: { register(claim: Parameters<TuiSlots['register']>[0]) {
+          removeSlot = ctx.ui.slot({ append: 'sidebar.content', render: props =>
+            claim.slots.sidebar_content?.({} as never, { session_id: props.sessionID } as never) as never });
+          return 'mdd.visual:sidebar';
+        } } } as never, elements.jsx, signals.createSignal, statuses, () => ctx.options.ascii === true);
+      } catch { /* A renderer failure must not prevent status notifications. */ }
+      const removeEvent = ctx.data.on('session.tool.success', event => {
+        pending = pending.then(async () => {
+          if (disposed) return;
+          const message = await ctx.client.session.message.get({ sessionID: event.data.sessionID, messageID: event.data.assistantMessageID });
+          if (disposed || message.type !== 'assistant') return;
+          const part = message.content.find(part => part.type === 'tool' && part.id === event.data.id);
+          if (!part || part.type !== 'tool' || !['mdd_status', 'mdd_start', 'mdd_phase_result'].includes(part.name)) return;
+          const text = event.data.content.every(item => item.type === 'text')
+            ? event.data.content.map(item => item.type === 'text' ? item.text : '').join('\n') : '';
+          const status = JSON.parse(text) as VisualStatus;
+          if (!status?.workflow?.evaluation?.phases?.length || typeof status.phase !== 'string' || typeof status.state !== 'string') return;
+          const sessionID = event.data.sessionID;
+          statuses.set(sessionID, status); refresh?.(sessionID);
+          const key = `${status.phase}:${status.state}`;
+          const previous = last.get(sessionID);
+          last.set(sessionID, key);
+          if (previous && previous !== key && ['await-approval', 'blocked', 'complete'].includes(status.state)) {
+            if (ctx.options.toasts !== false) ctx.ui.toast.show({ message: `MDD ${status.state.replace('-', ' ')}`, variant: status.state === 'blocked' ? 'error' : status.state === 'complete' ? 'success' : 'info' });
+            await ctx.attention.notify({ message: `MDD ${status.state.replace('-', ' ')}`, notification: false,
+              sound: { name: status.state === 'blocked' ? 'error' : status.state === 'complete' ? 'done' : 'question' } });
+          }
+        }).catch(() => { /* UI delivery never affects the recorded run. */ });
+      });
+      return () => { disposed = true; removeEvent(); removeSlot?.(); statuses.clear(); last.clear(); };
+    },
+  }),
+};

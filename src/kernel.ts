@@ -23,7 +23,7 @@ export function preflight(value: unknown): { answers: Answers; evaluation: Evalu
   if (hasProfile) {
     const profile = objectWithKeys(request.profile, 'profile', ['answers']);
     if (!Object.hasOwn(profile, 'answers')) {
-      throw new ValidationError('profile.answers is required. Supply all five preflight answers; this proof does not prompt.');
+      throw new ValidationError('profile.answers is required. Supply the four active preflight answers (certainty, artifactStore, mode, summary); legacy complexity is accepted but ignored. This proof does not prompt.');
     }
     source = profile.answers;
   }
@@ -37,7 +37,6 @@ export function preflight(value: unknown): { answers: Answers; evaluation: Evalu
     { field: 'certainty', answer: answers.certainty, points: config.weights.certainty[answers.certainty] },
     { field: 'mode', answer: answers.mode, points: config.weights.mode[answers.mode] },
     { field: 'summary', answer: answers.summary, points: config.weights.summary[answers.summary] },
-    { field: 'complexity', answer: answers.complexity, points: config.weights.complexity[answers.complexity] },
   ];
   const score = contributions.reduce((sum, contribution) => sum + contribution.points, 0);
   const route = score >= config.threshold ? 'high' : 'low';
@@ -54,16 +53,13 @@ export function preflight(value: unknown): { answers: Answers; evaluation: Evalu
     if (answers.certainty !== 'very-sure') {
       explorationReasons.push(`Low-route exploration required: certainty is ${answers.certainty}.`);
     }
-    if (answers.complexity !== 'not-complex') {
-      explorationReasons.push(`Low-route exploration required: complexity is ${answers.complexity}.`);
-    }
     if (request.explore === true) explorationReasons.push('Low-route exploration explicitly requested.');
     phases = ['mdd-plan', 'mdd-apply', 'mdd-verify'];
     if (explorationReasons.length > 0) {
       phases.unshift('mdd-explore');
       reasons.push(...explorationReasons);
     } else {
-      reasons.push('Low-route exploration not required: very-sure requirements and not-complex work.');
+      reasons.push('Low-route exploration not required: very-sure requirements.');
     }
   }
   return {

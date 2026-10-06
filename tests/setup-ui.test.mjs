@@ -36,6 +36,8 @@ function seedPackage(root) {
   const scope = join(root, 'node_modules/@opencode-ai'); fs.mkdirSync(scope, { recursive: true });
   // A reinstall only replaces the MDD package; unrelated dependencies stay in place.
   if (!fs.existsSync(join(scope, 'plugin'))) fs.symlinkSync(resolve('node_modules/@opencode-ai/plugin'), join(scope, 'plugin'), process.platform === 'win32' ? 'junction' : 'dir');
+  const v2 = join(root, 'node_modules/@opencode'); fs.mkdirSync(v2, { recursive: true });
+  if (!fs.existsSync(join(v2, 'plugin'))) fs.symlinkSync(resolve('node_modules/@opencode/plugin'), join(v2, 'plugin'), process.platform === 'win32' ? 'junction' : 'dir');
 }
 function ui(lines) {
   const output = []; const prompts = [];
@@ -59,6 +61,8 @@ test('one wizard invocation skips optional memory and is ready with no dependenc
   assert.equal(loadSettings(root).engram, undefined);
   assert.deepEqual(loadSettings(root).profiles.default, { models: {}, answers: {} });
   assert.match(io.output.join(''), /Paso 1\/4[\s\S]*Paso 2\/4[\s\S]*Paso 3\/4[\s\S]*Paso 4\/4[\s\S]*Listo/);
+  assert.match(io.output.join(''), /opencode service restart/);
+  assert.match(io.output.join(''), /puede interrumpir ejecuciones activas/);
   assert.equal(io.prompts.length, 2);
   assert.match(fs.readFileSync(join(root, LOADER_PATH), 'utf8'), /my-driven-development\/dist\/opencode-plugin.js/);
 });
@@ -90,7 +94,7 @@ test('legacy opt-in config stays byte-identical and doctor failure never silentl
   const io = ui(['', 'apply']);
   assert.equal(await runSetupUI(root, io, { ...noMemory, check: async () => ({ ready: false, checks: [{ status: 'action', check: 'engram', message: 'Unavailable' }] }) }), 'issues');
   assert.equal(fs.readFileSync(join(root, 'mdd/mdd.config.json'), 'utf8'), before);
-  assert.doesNotMatch(io.output.join(''), /Cerrá y reiniciá OpenCode/);
+  assert.doesNotMatch(io.output.join(''), /opencode service restart/);
 });
 test('wizard preserves global endpoint opt-in without contacting the memory service', async t => {
   const root = fixture(t); const settings = defaultSettings();
@@ -445,5 +449,5 @@ test('linked installer parent is refused before any download or external write',
   assert.deepEqual(fs.readdirSync(outside), before);
 });
 function awaitImportLoader(root) {
-  return spawnSync(process.execPath, ['--input-type=module', '-e', `const plugin = await import(${JSON.stringify(pathToFileURL(join(root, LOADER_PATH)).href)}); if (typeof plugin.default !== 'function') process.exit(1);`], { encoding: 'utf8' });
+  return spawnSync(process.execPath, ['--input-type=module', '-e', `const plugin = await import(${JSON.stringify(pathToFileURL(join(root, LOADER_PATH)).href)}); if (plugin.default.id !== 'mdd' || typeof plugin.default.setup !== 'function') process.exit(1);`], { encoding: 'utf8' });
 }

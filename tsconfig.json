@@ -3,6 +3,7 @@
     "target": "ES2023",
     "module": "NodeNext",
     "strict": true,
+    "skipLibCheck": true,
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true,
     "verbatimModuleSyntax": true,

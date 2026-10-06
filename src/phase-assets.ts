@@ -1,11 +1,12 @@
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { PHASES } from './policy.js';
 import type { Phase } from './policy.js';
-import { MODEL_ROLES } from './settings.js';
 import { fileDigest } from './safe-paths.js';
 
+/** Rejects anything that is not one of the eight workflow phases, including actors like `mdd-risk` or `orchestrator`. */
 export function phaseName(value: string): Phase {
-  if (value === 'orchestrator' || !MODEL_ROLES.includes(value as Phase)) throw new Error('Unknown MDD phase.');
+  if (!PHASES.includes(value as Phase)) throw new Error('Unknown MDD phase.');
   return value as Phase;
 }
 

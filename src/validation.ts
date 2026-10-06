@@ -42,6 +42,8 @@ function points(value: unknown, path: string): number {
   return value;
 }
 
+// 'complexity' is accepted for backward compatibility with saved profiles and existing kernel
+// callers, but it is never read: mdd-risk, not this legacy field, now judges complexity.
 export function parseAnswers(value: unknown): Answers {
   const answers = objectWithKeys(value, 'answers', ['certainty', 'artifactStore', 'mode', 'summary', 'complexity']);
   return {
@@ -49,7 +51,6 @@ export function parseAnswers(value: unknown): Answers {
     artifactStore: option(answers.artifactStore, 'answers.artifactStore', ['engram', 'openspec', 'both', 'none']),
     mode: option(answers.mode, 'answers.mode', ['interactive', 'automatic']),
     summary: option(answers.summary, 'answers.summary', ['detailed', 'medium', 'low']),
-    complexity: option(answers.complexity, 'answers.complexity', ['very-complex', 'somewhat-complex', 'not-complex']),
   };
 }
 
@@ -80,9 +81,6 @@ export function parseConfig(value: unknown): Config {
     }
     if (Object.hasOwn(weights, 'summary')) {
       config.weights.summary = weightOverrides(weights.summary, config.weights.summary, 'config.weights.summary');
-    }
-    if (Object.hasOwn(weights, 'complexity')) {
-      config.weights.complexity = weightOverrides(weights.complexity, config.weights.complexity, 'config.weights.complexity');
     }
   }
   let maximum = 0;

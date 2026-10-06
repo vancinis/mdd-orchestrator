@@ -9,7 +9,6 @@ const clear = {
   artifactStore: 'none',
   mode: 'automatic',
   summary: 'low',
-  complexity: 'not-complex',
 };
 const lowPhases = ['mdd-plan', 'mdd-apply', 'mdd-verify'];
 const highPhases = [
@@ -29,7 +28,6 @@ test('default policy produces the minimum low route and explanations', () => {
     { field: 'certainty', answer: 'very-sure', points: 10 },
     { field: 'mode', answer: 'automatic', points: 5 },
     { field: 'summary', answer: 'low', points: 5 },
-    { field: 'complexity', answer: 'not-complex', points: 0 },
   ]);
   assert.ok(result.reasons.includes('Score 20 < threshold 50: low route.'));
   assert.ok(result.reasons.includes('Artifact storage is unscored.'));
@@ -41,7 +39,6 @@ const weightCases = {
   certainty: { 'very-sure': 10, 'somewhat-sure': 15, 'not-sure': 25 },
   mode: { interactive: 15, automatic: 5 },
   summary: { detailed: 25, medium: 10, low: 5 },
-  complexity: { 'very-complex': 25, 'somewhat-complex': 10, 'not-complex': 0 },
 };
 for (const [field, values] of Object.entries(weightCases)) {
   for (const [answer, points] of Object.entries(values)) {
@@ -53,26 +50,24 @@ for (const [field, values] of Object.entries(weightCases)) {
   }
 }
 
-test('all 54 scored combinations stay within 20..90 and obey exact phase rules', () => {
+test('all 18 scored combinations stay within 20..65 and obey exact phase rules', () => {
   const scores = [];
   for (const certainty of Object.keys(weightCases.certainty)) {
     for (const mode of Object.keys(weightCases.mode)) {
       for (const summary of Object.keys(weightCases.summary)) {
-        for (const complexity of Object.keys(weightCases.complexity)) {
-          const answers = { ...clear, certainty, mode, summary, complexity };
-          const result = run(answers);
-          scores.push(result.score);
-          assert.equal(result.route, result.score >= 50 ? 'high' : 'low');
-          const explore = certainty !== 'very-sure' || complexity !== 'not-complex';
-          assert.deepEqual(result.phases, result.route === 'high'
-            ? highPhases : [...(explore ? ['mdd-explore'] : []), ...lowPhases]);
-        }
+        const answers = { ...clear, certainty, mode, summary };
+        const result = run(answers);
+        scores.push(result.score);
+        assert.equal(result.route, result.score >= 50 ? 'high' : 'low');
+        const explore = certainty !== 'very-sure';
+        assert.deepEqual(result.phases, result.route === 'high'
+          ? highPhases : [...(explore ? ['mdd-explore'] : []), ...lowPhases]);
       }
     }
   }
-  assert.equal(scores.length, 54);
+  assert.equal(scores.length, 18);
   assert.equal(Math.min(...scores), 20);
-  assert.equal(Math.max(...scores), 90);
+  assert.equal(Math.max(...scores), 65);
 });
 
 for (const artifactStore of ['engram', 'openspec', 'both', 'none']) {
@@ -104,7 +99,6 @@ test('threshold override and zero weights are applied rather than replaced by de
 
 for (const [field, answer] of [
   ['certainty', 'somewhat-sure'], ['certainty', 'not-sure'],
-  ['complexity', 'somewhat-complex'], ['complexity', 'very-complex'],
 ]) {
   test(`low route requires exploration for ${field}=${answer}`, () => {
     const result = run({ ...clear, [field]: answer }, { config: { threshold: 100 }, explore: false });

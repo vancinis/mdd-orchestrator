@@ -10,6 +10,10 @@ import { installationPaths } from './installation-paths.js';
 import { loadGlobalSettings } from './global-settings.js';
 
 type Check = { check: string; status: 'ok' | 'action' | 'info'; message: string };
+export function isSupportedNodeVersion(version: string): boolean {
+  const [major, minor] = version.split('.').map(Number);
+  return (major === 24 && minor! >= 6) || (major === 26 && minor! >= 4);
+}
 async function health(endpoint: string): Promise<boolean> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 2000);
@@ -35,14 +39,14 @@ export async function doctor(cwd: string, probeMemory = true): Promise<{ ready: 
     catch { checks.push({ check: name, status: 'action', message: action }); }
   };
   checks.push({ check: 'workspace', status: 'info', message: `Solo contexto activo: ${resolve(cwd)}` });
-  check('node', () => { const [major, minor] = process.versions.node.split('.').map(Number); if (major !== 24 || minor! < 6) throw new Error(); }, 'Node está en el rango soportado 24.6+ / 24.x.', 'Usá Node 24.6 o posterior dentro de 24.x; mirá la nota sobre el motor de dependencias en la documentación de setup.');
+  check('node', () => { if (!isSupportedNodeVersion(process.versions.node)) throw new Error(); }, 'Node está en el rango soportado 24.6+ / 24.x o 26.4+ / 26.x.', 'Usá Node 24.6 o posterior dentro de 24.x, o Node 26.4 o posterior dentro de 26.x; mirá la nota sobre el motor de dependencias en la documentación de setup.');
   check('installed-package', () => { installation = dirname(dirname(installedPlugin(root))); }, 'El prefijo global propio resuelve el export del plugin de MDD.', 'Ejecutá mdd setup. Desde el código fuente: npm run setup.');
   check('build', () => { for (const file of ['cli.js', 'opencode-plugin.js', 'phase-runner.js']) if (!fs.statSync(join(installation, 'dist', file)).isFile()) throw new Error(); }, 'El build de MDD está presente.', 'Ejecutá npm run setup desde el checkout de origen para preparar el build, o restaurá el artefacto local compilado.');
   check('dependencies', () => {
-    const manifest = findPackageJSON('@opencode-ai/plugin', join(installation, 'package.json'));
+    const manifest = findPackageJSON('@opencode/plugin', join(installation, 'package.json'));
     if (!manifest) throw new Error();
     const pkg = JSON.parse(fs.readFileSync(manifest, 'utf8'));
-    if (pkg.name !== '@opencode-ai/plugin' || pkg.version !== '1.18.31' || !fs.statSync(join(dirname(manifest), 'dist/index.js')).isFile()) throw new Error();
+    if (pkg.name !== '@opencode/plugin' || pkg.version !== '2.0.22' || !fs.statSync(join(dirname(manifest), 'dist/promise/index.js')).isFile()) throw new Error();
   }, 'La dependencia fijada del plugin resuelve.', 'Instalá las dependencias fijadas del paquete; no copies solo dist sin las dependencias de ejecución.');
   check('agents-and-skills', () => { for (const name of MDD_ASSETS) if (assetText(root, name.replace('assets/opencode/', '')).digest !== assetText(installation, name).digest) throw new Error(); }, 'Todos los actores y skills que trae MDD coinciden.', 'Ejecutá mdd setup. Los archivos editados por vos o no registrados que difieran hay que reconciliarlos a mano.');
   check('loader', () => {

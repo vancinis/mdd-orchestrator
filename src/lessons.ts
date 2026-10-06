@@ -1,7 +1,7 @@
 import { LocalFiles } from './local-files.js';
 import { FAILURE_CLASSES } from './telemetry.js';
 import type { FailureClass } from './telemetry.js';
-import { MODEL_ROLES } from './settings.js';
+import { PHASES } from './policy.js';
 import type { Phase } from './policy.js';
 import { objectWithKeys, ValidationError } from './validation.js';
 
@@ -27,7 +27,6 @@ export const LESSON_SOURCES = Object.freeze(['user', 'failure'] as const);
 export type LessonSource = typeof LESSON_SOURCES[number];
 export const LESSON_STATES = Object.freeze(['open', 'reviewed', 'applied'] as const);
 export type LessonState = typeof LESSON_STATES[number];
-const PHASES = MODEL_ROLES.filter((role): role is Phase => role !== 'orchestrator');
 const CONTROL_CHARACTERS = /[\x00-\x08\x0b-\x1f\x7f]/;
 
 export type Lesson = {

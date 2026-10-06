@@ -202,7 +202,7 @@ export async function runSetupUI(cwd: string, io: ConfigIO, dependencies: Partia
       return 'issues';
     }
     const reachable = deps.commandPlan().onPath;
-    io.write(`\n  Listo: las verificaciones de la instalación global pasaron.\n${note('Cerrá y reiniciá OpenCode para que cargue los assets.')}${note('La integración con los ajustes nativos globales y la aceptación de modelos todavía no están verificadas.')}${rows([
+    io.write(`\n  Listo: las verificaciones de la instalación global pasaron.\n${note('Si OpenCode ya estaba abierto, ejecutá opencode service restart para cargar el plugin actualizado. Reiniciar solo la interfaz o ejecutar opencode reload puede conservar módulos anteriores en caché. El reinicio del servicio puede interrumpir ejecuciones activas; hacelo cuando no haya trabajo en curso.')}${note('La integración con los ajustes nativos globales y la aceptación de modelos todavía no están verificadas.')}${rows([
       ['Instalar o actualizar', reachable ? COMMAND : `node "${paths.cliPath}"`],
       ['Configuración', reachable ? `${COMMAND} config` : `node "${paths.cliPath}" config`],
       ['Verificación', reachable ? `${COMMAND} doctor` : `node "${paths.cliPath}" doctor`]])}${

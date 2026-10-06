@@ -41,7 +41,7 @@ reintentos, fallos y tokens.
 Las automejoras anotan, con texto, qué salió mal: las escribe cada fase que falla
 y también vos cuando pedís que algo quede registrado. Son locales al workspace.
 
-Answers: los cinco campos del preflight. Profile: { "answers": { ... } }.
+Answers: los cuatro campos del preflight. Profile: { "answers": { ... } }.
 Config: overrides opcionales de umbral y peso parcial. Ver docs/product-contract.md.
 Usá exactamente una fuente. Las rutas son relativas al directorio actual.
 Códigos de salida: 0 éxito o ayuda; 2 error de uso, JSON o validación; 1 error de

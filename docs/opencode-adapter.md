@@ -1,7 +1,7 @@
 # Run the main MDD routes in OpenCode
 
-This opt-in project adapter executes the complete approved low/high main routes.
-It uses the native permission-controlled `task` tool, not SDK prompting.
+This opt-in adapter targets OpenCode **V2 2.0.22** and preserves the approved low/high main routes.
+It uses the native permission-controlled foreground `subagent` tool, not SDK prompting.
 When optional Engram memory is enabled, receipts must be read back before dispatch and before recording a result.
 Verify is grounded in actual native command outcomes. This is **execution evidence, not
 a guarantee of semantic correctness or independent review**. Model-backed E2E is pending.
@@ -10,45 +10,37 @@ a guarantee of semantic correctness or independent review**. Model-backed E2E is
 
 ### Visual status
 
-MDD's server plugin adds a route/progress/skills frame to status reports, sets phase task
-titles after completion, and sends best-effort toasts for completion and attention. These
-presentations do not authorize a phase or change its skills. Set `MDD_ASCII=1` in the server
-environment before launching OpenCode for ASCII progress markers and titles instead of emoji;
-set `MDD_TOASTS=0` to disable MDD server toasts. Neither changes workflow evidence.
+MDD's server reports retain the route/progress/skills frame. The separate V2 CLI plugin observes
+correlated native tool-success events and supplies sidebar updates, transition toasts and
+best-effort attention. These presentations do not authorize a phase or change its skills.
+Set `MDD_ASCII=1` in the server environment for ASCII status reports. CLI sidebar/toast options
+are independent, supplied through the plugin's `options.ascii` and `options.toasts`.
 
-The separate TUI module requires an explicit entry in the active `tui.json` (it is not loaded
-by the server plugin). Setup merges the plugin entry below into that file without removing other
-plugins or changing the user's attention settings; malformed configs fail setup before writing
-owned assets:
+Setup merges this entry into global `cli.json`, preserving unrelated plugins and attention settings.
+Malformed configs fail before owned assets are written. When only legacy `tui.json(c)` exists,
+start V2 once to let OpenCode migrate it before running setup:
 
 ```json
 {
-  "plugin": ["./mdd/node_modules/my-driven-development/dist/opencode-tui.js"]
+  "$schema": "https://opencode.ai/v2/cli.json",
+  "plugins": ["./mdd/node_modules/my-driven-development/dist/opencode-tui.js"]
 }
 ```
 
-For file plugins `mdd.visual` is the exported nonempty id. The pinned plugin type declares
-`api.attention.notify`, but the module also tolerates a runtime without that capability and
-swallows failed deliveries. Live TUI sound playback has not been verified. Attention sounds use
-the host's `attention` controls; `enabled` is false by default, so set
-`"attention": { "enabled": true }` in `tui.json` to opt in. MDD requests sound only, not a
-second desktop notification. The
-sidebar uses the `sidebar_content` slot at order 250 (between MCP 200 and LSP 300; context
-100, todo 400, files 500 remain in order). It registers only if `@opentui/solid` and `solid-js`
-resolve from the installed module; setup installs both as pinned runtime dependencies in the
-owned prefix. If either renderer is unavailable, no sidebar is registered, while attention
-remains available. Isolated plugin loading verifies registration from that prefix; a live
-interactive sidebar and sound have not been visually verified. The TUI-only `mdd.ascii` KV flag changes the sidebar's
-icons; `mdd.sidebarAvailable` reports whether registration succeeded. These keys do not alter
-the server's `MDD_ASCII` environment setting.
+The CLI plugin exports `id: "mdd.visual"` and `setup`, appends to `sidebar.content`, and cleans up
+its subscription and slot on unload. Renderer failures and failed notifications never affect
+the run. OpenCode's `attention.sound` setting controls playback; MDD asks for sound, not a second
+desktop notification. Installed-prefix tests exercise real Solid reactivity with JSX creation
+stubbed under Node. Interactive rendering and sound playback have not been visually verified.
 
 Run the single [setup wizard](setup.md): `npm run setup` from trusted source, or
 `node "<OpenCode root>/mdd/node_modules/my-driven-development/dist/cli.js" setup` from any directory.
 
-1. Use OpenCode **1.18.31** and Node **24.15+ within 24.x**. Setup offers missing dependencies,
+1. Use OpenCode **2.0.22** and Node **24.6+ within 24.x, or 26.4+ within 26.x**. Setup offers missing dependencies,
    optional Engram **1.20.0**, global assets and a readiness check in one invocation.
-2. After Ready, quit and restart OpenCode in the active project. Configuration and plugin loading
-   are startup-time operations. `<OpenCode root>/plugins/mdd.ts` imports the installed package
+2. After Ready, run `opencode service restart` when no work is in flight, then reopen OpenCode
+   in the active project. Reloading configuration or closing only the UI can retain imported
+   modules from the previous installation. `<OpenCode root>/plugins/mdd.ts` imports the installed package
    under `<OpenCode root>/mdd/node_modules`; execution workspaces need no installation files.
 3. Advanced `mdd config` is optional. Answers may be partial; blank values remain unanswered.
    Explicitly select **mdd-orchestrator**, not the default agent. This
@@ -64,19 +56,46 @@ Run the single [setup wizard](setup.md): `npm run setup` from trusted source, or
    No typed JSON preflight or model-supplied answer override is accepted.
 6. After the question, read `mdd_status`. It returns `nextAction`: the single call to make now,
    with ready-to-dispatch `args` whenever the call is dispatchable as written. Submit exactly the
-   returned `task` arguments, once, using the native task
-   tool. Do not add `background`, `task_id`, `command`, or extra keys. The hook
+    returned `task` arguments (`agent`, `description`, `prompt`), once, using native `subagent`
+    foreground execution. Do not add `background`, `sessionID`, `model`, or extra keys. The hook
    appends the actual native call ID in place after checking the expected args.
    After the task, call `mdd_status` and present the readable artifact to the user.
    In interactive mode, a passed phase exposes an exact native Proceed/Stop question for
    the next phase. Approval prepares only that phase's task. Automatic mode returns the next
    exact executable task without an approval question. Repeat through final Verify. A rejected
    attempt is not the end: the phase becomes ready again, so run it once more or carry it out
-   directly. Neither mode suppresses native edit/bash permission requests.
+    through the tracked native fallback. Neither mode suppresses native edit/shell permission requests.
 
-The MDD tools are registered once for the whole app but belong to `mdd-orchestrator`. Every
+The MDD tools are registered for their plugin location but belong to `mdd-orchestrator`. Every
 other agent has them disabled in configuration and refused at execution, so an unrelated
 agent neither sees nor mutates MDD state.
+
+### V2 host boundary and limits
+
+`src/opencode-v2.ts` translates V2 records and native `subagent`/`question` results into the
+existing motor protocol. The sections below retain internal `task`/`subagent_type` names where
+they describe that motor, not arguments to send to V2. The legacy motor remains exported for
+regression tests; this is not a claim of maintained V1 host acceptance.
+
+- All host actions stay on the supplied plugin context, including remote or private servers.
+  MDD tools require the exact location and project. Moved sessions cannot complete an old dispatch.
+- Agent model overrides and isolation permissions are registered again after startup contributions,
+  and awaited before a coordinator tool runs. Otherwise later file-agent registration can overwrite them.
+- History comes from `session.context`; synthetic records never authorize consent. History before
+  a location switch is discarded. The plugin context has no exact-message lookup, so an older
+  request absent from effective context cannot authorize restart/transfer recovery.
+- Child status is learned from native events. Missing events, a restarted stream, or a closed
+  stream mean **unknown**, never idle. Explicit native user recovery remains available; automatic
+  recovery cannot assume that an unseen child stopped.
+- Tools are direct (`codemode: false`). Model context collapses settled phase prompts without
+  rewriting persisted native messages or recorded artifacts.
+
+Run `node tests/opencode-v2-host-smoke.mjs` after building for the explicit **2.0.22** host check.
+It starts a service in isolated XDG directories, authenticates from that service's registration,
+and verifies 15 tools, nine agents, profile variants and phase isolation permissions without
+model requests. Contract tests cover intake, grouped questions, foreground Plan/Apply/Verify,
+native fallback restrictions, workspace isolation and CLI events. Neither check proves model-backed
+end-to-end execution or interactive permission/UI behavior.
 
 ### Legacy setup-only recovery
 
@@ -501,8 +520,9 @@ local, workspace-scoped and never exported. See [configuration](configuration.md
 
 `npm test` includes the original 83 routing/CLI/workflow tests and additional
 real-loopback HTTP and explicitly labeled SDK/hook **contract tests**. Faked
-SDK metadata is not a model execution claim. `npm run typecheck` checks the
-installed v1 nested `path`/`query` SDK calls and plugin hook types.
+SDK metadata is not a model execution claim. `npm run typecheck` checks MDD's V2 host
+adapter and the motor's internal legacy hook types. Source checks stay strict; `skipLibCheck`
+skips released dependency declarations that conflict with `exactOptionalPropertyTypes`.
 
 Isolated service checks have verified Engram session/observation readbacks and
 binding rejection with cloud autosync off, plus actual OpenCode/Bun project

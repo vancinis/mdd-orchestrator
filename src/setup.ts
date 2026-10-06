@@ -8,10 +8,13 @@ import { LocalFiles } from './local-files.js';
 
 export const LOADER_PATH = 'plugins/mdd.ts';
 export const LOADER_TEXT = "export { default } from '../mdd/node_modules/my-driven-development/dist/opencode-plugin.js';\n";
-export const TUI_CONFIG_PATH = 'tui.json';
+export const TUI_CONFIG_PATH = 'cli.json';
 export const TUI_PLUGIN_SPEC = './mdd/node_modules/my-driven-development/dist/opencode-tui.js';
 export const PRIVATE_IGNORE_PATH = 'mdd/.gitignore';
 export const PRIVATE_IGNORE_TEXT = '*\n!.gitignore\n';
+// Previously installed assets can exceed today's packaged-asset limit. Read them within a
+// separate bounded migration budget, then require the recorded digest before any replacement.
+const INSTALLED_ASSET_MAX_BYTES = 65536;
 export function installedPlugin(root: string): string {
   const local = join(root, 'mdd/node_modules/my-driven-development');
   const pkg = JSON.parse(fs.readFileSync(join(local, 'package.json'), 'utf8'));
@@ -91,12 +94,14 @@ export function registerTuiPlugin(previous?: string): string {
     const parsed: unknown = previous === undefined ? {} : JSON.parse(previous);
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error();
     value = parsed as Record<string, unknown>;
-  } catch { throw new Error('Existing tui.json is not a JSON object; reconcile it before installing MDD.'); }
-  if (value.plugin !== undefined && (!Array.isArray(value.plugin) || !value.plugin.every(entry => typeof entry === 'string' ||
-    (Array.isArray(entry) && entry.length === 2 && typeof entry[0] === 'string')))) throw new Error('Existing tui.json plugin entries cannot be merged safely.');
-  if ((value.plugin as unknown[] | undefined)?.some(entry => entry === TUI_PLUGIN_SPEC || (Array.isArray(entry) && entry[0] === TUI_PLUGIN_SPEC))) return previous!;
-  value.plugin = [...(value.plugin as unknown[] | undefined ?? []), TUI_PLUGIN_SPEC];
-  // OpenCode defaults attention.enabled to false; leave existing settings untouched.
+  } catch { throw new Error('Existing cli.json is not a JSON object; reconcile it before installing MDD.'); }
+  if (value.plugins !== undefined && (!Array.isArray(value.plugins) || !value.plugins.every(entry => typeof entry === 'string' ||
+    (entry && typeof entry === 'object' && !Array.isArray(entry) && typeof entry.package === 'string')))) throw new Error('Existing cli.json plugins cannot be merged safely.');
+  if ((value.plugins as unknown[] | undefined)?.some(entry => entry === TUI_PLUGIN_SPEC ||
+    (entry && typeof entry === 'object' && !Array.isArray(entry) && (entry as Record<string, unknown>).package === TUI_PLUGIN_SPEC))) return previous!;
+  value.plugins = [...(value.plugins as unknown[] | undefined ?? []), TUI_PLUGIN_SPEC];
+  value.$schema ??= 'https://opencode.ai/v2/cli.json';
+  // Preserve all terminal preferences; V1 tui.json is left for OpenCode's own migration.
   return `${JSON.stringify(value, null, 2)}\n`;
 }
 
@@ -105,12 +110,16 @@ export function planProject(root: string, updateOwned = false) {
   const storage = new LocalFiles(root);
   const previous = fs.existsSync(root) ? storage.read('mdd/setup-assets.json', 16384) : undefined;
   const manifest: Record<string, string> = previous ? JSON.parse(previous) : {};
+  if (!fs.existsSync(scopedPath(root, TUI_CONFIG_PATH)) &&
+      ['tui.json', 'tui.jsonc'].some(name => fs.existsSync(scopedPath(root, name)))) {
+    throw new Error('Start OpenCode V2 once to migrate terminal preferences from tui.json(c) to cli.json, then retry MDD setup. Existing preferences were not changed.');
+  }
   const tuiBefore = fs.existsSync(scopedPath(root, TUI_CONFIG_PATH)) ? assetText(root, TUI_CONFIG_PATH, 65536).content : undefined;
   const files = [...MDD_ASSETS.map(name => ({ name: name.replace('assets/opencode/', ''), content: assetText(PACKAGE_ROOT, name).content })), { name: LOADER_PATH, content: LOADER_TEXT }, { name: PRIVATE_IGNORE_PATH, content: PRIVATE_IGNORE_TEXT },
     { name: TUI_CONFIG_PATH, content: registerTuiPlugin(tuiBefore) }];
   return files.map(file => {
     const path = scopedPath(root, file.name);
-    const before = fs.existsSync(path) ? assetText(root, file.name, file.name === TUI_CONFIG_PATH ? 65536 : 16000) : undefined;
+    const before = fs.existsSync(path) ? assetText(root, file.name, INSTALLED_ASSET_MAX_BYTES) : undefined;
     const knownLoader = file.name === LOADER_PATH && ["export { default } from 'my-driven-development/opencode-plugin';\n", "export { default } from '../../dist/opencode-plugin.js';\n"].includes(before?.content ?? '');
     const digest = createHash('sha256').update(file.content).digest('hex');
     if (before && before.digest !== digest && file.name !== TUI_CONFIG_PATH && (!updateOwned || (!knownLoader && manifest[file.name] !== before.digest))) throw new Error(`MDD init refuses to overwrite different content: ${file.name}. User edits or unrecorded assets must be reconciled explicitly.`);
@@ -130,7 +139,7 @@ export function initProject(root: string, updateOwned = false): { created: numbe
   for (const file of files) {
     const path = scopedPath(root, file.name);
     if (fs.existsSync(path)) {
-      if (assetText(root, file.name, file.name === TUI_CONFIG_PATH ? 65536 : 16000).digest !== file.before) throw new Error('An owned setup file changed during initialization; no overwrite was performed.');
+      if (assetText(root, file.name, INSTALLED_ASSET_MAX_BYTES).digest !== file.before) throw new Error('An owned setup file changed during initialization; no overwrite was performed.');
       if (file.action === 'keep') { unchanged++; continue; }
       const fd = fs.openSync(path, 'r+');
       try {

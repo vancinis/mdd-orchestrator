@@ -24,7 +24,7 @@
     "docs/mdd-config.schema.json"
   ],
   "engines": {
-    "node": ">=24.6.0 <25"
+    "node": ">=24.6.0 <25 || >=26.4.0 <27"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
@@ -35,13 +35,17 @@
     "setup": "node scripts/setup.mjs"
   },
   "devDependencies": {
-    "@opentui/keymap": "0.4.5",
+    "@opentui/keymap": "0.5.14",
     "@types/node": "24.13.4",
     "typescript": "7.0.2"
   },
   "dependencies": {
+    "@opencode/plugin": "2.0.22",
+    "@opencode/client": "2.0.22",
     "@opencode-ai/plugin": "1.18.31",
-    "@opentui/solid": "0.4.5",
-    "solid-js": "1.9.12"
+    "@opentui/core": "0.5.14",
+    "@opentui/solid": "0.5.14",
+    "solid-js": "1.9.12",
+    "zod": "4.1.8"
   }
 }

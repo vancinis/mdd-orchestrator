@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import plugin, { createInspector, AGENTS_MAX, PERMISSION_MAX } from '../dist/opencode-plugin.js';
+import { createLegacyPlugin as plugin, createInspector, AGENTS_MAX, PERMISSION_MAX } from '../dist/opencode-plugin.js';
 import { NativeIntake } from '../dist/native-intake.js';
-import { memoryServer, request, result, runtime, call, answers, installCleanup, isolateHome, SUMMARY_TEXT } from './adapter-fixture.mjs';
+import { memoryServer, request, result, runtime, call, answers, installCleanup, isolateHome, SUMMARY_TEXT, reportDocument } from './adapter-fixture.mjs';
 import { MODEL_ROLES } from '../dist/settings.js';
 import { defaultSettings, saveSettings } from '../dist/settings.js';
 import { saveGlobalSettings } from '../dist/global-settings.js';
@@ -404,6 +404,35 @@ test('plugin contract: a phase actor may check its own report, and nobody else m
     /belongs to MDD phase actors/);
 });
 
+// mdd-risk is not one of the eight phases the coordinator dispatches, but it shares the same
+// report-check tool and the same restricted call permission as every phase actor.
+test('plugin contract: the risk actor may check its own report through the same tool', async t => {
+  const f = await pluginFixture(t);
+  const { hooks, context } = f;
+  const riskDocument = reportDocument({
+    outcome: 'passed', evidenceSummary: 'Low complexity; recommend the low route.',
+    how: 'The symbol has one local caller, so the exploration finding grounds a low route.',
+    artifact: 'A local rename with no external callers and no evidenced risk.',
+    risk: { route: 'low', complexity: 'low', reason: 'No shared code is touched.',
+      evidence: [{ source: 'mdd-explore finding 1', finding: 'the symbol has one local caller' }], risks: [],
+      risksJustification: 'No shared code path was found to carry any risk.' },
+  });
+  const actor = { ...context, agent: 'mdd-risk', sessionID: 'ses_child' };
+  const clean = JSON.parse(await hooks.tool.mdd_check_report.execute({ phase: 'mdd-risk', result: riskDocument }, actor));
+  assert.equal(clean.ok, true);
+  assert.deepEqual(clean.problems, []);
+
+  const broken = JSON.parse(await hooks.tool.mdd_check_report.execute(
+    { phase: 'mdd-risk', result: riskDocument.replace('"route": "low"', '"route": "high"') }, actor));
+  assert.equal(broken.ok, false);
+  assert.ok(broken.problems.some(problem => /must agree/.test(problem)));
+
+  // Nobody outside a phase actor, the risk actor or the coordinator may call in.
+  await assert.rejects(
+    hooks.tool.mdd_check_report.execute({ phase: 'mdd-risk', result: riskDocument }, { ...context, agent: 'build' }),
+    /belongs to MDD phase actors/);
+});
+
 // The coordinator holds the issue body it already fetched; the only legitimate way in is to hand
 // it to MDD, which composes it into the prompt so the dispatched task still matches byte for byte.
 test('plugin contract: coordinator context reaches the phase and the exact task still dispatches', async t => {
@@ -629,6 +658,9 @@ test('plugin config contract: settings frozen at startup; only explicit model ov
       'mdd-design': { tools: { ...pinned } },
       'mdd-tasks': { tools: { ...pinned } },
       'mdd-verify': { tools: { ...pinned } },
+      // mdd-risk is not one of the eight phase actors, but it shares their restricted tool
+      // profile: it may call only mdd_check_report, the same as every phase actor above.
+      'mdd-risk': { tools: { ...pinned } },
     },
   });
   // The coordinator dispatches phases, so it keeps both.

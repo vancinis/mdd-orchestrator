@@ -58,7 +58,7 @@ const PROVIDER_PATTERN = /^[A-Za-z0-9][\w.-]*$/;
 
 /**
  * Reads the reasoning-effort variants declared per model, for one provider, from the same
- * verbose catalog OpenCode itself resolves selectors against. Variants are optional per
+ * V2 API catalog OpenCode itself resolves selectors against. Variants are optional per
  * model; an empty map is a normal outcome, not an error.
  */
 export function listVariants(provider: string, execute = execFileSync, env: NodeJS.ProcessEnv = process.env, platform = process.platform): VariantCatalog {
@@ -67,10 +67,27 @@ export function listVariants(provider: string, execute = execFileSync, env: Node
   if (!binary) return { status: 'unavailable', reason: 'No se encontró el ejecutable de OpenCode en el PATH.' };
   let output: string;
   try {
-    output = String(execute(binary, ['models', provider, '--verbose'], {
+    output = String(execute(binary, ['api', 'model.list'], {
       encoding: 'utf8', timeout: 30000, maxBuffer: 4 * 1024 * 1024, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'],
     }));
   } catch { return { status: 'unavailable', reason: 'OpenCode no pudo listar los niveles de esfuerzo.' }; }
+  try {
+    const parsed: unknown = JSON.parse(output);
+    const models = Array.isArray(parsed) ? parsed : parsed && typeof parsed === 'object' ? (parsed as { data?: unknown }).data : undefined;
+    if (!Array.isArray(models) || models.length > MODEL_LIMIT) throw new Error();
+    const variants: Record<string, string[]> = {};
+    for (const model of models) {
+      if (!model || typeof model !== 'object' || model.providerID !== provider || typeof model.id !== 'string') continue;
+      const key = `${provider}/${model.id}`;
+      if (!MODEL_PATTERN.test(key) || !Array.isArray(model.variants)) throw new Error();
+      if (model.variants.some((variant: unknown) => !variant || typeof variant !== 'object' || typeof (variant as { id?: unknown }).id !== 'string')) throw new Error();
+      variants[key] = [...new Set<string>(model.variants.map((variant: { id: string }) => variant.id))].sort();
+    }
+    return { status: 'ok', variants };
+  } catch {
+    if (output.trimStart().startsWith('{') || output.trimStart().startsWith('['))
+      return { status: 'unavailable', reason: 'El catálogo de modelos de OpenCode V2 no tiene el formato esperado.' };
+  }
   const lines = output.replaceAll(/\x1b\[[0-9;]*m/g, '').split(/\r?\n/);
   const variants: Record<string, string[]> = {};
   // Each model is printed as a header line, then a pretty-printed JSON object whose own

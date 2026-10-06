@@ -40,7 +40,7 @@ and plan match, actual checks and material limits. Internal IDs and receipts sta
 This is original MDD code/instructions using traceability patterns, not imported Gentle AI
 SDD/RDD runtime, commands, dependencies or copied gate text.
 
-The five questions preserve their original order, option meanings, and now-approved default scores. Field names and case-sensitive tokens below are the executable interface.
+The four preflight questions preserve their original order, option meanings, and now-approved default scores. Field names and case-sensitive tokens below are the executable interface. A legacy fifth field, `complexity`, is still accepted on input (saved profiles, kernel requests) for backward compatibility, but it is never asked and never scored: judging complexity is being moved to a dedicated risk assessment after exploration, not this intake.
 
 | # | Question / field | Options in order: label → token (default points) |
 |---|---|---|
@@ -48,13 +48,10 @@ The five questions preserve their original order, option meanings, and now-appro
 | 2 | Workflow artifact storage / `artifactStore` | Engram → `engram`; OpenSpec → `openspec`; Engram + OpenSpec → `both`; None → `none` — **unscored** |
 | 3 | Phase advancement / `mode` | Interactive (ask each phase) → `interactive` (**15**); Automatic (advance) → `automatic` (**5**) |
 | 4 | Phase summary level / `summary` | Detailed → `detailed` (**25**); Medium → `medium` (**10**); Low → `low` (**5**) |
-| 5 | Work complexity / `complexity` | Very complex → `very-complex` (**25**); Somewhat complex → `somewhat-complex` (**10**); Not complex → `not-complex` (**0**) |
 
-All five answers are required. There are no invented answer defaults. `mode` controls lifecycle advancement. All native phases use selected artifact storage, and reports reflect grounded current-phase evidence.
+All four answers are required. There are no invented answer defaults. `mode` controls lifecycle advancement. All native phases use selected artifact storage, and reports reflect grounded current-phase evidence.
 
-The raw score is the sum of the four scored answers. Its default range is **20–90 points**, not a normalized value, probability, or confidence percentage. Changing weights may change the range. Artifact storage never contributes points.
-
-**Known tradeoff retained by approval:** summary and interaction mode together contribute 10–40 points, versus complexity's 0–25. The proof does not silently rebalance the user's formula.
+The raw score is the sum of the three scored answers (certainty, mode, summary). Its default range is **20–65 points**, not a normalized value, probability, or confidence percentage. Changing weights may change the range. Artifact storage never contributes points.
 
 ## 2. Approved routing policy
 
@@ -68,7 +65,7 @@ Phase identities use the `mdd-*` form everywhere in output:
 | Low, with exploration | `mdd-explore`, `mdd-plan`, `mdd-apply`, `mdd-verify` |
 | High | `mdd-explore`, `mdd-propose`, `mdd-spec`, `mdd-design`, `mdd-tasks`, `mdd-apply`, `mdd-verify` |
 
-Low-route exploration is required when **certainty is not `very-sure` OR complexity is not `not-complex`**. Otherwise it may be explicitly requested using `explore: true` in the kernel or `--explore` in the CLI. `false` or omission never suppresses required exploration. High includes exactly one explore, even when exploration is explicitly requested. No extra complexity heuristic or model inference is used.
+Low-route exploration is required when **certainty is not `very-sure`**. Otherwise it may be explicitly requested using `explore: true` in the kernel or `--explore` in the CLI. `false` or omission never suppresses required exploration. High includes exactly one explore, even when exploration is explicitly requested. No extra complexity heuristic or model inference is used.
 
 ## 3. Kernel API and validation
 
@@ -82,7 +79,6 @@ const answers = {
   artifactStore: 'none',
   mode: 'automatic',
   summary: 'low',
-  complexity: 'not-complex',
 };
 
 const direct = evaluate({ answers });
@@ -92,8 +88,8 @@ const saved = evaluate({ profile: { answers } });
 
 | Request field | Contract |
 |---|---|
-| `answers` | Complete five-field answer object. Mutually exclusive with `profile`. |
-| `profile` | Exactly `{ answers: <complete five-field object> }`. Uses the same answer validator and evaluator. |
+| `answers` | Complete four-field answer object. Mutually exclusive with `profile`. The legacy `complexity` key is accepted and ignored if present. |
+| `profile` | Exactly `{ answers: <complete four-field object> }`. Uses the same answer validator and evaluator. |
 | `config` | Optional object containing `threshold` and/or `weights`. Omission or `{}` uses defaults. |
 | `explore` | Optional boolean, default `false`. Requests additional low-route exploration, never disables required exploration. |
 
@@ -112,7 +108,7 @@ Configuration supports partial overrides at the field and option levels. Omitted
 }
 ```
 
-`weights` permits only `certainty`, `mode`, `summary`, and `complexity`, each keyed by that field's tokens in section 1. Empty override objects are valid no-ops. `artifactStore` weights are invalid.
+`weights` permits only `certainty`, `mode`, and `summary`, each keyed by that field's tokens in section 1. Empty override objects are valid no-ops. `artifactStore` weights are invalid.
 
 **Numeric constraints:** all weights and the threshold must be numbers that are nonnegative safe integers, from `0` through `Number.MAX_SAFE_INTEGER` (`9007199254740991`). Fractions, numeric strings, negative numbers, NaN, and infinities fail. The sum of the maximum weight in each scored field must also remain within that safe range, even when the selected answers would produce a smaller score. This keeps every possible configured sum exact. A threshold outside the configured score range is allowed: it intentionally makes every answer set high or low. Zero is valid and is not replaced with a default.
 
@@ -152,7 +148,7 @@ Controller results are **caller-supplied claims, not independent verification**.
 
 The [README](../README.md) provides working PowerShell commands and exit codes. `examples/answers.json` and `examples/profile.json` are equivalent complete sources. `examples/config.json` demonstrates the equality boundary. The CLI reads UTF-8 JSON files, accepts a leading BOM, validates input, and prints a decision. It never executes the returned phases or creates artifact folders.
 
-The stack is TypeScript compiled to Node.js ESM with native Node tests. Node 24.6+ within 24.x remains the declared proof runtime. The adapter adds the pinned local runtime package `@opencode-ai/plugin@1.18.31`; its SDK and schema dependencies do not enter the pure kernel.
+The stack is TypeScript compiled to Node.js ESM with native Node tests. Node 24.6+ within 24.x, or 26.4+ within 26.x, remains the declared proof runtime (Node 25 is not supported). The host adapter pins `@opencode/plugin@2.0.22` and `@opencode/client@2.0.22`; `@opencode-ai/plugin@1.18.31` remains an internal motor/regression dependency. Host SDK and schema dependencies do not enter the pure kernel.
 
 The focused suite covers default contributions and extrema, every scored-answer combination, unscored stores, threshold boundaries, override validation, exploration, safe arithmetic, and CLI subprocess behavior. Lifecycle tests cover exact phase order, live preflight reuse, mutation isolation, phase-scoped approvals, failure blocking, and invalid operations. These tests are **kernel, lifecycle, and CLI verification, not full harness integration or independent review**. The runnable `examples/workflow-demo.mjs` uses simulated results and approvals only.
 

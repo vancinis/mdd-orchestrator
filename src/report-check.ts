@@ -2,7 +2,9 @@ import { boundedText } from './phase-runner.js';
 import { acceptance, assertNoTraceSection, phaseFields } from './acceptance.js';
 import { concerns } from './concerns.js';
 import { changed, deliverables, executed } from './phase-evidence.js';
-import { parsePhaseReport, reportFormatLines } from './phase-report.js';
+import { parsePhaseReport, parseRiskReport, reportFormatLines } from './phase-report.js';
+import { parseRiskVerdict, riskReportFormatLines, RISK_REPORT_KEYS } from './risk.js';
+import type { RiskVerdict } from './risk.js';
 import type { Phase } from './policy.js';
 
 /**
@@ -42,7 +44,7 @@ function collect(checks: readonly (() => unknown)[]): string[] {
   return problems;
 }
 
-export type ReportCheck = { ok: boolean; problems: string[]; resultFormat: string[]; note: string };
+export type ReportCheck = { ok: boolean; problems: string[]; resultFormat: string[]; note: string; risk?: RiskVerdict };
 
 const CLEAN = 'No problem of form was found. This is not an acceptance: it says the document can be read, not that the work is right, and the links between a plan and the requirements it answers are checked against state only the run holds. Report it as you normally would.';
 const FOUND = 'These are problems of form in the document, not in the work it describes. Fix them all and re-check before reporting; nothing has been recorded and no attempt has been spent.';
@@ -76,4 +78,50 @@ export function checkReportForm(phase: Phase, text: unknown): ReportCheck {
     ...(passed && phase === 'mdd-apply' ? [() => changed(fields.changes, fields.noChangeReason)] : []),
     ...(passed && (phase === 'mdd-apply' || phase === 'mdd-verify') ? [() => executed(fields.checks)] : []),
   ]));
+}
+
+/**
+ * Checks the risk actor's report. Kept apart from `checkReportForm` rather than widening it with
+ * a `Phase | 'mdd-risk'` parameter, because `mdd-risk` carries one structured field — the grounded
+ * route/complexity verdict — not a phase's `PHASE_RESULT_FIELDS` shape, and accepting it here is
+ * only a form check: it never approves a route or records anything.
+ *
+ * Unlike `checkReportForm`, this is the only validator a risk report passes through in this
+ * increment — later runs add routing, but nothing downstream re-checks the report's shape — so
+ * it is deliberately stricter than the phase checker in three ways: the explanation under
+ * "## MDD How" is required rather than optional, the data block may hold no key beyond `risk`,
+ * and, when the report passes, the parsed `RiskVerdict` is returned alongside the check so a
+ * caller never has to re-parse a document that was just validated.
+ */
+export function checkRiskReportForm(text: unknown): ReportCheck {
+  const resultFormat = riskReportFormatLines();
+  const done = (problems: string[], risk?: RiskVerdict): ReportCheck =>
+    ({ ok: !problems.length, problems, resultFormat, note: problems.length ? FOUND : CLEAN, ...(risk ? { risk } : {}) });
+
+  const envelope = collect([() => boundedText(text, 'risk report', 20000)]);
+  if (envelope.length) return done(envelope);
+
+  let fields: Record<string, unknown>;
+  try { fields = parseRiskReport(text as string); }
+  catch (error) { return done([error instanceof Error ? error.message : 'The risk report could not be parsed.']); }
+
+  const extraKeys = Object.keys(fields).filter(key => !RISK_REPORT_KEYS.includes(key));
+  const outcome = fields.outcome;
+  const passed = outcome === 'passed';
+  let verdict: RiskVerdict | undefined;
+  const problems = collect([
+    () => { if (outcome !== 'passed' && outcome !== 'failed') throw new Error('The risk report must state outcome passed or failed.'); },
+    () => boundedText(fields.evidenceSummary, 'summary', 2000),
+    // Required on every report, passed or failed: the actor's own format instructions list
+    // "## MDD How" unconditionally, and a failure that gives no reason is as unreadable as one
+    // that is missing the required explanation of a passing assessment.
+    () => boundedText(fields.how, 'how', 2000),
+    () => assertNoTraceSection(boundedText(fields.artifact, 'artifact', 16000)),
+    () => concerns(fields.concerns),
+    () => { if (extraKeys.length) throw new Error(`risk report data holds unknown key(s): ${extraKeys.join(', ')}. Only "risk" is accepted.`); },
+    // A failed outcome is uncertainty reported honestly; it is not required to carry a verdict
+    // it could not substantiate. A passed outcome must carry one that is internally consistent.
+    ...(passed ? [() => { verdict = parseRiskVerdict(fields.risk); }] : []),
+  ]);
+  return done(problems, passed ? verdict : undefined);
 }

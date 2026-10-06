@@ -4,8 +4,7 @@ import { readRuns } from './run-ledger.js';
 import type { RunRecord } from './run-ledger.js';
 import { FAILURE_CLASSES, telemetryRetained, telemetryTotals } from './telemetry.js';
 import type { FailureClass, TelemetryRollup } from './telemetry.js';
-import { MODEL_ROLES } from './settings.js';
-import type { Phase } from './policy.js';
+import { PHASES } from './policy.js';
 
 /**
  * The review MDD could not do about itself.
@@ -17,7 +16,6 @@ import type { Phase } from './policy.js';
  * conclusion the report names the number and leaves the conclusion to the reader. A retro that
  * guessed at causes would be a model's opinion wearing the costume of evidence.
  */
-const PHASES = MODEL_ROLES.filter((role): role is Phase => role !== 'orchestrator');
 const FAILURE_LABELS: Record<FailureClass, string> = {
   'phase-failed': 'la fase falló', 'result-rejected': 'resultado rechazado',
   'result-malformed': 'reporte ilegible', 'dispatch-mismatch': 'despacho no coincidente',

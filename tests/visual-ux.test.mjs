@@ -5,6 +5,50 @@ import { injectedSkillNames } from '../dist/phase-assets.js';
 import tui from '../dist/opencode-tui.js';
 import { registerPhaseSidebar, MDD_SIDEBAR_ORDER } from '../dist/tui-sidebar.js';
 
+test('V2 CLI setup correlates native tool events, serializes transitions and releases subscriptions', async () => {
+  const handlers = new Map(); const notices = []; const toasts = [];
+  const parts = new Map(); let removed = 0;
+  const cleanup = await tui.setup({ options: {},
+    data: { on(type, handler) { handlers.set(type, handler); return () => { removed++; handlers.delete(type); }; } },
+    client: { session: { message: { get: async ({ messageID }) => ({ type: 'assistant', content: parts.get(messageID) ?? [] }) } } },
+    ui: { toast: { show: value => toasts.push(value) }, slot: () => () => {} },
+    attention: { notify: async value => notices.push(value) },
+  });
+  const send = (name, state, id, sessionID = 'parent') => {
+    parts.set(id, [{ type: 'tool', id, name }]);
+    handlers.get('session.tool.success')({ data: { sessionID, assistantMessageID: id, id,
+      content: [{ type: 'text', text: JSON.stringify({ phase: 'mdd-plan', state, workflow: { evaluation: { phases: ['mdd-plan'] } } }) }] } });
+  };
+  send('mdd_start', 'ready', 'start');
+  send('other', 'blocked', 'unrelated');
+  send('mdd_status', 'await-approval', 'approval');
+  send('mdd_status', 'await-approval', 'duplicate');
+  send('mdd_phase_result', 'complete', 'complete');
+  send('mdd_status', 'blocked', 'other-session', 'another'); // No prior transition in that session.
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(notices.map(value => value.sound.name), ['question', 'done']);
+  assert.deepEqual(toasts.map(value => value.variant), ['info', 'success']);
+  cleanup();
+  assert.equal(removed, 1);
+  assert.equal(handlers.size, 0);
+});
+
+test('V2 CLI disposal cancels pending UI delivery', async () => {
+  let handler; let resolveMessage; const notices = [];
+  const cleanup = await tui.setup({ options: { toasts: false },
+    data: { on(_type, fn) { handler = fn; return () => {}; } },
+    client: { session: { message: { get: () => new Promise(resolve => { resolveMessage = resolve; }) } } },
+    ui: { toast: { show: () => assert.fail('toasts disabled') }, slot: () => () => {} },
+    attention: { notify: async value => notices.push(value) },
+  });
+  handler({ data: { sessionID: 'parent', assistantMessageID: 'message', id: 'call', content: [] } });
+  await Promise.resolve();
+  cleanup();
+  resolveMessage({ type: 'assistant', content: [{ type: 'tool', id: 'call', name: 'mdd_status' }] });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(notices, []);
+});
+
 test('progress follows route and recorded outcomes, not inferred completion', () => {
   const status = { phase: 'mdd-apply', state: 'ready', workflow: {
     evaluation: { route: 'low', phases: ['mdd-explore', 'mdd-plan', 'mdd-apply', 'mdd-verify'] },

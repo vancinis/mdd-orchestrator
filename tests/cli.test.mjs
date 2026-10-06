@@ -120,7 +120,7 @@ test('CLI file I/O failure is distinct from invalid input and never emits a resu
 test('CLI accepts UTF-8 BOM and spaces in file paths', (t) => {
   const contents = '\uFEFF' + JSON.stringify({
     certainty: 'very-sure', artifactStore: 'none', mode: 'automatic',
-    summary: 'low', complexity: 'not-complex',
+    summary: 'low',
   });
   const result = invoke('--answers', temporaryFile(t, contents));
   assert.equal(result.status, 0);

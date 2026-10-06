@@ -1,6 +1,6 @@
 import type { Check } from './phase-evidence.js';
 import type { Answers, Phase } from './policy.js';
-import { MODEL_ROLES } from './settings.js';
+import { PHASES } from './policy.js';
 import { objectWithKeys, ValidationError } from './validation.js';
 
 export const EVIDENCE_WEIGHTS = Object.freeze({ requirements: 20, plan: 20, implementation: 25, checks: 35 });
@@ -86,7 +86,7 @@ function text(value: unknown): string {
 
 export function renderReport(detail: Answers['summary'], value: PhaseReport): string {
   const input = objectWithKeys(value, 'report', ['phase', 'summary', 'how', 'status', 'evidence']);
-  if (typeof input.phase !== 'string' || input.phase === 'orchestrator' || !MODEL_ROLES.includes(input.phase as Phase)) {
+  if (typeof input.phase !== 'string' || !PHASES.includes(input.phase as Phase)) {
     throw new ValidationError('Report requires a known phase.');
   }
   if (!['in-progress', 'passed', 'failed', 'blocked'].includes(input.status as string)) throw new ValidationError('Unknown report status.');

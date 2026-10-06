@@ -1,6 +1,6 @@
 # my-driven-development (MDD)
 
-**Status: complete main low/high route execution is implemented and contract-tested in the opt-in OpenCode adapter. Model-backed end-to-end validation is still pending.** The original proof flags remain a dry run. Native runs use protected preflight/approval, delegation with an inline fallback, bound Engram receipts, artifact handoff, and reported Verify checks. See [OpenCode setup and limits](docs/opencode-adapter.md).
+**OpenCode V2: targets 2.0.22, with a native plugin entrypoint, foreground `subagent` dispatch and global `cli.json` UI registration. Model-backed end-to-end validation is still pending.** The original proof flags remain a dry run. Native runs preserve protected preflight/approval, tracked native fallback, optional bound Engram receipts, artifact handoff, and reported Verify checks. See [OpenCode setup and limits](docs/opencode-adapter.md).
 
 Installation, named-profile commands, the explicit-save editor and doctor now use one global
 OpenCode installation. **The native plugin reads global settings only; telemetry preference is
@@ -25,6 +25,9 @@ reason to stop an approved plan.
 
 ## Set up MDD
 
+If upgrading from V1 and only `tui.json(c)` exists, start OpenCode V2 once so it migrates terminal
+preferences to `cli.json` before running MDD setup. MDD does not perform or bypass that migration.
+
 Run **`npm run setup`** in the trusted source checkout, even without a build. It offers missing
 dependencies/build with separate consent, then one wizard in Spanish with four numbered steps:
 global destination, optional memory, review, apply/check. Its lists take the arrow keys plus
@@ -44,7 +47,7 @@ default-agent change or publication is implied. Advanced `mdd-ai config` and rea
 
 ## Run the proof (development)
 
-Use Node.js **24.6 or later in the 24.x series** and npm. From this directory, run these commands individually in PowerShell; continue only when the preceding command succeeds:
+Use Node.js **24.6+ within 24.x, or 26.4+ within 26.x** and npm. From this directory, run these commands individually in PowerShell; continue only when the preceding command succeeds:
 
 ```powershell
 npm ci --ignore-scripts
@@ -90,7 +93,7 @@ Errors go to stderr; no decision JSON is emitted on failure. A proof `--profile`
 - High route: score **≥ 50** by default; threshold and weights are configurable.
 - Low: optional `mdd-explore`, then `mdd-plan`, `mdd-apply`, `mdd-verify`.
 - High: `mdd-explore`, `mdd-propose`, `mdd-spec`, `mdd-design`, `mdd-tasks`, `mdd-apply`, `mdd-verify`.
-- Low requires exploration if certainty is not `very-sure` **or** complexity is not `not-complex`. Explicit exploration can also be requested. High always contains exactly one explore.
+- Low requires exploration if certainty is not `very-sure`. Explicit exploration can also be requested. High always contains exactly one explore. (The legacy `complexity` preflight field is accepted but ignored; it no longer influences this decision.)
 - Artifact storage never contributes points. Engram installation and use are optional. With memory off, choose OpenSpec or live-only `none`; Engram and Both require an opted-in backend.
 
 See the [product contract](docs/product-contract.md) for every stable input token, score, validation constraint, kernel API, and deferred product requirement.

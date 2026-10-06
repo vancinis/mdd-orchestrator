@@ -99,7 +99,7 @@ test('variants are parsed per model, sorted, from the verbose catalog of one pro
   });
   assert.equal(calls.length, 1);
   assert.equal(calls[0].binary, join(root, 'opencode'));
-  assert.deepEqual(calls[0].args, ['models', 'anthropic', '--verbose']);
+  assert.deepEqual(calls[0].args, ['api', 'model.list']);
   assert.equal(calls[0].options.timeout, 30000);
 });
 
@@ -126,4 +126,13 @@ test('a missing launcher never executes anything for variants either', () => {
   const result = listVariants('openai', () => assert.fail('must not execute'), { PATH: '' }, 'linux');
   assert.equal(result.status, 'unavailable');
   assert.match(result.reason, /PATH/);
+});
+test('V2 API variants use IDs, filter the requested provider and never expose provider settings', t => {
+  const { env } = pathWith(t, process.platform === 'win32' ? 'opencode.exe' : 'opencode');
+  const result = listVariants('openai', () => JSON.stringify({ data: [
+    { providerID: 'openai', id: 'model', variants: [{ id: 'high' }, { id: 'low' }], settings: { apiKey: 'not-output' } },
+    { providerID: 'other', id: 'foreign', variants: [{ id: 'foreign' }] },
+  ] }), env);
+  assert.deepEqual(result, { status: 'ok', variants: { 'openai/model': ['high', 'low'] } });
+  assert.equal(JSON.stringify(result).includes('not-output'), false);
 });

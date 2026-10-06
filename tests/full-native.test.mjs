@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import plugin from '../dist/opencode-plugin.js';
+import { createLegacyPlugin as plugin } from '../dist/opencode-plugin.js';
 import { defaultSettings, MODEL_ROLES } from '../dist/settings.js';
 import { saveGlobalSettings } from '../dist/global-settings.js';
 import { memoryServer, installCleanup, isolateHome, answers, traceFixture, reportDocument } from './adapter-fixture.mjs';
@@ -510,7 +510,9 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
   const memory = memoryEnabled ? await memoryServer(t, memoryFault) : { binding: {}, writes: [] };
   memory.binding.directory = root;
   const settings = defaultSettings();
-  const known = { ...answers, mode, summary, artifactStore: store, ...(route === 'high' ? { certainty: 'not-sure', complexity: 'very-complex' } : route === 'low-explore' ? { certainty: 'somewhat-sure' } : {}) };
+  // complexity no longer scores a route (mdd-risk judges it after exploration instead), so the
+  // high-route fixture now reaches the threshold through certainty and summary alone.
+  const known = { ...answers, mode, summary, artifactStore: store, ...(route === 'high' ? { certainty: 'not-sure', summary: 'detailed' } : route === 'low-explore' ? { certainty: 'somewhat-sure' } : {}) };
   settings.profiles.default.answers = partial ? { ...known, mode: undefined } : known;
   if (partial) delete settings.profiles.default.answers.mode;
   if (memoryEnabled) settings.engram = { endpoint: memory.endpoint, project: 'mdd-test' };
@@ -553,7 +555,7 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
     const call = { sessionID: runtime.sessionID, callID: `question-${++questionCount}`, tool: 'question' };
     parent[1].parts = [{ type: 'tool', tool: 'question', callID: call.callID, sessionID: runtime.sessionID, messageID: context.messageID, state: { status: 'running', input: structuredClone(args) } }];
     await hooks['tool.execute.before'](call, { args });
-    const labels = { 'Aprobación': 'Continuar', Cambio: 'Confirmar el cambio', Certeza: known.certainty === 'not-sure' ? 'Poco seguro' : known.certainty === 'somewhat-sure' ? 'Algo seguro' : 'Muy seguro', Artefactos: { none: 'Ninguno', openspec: 'OpenSpec', engram: 'Engram', both: 'Ambos' }[store], Modo: mode === 'automatic' ? 'Automático' : 'Interactivo', Resumen: { low: 'Bajo', medium: 'Medio', detailed: 'Detallado' }[summary], Complejidad: known.complexity === 'very-complex' ? 'Muy complejo' : 'Poco complejo' };
+    const labels = { 'Aprobación': 'Continuar', Cambio: 'Confirmar el cambio', Certeza: known.certainty === 'not-sure' ? 'Poco seguro' : known.certainty === 'somewhat-sure' ? 'Algo seguro' : 'Muy seguro', Artefactos: { none: 'Ninguno', openspec: 'OpenSpec', engram: 'Engram', both: 'Ambos' }[store], Modo: mode === 'automatic' ? 'Automático' : 'Interactivo', Resumen: { low: 'Bajo', medium: 'Medio', detailed: 'Detallado' }[known.summary] };
     const selections = Array.isArray(selection) ? selection : args.questions.map(q => [typeof selection === 'string' ? selection : labels[q.header]]);
     const formatted = args.questions.map((q, i) => `"${q.question}"="${selections[i].join(', ')}"`).join(', ');
     await hooks['tool.execute.after']({ ...call, args }, { title: `Asked ${args.questions.length} question${args.questions.length > 1 ? 's' : ''}`, output: `User has answered your questions: ${formatted}. You can now continue with the user's answers in mind.`, metadata: { answers: selections, truncated: false } });
@@ -1063,9 +1065,9 @@ test('confirmed rerun asks every field once despite complete profile and preserv
   const confirmation = await f.change();
   assert.equal(confirmation.question.questions.length, 1);
   await f.answer();
-  const preflight = await f.status(); assert.equal(preflight.question.questions.length, 5);
+  const preflight = await f.status(); assert.equal(preflight.question.questions.length, 4);
   assert.equal(preflight.runID, old.runID);
-  await f.answer([['Muy seguro'], ['Ninguno'], ['Interactivo'], ['Bajo'], ['Poco complejo']]);
+  await f.answer([['Muy seguro'], ['Ninguno'], ['Interactivo'], ['Bajo']]);
   const next = await f.status();
   assert.notEqual(next.runID, old.runID); assert.equal(next.task.subagent_type, 'mdd-plan');
   assert.equal(next.previousRuns[0].runID, old.runID);
@@ -1638,7 +1640,7 @@ test('a large history keeps mdd_status within budget and the task byte-identical
   // A superseded run leaves its own history and contexts behind in previousRuns.
   f.user('Please rerun the preflight for this task.');
   await f.change(); await f.answer();
-  await f.answer([['Poco seguro'], ['Ninguno'], ['Automático'], ['Bajo'], ['Muy complejo']]);
+  await f.answer([['Poco seguro'], ['Ninguno'], ['Automático'], ['Bajo']]);
   f.visited.length = 0;
   await f.hooks.tool.mdd_contextual_explore.execute({ purpose: 'Inspect the current feature boundary.' }, f.context);
   await f.phase({ large: true });
@@ -2369,7 +2371,7 @@ test('audit D2: a pending re-preflight question on an existing run survives rest
   await f.change();
   await f.answer();
   const preflight = await f.status();
-  assert.equal(preflight.question.questions.length, 5);
+  assert.equal(preflight.question.questions.length, 4);
   await dispatchQuestion(f, 'preflight-before-restart', structuredClone(preflight.question));
   const resumed = await plugin(f.input);
   assert.equal(JSON.parse(await resumed.tool.mdd_status.execute({}, f.context)).state, 'recovery-blocked');

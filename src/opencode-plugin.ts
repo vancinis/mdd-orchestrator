@@ -1,5 +1,7 @@
 import { tool } from '@opencode-ai/plugin';
 import type { Plugin, PluginInput } from '@opencode-ai/plugin';
+import { Plugin as V2Plugin } from '@opencode/plugin';
+import { setupV2 } from './opencode-v2.js';
 import { isDeepStrictEqual } from 'node:util';
 import { createHash, randomUUID } from 'node:crypto';
 import { boundedText, movedMessage, PhaseRunner } from './phase-runner.js';
@@ -28,7 +30,7 @@ import { recordLessonQuietly } from './lessons.js';
 import { recordRunQuietly } from './run-ledger.js';
 import { withNextAction } from './next-action.js';
 import { collapseDispatchPrompts } from './dispatch-transcript.js';
-import { checkReportForm } from './report-check.js';
+import { checkReportForm, checkRiskReportForm } from './report-check.js';
 import { CHANGE_CATEGORIES, decodeConcerns } from './concerns.js';
 import { authoredNativeText, canonicalNativeText, firstDivergence } from './native-text.js';
 import type { Phase } from './policy.js';
@@ -101,6 +103,16 @@ export function restrictTools(config: { agent?: Record<string, Record<string, un
 export const PHASE_AGENTS: readonly string[] = Object.freeze([
   'mdd-explore', 'mdd-plan', 'mdd-propose', 'mdd-spec', 'mdd-design', 'mdd-tasks', 'mdd-apply', 'mdd-verify',
 ]);
+/**
+ * The risk actor. It is not one of `PHASE_AGENTS`: nothing dispatches it yet and it occupies no
+ * stop on the route, but it shares the phase actors' restricted tool profile and may submit its
+ * report through the same form check.
+ */
+export const RISK_AGENT = 'mdd-risk';
+/** Agents allowed to call `mdd_check_report`: the eight phase actors and the risk actor. */
+export const CHECK_AGENTS: readonly string[] = Object.freeze([...PHASE_AGENTS, RISK_AGENT]);
+/** Agents pinned to the restricted tool profile below: the eight phase actors and the risk actor. */
+const PINNED_AGENTS: readonly string[] = Object.freeze([...PHASE_AGENTS, RISK_AGENT]);
 
 /**
  * Closes the other direction. `restrictTools` keeps MDD's tools out of agents that are not MDD's;
@@ -112,11 +124,13 @@ export const PHASE_AGENTS: readonly string[] = Object.freeze([
  * it delegated would run under instructions MDD never composed. `skill` goes because a phase that
  * wants an applicable packaged skill already has its direct path in the prompt; a name lookup
  * against the shared registry can only find something else. The coordinator keeps both: it
- * dispatches phases, and its own work is not a phase.
+ * dispatches phases, and its own work is not a phase. `mdd-risk` gets the same restricted profile
+ * even though the coordinator does not dispatch it yet, so later wiring its dispatch adds no new
+ * capability here.
  */
 export function pinPhaseAgents(config: { agent?: Record<string, Record<string, unknown>> }): void {
   config.agent ??= {};
-  for (const name of PHASE_AGENTS) {
+  for (const name of PINNED_AGENTS) {
     const agent = { ...config.agent[name] };
     // `mdd_check_report` is the one MDD tool a phase actor may call, and it runs after the
     // blanket `mdd_*: false` that `restrictTools` writes, so the explicit entry is what grants
@@ -233,6 +247,7 @@ export function createInspector(input: PluginInput, timeout = 5000, now: () => n
     const statuses = await readSdk(signal => input.client.session.status({ query: { directory: runtime.directory }, signal, throwOnError: true }), timeout);
     const current = record(statuses.data, 'session statuses')[child];
     const hostState = current === undefined ? 'idle' : String(record(current, 'child status').type);
+    if (hostState === 'unknown') return { verdict: 'unknown', child, detail: 'OpenCode has not confirmed the current native child status.' };
     if (hostState !== 'idle') return { verdict: 'running', child, detail: `OpenCode reports subagent session ${child} as ${hostState}.` };
     const last = (await messages(child, runtime.directory)).at(-1);
     const lastInfo = last ? record(last.info, 'child message') : undefined;
@@ -914,14 +929,15 @@ const plugin: Plugin = async input => {
       mdd_check_report: tool({
         description: 'Check that the phase report you are about to return can be read, before you return it. Answers about form only — required sections, field types and size limits — and records nothing: no attempt is spent, no run changes, and a clean answer is not an acceptance. Use it once your report is written; if it names problems, fix them all and check again. This is the only MDD tool a phase actor may call.',
         args: {
-          phase: tool.schema.enum(PHASE_AGENTS as unknown as [string, ...string[]]).describe('The phase this report answers, exactly as it appears in your prompt.'),
+          phase: tool.schema.enum(CHECK_AGENTS as unknown as [string, ...string[]]).describe('The phase this report answers, exactly as it appears in your prompt.'),
           result: tool.schema.string().min(1).describe('The full report markdown you intend to return, exactly as you would return it.'),
         },
         async execute(args, context) {
           // Phase actors and the coordinator carrying a phase itself; nobody else has a report.
-          if (context.agent !== COORDINATOR && !PHASE_AGENTS.includes(context.agent)) {
+          if (context.agent !== COORDINATOR && !CHECK_AGENTS.includes(context.agent)) {
             throw new Error(`${CHECK_TOOL} belongs to MDD phase actors and the ${COORDINATOR} agent. This session is not carrying out an MDD phase; continue with your own tools.`);
           }
+          if (args.phase === RISK_AGENT) return statusPayload(checkRiskReportForm(args.result));
           return statusPayload(checkReportForm(args.phase as Phase, args.result));
         },
       }),
@@ -1205,4 +1221,9 @@ const plugin: Plugin = async input => {
   return hooks;
 };
 
-export default plugin;
+/** Internal legacy motor entrypoint retained for contract regression tests. */
+export const createLegacyPlugin = plugin;
+export default {
+  ...V2Plugin.define({ id: 'mdd', setup: context => setupV2(context, plugin) }),
+  server: plugin,
+};

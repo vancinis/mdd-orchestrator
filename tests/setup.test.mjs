@@ -6,10 +6,10 @@ import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { initProject, LOADER_PATH, LOADER_TEXT, PRIVATE_IGNORE_PATH, registerTuiPlugin, TUI_CONFIG_PATH, TUI_PLUGIN_SPEC } from '../dist/setup.js';
-import { doctor } from '../dist/doctor.js';
+import { doctor, isSupportedNodeVersion } from '../dist/doctor.js';
 import { defaultSettings, saveSettings as writeSettings, setupDiagnostic } from '../dist/settings.js';
 const saveSettings = (root, value) => writeSettings(join(root, 'mdd'), value);
-import { MDD_ASSETS } from '../dist/project-assets.js';
+import { MDD_ASSETS, assetText } from '../dist/project-assets.js';
 import { runConfigUI } from '../dist/config-ui.js';
 import { pathToFileURL } from 'node:url';
 
@@ -26,6 +26,8 @@ function fixture(t, installed = true, stubJSX = false) {
     fs.cpSync('assets', join(pkg, 'assets'), { recursive: true });
     const scope = join(root, 'mdd/node_modules/@opencode-ai'); fs.mkdirSync(scope, { recursive: true });
     fs.symlinkSync(resolve('node_modules/@opencode-ai/plugin'), join(scope, 'plugin'), process.platform === 'win32' ? 'junction' : 'dir');
+    const v2 = join(root, 'mdd/node_modules/@opencode'); fs.mkdirSync(v2, { recursive: true });
+    fs.symlinkSync(resolve('node_modules/@opencode/plugin'), join(v2, 'plugin'), process.platform === 'win32' ? 'junction' : 'dir');
     const renderer = join(root, 'mdd/node_modules/@opentui'); fs.mkdirSync(renderer, { recursive: true });
     if (stubJSX) {
       const solid = join(renderer, 'solid'); fs.mkdirSync(solid);
@@ -58,17 +60,17 @@ test('init installs only owned assets, preserves user files and is byte-idempote
   for (const [path, text] of Object.entries(before)) assert.equal(fs.readFileSync(join(root, path), 'utf8'), text);
   assert.equal(fs.readFileSync(join(root, LOADER_PATH), 'utf8'), LOADER_TEXT);
   assert.equal(fs.readFileSync(join(root, PRIVATE_IGNORE_PATH), 'utf8'), '*\n!.gitignore\n');
-  assert.deepEqual(JSON.parse(fs.readFileSync(join(root, TUI_CONFIG_PATH), 'utf8')).plugin, [TUI_PLUGIN_SPEC]);
+   assert.deepEqual(JSON.parse(fs.readFileSync(join(root, TUI_CONFIG_PATH), 'utf8')).plugins, [TUI_PLUGIN_SPEC]);
   const installed = snapshot(root); const second = initProject(root);
   assert.equal(second.created, 0); assert.equal(second.unchanged, first.created); assert.deepEqual(snapshot(root), installed);
 });
 test('TUI registration merges existing config and preserves attention and plugin options', t => {
   const root = fixture(t);
-  const original = { theme: 'smoke', attention: { enabled: false, sound: true }, plugin: ['other', ['local.tsx', { flag: true }]] };
+  const original = { theme: { name: 'smoke' }, attention: { sound: true, notifications: false }, plugins: ['other', { package: 'local.tsx', options: { flag: true } }] };
   fs.writeFileSync(join(root, TUI_CONFIG_PATH), JSON.stringify(original));
   initProject(root);
   const result = JSON.parse(fs.readFileSync(join(root, TUI_CONFIG_PATH), 'utf8'));
-  assert.deepEqual(result, { ...original, plugin: [...original.plugin, TUI_PLUGIN_SPEC] });
+  assert.deepEqual(result, { ...original, plugins: [...original.plugins, TUI_PLUGIN_SPEC], $schema: 'https://opencode.ai/v2/cli.json' });
   assert.equal(registerTuiPlugin(JSON.stringify(result)), JSON.stringify(result));
   assert.deepEqual(JSON.parse(fs.readFileSync(join(root, TUI_CONFIG_PATH), 'utf8')), result);
 });
@@ -77,51 +79,76 @@ test('the installed TUI entry renders after a real Solid signal update', async t
   // keep the built plugin, installed-prefix resolution and client Solid runtime real.
   const root = fixture(t, true, true);
   initProject(root);
-  const spec = JSON.parse(fs.readFileSync(join(root, TUI_CONFIG_PATH), 'utf8')).plugin[0];
+  const spec = JSON.parse(fs.readFileSync(join(root, TUI_CONFIG_PATH), 'utf8')).plugins[0];
   const loaded = await import(pathToFileURL(join(root, spec)).href);
   assert.equal(loaded.default.id, 'mdd.visual');
-  assert.equal(typeof loaded.default.tui, 'function');
+  assert.equal(typeof loaded.default.setup, 'function');
   assert.equal('server' in loaded.default, false);
-  let slot; const values = []; const handlers = new Map(); const disposers = [];
-  await loaded.default.tui({ kv: { get: (_, fallback) => fallback, set: (...args) => values.push(args) },
-    slots: { register(value) { slot = value; return 'mdd.visual:sidebar'; } },
-    event: { on(type, handler) { handlers.set(type, handler); return () => handlers.delete(type); } },
-    lifecycle: { onDispose(fn) { disposers.push(fn); } }, tuiConfig: { attention: { enabled: false } },
+  let slot; let slotRemoved = false; const handlers = new Map();
+  const cleanup = await loaded.default.setup({ options: {},
+    ui: { slot(value) { slot = value; return () => { slotRemoved = true; }; } },
+    client: { session: { message: { get: async () => ({ type: 'assistant', content: [{ type: 'tool', id: 'call', name: 'mdd_status' }] }) } } },
+    data: { on(type, handler) { handlers.set(type, handler); return () => handlers.delete(type); } },
   });
-  assert.equal(slot?.order, 250, 'renderer resolves from the installed prefix and registers the sidebar');
-  assert.deepEqual(values, [['mdd.sidebarAvailable', true]]);
-  assert.equal(typeof handlers.get('message.part.updated'), 'function');
+  assert.equal(slot?.append, 'sidebar.content', 'renderer resolves from the installed prefix and registers the V2 sidebar');
+  assert.equal(typeof handlers.get('session.tool.success'), 'function');
   const { createRoot, createRenderEffect } = await import(pathToFileURL(join(root, 'mdd/node_modules/solid-js/dist/solid.js')).href);
   const frames = [];
   const dispose = createRoot(dispose => {
-    const content = slot.slots.sidebar_content({}, { session_id: 'parent' });
+    const content = slot.render({ sessionID: 'parent' });
     createRenderEffect(() => frames.push(content()));
     return dispose;
   });
   try {
     assert.deepEqual(frames, [null]);
-    handlers.get('message.part.updated')({ properties: { part: { type: 'tool', tool: 'mdd_status', sessionID: 'parent',
-      state: { status: 'completed', output: JSON.stringify({ phase: 'mdd-plan', state: 'ready', workflow: {
+    handlers.get('session.tool.success')({ data: { id: 'call', assistantMessageID: 'message', sessionID: 'parent',
+      content: [{ type: 'text', text: JSON.stringify({ phase: 'mdd-plan', state: 'ready', workflow: {
         evaluation: { route: 'low', phases: ['mdd-plan', 'mdd-apply'] }, results: [],
-      } }) } } } });
+      } }) }] } });
+    await new Promise(resolve => setImmediate(resolve));
     assert.equal(frames.at(-1)?.tag, 'box');
     assert.deepEqual(frames.at(-1)?.props.children.map(child => child.props.children),
       ['MDD · low route', '🔵 plan', '○ apply', 'Skills: mdd-doc, cognitive-doc-design']);
-    handlers.get('message.part.updated')({ properties: { part: { type: 'tool', tool: 'mdd_status', sessionID: 'parent',
-      state: { status: 'completed', output: JSON.stringify({ phase: 'mdd-apply', state: 'ready', workflow: {
+    handlers.get('session.tool.success')({ data: { id: 'call', assistantMessageID: 'message', sessionID: 'parent',
+      content: [{ type: 'text', text: JSON.stringify({ phase: 'mdd-apply', state: 'ready', workflow: {
         evaluation: { route: 'low', phases: ['mdd-plan', 'mdd-apply'] },
         results: [{ phase: 'mdd-plan', outcome: 'passed' }],
-      } }) } } } });
+      } }) }] } });
+    await new Promise(resolve => setImmediate(resolve));
     assert.deepEqual(frames.at(-1)?.props.children.map(child => child.props.children),
       ['MDD · low route', '✅ plan', '🔵 apply', 'Skills: mdd-cleanup']);
   } finally { dispose(); }
-  disposers[0]();
+  cleanup();
+  assert.equal(slotRemoved, true);
   assert.equal(handlers.size, 0);
 });
 test('malformed TUI config blocks setup before installing owned files', t => {
   const root = fixture(t); fs.writeFileSync(join(root, TUI_CONFIG_PATH), '{broken');
-  assert.throws(() => initProject(root), /tui.json/);
+  assert.throws(() => initProject(root), /cli.json/);
   assert.equal(fs.existsSync(join(root, LOADER_PATH)), false);
+});
+test('V2 setup never suppresses OpenCode terminal migration by creating cli.json too early', t => {
+  const root = fixture(t);
+  fs.writeFileSync(join(root, 'tui.json'), JSON.stringify({ theme: 'user-theme', plugin: ['user-plugin'] }));
+  const before = snapshot(root);
+  assert.throws(() => initProject(root), /Start OpenCode V2 once/);
+  assert.deepEqual(snapshot(root), before);
+  assert.equal(fs.existsSync(join(root, 'cli.json')), false);
+});
+
+test('setup migrates a recorded older asset above the packaged size limit without relaxing ownership', t => {
+  const root = fixture(t); initProject(root);
+  const name = 'agents/mdd-orchestrator.md';
+  const legacy = 'x'.repeat(16015);
+  fs.writeFileSync(join(root, name), legacy);
+  assert.throws(() => initProject(root, true), /refuses to overwrite different content: agents\/mdd-orchestrator.md/);
+  assert.equal(fs.readFileSync(join(root, name), 'utf8'), legacy);
+  const metadata = join(root, 'mdd/setup-assets.json');
+  const manifest = JSON.parse(fs.readFileSync(metadata, 'utf8'));
+  manifest[name] = assetText(root, name, 65536).digest;
+  fs.writeFileSync(metadata, JSON.stringify(manifest));
+  initProject(root, true);
+  assert.equal(assetText(root, name).digest, assetText(process.cwd(), 'assets/opencode/agents/mdd-orchestrator.md').digest);
 });
 test('init refuses a conflicting owned file before creating other assets', t => {
   const root = fixture(t); const path = join(root, 'agents/mdd-verify.md'); fs.mkdirSync(join(root, 'agents'), { recursive: true });
@@ -231,4 +258,13 @@ test('doctor bounds an unresponsive health endpoint without retrying', async t =
   const settings = defaultSettings(); settings.engram = { endpoint: `http://127.0.0.1:${server.address().port}`, project: 'fixture' }; saveSettings(root, settings);
   const start = Date.now(); const report = await doctor(root);
   assert.equal(report.ready, false); assert.equal(requests, 1); assert.ok(Date.now() - start < 5000);
+});
+test('supported Node version boundaries accept 24.6+/24.x and 26.4+/26.x and reject the rest', () => {
+  assert.equal(isSupportedNodeVersion('24.6.0'), true);
+  assert.equal(isSupportedNodeVersion('24.13.4'), true);
+  assert.equal(isSupportedNodeVersion('26.4.0'), true);
+  assert.equal(isSupportedNodeVersion('26.9.0'), true);
+  assert.equal(isSupportedNodeVersion('24.5.9'), false);
+  assert.equal(isSupportedNodeVersion('25.0.0'), false);
+  assert.equal(isSupportedNodeVersion('26.3.9'), false);
 });

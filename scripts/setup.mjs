@@ -9,7 +9,7 @@ const root = fileURLToPath(new URL('../', import.meta.url));
 const args = process.argv.slice(2);
 const cli = join(root, 'dist/cli.js');
 export function needsPreparation(directory) {
-  if (!fs.existsSync(join(directory, 'dist/cli.js')) || !fs.existsSync(join(directory, 'node_modules/@opencode-ai/plugin/dist/index.js'))) return true;
+  if (!fs.existsSync(join(directory, 'dist/cli.js')) || !fs.existsSync(join(directory, 'node_modules/@opencode/plugin/dist/promise/index.js'))) return true;
   const source = join(directory, 'src');
   if (!fs.existsSync(source)) return false;
   return fs.readdirSync(source, { recursive: true, withFileTypes: true }).some(entry => {

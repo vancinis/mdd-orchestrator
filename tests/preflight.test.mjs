@@ -4,13 +4,13 @@ import { ANSWER_FIELDS, questionEnvelope, answersFromLabels, resolvePreflight, p
 import { evaluate } from '../dist/kernel.js';
 import { Workflow } from '../dist/workflow.js';
 
-const answers = { certainty: 'very-sure', artifactStore: 'none', mode: 'interactive', summary: 'low', complexity: 'not-complex' };
-const labels = [['Muy seguro'], ['Ninguno'], ['Interactivo'], ['Bajo'], ['Poco complejo']];
+const answers = { certainty: 'very-sure', artifactStore: 'none', mode: 'interactive', summary: 'low' };
+const labels = [['Muy seguro'], ['Ninguno'], ['Interactivo'], ['Bajo']];
 
 test('native envelope uses only supported question and option fields in original order', () => {
   const envelope = questionEnvelope();
   assert.deepEqual(Object.keys(envelope), ['questions']);
-  assert.deepEqual(envelope.questions.map(q => q.header), ['Certeza', 'Artefactos', 'Modo', 'Resumen', 'Complejidad']);
+  assert.deepEqual(envelope.questions.map(q => q.header), ['Certeza', 'Artefactos', 'Modo', 'Resumen']);
   for (const question of envelope.questions) {
     assert.deepEqual(Object.keys(question).sort(), ['header', 'multiple', 'options', 'question']);
     assert.equal(question.multiple, false);
@@ -22,7 +22,7 @@ test('native envelope uses only supported question and option fields in original
 });
 
 test('every partial subset asks all and only missing fields together, preserving order and kernel evaluation', () => {
-  for (let mask = 0; mask < 32; mask++) {
+  for (let mask = 0; mask < 16; mask++) {
     const known = Object.fromEntries(ANSWER_FIELDS.filter((_, i) => mask & (1 << i)).map(field => [field, answers[field]]));
     const missing = labels.filter((_, i) => !(mask & (1 << i)));
     const envelope = questionEnvelope(known);
@@ -49,6 +49,14 @@ for (const selected of [undefined, null, {}, [], labels.slice(1), [...labels, ['
   [['Ninguno'], ['Muy seguro'], ...labels.slice(2)], [[' Muy seguro'], ...labels.slice(1)]]) {
   test(`reject ordered label ambiguity/missing data ${JSON.stringify(selected)}`, () => assert.throws(() => answersFromLabels({}, selected)));
 }
+
+test('legacy complexity answer is accepted but ignored, never asked and never scored', () => {
+  assert.deepEqual(parsePartialAnswers({ complexity: 'very-complex' }), {});
+  assert.deepEqual(parsePartialAnswers({ ...answers, complexity: 'very-complex' }), answers);
+  assert.deepEqual(questionEnvelope({ complexity: 'very-complex' }).questions.map(q => q.header),
+    ['Certeza', 'Artefactos', 'Modo', 'Resumen']);
+  assert.deepEqual(resolvePreflight({ complexity: 'very-complex' }, labels).evaluation, evaluate({ answers }));
+});
 
 test('partial validation rejects unknown, invalid, prototype and undefined values without defaults', () => {
   assert.deepEqual(parsePartialAnswers({}), {});

@@ -64,9 +64,9 @@ for (const known of [{}, { certainty: 'very-sure', artifactStore: 'none', summar
     const f = await fixture(t, known);
     const status = await f.start();
     assert.equal(status.state, 'question-ready');
-    assert.equal(status.question.questions.length, 5 - Object.keys(known).length);
+    assert.equal(status.question.questions.length, 4 - Object.keys(known).length);
     assert.equal(f.starts(), 0);
-    const labels = { Certeza: 'Muy seguro', Artefactos: 'Ninguno', Modo: 'Automático', Resumen: 'Bajo', Complejidad: 'Poco complejo' };
+    const labels = { Certeza: 'Muy seguro', Artefactos: 'Ninguno', Modo: 'Automático', Resumen: 'Bajo' };
     const selections = status.question.questions.map(q => [labels[q.header]]);
     status.question.questions[0].question = 'mutated snapshot';
     await f.answer(selections);
@@ -80,7 +80,8 @@ for (const known of [{}, { certainty: 'very-sure', artifactStore: 'none', summar
 for (const route of ['low', 'high']) {
   for (const mode of ['automatic', 'interactive']) {
     test(`native gate state contract: full ${route} ${mode} route has exact approval slots`, async t => {
-      const known = { ...answers, mode, ...(route === 'high' ? { complexity: 'very-complex', certainty: 'not-sure' } : {}) };
+      // complexity no longer scores a route; reach high through certainty and summary alone.
+      const known = { ...answers, mode, ...(route === 'high' ? { certainty: 'not-sure', summary: 'detailed' } : {}) };
       const f = await fixture(t, known);
       await f.start();
       const phases = f.workflow().snapshot().evaluation.phases;
@@ -181,7 +182,7 @@ test('review questions precede approval and retain recommended, delegated, defer
 });
 
 test('deferred clarification is unresolved through approval and returns after the next phase, not immediately', async t => {
-  const f = await fixture(t, { ...answers, mode: 'interactive', complexity: 'very-complex', certainty: 'not-sure' });
+  const f = await fixture(t, { ...answers, mode: 'interactive', summary: 'detailed', certainty: 'not-sure' });
   await f.start(); f.pass();
   const question = { question: 'Which date format?', options: [{ label: 'ISO', description: 'Use ISO dates.' }], deferrable: true };
   f.gate.prepareAdvance({ questions: [question] }, runtime);
@@ -258,7 +259,7 @@ test('unrelated native questions cannot compete during MDD accepting or await-an
   await assert.rejects(f.gate.beforeQuestion({ sessionID: runtime.sessionID, callID: 'other-awaiting' }, other), /already pending/);
   assert.equal(f.gate.status(runtime.sessionID).state, 'await-answer');
   f.inspect.question = async () => {};
-  await f.gate.afterQuestion(call, args, output(args, [['Muy seguro'], ['Ninguno'], ['Automático'], ['Bajo'], ['Poco complejo']]));
+  await f.gate.afterQuestion(call, args, output(args, [['Muy seguro'], ['Ninguno'], ['Automático'], ['Bajo']]));
   assert.equal(f.starts(), 1);
 });
 
@@ -339,7 +340,7 @@ test('the detail choice is conditional and does not grant approval', async t => 
   assert.match(f.gate.status(runtime.sessionID).notice, /expandedReport|full/);
 });
 
-for (const selections of [[], [['forged']], [['Muy seguro', 'Poco seguro']], [['Muy seguro', 'Poco seguro'], ['Ninguno'], ['Automático'], ['Bajo'], ['Poco complejo']]]) {
+for (const selections of [[], [['forged']], [['Muy seguro', 'Poco seguro']], [['Muy seguro', 'Poco seguro'], ['Ninguno'], ['Automático'], ['Bajo']]]) {
   test(`native question: reject malformed answer envelopes ${JSON.stringify(selections)}`, async t => {
     const f = await fixture(t, {}); await f.start();
     await assert.rejects(f.answer(selections));
@@ -354,14 +355,14 @@ for (const selections of [[], [['forged']], [['Muy seguro', 'Poco seguro']], [['
 // the question simply stays open and can be answered again.
 test('native question: an unlisted label answers nothing and leaves the question open', async t => {
   const f = await fixture(t, {}); await f.start();
-  await f.answer([['Ninguno'], ['Muy seguro'], ['Automático'], ['Bajo'], ['Poco complejo']]);
+  await f.answer([['Ninguno'], ['Muy seguro'], ['Automático'], ['Bajo']]);
   const stalled = f.gate.status(runtime.sessionID);
   assert.equal(stalled.state, 'question-ready');
   assert.ok(stalled.question);
   assert.equal(f.starts(), 0);
   assert.equal(stalled.questionReceipts.at(-1).cancelled, true);
   assert.equal(stalled.questionReceipts.at(-1).answers.length, 0);
-  await f.answer([['Muy seguro'], ['Ninguno'], ['Automático'], ['Bajo'], ['Poco complejo']]);
+  await f.answer([['Muy seguro'], ['Ninguno'], ['Automático'], ['Bajo']]);
   assert.equal(f.starts(), 1);
   assert.equal(f.gate.status(runtime.sessionID).state, 'phase-recorded');
 });
@@ -417,7 +418,7 @@ test('native question: exact arguments, wrong parent, cancellation and unrelated
   assert.equal(f.gate.status(runtime.sessionID).state, 'await-answer');
   f.gate.nativeError(call);
   assert.equal(f.gate.status(runtime.sessionID).state, 'stopped');
-  await assert.rejects(f.gate.afterQuestion(call, args, output(args, [['Muy seguro'], ['Ninguno'], ['Automático'], ['Bajo'], ['Poco complejo']])));
+  await assert.rejects(f.gate.afterQuestion(call, args, output(args, [['Muy seguro'], ['Ninguno'], ['Automático'], ['Bajo']])));
   assert.equal(f.starts(), 0);
 });
 
@@ -484,7 +485,7 @@ test('native question: duplicate concurrent after cannot accept either response'
   await f.gate.beforeQuestion(call, args);
   let release;
   f.inspect.question = () => new Promise(resolve => { release = resolve; });
-  const raw = output(args, [['Muy seguro'], ['Ninguno'], ['Automático'], ['Bajo'], ['Poco complejo']]);
+  const raw = output(args, [['Muy seguro'], ['Ninguno'], ['Automático'], ['Bajo']]);
   const first = f.gate.afterQuestion(call, args, raw);
   await assert.rejects(f.gate.afterQuestion(call, args, raw));
   release(); await assert.rejects(first);

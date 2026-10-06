@@ -122,11 +122,25 @@ function structured(body: string, label: string): unknown {
  * the report is allowed, and every field it produces is validated downstream exactly as before.
  */
 export function parsePhaseReport(text: string, phase: Phase): Record<string, unknown> {
+  return parseReportSections(text, PHASE_RESULT_FIELDS[phase].length > 0);
+}
+
+/**
+ * Parses the risk actor's report. It shares the same envelope and section-splitting rules as a
+ * phase report — this is still "## MDD Outcome", "## MDD Summary" and the rest — but `mdd-risk`
+ * is not a `Phase`, so this is kept apart from `parsePhaseReport` rather than widening that
+ * function (or `PHASE_RESULT_FIELDS`) to accept an actor that occupies no stop on the route.
+ */
+export function parseRiskReport(text: string): Record<string, unknown> {
+  return parseReportSections(text, true);
+}
+
+function parseReportSections(text: string, hasFields: boolean): Record<string, unknown> {
   const parts = sections(text);
   if (!parts) {
     const json = jsonDocument(text);
     if (json) return json;
-    throw new MalformedReport(`The phase report needs the headings "## MDD Outcome", "## MDD Summary" and "## MDD Artifact"${PHASE_RESULT_FIELDS[phase].length ? ', plus "## MDD Data" with this phase\'s fields' : ''}. Report prose under those headings; a bare JSON object is also accepted.`);
+    throw new MalformedReport(`The phase report needs the headings "## MDD Outcome", "## MDD Summary" and "## MDD Artifact"${hasFields ? ', plus "## MDD Data" with this phase\'s fields' : ''}. Report prose under those headings; a bare JSON object is also accepted.`);
   }
   const result: Record<string, unknown> = {
     outcome: outcomeOf(parts.get('outcome')!),

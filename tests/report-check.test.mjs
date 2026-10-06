@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { checkReportForm } from '../dist/report-check.js';
+import { checkReportForm, checkRiskReportForm } from '../dist/report-check.js';
 import { reportFormatLines } from '../dist/phase-report.js';
+import { riskReportFormatLines } from '../dist/risk.js';
 import { reportDocument, traceFixture } from './adapter-fixture.mjs';
 
 const planReport = (overrides = {}) => reportDocument({
@@ -94,4 +95,115 @@ test('checking is pure: the same document checks the same way every time', () =>
   const first = checkReportForm('mdd-plan', text);
   const second = checkReportForm('mdd-plan', text);
   assert.deepEqual(first, second);
+});
+
+const riskVerdict = (overrides = {}) => ({
+  route: 'high', complexity: 'high',
+  reason: 'The change touches authentication middleware shared by every route.',
+  evidence: [{ source: 'mdd-explore finding 2', finding: 'auth.ts is imported by all route handlers' }],
+  risks: [{ description: 'A regression here locks out every user.', evidence: 'auth.ts has no dedicated tests', mitigation: 'Add a regression test before merging.' }],
+  ...overrides,
+});
+
+const riskReport = (overrides = {}) => reportDocument({
+  outcome: 'passed', evidenceSummary: 'High complexity; recommend the high route.',
+  how: 'auth.ts is imported by every route handler, so the exploration finding grounds a high route.',
+  artifact: 'Touches shared authentication middleware with no dedicated tests.',
+  risk: riskVerdict(overrides.risk), ...overrides,
+});
+
+test('a grounded risk report checks clean, names risk as the only data field, and exposes the parsed verdict', () => {
+  const checked = checkRiskReportForm(riskReport());
+  assert.deepEqual(checked.problems, []);
+  assert.equal(checked.ok, true);
+  assert.match(checked.note, /not an acceptance/);
+  assert.deepEqual(checked.resultFormat, riskReportFormatLines());
+  // The verdict a caller would otherwise have to re-parse out of the same document.
+  assert.deepEqual(checked.risk, riskVerdict());
+});
+
+test('a low-complexity risk report with no evidenced risk is accepted when explicitly justified', () => {
+  const checked = checkRiskReportForm(riskReport({
+    risk: riskVerdict({ route: 'low', complexity: 'low', risks: [],
+      reason: 'The change is a local rename with no external callers.',
+      risksJustification: 'No shared code path was found to carry any risk.' }),
+  }));
+  assert.deepEqual(checked.problems, []);
+  assert.equal(checked.risk.risksJustification, 'No shared code path was found to carry any risk.');
+});
+
+test('an empty risk list with no justification is rejected rather than silently accepted', () => {
+  const checked = checkRiskReportForm(riskReport({
+    risk: riskVerdict({ route: 'low', complexity: 'low', risks: [],
+      reason: 'The change is a local rename with no external callers.' }),
+  }));
+  assert.equal(checked.ok, false);
+  assert.ok(checked.problems.some(problem => /risksJustification/.test(problem)));
+});
+
+test('a risksJustification on a nonempty risk list is rejected: it only explains an empty one', () => {
+  const checked = checkRiskReportForm(riskReport({
+    risk: riskVerdict({ risksJustification: 'This should not be here.' }),
+  }));
+  assert.equal(checked.ok, false);
+  assert.ok(checked.problems.some(problem => /only accepted when risks is empty/.test(problem)));
+});
+
+test('a failed outcome reports uncertainty without needing a risk verdict', () => {
+  const checked = checkRiskReportForm(reportDocument({
+    outcome: 'failed', evidenceSummary: 'Exploration found nothing touching this area.',
+    how: 'Findings from mdd-explore do not reach the area the request describes.',
+    artifact: 'Cannot substantiate a route; findings do not reach the changed code.',
+  }));
+  assert.deepEqual(checked.problems, []);
+});
+
+test('a risk report missing the required explanation is rejected', () => {
+  const checked = checkRiskReportForm(reportDocument({
+    outcome: 'passed', evidenceSummary: 'High complexity; recommend the high route.',
+    artifact: 'Touches shared authentication middleware with no dedicated tests.',
+    risk: riskVerdict(),
+  }));
+  assert.equal(checked.ok, false);
+  assert.ok(checked.problems.some(problem => /how must be nonempty text/.test(problem)));
+});
+
+test('a risk report data block carrying an extra key is rejected', () => {
+  const checked = checkRiskReportForm(riskReport({ unexpected: 'not part of the risk schema' }));
+  assert.equal(checked.ok, false);
+  assert.ok(checked.problems.some(problem => /unknown key\(s\): unexpected/.test(problem)));
+});
+
+test('a route that disagrees with its stated complexity is rejected', () => {
+  const checked = checkRiskReportForm(riskReport({ risk: riskVerdict({ route: 'high', complexity: 'low' }) }));
+  assert.equal(checked.ok, false);
+  assert.ok(checked.problems.some(problem => /must agree/.test(problem)));
+});
+
+test('an unknown route is rejected', () => {
+  const checked = checkRiskReportForm(riskReport({ risk: riskVerdict({ route: 'medium', complexity: 'medium' }) }));
+  assert.equal(checked.ok, false);
+  assert.ok(checked.problems.some(problem => /route must be exactly/.test(problem)));
+});
+
+test('evidence must be attributable: an empty evidence list is rejected', () => {
+  const checked = checkRiskReportForm(riskReport({ risk: riskVerdict({ evidence: [] }) }));
+  assert.equal(checked.ok, false);
+  assert.ok(checked.problems.some(problem => /evidence requires/.test(problem)));
+});
+
+test('a reported risk missing its mitigation is rejected rather than silently accepted', () => {
+  const checked = checkRiskReportForm(riskReport({
+    risk: riskVerdict({ risks: [{ description: 'A regression could lock out users.', evidence: 'no dedicated tests', mitigation: '' }] }),
+  }));
+  assert.equal(checked.ok, false);
+  assert.ok(checked.problems.some(problem => /mitigation/.test(problem)));
+});
+
+test('a malformed risk envelope is rejected the same way a malformed phase report is', () => {
+  for (const text of ['', '   ', 'z'.repeat(20001), undefined, 42]) {
+    const checked = checkRiskReportForm(text);
+    assert.equal(checked.ok, false);
+    assert.equal(checked.problems.length, 1, `one problem for ${typeof text}`);
+  }
 });

@@ -2,6 +2,7 @@ import { LocalFiles } from './local-files.js';
 import { loadGlobalSettings } from './global-settings.js';
 import type { InstallationEnvironment } from './installation-paths.js';
 import { MODEL_ROLES } from './settings.js';
+import { PHASES } from './policy.js';
 import type { Phase } from './policy.js';
 import { objectWithKeys, ValidationError } from './validation.js';
 
@@ -26,7 +27,6 @@ export const FAILURE_CLASSES = Object.freeze([
   'phase-failed', 'result-rejected', 'result-malformed', 'dispatch-mismatch', 'native-error', 'route-blocked', 'stopped',
 ] as const);
 export type FailureClass = typeof FAILURE_CLASSES[number];
-const PHASES = MODEL_ROLES.filter((role): role is Phase => role !== 'orchestrator');
 
 /**
  * Provider-reported usage of one delegated attempt: counts and a price, never text. `partial` is

@@ -75,7 +75,7 @@ export async function memoryServer(t, change = () => {}) {
 }
 
 export const answers = {
-  certainty: 'very-sure', artifactStore: 'none', mode: 'automatic', summary: 'low', complexity: 'not-complex',
+  certainty: 'very-sure', artifactStore: 'none', mode: 'automatic', summary: 'low',
 };
 export const runtime = {
   sessionID: 'ses_parent', agent: 'mdd-orchestrator', directory: process.cwd(), worktree: process.cwd(),

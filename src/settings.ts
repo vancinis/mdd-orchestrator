@@ -7,9 +7,15 @@ import { fileURLToPath } from 'node:url';
 
 export const MODEL_ROLES = Object.freeze([
   'orchestrator', 'mdd-explore', 'mdd-plan', 'mdd-propose', 'mdd-spec',
-  'mdd-design', 'mdd-tasks', 'mdd-apply', 'mdd-verify',
+  'mdd-design', 'mdd-tasks', 'mdd-apply', 'mdd-verify', 'mdd-risk',
 ] as const);
-export type ModelRole = 'orchestrator' | Phase;
+/**
+ * `mdd-risk` is a configurable actor, not a workflow `Phase`: it assesses complexity and risk
+ * after exploration, but does not yet occupy a stop on the route. Keeping it in `ModelRole`
+ * rather than `Phase` is what lets it be installed, packaged and modeled like every other actor
+ * without being accepted anywhere a `Phase` is required (routing, the ledger, telemetry phases).
+ */
+export type ModelRole = 'orchestrator' | 'mdd-risk' | Phase;
 export type NamedProfile = { models: Partial<Record<ModelRole, string>>; answers: Partial<Answers> };
 export type EngramSettings = { endpoint: string; project?: string } | { mode: 'local'; binary: string; dataDirectory: string };
 export type Settings = {

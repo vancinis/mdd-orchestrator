@@ -16,13 +16,12 @@ const FIELD_TITLES: Record<string, string> = {
   artifactStore: 'Dónde guardar los artefactos del flujo',
   mode: 'Cómo aprobar las fases posteriores',
   summary: 'Cuánto detalle querés en los reportes',
-  complexity: 'Complejidad del trabajo pedido',
 };
 const UNANSWERED: Choice = { value: '-', label: 'Sin responder', hint: 'Se pregunta al iniciar cada run' };
 const MENU: readonly Choice[] = [
   { value: 'perfiles', label: 'Perfiles', hint: 'Crear un perfil o cambiar el activo' },
   { value: 'modelos', label: 'Modelos', hint: 'Elegir el modelo de cada agente' },
-  { value: 'preflight', label: 'Respuestas de preflight', hint: 'Fijar las 5 respuestas por defecto' },
+  { value: 'preflight', label: 'Respuestas de preflight', hint: 'Fijar las 4 respuestas por defecto' },
   { value: 'memoria', label: 'Memoria (Engram)', hint: 'Endpoint avanzado o apagarla' },
   { value: 'telemetria', label: 'Telemetría', hint: 'Métricas locales, nunca por red' },
   { value: 'guardar', label: 'Guardar y salir', hint: 'Escribe los cambios y cierra' },

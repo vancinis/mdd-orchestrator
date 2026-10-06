@@ -8,8 +8,11 @@ Installation readiness does not establish model acceptance.
 
 ## Start here
 
-Use Node **24.15+ within 24.x** (24.6 is the minimum engine) and npm. OpenCode **1.18.31**
-is the pinned adapter dependency. From the trusted source checkout:
+Use Node **24.6+ within 24.x, or 26.4+ within 26.x** and npm. The adapter targets OpenCode **2.0.22**, with
+`@opencode/plugin` and `@opencode/client` pinned to that release. When upgrading from V1,
+start V2 once to migrate an existing `tui.json(c)` to global `cli.json` before MDD setup;
+setup refuses to create that file early and suppress OpenCode's preference migration.
+From the trusted source checkout:
 
 ```powershell
 npm run setup
@@ -82,7 +85,9 @@ terminals without raw-mode support read the same numbered list as one line.
    writes no installation or workspace files and downloads nothing. A version probe may use
    disposable isolated temporary files.
 4. **Paso 4/4 — Aplicar y verificar:** install the reviewed components and check the global installation. No OpenCode,
-   model or memory service is started. Quit and restart OpenCode to discover newly installed assets.
+   model or memory service is started. If OpenCode was already running, run `opencode service restart`
+   when no work is in flight. Restarting only the terminal UI, or `opencode reload`, can retain
+   old imported plugin modules in the long-lived V2 service.
 
 A failure names remaining issues. Already-applied changes remain; setup is not a transactional
 rollback system. A Ready result proves only installation checks, not native/model behavior.
@@ -104,7 +109,7 @@ Engram binary**; `mdd.config.json`, `memory/`, artifacts and unrelated agents ar
 After Apply it removes `mdd/node_modules/my-driven-development` plus its dependency entry,
 reinstalls from a fresh content-addressed tarball, and updates the owned assets. It keeps the
 referenced tarball and the three newest in `mdd/packages`, deleting the rest, so the previous
-build stays restorable. Quit and restart OpenCode afterwards.
+build stays restorable. Afterwards, run `opencode service restart` when no work is in flight.
 
 `mdd doctor` reports the same comparison as `package-freshness`: `ok` when the installed package
 matches the one running, `info` with an `mdd update` hint when it is outdated.
@@ -142,7 +147,8 @@ repositories or remove unknown assets.
 ## Legacy project migration
 
 Install and configure once globally, then start OpenCode from either project without a local
-MDD package or config. Restart OpenCode after changing profiles or installed assets.
+MDD package or config. After replacing installed plugin code, restart the service with
+`opencode service restart` when no work is in flight; closing the UI alone does not restart it.
 
 Legacy `mdd.config.json` files, including the source checkout's user file, are preserved but
 never imported automatically. There is no import command. To migrate manually, back up both

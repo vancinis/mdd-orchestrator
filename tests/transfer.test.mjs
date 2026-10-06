@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { spawn } from 'node:child_process';
-import plugin from '../dist/opencode-plugin.js';
+import { createLegacyPlugin as plugin } from '../dist/opencode-plugin.js';
 import { CheckpointStorageError, CheckpointStore, sealResumeData } from '../dist/checkpoint.js';
 import { QuestionCheckpointStore } from '../dist/question-checkpoint.js';
 import { ProgressGuard } from '../dist/progress.js';
@@ -23,7 +23,7 @@ import { LocalFiles } from '../dist/local-files.js';
 const sourceID = 'ses_source';
 const runID = 'run_explicit';
 const userText = `Continue MDD sourceSessionID=${sourceID} runID=${runID} here.`;
-const answers = { certainty: 'very-sure', artifactStore: 'none', mode: 'automatic', summary: 'low', complexity: 'not-complex' };
+const answers = { certainty: 'very-sure', artifactStore: 'none', mode: 'automatic', summary: 'low' };
 
 function checkpoint(root) {
   const request = { answers };
@@ -116,7 +116,7 @@ function appendUser(histories, sessionID, id, text) {
 function transferChild(root, targetID, mode = 'normal') {
   const pluginURL = pathToFileURL(join(process.cwd(), 'dist', 'opencode-plugin.js')).href;
   const checkpointURL = pathToFileURL(join(process.cwd(), 'dist', 'checkpoint.js')).href;
-  const script = `import plugin from ${JSON.stringify(pluginURL)};
+  const script = `import { createLegacyPlugin as plugin } from ${JSON.stringify(pluginURL)};
     import { CheckpointStore } from ${JSON.stringify(checkpointURL)};
     const root = process.argv[1], target = process.argv[2], mode = process.argv[3];
     const source = ${JSON.stringify(sourceID)}, run = ${JSON.stringify(runID)}, text = ${JSON.stringify(userText)};

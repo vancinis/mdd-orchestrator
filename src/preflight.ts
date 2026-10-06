@@ -2,7 +2,10 @@ import type { Answers } from './policy.js';
 import { preflight } from './kernel.js';
 import { objectWithKeys, parseAnswers, ValidationError } from './validation.js';
 
-export const ANSWER_FIELDS = Object.freeze(['certainty', 'artifactStore', 'mode', 'summary', 'complexity'] as const);
+export const ANSWER_FIELDS = Object.freeze(['certainty', 'artifactStore', 'mode', 'summary'] as const);
+// Accepted on input for backward compatibility with saved profiles and kernel callers, but never
+// asked and never scored: mdd-risk now judges complexity, after exploration, not this intake.
+const LEGACY_FIELDS = Object.freeze(['complexity'] as const);
 type Field = keyof Answers;
 type Choice = { label: string; description: string; token: string };
 /**
@@ -31,11 +34,6 @@ const fields: Record<Field, { header: string; question: string; choices: Choice[
     { label: 'Medio', token: 'medium', description: 'Resumen y cómo se realizó el trabajo.' },
     { label: 'Bajo', token: 'low', description: 'Un resumen corto del trabajo de la fase actual.' },
   ] },
-  complexity: { header: 'Complejidad', question: '¿Qué tan complejo es el trabajo pedido?', choices: [
-    { label: 'Muy complejo', token: 'very-complex', description: 'Alcance o complejidad técnica importante.' },
-    { label: 'Algo complejo', token: 'somewhat-complex', description: 'Algo de alcance o complejidad técnica.' },
-    { label: 'Poco complejo', token: 'not-complex', description: 'Trabajo chico y directo.' },
-  ] },
 };
 
 export type QuestionEnvelope = { questions: {
@@ -43,7 +41,7 @@ export type QuestionEnvelope = { questions: {
 }[] };
 
 export function parsePartialAnswers(value: unknown): Partial<Answers> {
-  const input = objectWithKeys(value, 'answers', ANSWER_FIELDS);
+  const input = objectWithKeys(value, 'answers', [...ANSWER_FIELDS, ...LEGACY_FIELDS]);
   const result: Record<string, string> = {};
   for (const key of ANSWER_FIELDS) {
     if (!Object.hasOwn(input, key)) continue;

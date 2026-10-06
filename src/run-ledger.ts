@@ -1,7 +1,7 @@
 import { LocalFiles } from './local-files.js';
 import { evidenceCoverage } from './reporting.js';
 import type { Evidence } from './reporting.js';
-import { MODEL_ROLES } from './settings.js';
+import { PHASES } from './policy.js';
 import type { Phase } from './policy.js';
 import { objectWithKeys, ValidationError } from './validation.js';
 
@@ -27,7 +27,6 @@ export const MAX_RUNS = 200;
 const GOAL_MAX = 300;
 const LIMIT_MAX = 300;
 const MAX_LIMITS = 4;
-const PHASES = MODEL_ROLES.filter((role): role is Phase => role !== 'orchestrator');
 const CONTROL = /[\x00-\x1f\x7f]/;
 
 export const RUN_STATES = Object.freeze(['complete', 'blocked'] as const);
