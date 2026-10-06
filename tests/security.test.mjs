@@ -124,3 +124,25 @@ test('security parser bounds and detaches its nested contract', async () => {
   assert.equal(parsed.coverage[0].inspected.length, 1);
   assert.throws(() => parseSecurityAssessment({ ...assessment(), findings: Array(33).fill(finding()) }));
 });
+
+for (const path of [' leading.js', 'trailing.js ', ' both.js ', ' parent/ child.js ', '\u00a0unicode.js\u00a0']) {
+  test(`security path parser preserves exact whitespace in ${JSON.stringify(path)}`, async () => {
+    const { parseSecurityAssessment } = await import('../dist/security.js');
+    const value = assessment();
+    value.findings[0].location.path = path;
+    assert.equal(parseSecurityAssessment(value).findings[0].location.path, path);
+    const result = check(value);
+    assert.equal(result.ok, true);
+    assert.equal(result.security.findings[0].location.path, path);
+  });
+}
+
+test('security path validation retains control, traversal and length bounds without trimming', async () => {
+  const { parseSecurityAssessment } = await import('../dist/security.js');
+  for (const path of ['', '/absolute.js', '../escape.js', 'dir/../escape.js', 'dir//file.js',
+    'dir\\file.js', 'C:/file.js', 'file\t', 'file\n', 'file\0', 'file\u007f', 'x'.repeat(1001)]) {
+    const value = assessment();
+    value.findings[0].location.path = path;
+    assert.throws(() => parseSecurityAssessment(value), undefined, JSON.stringify(path));
+  }
+});

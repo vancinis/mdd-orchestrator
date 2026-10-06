@@ -63,7 +63,11 @@ function location(value: unknown): SecurityLocation {
   const layer = choice(input.layer, 'security location.layer', SECURITY_LAYERS);
   const side = choice(input.side, 'security location.side', ['before', 'after'] as const);
   if (layer === 'untracked' && side !== 'after') throw new Error('Untracked security locations only have an after side.');
-  const path = shortText(input.path, 'security location.path', 1000);
+  // A path is an exact repository identity, not prose to trim or canonicalize.
+  const path = input.path;
+  if (typeof path !== 'string' || !path || path.length > 1000 || /[\x00-\x1f\x7f]/.test(path)) {
+    throw new Error('security location.path must be nonempty text of at most 1000 characters without control characters.');
+  }
   if (/^[\\/]|[:\\]/.test(path) || path.split('/').some(part => !part || part === '.' || part === '..')) {
     throw new Error('security location.path must be a repository-relative forward-slash path without traversal.');
   }
@@ -116,7 +120,7 @@ export const SECURITY_FIELD_SCHEMA = [
   'Copy runtime coverage and omissions, then disclose any additional inspection gaps. Each partial/unavailable layer needs a limitation. Layer and overall limitations: at most 16 nonempty single-line entries each, at most 1000 characters each.',
   'Assessment status: findings (complete with 1–32 findings), no-findings (complete with no findings), inconclusive (any partial coverage or limitation, with 0–32 known findings preserved). Inconclusive requires an explicit limitation; never hide findings because coverage is incomplete.',
   'Finding severity critical/high/medium/low; title at most 300 characters; evidence, attackConditions, impact and recommendation each nonempty single-line text of at most 2000 characters. IDs unique. Ground evidence in supplied source without exposing secrets.',
-  'Location side before/after (untracked only after); path repository-relative using forward slashes, at most 1000 characters, no traversal; lines inclusive positive safe integers with endLine >= startLine. locationID must appear under inspected in the same layer. Distinct revisions/sides use distinct runtime locationIDs; final binding validates path, side, lines and evidence.',
+  'Location side before/after (untracked only after); path repository-relative using forward slashes, at most 1000 characters, no traversal. Copy paths exactly, including leading/trailing spaces; never trim or normalize them. Lines inclusive positive safe integers with endLine >= startLine. locationID must appear under inspected in the same layer. Distinct revisions/sides use distinct runtime locationIDs; final binding validates path, side, lines and evidence.',
 ].join(' ');
 
 export function securityReportFormatLines(): string[] {

@@ -26,7 +26,7 @@ The user requested the actor, configuration in `mdd-ai config`, detailed finding
 | Forecast | 1,430–2,090 authored additions plus deletions, excluding generated output |
 | Delivery strategy | `ask-on-risk` |
 | Chain strategy | `stacked-to-main`, explicitly selected by user; no publication authorized |
-| Running authored count | SEC-1 commit +543/−15 (558 total, including tracking); corrective commit pending |
+| Running authored count | 611 committed authored changed lines including tracking: SEC-1 558 plus correction 53 |
 | Review switch | On, decided by global preference; candidate consent remains separate |
 | Last reviewed boundary | Starting boundary; no new candidate reviewed |
 | Memory mirror | Pending in detected project `mdd-orchestrator`; registered session uses `mdd` |
@@ -36,7 +36,7 @@ The approximately 400-line task heuristic is advisory. Keep coherent behavior, t
 ## Tasks and acceptance criteria
 
 - [x] **SEC-1 — Configurable actor and report contract.** Route: delegated, multi-file writer trigger. Standalone configurable packaged actor and bounded report checker implemented. Independent verification exposed telemetry model-role coupling; corrected admission to actual phases with regression tests and an independent passing recheck. Runtime audit dispatch remains intentionally unavailable until SEC-2/3.
-- [ ] **SEC-2 — Complete bounded implementation snapshot.** Route: delegated, preparation and multi-file writer triggers. Capture committed, staged, unstaged and untracked layers against a trustworthy base, including changes cancelled by later layers. Bound paths, bytes and evidence; expose omissions and reject detected races or unsafe reads. Verify committed-only scope, additions/deletions/renames, dirty layers, limits, unsafe paths and capture races. Forecast: +550–750 / −0.
+- [x] **SEC-2 — Complete bounded implementation snapshot.** Route: delegated, preparation and multi-file writer triggers. Immutable capture and final report binding cover committed/index/worktree/untracked layers, cancellations, changed ranges, bounded context, omissions and detectable races. Independent review found short-line evidence and whitespace-path reporting gaps; both corrected with behavioral RED/GREEN and independently passing rechecks. Footprint +1,180/−2, exceeding the advisory forecast to preserve security behavior and tests.
 - [ ] **SEC-3 — Authenticated standalone dispatch and isolation.** Route: delegated, multi-file writer trigger. Admit only an explicit authenticated native-user audit request, dispatch one bound foreground actor, enforce tool isolation and validate its snapshot-bound report. Document natural-language usage and separately authorized fixes. Verify bilingual requests, forged/synthetic/stale inputs, replay, forbidden tools, evidence binding, redaction, no automatic launch and unchanged workflow state. Forecast: +500–750 / −20–60.
 
 ## Verification
@@ -67,10 +67,14 @@ Closure checks: `npm run typecheck`, `npm run build`, `npm test`, `git diff --ch
 - SEC-1 native risk assessment returned `high/unassessable` because new files were not declared. Do not infer low risk; assess the exact committed work unit after its commit. Review outcome pending.
 - SEC-1 work-unit commit: `c592348b462e55c73a9ebf22325265251d982096`. Committed range assessed high (`hot_path/security`). Exact native preflight returned terminal `rdd_disabled`; no START, approval or mode toggle. Native outcome disabled/unmanaged; ordinary high-tier independent verification used, not native approval.
 - Independent verifier reran typecheck/build, focused 166/166 and diff checks. Medium candidate-caused finding: telemetry accepted `mdd-security` through `MODEL_ROLES`, but rollup parsing accepted only `PHASES`. A probe demonstrated accepted event followed by unreadable rollup.
-- Targeted correction +36/−3: telemetry phase admission now uses `PHASES`. Observed behavioral RED 24 passed/2 failed, GREEN/refactor 192/192; typecheck/build/full suite 1,085 passed/2 known skips/diff checks succeeded. Parent spot check 192/192. Independent re-verifier confirmed resolution, retained all eight valid phases and rejected standalone roles before any writes; its typecheck/build/192-test/diff checks passed. Corrective commit pending.
+- Targeted correction +36/−3: telemetry phase admission now uses `PHASES`. Observed behavioral RED 24 passed/2 failed, GREEN/refactor 192/192; typecheck/build/full suite 1,085 passed/2 known skips/diff checks succeeded. Parent spot check 192/192. Independent re-verifier confirmed resolution, retained all eight valid phases and rejected standalone roles before any writes; its typecheck/build/192-test/diff checks passed. Corrective commit: `96dedc16e5489091b1ef1e3274dd4360a911e8ac`.
 - No known baseline test failures have been established.
-- Future slice 1 contains SEC-1 commit and its pending targeted correction. No PR created or published.
+- Future slice 1 contains SEC-1 commit `c592348` and correction `96dedc1` (611 authored lines including tracking; coherent unit over advisory heuristic). No PR created or published.
+- SEC-2 observed initial behavioral RED 17 failures after successful stub build; initial GREEN 37 passed/1 Windows-native-symlink skip. Typecheck/build/full suite 1,122 passed/3 skips/diff checks succeeded. Parent repeated snapshot runner 37 passed/1 skip; independent verifier repeated checks and found two deterministic reportability gaps.
+- SEC-2 correction observed RED 13 passed/8 failed, GREEN 21 passed. Final typecheck/build/full suite 1,131 passed/3 known skips and security+snapshot 85 passed/1 skip succeeded. Independent re-verifier reproduced both fixes and eight negative probes, with typecheck/build/21 targeted tests/diff check passed. Parent spot check repeated the exact targeted runner: 21 passed.
+- SEC-2 omitted coverage is explicit: ignored untracked files, unsupported binary/link/submodule inputs, nearby context only, heuristic credential redaction and detectable rather than globally atomic races. Oversized scope refuses, never silently narrows. Snapshot 24,000 bytes; composed prompt 38,000 bytes. Inferred HEAD-only baseline refuses.
+- SEC-2 committed work-unit identity pending. Current untracked assessment returned high/unassessable; independent high-tier verification completed. Native lifecycle remains stopped disabled/unmanaged without automatic retries or mode toggles.
 
 ## Next step
 
-Commit the independently verified SEC-1 correction, then delegate SEC-2 bounded snapshot capture with exact allowed paths. User selected `stacked-to-main`; no publication. Native review stopped disabled; do not reactivate automatically. Reconcile tracking and mirror after each observed task outcome.
+Commit SEC-2, record its identity and tier, then delegate SEC-3 authenticated standalone dispatch and permission isolation with exact allowed paths. User selected `stacked-to-main`; no publication. Native review stopped disabled; do not reactivate automatically. Mirror in the detected project remains pending because of the registered-session project mismatch; preserve local progress.
