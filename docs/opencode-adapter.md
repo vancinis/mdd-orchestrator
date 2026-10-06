@@ -709,6 +709,20 @@ their own latest message (`mdd_reset` with `userText`), and a question or coordi
 died holding the run's writer is released the same way. A complete run closes itself when the
 user starts a new objective in that conversation; its record is set aside, not deleted.
 
+Releasing an interrupted attempt keeps the run. `nextAction` for `recovery-blocked` is
+`mdd_reset` with `scope: 'phase'` — with the user's `userText` unless OpenCode already reports
+the subagent `stopped`, and no reset at all while it reports it `running` — so "it was
+interrupted, continue" readies the interrupted phase again with every completed phase kept and no
+new preflight. `scope: 'run'` is the fallback only when MDD refuses the phase reset because the
+run cannot be restored.
+
+A run keeps the route it started with. The checkpoint's request records the evaluated phases
+(`request.route`), and replay follows them rather than re-evaluating the answers under the current
+routing policy, which may route the same answers differently (complexity stopped scoring, for
+example). A recorded route must be one the policy can choose. A checkpoint written before routes
+were recorded is replayed under the current policy and, when its history does not fit that
+route, on the one known route its history fits; when more than one fits, it stays unreadable.
+
 A checkpoint write that keeps failing (a scanner holding the file, a full disk) is retried and
 then **degrades** the run instead of stopping it: the progress marker records `resumable: false`,
 the stale checkpoint is withdrawn, and the live run carries on with the marker as its

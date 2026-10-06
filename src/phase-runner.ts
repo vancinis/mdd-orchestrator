@@ -1080,7 +1080,9 @@ export class PhaseRunner {
     this.#inheritedCalls.delete(runtime.sessionID);
     const run: Run = {
       id, runtime: { ...runtime }, workflow, phase: first.phase, requirements,
-      ...(this.options.checkpoint ? { checkpointRequest: structuredClone(request.preflight), checkpointSequence: -1 } : {}),
+      // The persisted request names the route this run started on, so replay after a restart
+      // follows it even when a later routing policy would choose another one.
+      ...(this.options.checkpoint ? { checkpointRequest: Workflow.recordedRequest(request.preflight, workflow), checkpointSequence: -1 } : {}),
       // A confirmed replacement supersedes the previous run's checkpoint in this same parent.
       ...(previous ? { replacesRunID: previous.id } : {}),
       memory, artifacts: new ArtifactStore(runtime.directory, workflow.snapshot().answers.artifactStore, memory),
