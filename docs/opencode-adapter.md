@@ -99,10 +99,12 @@ end-to-end execution or interactive permission/UI behavior.
 
 ### Bounded worker authority (internal host capability)
 
-**Production dispatch remains serial.** The captured `workers.enabled` preference alone never
-authorizes concurrent writes. PW-3 adds durable batch authority; PW-4 must wire native child
-edit/tool confinement before the production adapter supplies `workerCapability: { confined: true }`.
-The capability is a host constructor option, not a tool argument or an actor-controlled flag.
+**Production exploration supports read-only batches; Apply remains serial.** The captured
+`workers.enabled` preference alone never authorizes concurrent writes. Production supplies only
+`workerCapability: { phase: 'mdd-explore', readOnly: true }`. The old `{ confined: true }` constructor
+field remains for legacy synthetic Apply tests; production does not supply it. PW-4A must establish
+formatter-free editing and a separately scoped Apply capability before enabling native Apply.
+Capabilities are internal host attestations, never tool arguments or actor-controlled flags.
 `runner.workerAssignment({ sessionID, callID })` returns a detached assigned task/scope only for
 an admitted pending member. The confinement hook must bind that call to the actual native child,
 revalidate filesystem aliases, enforce read/write scope on native edits, and refuse uncontrolled
@@ -128,7 +130,104 @@ legacy format. Missing captured policy keeps old checkpoints serial, even on a c
 If a host loses confinement capability after partial completion, restoration refuses whole-phase
 replay. Complete member reports remain in the checkpoint even when the aggregate artifact uses
 size-bounded summaries and digests. Explicit Verify rework starts a new implementation pass.
-Read-only investigations capture the preference but still dispatch singularly in this unit.
+Read-only investigations use the same plural status surfaces and member/owner CAS model, with
+separate durable exploration records so contextual work cannot advance or overwrite the main plan.
+
+#### Explicit read-only exploration
+
+Pass `exploration: { workItems: [...] }` to `mdd_start`, or `workItems: [...]` to
+`mdd_contextual_explore`. The main route must already begin with `mdd-explore`; metadata never
+adds a phase. Exactly two complete independent items qualify. Each names a distinct purpose:
+
+```json
+{
+  "id": "routing",
+  "purpose": "Inspect the existing routing boundary",
+  "dependsOn": [],
+  "independent": true,
+  "complete": true,
+  "reads": [{ "root": "/work/project", "files": ["src/router.ts"] }]
+}
+```
+
+Roots must be existing local absolute paths; file entries are exact existing root-relative files,
+not directories, globs, case aliases, links or remote targets. Separate local repository roots are
+allowed without moving the native child's project/location. Declarations narrow reads, never
+grant user authorization or `external_directory` permission. Shared reads are safe; declared
+dependencies or missing independence/scope attestations fall back to one phase actor.
+
+Before every action, a bounded gate binds parent session, assistant message, native call and
+admitted owner epoch to the child through `session.tool.progress`. Native child parent/project/
+location must match. No role, arrival order, prompt or history reconstruction grants authority.
+Only native `read` on a declared file and `grep` with `literal: true` on one declared file pass;
+unknown fields, directory reads, glob traversal, writes, edits, patches, shell, execution,
+formatting, control, recursive dispatch and custom/MCP tools deny. Nested `AGENTS.md` files that
+native read would load must also be declared. A missed binding deadline, conflicting progress,
+lost stream or reload refuses action; instructions are not the enforcement boundary.
+
+Member outcomes persist in `.mdd/checkpoint-SHA256("exploration:" + parentID).json` before owner
+settlement. Replacing a settled exploration archives its full record under
+`.mdd/checkpoint-SHA256("exploration-result:" + explorationID).json`, including member reports
+omitted from a size-bounded aggregate. Completion order cannot change the aggregate ordering.
+Only all-member success produces one main phase result or one contextual finding. Failures,
+transport/unknown outcomes
+and persistence faults retain successes and block. Restart never restores live progress authority
+or automatically replays a member. Unresolved exploration is data-only: inspect its record and
+native children, then use a fresh parent rather than guessing or reconstructing a launch.
+
+#### Pinned progress provenance and native edit safety blocker
+
+Native Apply enablement remains **blocked**. Run
+`node tests/opencode-v2-workers-host-smoke.mjs` after building for the explicit local probe.
+It loads the actual production V2 plugin on a private **2.0.22** host, drives `mdd_start`,
+`mdd_status` and native foreground Plan using a test-owned loopback model fixture, and refuses
+a child read with an `execute.before` hook. No external model or ambient credential is used.
+Its observed running parent subagent has `metadata: {}` at the first child action. This is
+expected, not evidence that native provenance is unavailable. The public ephemeral event
+`session.tool.progress` carries the parent `sessionID`, exact `assistantMessageID` and native
+call `id`, with the child in `metadata.sessionID`. The native executor awaits progress publication
+before prompting the child. The probe verifies the exact native correlation on the real host.
+Plugin subscription processing is asynchronous: a production gate must await a bounded trusted
+binding, verify child parent/project/location and the admitted owner epoch, and refuse missing,
+stale, conflicting or stream-lost evidence. Ephemeral progress is not replayable authority.
+Completion's structured `sessionID` is too late for pre-action confinement. Actor names,
+arrival order, prompt text and the first pending slot are not trusted substitutes.
+
+The probe checks clean configuration ancestors, redirects local-runtime discovery to its own
+fixture, and removes other providers. It cleans up its private host/provider and temporary HOME.
+On Windows the per-user temp path may inherit `~/.opencode`; the probe uses a test-owned
+system-temp child only after verifying clean ancestors. It must fail rather than load user plugins.
+
+That original probe proves progress provenance and read refusal, not worker overlap. Run
+`node tests/opencode-v2-workers-host-smoke.mjs --exploration-workers` for actual production
+foreground exploration: main/contextual batches, a two-live-child barrier, reversed completion,
+own-scope reads, forbidden-tool refusal, delayed/dropped/conflicting progress, external-directory
+permission denial and disabled serial fallback. The fault scenarios wrap only event delivery,
+not the production motor or fences.
+Synthetic tests separately cover durable failures/restart and alias/schema denial. Neither proof
+establishes native editing confinement, arbitrary-script sandboxing or Apply overlap.
+
+Run `node tests/opencode-v2-workers-host-smoke.mjs --formatter-boundary` for the explicit
+**expected safety RED**, not a passing worker test. Its hostile local model fixture attempts a
+native edit of a test-owned file while a deny-all `ctx.shell` hook is installed. On **2.0.22**
+the edit completes, the file changes and the test-owned formatter writes its marker, with zero
+shell-hook invocations. The native formatter calls `AppProcess.Service.run` directly, not the
+shell tool or shell hook. The public plugin context has no formatter gate or per-edit skip option.
+The assertion fails and cleanup still removes the private processes and test-owned files.
+Replacing the native executor with direct filesystem code would bypass the path-specific native
+permission assertions embedded in that executor; it is not an acceptable confinement fix.
+Production Apply capability stays absent. No arbitrary-script sandbox is claimed.
+
+The formatter bypass does not block the mutation-denying read-only exploration fence.
+Legacy investigation remains singular and never invents unrelated splits.
+
+If a capable adapter emits plural `tasks`/`nextAction.calls`, submit all exact objects in one
+grouped native foreground tool-call message in provider order. Never use a Code Mode
+`Promise.all` wrapper (`subagent` is `codemode:false`) or background dispatch. A singular
+surface remains one call. Wait for all outcomes before the one aggregate and sequential next
+phase; successful members cannot be replayed to recover an uncertain sibling.
+Separately authorized repositories remain read-only targets without moving the child workspace,
+and still require native `external_directory` permission. No remote probe/access is authorized.
 
 ### Legacy setup-only recovery
 

@@ -59,6 +59,7 @@ test('help is standalone, succeeds, and identifies dry-run and exit semantics', 
   assert.equal(result.stderr, '');
   assert.match(result.stdout, /simulación: la CLI no ejecuta ninguna fase/);
   assert.match(result.stdout, /Códigos de salida: 0/);
+  assert.match(result.stdout, /mdd-ai workers status \| on \| off/);
 });
 
 for (const args of [

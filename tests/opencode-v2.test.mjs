@@ -15,14 +15,17 @@ test('plural task payloads map native arguments without a wrapper or single-memb
   assert.deepEqual(payload.tasks, tasks.map(({ subagent_type, ...rest }) => ({ ...rest, agent: subagent_type })));
   assert.deepEqual(payload.nextAction.calls, payload.tasks); assert.equal(payload.nextAction.tool, 'subagent');
   assert.match(payload.nextAction.why, /each exact object/);
+  assert.match(payload.nextAction.why, /one grouped native foreground tool-call message in provider order/);
+  assert.match(payload.nextAction.why, /Never use Code Mode, Promise\.all or background/);
 });
 
 // Public host fakes follow @opencode/plugin/client/core 2.0.22, not the V1 hooks.
-async function fixture(t, completeProfile = true) {
+async function fixture(t, completeProfile = true, workersEnabled = true) {
   isolateHome(t);
   const root = await mkdtemp(join(tmpdir(), 'mdd-v2-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const settings = defaultSettings();
+  settings.workers.enabled = workersEnabled;
   settings.profiles.default.answers = completeProfile ? { ...answers } : {};
   settings.profiles.default.models['mdd-plan'] = 'openai/test-model#high';
   saveGlobalSettings(settings);
@@ -85,6 +88,33 @@ test('V2 setup registers native tools, model variants and ordered isolation perm
   assert.deepEqual(f.agents.find(agent => agent.id === 'mdd-apply').permissions.slice(-3).map(rule => [rule.action, rule.effect]),
     [['subagent', 'deny'], ['skill', 'deny'], ['mdd_check_report', 'allow']]);
   assert.equal(f.agents.find(agent => agent.id === 'general').permissions.at(-1).effect, 'deny');
+});
+
+for (const enabled of [true, false]) test(`production V2 stays serial without trusted confinement (workers=${enabled})`, async t => {
+  const f = await fixture(t, true, enabled);
+  f.user('Implement the requested change.');
+  await f.call('mdd_start', { requirements: 'Implement the requested change.' });
+  const ready = await f.call('mdd_status', {});
+  const call = f.begin('subagent', ready.task);
+  await f.toolHooks.get('execute.before')(call);
+  const trace = traceFixture(join(f.root, 'one.txt'), 'one');
+  trace.deliverables = ['one', 'two'].map(id => ({ ...trace.deliverables[0], id, path: join(f.root, `${id}.txt`),
+    dependsOn: [], parallel: { complete: true, reads: [], writes: [`${id}.txt`] } }));
+  const text = reportDocument({ phase: 'mdd-plan', runID: ready.runID, callID: call.id, outcome: 'passed',
+    evidenceSummary: 'Two explicitly independent tasks.', artifact: 'Implement the two boundaries.', ...trace });
+  await f.toolHooks.get('execute.after')({ ...call, status: 'completed', result: {
+    output: { sessionID: 'plan-child', status: 'completed', output: text },
+    content: `<subagent sessionID="plan-child" state="completed">\n${text}\n</subagent>`,
+  } });
+  const apply = await f.call('mdd_status', {});
+  assert.equal(apply.task.agent, 'mdd-apply');
+  assert.equal(apply.tasks, undefined);
+  assert.equal(apply.nextAction.calls, undefined);
+  const first = f.begin('subagent', apply.task);
+  await f.toolHooks.get('execute.before')(first);
+  const duplicate = f.begin('subagent', apply.task);
+  await assert.rejects(f.toolHooks.get('execute.before')(duplicate));
+  assert.equal((await f.call('mdd_status', {})).state, 'await-result');
 });
 
 test('V2 history preserves native authored provenance, tool IDs, streaming calls and moved workspace boundaries', () => {

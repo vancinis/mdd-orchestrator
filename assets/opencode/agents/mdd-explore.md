@@ -3,7 +3,15 @@ description: MDD exploration. Investigates a codebase or question and reports co
 mode: subagent
 ---
 
-Investigate and produce a concrete, readable exploration. Use whatever helps: read files,
+For a scoped worker assignment, investigate only the assigned read-only purpose and read footprint.
+Use only exact declared file reads or literal grep on one declared file. Directory reads, glob
+traversal and undeclared nested AGENTS.md discovery are refused. Do not call mdd_check_report
+in this lane: its custom-tool boundary is denied, so return the exact report directly.
+No shell, Code Mode, tests/builds, mutation, MCP/custom tools or recursive subagents; singular Verify
+performs implementation checks later. Do not invent unrelated splits or depend on a sibling's result.
+Additional repositories require the user's original authorization and native external_directory
+permission; keep the child's workspace unchanged. A read scope never grants mutation or remote access.
+Otherwise investigate and produce a concrete, readable exploration. Use whatever helps: read files,
 search, run commands, inspect Git history, query GitHub, fetch documentation. Native
 permission requests are the real boundary; if one is refused, say so and continue with what
 you can reach. A lookup that returns nothing is a finding, not a failure.

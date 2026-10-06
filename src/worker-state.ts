@@ -4,6 +4,11 @@ import type { Deliverable } from './phase-evidence.js';
 import { parsePhaseReport } from './phase-report.js';
 import { scopesConflict } from './worker-batch.js';
 import { createHash } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
+import { explorationItems, type ExplorationWorkItem } from './worker-batch.js';
+import type { CheckpointStore } from './checkpoint.js';
+import type { RunOwnershipStore } from './run-ownership.js';
+import type { ReadAssignment } from './worker-fence.js';
 
 /** Durable evidence, not live handles or authorization to replay a child. */
 export type WorkerMember = {
@@ -13,6 +18,189 @@ export type WorkerState = {
   completed: { taskID: string; callID: string; text: string }[];
   batch?: { id: string; members: WorkerMember[]; blocked?: string };
 };
+
+type ReadTask = { description: string; subagent_type: string; prompt: string };
+export type ExplorationRecord = {
+  version: 1; id: string; ownerRunID: string; parent: string; directory: string; worktree: string;
+  kind: 'main' | 'contextual'; sequence: number; state: 'ready' | 'await-result' | 'blocked' | 'aggregating' | 'settled';
+  items: ExplorationWorkItem[]; workers: { enabled: true }; workerState: WorkerState;
+  tasks: { taskID: string; token: string; args: ReadTask; dispatchedArgs?: ReadTask; ownerEpoch?: number }[];
+  aggregate?: string;
+};
+
+export function explorationReport(text: string, callID?: string) {
+  if (!text.trim() || Buffer.byteLength(text) > 20000) throw new Error('Invalid exploration worker report size.');
+  const result = parsePhaseReport(text, 'mdd-explore');
+  if (result.phase !== undefined && result.phase !== 'mdd-explore' || result.callID !== undefined && result.callID !== callID ||
+      !['passed', 'failed'].includes(String(result.outcome)) || typeof result.evidenceSummary !== 'string' ||
+      !result.evidenceSummary.trim() || Buffer.byteLength(result.evidenceSummary) > 2000 ||
+      typeof result.artifact !== 'string' || !result.artifact.trim() || Buffer.byteLength(result.artifact) > 16000 ||
+      /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(result.artifact + result.evidenceSummary) ||
+      /## Acceptance and plan links/.test(result.artifact) || executed(result.checks).length ||
+      result.changes !== undefined && (!Array.isArray(result.changes) || result.changes.length))
+    throw new Error('Exploration worker report is not read-only or not bound to its exact call.');
+  return result;
+}
+
+/** Checkpoint data never restores live native authority or permits replay. */
+export function validateExplorationRecord(value: unknown): ExplorationRecord {
+  const item = objectWithKeys(value, 'exploration checkpoint', ['version', 'id', 'ownerRunID', 'parent', 'directory', 'worktree',
+    'kind', 'sequence', 'state', 'items', 'workers', 'workerState', 'tasks', 'aggregate']);
+  if (item.version !== 1 || !['main', 'contextual'].includes(String(item.kind)) ||
+      !['ready', 'await-result', 'blocked', 'aggregating', 'settled'].includes(String(item.state)) ||
+      !Number.isSafeInteger(item.sequence) || (item.sequence as number) < 0 ||
+      !['id', 'ownerRunID', 'parent'].every(key => id(item[key])) ||
+      !['directory', 'worktree'].every(key => typeof item[key] === 'string' && (item[key] as string).length > 0 &&
+        Buffer.byteLength(item[key] as string) <= 2048 && !/[\x00-\x1f]/.test(item[key] as string)) ||
+      !isDeepStrictEqual(item.workers, { enabled: true })) throw new Error('Invalid exploration checkpoint identity.');
+  const items = explorationItems(item.items);
+  if (items.length !== 2 || new Set(items.map(item => item.id)).size !== 2 ||
+      items.some(item => item.complete !== true || item.independent !== true || item.dependsOn?.length !== 0 || !item.reads))
+    throw new Error('Invalid exploration declarations.');
+  if (!Array.isArray(item.tasks) || item.tasks.length !== 2) throw new Error('Invalid exploration dispatch data.');
+  const tasks = item.tasks.map((value, index) => {
+    const task = objectWithKeys(value, 'exploration dispatch', ['taskID', 'token', 'args', 'dispatchedArgs', 'ownerEpoch']);
+    if (task.taskID !== items[index]!.id || !id(task.token) || !task.token.startsWith('mdd:dispatch:') || task.args === undefined)
+      throw new Error('Invalid exploration dispatch binding.');
+    for (const key of ['args', 'dispatchedArgs']) if (task[key] !== undefined) {
+      const args = objectWithKeys(task[key], 'exploration task', ['description', 'subagent_type', 'prompt']);
+      if (args.subagent_type !== 'mdd-explore' || typeof args.description !== 'string' || typeof args.prompt !== 'string' ||
+          Buffer.byteLength(args.prompt) > 48000) throw new Error('Invalid exploration task.');
+    }
+    if (task.ownerEpoch !== undefined && (!Number.isSafeInteger(task.ownerEpoch) || (task.ownerEpoch as number) < 0))
+      throw new Error('Invalid admitted owner epoch.');
+    return task;
+  });
+  const state = objectWithKeys(item.workerState, 'exploration workers', ['completed', 'batch']);
+  if (!Array.isArray(state.completed) || state.completed.length > 2) throw new Error('Invalid exploration evidence.');
+  const calls = new Set<string>();
+  let ordinal = -1;
+  for (const value of state.completed) {
+    const member = objectWithKeys(value, 'exploration success', ['taskID', 'callID', 'text']);
+    const index = items.findIndex(item => item.id === member.taskID);
+    if (index <= ordinal || !id(member.callID) || calls.has(member.callID) || typeof member.text !== 'string' ||
+        explorationReport(member.text, member.callID).outcome !== 'passed') throw new Error('Invalid exploration success binding.');
+    ordinal = index; calls.add(member.callID);
+  }
+  const batch = objectWithKeys(state.batch, 'exploration batch', ['id', 'members', 'blocked']);
+  if (!id(batch.id) || !Array.isArray(batch.members) || batch.members.length !== 2 ||
+      batch.blocked !== undefined && !id(batch.blocked)) throw new Error('Invalid exploration batch.');
+  const admitted = new Set<string>();
+  for (const [index, value] of batch.members.entries()) {
+    const member = objectWithKeys(value, 'exploration member', ['taskID', 'state', 'callID', 'text']);
+    if (member.taskID !== items[index]!.id || !['ready', 'pending', 'settled', 'uncertain'].includes(String(member.state)) ||
+        member.state === 'ready' && (member.callID !== undefined || tasks[index]!.dispatchedArgs !== undefined) ||
+        member.state !== 'ready' && (!id(member.callID) || admitted.has(member.callID) || tasks[index]!.dispatchedArgs === undefined) ||
+        member.text !== undefined && (typeof member.text !== 'string' || !explorationReport(member.text, member.callID as string)))
+      throw new Error('Invalid exploration member binding.');
+    if (member.callID) admitted.add(member.callID as string);
+    const success = state.completed.find(value => (value as { taskID: string }).taskID === member.taskID) as
+      { taskID: string; callID: string; text: string } | undefined;
+    if (success && (member.state !== 'settled' || member.callID !== success.callID || member.text !== success.text))
+      throw new Error('Exploration success contradicts its exact settled member.');
+    if (member.state === 'settled' && typeof member.text !== 'string') throw new Error('Settled exploration needs its durable member outcome.');
+  }
+  if (['aggregating', 'settled'].includes(String(item.state)) && (state.completed.length !== 2 ||
+      batch.members.some(value => (value as { state: string }).state !== 'settled') || batch.blocked || item.aggregate === undefined))
+    throw new Error('Exploration aggregate cannot precede complete member settlement.');
+  if (item.aggregate !== undefined && (typeof item.aggregate !== 'string' || !explorationReport(item.aggregate)))
+    throw new Error('Invalid exploration aggregate.');
+  return structuredClone(value) as ExplorationRecord;
+}
+
+/** Uses PW-3 member states and owner CAS; only the aggregate touches the sequential workflow. */
+export class ExplorationWorkers {
+  constructor(readonly record: ExplorationRecord, readonly checkpoint: CheckpointStore, readonly ownership: RunOwnershipStore) {}
+  persist(): void { this.record.sequence++; this.checkpoint.writeExploration(this.record.parent, this.record); }
+  status() {
+    const record = this.record;
+    return { state: record.state === 'aggregating' ? 'await-result' : record.state, phase: 'mdd-explore',
+      explorationID: record.id, contextual: record.kind === 'contextual', workers: record.workers,
+      workerProgress: { completed: record.workerState.completed.map(member => member.taskID),
+        members: record.workerState.batch!.members.map(({ text: _text, ...member }) => member), blocked: record.workerState.batch!.blocked },
+      tasks: ['ready', 'await-result'].includes(record.state) && !record.workerState.batch!.blocked
+        ? record.tasks.filter(task => !task.dispatchedArgs).map(task => ({ ...task.args, prompt: task.token })) : undefined };
+  }
+  assignment(callID: string): ReadAssignment | undefined {
+    const member = this.record.workerState.batch!.members.find(member => member.callID === callID);
+    const task = this.record.tasks.find(task => task.taskID === member?.taskID);
+    const owner = this.ownership.read(this.record.ownerRunID);
+    if (!member || member.state !== 'pending' || !task || task.ownerEpoch === undefined ||
+        owner?.ownerSessionID !== this.record.parent || owner.state !== 'reserved' || owner.directory !== this.record.directory ||
+        owner.worktree !== this.record.worktree || owner.epoch < task.ownerEpoch || owner.callID !== this.record.workerState.batch!.id ||
+        owner.workers?.find(member => member.callID === callID)?.state !== 'pending') return undefined;
+    return { phase: 'mdd-explore', taskID: member.taskID, ownerEpoch: task.ownerEpoch,
+      reads: structuredClone(this.record.items.find(item => item.id === member.taskID)!.reads!) };
+  }
+  async before(callID: string, args: unknown, inspect: () => Promise<void>, start: (batchID: string) => void): Promise<ReadTask> {
+    const record = this.record, batch = record.workerState.batch!;
+    const task = record.tasks.find(task => isDeepStrictEqual(args, { ...task.args, prompt: task.token }));
+    if (!['ready', 'await-result'].includes(record.state) || batch.blocked || !id(callID) || !task || task.dispatchedArgs ||
+        batch.members.some(member => member.callID === callID)) throw new Error('Exploration call does not match an unconsumed native handle.');
+    try {
+      let owner = this.ownership.read(record.ownerRunID)!;
+      if (!batch.members.some(member => member.callID)) {
+        owner = this.ownership.reserveWorkers(record.ownerRunID, record.parent, batch.id, record.items.map(item => item.id), owner.epoch);
+        start(batch.id);
+      }
+      owner = this.ownership.admitWorker(record.ownerRunID, record.parent, batch.id, task.taskID, callID, owner.epoch);
+      const member = batch.members.find(member => member.taskID === task.taskID)!;
+      member.callID = callID; member.state = 'pending'; task.ownerEpoch = owner.epoch;
+      task.dispatchedArgs = { ...task.args, prompt: `${task.args.prompt}\nNative callID=${JSON.stringify(callID)}` };
+      record.state = 'await-result'; this.persist();
+      await inspect();
+      if (!this.assignment(callID)) throw new Error('Exploration admission lost its exact owner.');
+      return structuredClone(task.dispatchedArgs);
+    } catch (error) { this.block(error); throw error; }
+  }
+  block(error: unknown): void {
+    this.record.state = 'blocked';
+    this.record.workerState.batch!.blocked = String(error instanceof Error ? error.message : error).slice(0, 256);
+    this.persist();
+  }
+  async after(callID: string, args: unknown, inspect: () => Promise<string>, stopped: () => Promise<boolean>): Promise<string | undefined> {
+    const record = this.record, batch = record.workerState.batch!;
+    const member = batch.members.find(member => member.callID === callID);
+    const task = record.tasks.find(task => task.taskID === member?.taskID);
+    if (!member || member.state !== 'pending' || !task || !isDeepStrictEqual(task.dispatchedArgs, args))
+      throw new Error('Exploration result does not match a pending exact dispatch.');
+    try {
+      const text = await inspect();
+      if (!await stopped()) throw new Error('Exploration child termination is unknown.');
+      const report = explorationReport(text, callID);
+      if (report.runID !== undefined && report.runID !== record.ownerRunID) throw new Error('Exploration report names another run.');
+      if (!this.assignment(callID)) throw new Error('Exploration owner changed before result admission.');
+      member.text = text; member.state = 'settled';
+      if (report.outcome === 'passed') {
+        record.workerState.completed.push({ taskID: member.taskID, callID, text });
+        record.workerState.completed.sort((a, b) => record.items.findIndex(item => item.id === a.taskID) - record.items.findIndex(item => item.id === b.taskID));
+      } else { record.state = 'blocked'; batch.blocked = 'A member failed; successful evidence is retained. No automatic replay.'; }
+      this.persist();
+      const owner = this.ownership.read(record.ownerRunID)!;
+      this.ownership.settleWorker(record.ownerRunID, record.parent, batch.id, callID, owner.epoch);
+    } catch (error) {
+      if (member.state === 'pending') member.state = 'uncertain';
+      this.block(error); throw error;
+    }
+    if (batch.members.some(member => member.state !== 'settled') || batch.blocked) return;
+    const parts = record.items.map(item => {
+      const member = record.workerState.completed.find(member => member.taskID === item.id)!;
+      return { item, report: explorationReport(member.text, member.callID) };
+    });
+    const full = parts.map(({ item, report }) => `## ${item.purpose}\n\n${report.artifact}`).join('\n\n');
+    const artifact = Buffer.byteLength(full) <= 16000 ? full : parts.map(({ item, report }) =>
+      `## ${item.purpose}\n\n${report.evidenceSummary}\n\nComplete member evidence is retained in the exploration checkpoint.`).join('\n\n');
+    record.aggregate = JSON.stringify({ outcome: 'passed', evidenceSummary: 'Completed both independent read-only investigations.', artifact,
+      concerns: parts.flatMap(({ report }) => Array.isArray(report.concerns) ? report.concerns : []).slice(0, 8) });
+    record.state = 'aggregating'; this.persist();
+    return record.aggregate;
+  }
+  finish(): void {
+    this.record.state = 'settled'; this.persist();
+    const owner = this.ownership.read(this.record.ownerRunID)!;
+    this.ownership.release(this.record.ownerRunID, this.record.parent, this.record.workerState.batch!.id, owner.epoch);
+  }
+}
 
 function id(value: unknown): value is string {
   return typeof value === 'string' && !!value.trim() && Buffer.byteLength(value) <= 256 && !/[\x00-\x1f]/.test(value);

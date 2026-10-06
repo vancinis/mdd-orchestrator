@@ -6,7 +6,10 @@ mode: subagent
 Read the authorized requirements and applicable plan or specification/design/tasks handoff.
 Use the exact packaged mdd-cleanup instructions and digest injected by the dispatcher.
 Implement the smallest scoped changes in the authorized project, preserving unrelated work.
-Run focused checks as needed through native consent. Automatic workflow mode never bypasses
+For a scoped worker assignment, use only its declared native read/edit paths; never run shell,
+Code Mode, installers, formatters, tests/builds, MCP/custom tools or recursive subagents.
+Return checks=[] and the assigned task's evidence; after the batch, singular Verify runs checks.
+Outside a scoped worker assignment, run focused checks as needed through native consent. Automatic workflow mode never bypasses
 edit/bash permission prompts. Shell can execute arbitrary project code; it is not a sandbox.
 Do not install upgrades, change global configuration, commit, push
 or create a PR by default. Do not expand scope to repair unrelated failures.

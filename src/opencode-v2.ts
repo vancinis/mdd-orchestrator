@@ -8,6 +8,7 @@ import { PHASES } from './policy.js';
 import { loadGlobalSettings } from './global-settings.js';
 import { collapsedPrompt, COLLAPSE_MIN_BYTES } from './dispatch-transcript.js';
 import { DISPATCH_HANDLE_PREFIX } from './phase-runner.js';
+import { WorkerFence, type WorkerHost } from './worker-fence.js';
 
 const COORDINATOR = 'mdd-orchestrator';
 /** Every actor with a configurable model: the eight workflow phases plus `mdd-risk`. */
@@ -53,7 +54,7 @@ export function v2Payload(text: string): string {
     if (next.args) next.args = nativeTask(next.args);
     if (Array.isArray(next.calls)) next.calls = next.calls.map(nativeTask);
     next.why = Array.isArray(next.calls)
-      ? 'Call each exact object once through the native foreground subagent tool. These members share one batch; wait for all results and pass every dispatch handle unchanged.'
+      ? 'Call each exact object once in one grouped native foreground tool-call message in provider order. Never use Code Mode, Promise.all or background. These members share one batch; wait for all results and pass every dispatch handle unchanged.'
       : 'Call the native subagent tool once, foreground, with exactly these three arguments. Pass the dispatch handle unchanged.';
   }
   return JSON.stringify(value);
@@ -137,6 +138,7 @@ export async function setupV2(ctx: Plugin.Context, createMotor: LegacyPlugin): P
   const statuses = new Map<string, { type: string }>();
   const seen = new Set<string>();
   const controller = new AbortController();
+  const workerHost: WorkerHost = { fence: new WorkerFence(directory, ctx.location.project.id) };
   const history = async (id: string, signal?: AbortSignal) => {
     const options = signal ? { signal } : undefined;
     const session = await ctx.session.get({ sessionID: id }, options);
@@ -147,7 +149,7 @@ export async function setupV2(ctx: Plugin.Context, createMotor: LegacyPlugin): P
   };
   // A small protocol adapter, not an HTTP client: calls stay on this exact host (including remote/standalone servers).
   const input = {
-    directory, worktree, project: { id: ctx.location.project.id },
+    directory, worktree, project: { id: ctx.location.project.id }, workerHost,
     client: { session: {
       get: async (options: { path: { id: string }; signal: AbortSignal }) => {
         seen.add(options.path.id);
@@ -196,6 +198,7 @@ export async function setupV2(ctx: Plugin.Context, createMotor: LegacyPlugin): P
       async execute(args, context) {
         await settleAgentPolicy();
         const session = await ctx.session.get({ sessionID: context.sessionID }, { signal: context.signal });
+        await workerHost.fence.guard(session, name, args, !!session.parentID && !!workerHost.protectedParent?.(session.parentID));
         if (session.location.directory !== directory || session.projectID !== ctx.location.project.id)
           throw new Error('Native MDD tool context differs from its plugin location.');
         const output = await definition.execute(args, { ...context, callID: context.id, abort: context.signal, directory, worktree } as never);
@@ -204,8 +207,10 @@ export async function setupV2(ctx: Plugin.Context, createMotor: LegacyPlugin): P
     });
   });
   await ctx.tool.hook('execute.before', async event => {
-    const call = { sessionID: event.sessionID, callID: event.id, tool: event.tool === 'subagent' ? 'task' : event.tool };
+    const call = { sessionID: event.sessionID, messageID: event.messageID, callID: event.id, tool: event.tool === 'subagent' ? 'task' : event.tool };
     const session = await ctx.session.get({ sessionID: event.sessionID });
+    await workerHost.fence.guard(session, event.tool, event.input,
+      !!session.parentID && !!workerHost.protectedParent?.(session.parentID));
     if (session.location.directory !== directory || session.projectID !== ctx.location.project.id) return;
     if (session.parentID) await hooks.event?.({ event: { type: 'session.created', properties: { info: session } } } as never);
     if (event.tool === 'subagent' && event.agent === COORDINATOR) {
@@ -226,8 +231,36 @@ export async function setupV2(ctx: Plugin.Context, createMotor: LegacyPlugin): P
       return;
     }
     if (event.tool === 'subagent' && event.agent !== COORDINATOR) return;
-    await hooks['tool.execute.after']?.({ ...call, args: event.tool === 'subagent' ? taskInput(event.input) : event.input },
-      legacyResult(event.tool, event.input, event.result) as never);
+    const readWorker = event.tool === 'subagent' && workerHost.assignment?.(event.sessionID, event.id);
+    if (readWorker) {
+      try {
+        const native = object(event.result.output);
+        legacyResult(event.tool, event.input, event.result);
+        if (native.status !== 'completed' || typeof native.sessionID !== 'string') throw new Error('Read-only native child did not complete.');
+        const child = await ctx.session.get({ sessionID: native.sessionID });
+        if (child.parentID !== event.sessionID || child.projectID !== session.projectID || child.location.directory !== directory)
+          throw new Error('Read-only completion belongs to another native parent or location.');
+        workerHost.fence.complete(event.sessionID, event.messageID, event.id, child.id);
+      } catch {
+        // Refuse admission, not the host's own settlement. Throwing from execute.after can leave
+        // a native call running forever even though its child finished. Keep MDD uncertain and
+        // let the native completed callback settle without accepting or aggregating its report.
+        await hooks.event?.({ event: { type: 'message.part.updated', properties: { part: {
+          type: 'tool', tool: call.tool, sessionID: call.sessionID, callID: call.callID, state: { status: 'error' },
+        } } } } as never);
+        workerHost.fence.settle(event.id);
+        return;
+      }
+    }
+    try {
+      await hooks['tool.execute.after']?.({ ...call, args: event.tool === 'subagent' ? taskInput(event.input) : event.input },
+        legacyResult(event.tool, event.input, event.result) as never);
+    } catch (error) {
+      if (!readWorker) throw error;
+      // WorkerState retains the blocked/uncertain outcome and reservation. Native settlement
+      // itself must not hang because admission or durable aggregation refused its report.
+      workerHost.fence.settle(event.id);
+    }
   });
   const stream = (async () => {
     try {
@@ -235,9 +268,14 @@ export async function setupV2(ctx: Plugin.Context, createMotor: LegacyPlugin): P
         if (event.location && event.location.directory !== directory) continue;
         if (event.type === 'agent.updated') await settleAgentPolicy();
         if (event.type === 'session.status') statuses.set(event.data.sessionID, event.data.status);
-        if (event.type === 'session.created') await hooks.event?.({ event: { type: 'session.created', properties: {
-          info: { ...event.data, id: event.data.sessionID },
-        } } } as never);
+        if (event.type === 'session.tool.progress') workerHost.fence.progress(event.data);
+        if (event.type === 'session.created') {
+          const child = await ctx.session.get({ sessionID: event.data.sessionID });
+          if (child.parentID && workerHost.protectedParent?.(child.parentID)) workerHost.fence.observeChild(child.id);
+          await hooks.event?.({ event: { type: 'session.created', properties: {
+            info: { ...event.data, id: event.data.sessionID },
+          } } } as never);
+        }
         if (event.type === 'session.compaction.ended') await hooks.event?.({ event: {
           type: 'session.compacted', properties: { sessionID: event.data.sessionID },
         } } as never);
@@ -249,7 +287,7 @@ export async function setupV2(ctx: Plugin.Context, createMotor: LegacyPlugin): P
         }
       }
     } catch (error) { if (!controller.signal.aborted) console.error('MDD native event stream ended:', error); }
-    finally { statuses.clear(); }
+    finally { workerHost.fence.close(); statuses.clear(); }
   })();
   // V2 supplies model messages, not durable parts. Only settled tool calls with matching results are collapsed.
   await ctx.session.hook('context', event => {
@@ -268,6 +306,7 @@ export async function setupV2(ctx: Plugin.Context, createMotor: LegacyPlugin): P
   });
   return async () => {
     controller.abort();
+    workerHost.fence.close();
     await stream;
     await agentRegistration.dispose();
     seen.clear();

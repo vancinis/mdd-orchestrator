@@ -109,7 +109,7 @@ Restart after changing them; never replace an in-flight workflow's answers. Gene
 Engram memory stays independent of artifacts, including `none`. The adapter verifies the
 exact registered runtime session/project/directory; it never fabricates a session.
 
-## Worker preference (configuration only)
+## Worker preference and safe fallback
 
 Use `mdd-ai workers status` to read `{ "enabled": true }` or `{ "enabled": false }`
 without writing settings or workspace files. `mdd-ai workers on` and `mdd-ai workers off`
@@ -120,10 +120,30 @@ startup snapshot does not change when the settings file changes.
 
 Existing version-1 files without `workers` remain valid and default to enabled in memory;
 reads never rewrite legacy files. An explicit save materializes the effective preference.
-**This unit does not enable concurrent execution.** Phase dispatch and shell commands,
-tests, and builds remain sequential. Run-level policy capture, eligibility checks, bounded
-native edits, and durable batch recovery belong to later execution units; enabling this
-preference grants no additional tool or file authority.
+**Production OpenCode 2.0.22 supports independent read-only exploration; Apply stays serial.**
+The default-on preference permits at most two explicitly declared independent exploration items,
+both for `mdd_start.exploration.workItems` (when the route begins with exploration) and
+`mdd_contextual_explore.workItems`. It never invents a split or adds an exploration phase.
+Each item needs a distinct `id` and `purpose`, `dependsOn: []`, `independent: true`,
+`complete: true`, and `reads: [{ root: <local absolute root>, files: <exact relative files> }]`.
+Missing, incomplete, dependent, disabled or unsupported declarations retain singular dispatch.
+Native progress binds each exact admitted call before action; running transcript metadata is not
+authority. The read-only fence permits exact-file reads and literal file grep only. It denies
+directories, glob traversal, mutations, shell, execution, controls, recursive agents and custom/MCP
+tools. Unknown schemas or paths deny rather than widen the scope. Nested native `AGENTS.md`
+discovery must also fit declared files. Native user permissions remain in force.
+
+The internal capable-host contract caps each phase batch at **two** independent foreground
+members. Explicit complete scopes and dependencies are mandatory; disabled, unsupported,
+legacy, incomplete, overlapping or dependent work stays serial. Scope selection is not an edit
+fence. Scoped workers cannot run shell, installers, formatters, tests/builds, write-capable
+MCP/custom tools or recursive subagents; checks belong to after-batch singular Verify.
+Completed member evidence survives failure/restart; uncertain live siblings block and successful
+tasks are never replayed implicitly. See [worker authority and the native blocker](opencode-adapter.md#bounded-worker-authority-internal-host-capability).
+
+A separately authorized repository remains a read-only target, not a new child workspace.
+Native `external_directory` approval is still required; enabling workers grants neither mutation
+nor remote access. Neither a quoted path nor a read scope replaces the user's authorization.
 
 ## Optional memory
 

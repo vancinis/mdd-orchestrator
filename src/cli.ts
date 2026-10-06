@@ -12,6 +12,7 @@ Uso:
   mdd-ai link                 agrega mdd-ai al PATH de tu usuario
   mdd-ai config | doctor | init | update
   mdd-ai profile list | create <nombre> | use <nombre>
+  mdd-ai workers status | on | off
   mdd-ai telemetry status | report | on | off | clear
   mdd-ai lessons report | list [texto] | mark <id> | clear
   mdd-ai retro               qué viene pasando: ejecuciones, fallos y automejoras

@@ -39,6 +39,7 @@ type Intake = {
   known: Partial<Answers>; userMessageID?: string; usedMessages: Set<string>; proposed: Set<string>; replacing?: true; notice?: string;
   restore?: { state: Intake['state']; slot?: Slot; requirements: string; known: Partial<Answers>; userMessageID?: string; clarifications: Clarification[]; deferred: Clarification[]; clarificationAnswers: { question: string; answer: string; phase: Phase; disposition: 'answered' | 'deferred' }[] };
   memory?: { endpoint: string; project: string }; context?: { label: string; content: string };
+  exploration?: { workItems: unknown[] };
   clarifications: Clarification[]; deferred: Clarification[];
   clarificationAnswers: { question: string; answer: string; phase: Phase; disposition: 'answered' | 'deferred' }[];
   /** Set while a native question holds the durable run writer; persisted with its record. */
@@ -264,7 +265,9 @@ export class NativeIntake {
         (state === 'not-started' && ['blocked', 'stopped'].includes(previous.state));
       if (!replaceable) throw new Error('This parent already has an MDD intake; use mdd_status or request a confirmed change.');
     }
-    const input = objectWithKeys(value, 'start', ['requirements', 'context']);
+    const input = objectWithKeys(value, 'start', ['requirements', 'context', 'exploration']);
+    const exploration = input.exploration === undefined ? undefined : objectWithKeys(input.exploration, 'exploration', ['workItems']);
+    if (exploration && (!Array.isArray(exploration.workItems) || exploration.workItems.length > 2)) throw new Error('Invalid exploration work items.');
     const requirements = boundedText(input.requirements, 'requirements', 12000);
     // Validated at intake so bad context fails here, not later when the first phase is prepared.
     // Only the pair is held: the runner attributes provenance itself when the run is created.
@@ -281,6 +284,7 @@ export class NativeIntake {
     const entry: Intake = { runtime: { ...runtime }, requirements, state: 'starting', receipts: previous?.receipts ?? [], known: { ...this.#profile.answers }, usedMessages: new Set(previous?.usedMessages ?? guards?.usedMessages), proposed: new Set(previous?.proposed ?? guards?.proposed), clarifications: [], deferred: [], clarificationAnswers: [], ...(context ? { context } : {}), ...(previous ? { replacing: true } : {}) };
     if (previous) entry.restore = { state: previous.state, requirements: previous.requirements, known: previous.known, clarifications: previous.clarifications, deferred: previous.deferred, clarificationAnswers: previous.clarificationAnswers, ...(previous.slot ? { slot: previous.slot } : {}), ...(previous.userMessageID ? { userMessageID: previous.userMessageID } : {}) };
     this.#sessions.set(runtime.sessionID, entry);
+    if (exploration) entry.exploration = { workItems: structuredClone(exploration.workItems) as unknown[] };
     try {
       // An objective may be older than the last thing the user said: a continuation message never
       // replaces the request it continues. Consent paths keep requiring the latest user text.
@@ -925,6 +929,7 @@ export class NativeIntake {
     this.#recordConsent(entry);
     await this.runner.start({ requirements: entry.requirements, preflight: { answers: answersFromLabels(entry.known, selections) },
       ...(entry.context ? { context: entry.context } : {}),
+      ...(entry.exploration ? { exploration: entry.exploration } : {}),
       ...(engram ? { engramEndpoint: engram.endpoint, project: engram.project } : {}) }, entry.runtime, { requirementsConfirmed: true, ...(entry.replacing ? { replace: true } : {}), ...(entry.userMessageID ? { userMessageID: entry.userMessageID } : {}), ...(entry.slot?.callID ? { authorityCallID: entry.slot.callID } : {}) });
     if (entry.intakeToken) this.durable.ownership?.settleIntake(entry.runtime.sessionID, entry.intakeToken);
     if (entry.state !== expectedState) throw new Error('Intake became uncertain during runner initialization.');

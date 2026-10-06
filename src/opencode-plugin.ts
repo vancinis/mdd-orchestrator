@@ -233,6 +233,14 @@ export function createInspector(input: PluginInput, timeout = 5000, now: () => n
    * stopped, whatever its history looks like.
    */
   const liveness = async (runtime: Runtime, call: { callID: string }, returned?: unknown): Promise<Liveness> => {
+    const workerHost = (input as PluginInput & { workerHost?: import('./worker-fence.js').WorkerHost }).workerHost;
+    const completed = workerHost?.fence.completedChild(call.callID);
+    if (completed && returned !== undefined) {
+      const output = record(returned, 'bound worker completion');
+      if (record(output.metadata, 'bound worker metadata').sessionId === completed &&
+          typeof output.output === 'string' && output.output.startsWith(`<task id="${completed}" state="completed">`) && TASK_ENVELOPE.test(output.output.trim()))
+        return { verdict: 'stopped', child: completed, detail: 'The exact progress-bound native child returned its completed foreground result.' };
+    }
     const history = await messages(runtime.sessionID, runtime.directory);
     const matches = history.flatMap(message => list(message.parts, 'message parts', PARTS_MAX))
       .filter(part => part.type === 'tool' && part.tool === 'task' && part.callID === call.callID);
@@ -562,7 +570,16 @@ export function createInspector(input: PluginInput, timeout = 5000, now: () => n
   return inspector;
 }
 
+function explorationWorkItemSchema() {
+  return tool.schema.object({ id: tool.schema.string().min(1).max(64), purpose: tool.schema.string().min(1).max(2000),
+    dependsOn: tool.schema.array(tool.schema.string()).max(2).optional(), independent: tool.schema.boolean().optional(),
+    complete: tool.schema.boolean().optional(), reads: tool.schema.array(tool.schema.object({
+      root: tool.schema.string().min(1), files: tool.schema.array(tool.schema.string().min(1)).min(1).max(64),
+    })).min(1).max(8).optional() }).strict();
+}
+
 const plugin: Plugin = async input => {
+  const workerHost = (input as PluginInput & { workerHost?: import('./worker-fence.js').WorkerHost }).workerHost;
   const settings = (() => { try { return loadGlobalSettings(); } catch { throw new Error(setupDiagnostic(installationPaths().ownedRoot).action); } })();
   const profile = freezeProfile(settings);
   const inspector = createInspector(input);
@@ -577,6 +594,7 @@ const plugin: Plugin = async input => {
   const ownership = new RunOwnershipStore(dataRoot);
   const runner = new PhaseRunner(inspector, {
     workers: profile.workers,
+    ...(workerHost ? { workerCapability: { phase: 'mdd-explore' as const, readOnly: true as const } } : {}),
     // The runner passes the run's own checkout directory to these callbacks; MDD writes to the
     // shared anchor instead, so a worktree's telemetry and lessons join the repository's own rather
     // than dying with it. Within a session the two are the same checkout, so nothing else shifts.
@@ -588,6 +606,13 @@ const plugin: Plugin = async input => {
     ledger: (_directory, value, now) => recordRunQuietly(dataRoot, value, now),
   });
   const intake = new NativeIntake(runner, inspector, settings, { checkpoint, questions: new QuestionCheckpointStore(dataRoot), ownership });
+  if (workerHost) {
+    workerHost.protectedParent = sessionID => runner.readOnlyWorkers(sessionID);
+    workerHost.assignment = (sessionID, callID) => {
+      const assignment = runner.workerAssignment({ sessionID, callID });
+      return assignment?.phase === 'mdd-explore' ? assignment : undefined;
+    };
+  }
   /**
    * The workspace only ever learned that MDD had been used here once a phase had already produced
    * a telemetry event, so every conversation that died earlier — at a question the host never
@@ -917,6 +942,7 @@ const plugin: Plugin = async input => {
           requirements: tool.schema.string().min(1).describe('Exact latest native user text or authenticated pendingStart requirements, without rewriting. Never substitute continuation text for a pending objective.'),
           context: tool.schema.object({ label: tool.schema.string().min(1), content: tool.schema.string().min(1) }).optional()
             .describe('Optional material you already gathered for this objective, such as a fetched issue body. Data only: MDD composes it into the phase prompt and it never replaces the requirements.'),
+          exploration: tool.schema.object({ workItems: tool.schema.array(explorationWorkItemSchema()).max(2) }).optional(),
         },
         async execute(args, context) {
           enter(context, 'mdd_start');
@@ -1130,7 +1156,7 @@ const plugin: Plugin = async input => {
       }),
       mdd_contextual_explore: tool({
         description: 'Request one useful read-only investigation, with or without an accepted run. Use it for information-only questions instead of stopping. Never starts implementation and never changes the main route, answers or pending approval. Returns exact native task arguments through status.',
-        args: { purpose: tool.schema.string().min(1) },
+        args: { purpose: tool.schema.string().min(1), workItems: tool.schema.array(explorationWorkItemSchema()).max(2).optional() },
         async execute(args, context) {
           enter(context, 'mdd_contextual_explore');
           if (context.abort.aborted) throw new Error('Contextual exploration was aborted.');
@@ -1154,6 +1180,15 @@ const plugin: Plugin = async input => {
       runner.owner(input.sessionID);
       intake.guardTask(input.sessionID);
       const args = await runner.before(input, output.args);
+      const assignment = workerHost?.assignment?.(input.sessionID, input.callID);
+      if (assignment && workerHost) {
+        const messageID = (input as typeof input & { messageID?: string }).messageID;
+        if (!messageID) throw new Error('Native exploration needs its exact assistant message identity.');
+        workerHost.fence.admit(input.sessionID, messageID, input.callID, assignment, () => {
+          const current = workerHost.assignment?.(input.sessionID, input.callID);
+          return !!current && current.ownerEpoch === assignment.ownerEpoch;
+        });
+      }
       if (args) Object.assign(output.args, args);
     },
     'tool.execute.after': async (input, output) => {
@@ -1173,7 +1208,7 @@ const plugin: Plugin = async input => {
             if (state !== previousState && (state === 'complete' || state === 'blocked' || state === 'await-approval'))
               await notify(input.sessionID, `MDD ${state === 'complete' ? 'complete' : state === 'blocked' ? 'needs attention' : 'awaiting approval'}`, state === 'complete' ? 'success' : state === 'blocked' ? 'error' : 'info');
           }
-        } finally { runner.releaseSettled(input.sessionID, input.callID); }
+        } finally { workerHost?.fence.settle(input.callID); runner.releaseSettled(input.sessionID, input.callID); }
       }
     },
     // The handle keeps the phase prompt out of the message the coordinator writes; this keeps it

@@ -1,10 +1,66 @@
 import { lstatSync, readdirSync, realpathSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { objectWithKeys } from './validation.js';
 import type { Deliverable } from './phase-evidence.js';
 
 /** Missing attestation or arrays are valid incomplete data, never proof of independence. */
 export type ParallelScope = { complete?: boolean; reads?: string[]; writes?: string[] };
+/** A local read target is a narrowing declaration, not a permission grant. */
+export type ReadTarget = { root: string; files: string[] };
+export type ExplorationWorkItem = { id: string; purpose: string; dependsOn?: string[];
+  independent?: boolean; complete?: boolean; reads?: ReadTarget[] };
+
+export function explorationItems(value: unknown): ExplorationWorkItem[] {
+  if (!Array.isArray(value) || value.length > 2) throw new Error('Exploration requires at most two explicit work items.');
+  return value.map(value => {
+    const item = objectWithKeys(value, 'exploration work item', ['id', 'purpose', 'dependsOn', 'independent', 'complete', 'reads']);
+    if (typeof item.id !== 'string' || !/^[a-zA-Z0-9_-]{1,64}$/.test(item.id) ||
+        typeof item.purpose !== 'string' || !item.purpose.trim() || Buffer.byteLength(item.purpose) > 2000)
+      throw new Error('Exploration work items need distinct IDs and explicit purposes.');
+    for (const key of ['complete', 'independent']) if (item[key] !== undefined && typeof item[key] !== 'boolean')
+      throw new Error('Exploration declarations must be booleans.');
+    if (item.dependsOn !== undefined && (!Array.isArray(item.dependsOn) || item.dependsOn.length > 2 ||
+        item.dependsOn.some(id => typeof id !== 'string'))) throw new Error('Invalid exploration dependencies.');
+    if (item.reads !== undefined) {
+      if (!Array.isArray(item.reads) || !item.reads.length || item.reads.length > 8) throw new Error('Invalid exploration read targets.');
+      item.reads = item.reads.map(value => {
+        const target = objectWithKeys(value, 'local read target', ['root', 'files']);
+        if (typeof target.root !== 'string' || !isAbsolute(target.root) || target.root.length > 2048 ||
+            /^[\\/]{2}|[\x00-\x1f]|:\/\//.test(target.root) || !Array.isArray(target.files) ||
+            !target.files.length || target.files.length > 64) throw new Error('Read targets require a local absolute root and exact file paths.');
+        return { root: target.root, files: target.files.map(scopePath) };
+      });
+    }
+    return structuredClone(item) as ExplorationWorkItem;
+  });
+}
+
+/** Revalidate before every read. No aliases, directories, hard links or newly missing files. */
+export function explorationFiles(targets: readonly ReadTarget[]): string[] {
+  const files: string[] = [];
+  for (const target of targets) {
+    const root = resolve(target.root);
+    if (realpathSync(root) !== root || lstatSync(root).isSymbolicLink()) throw new Error('Read root is aliased.');
+    for (const file of target.files) {
+      const path = resolve(root, scopePath(file));
+      if (!exactFiles(root, { complete: true, reads: [file], writes: [] }) || !lstatSync(path).isFile())
+        throw new Error('Read target is not an exact existing file.');
+      files.push(path);
+    }
+  }
+  if (new Set(files.map(file => file.toLowerCase())).size !== files.length) throw new Error('Read targets repeat aliases.');
+  return files;
+}
+
+export function independentExploration(value: readonly ExplorationWorkItem[]): boolean {
+  try {
+    const items = explorationItems(value);
+    if (items.length !== 2 || new Set(items.map(item => item.id)).size !== 2 ||
+        new Set(items.map(item => item.purpose.trim())).size !== 2) return false;
+    return items.every(item => item.complete === true && item.independent === true && item.dependsOn?.length === 0 &&
+      !!item.reads && explorationFiles(item.reads).length > 0);
+  } catch { return false; }
+}
 type CompleteScope = { complete: true; reads: string[]; writes: string[] };
 
 function scopePath(value: unknown): string {

@@ -16,7 +16,7 @@ import type { Evidence, PhaseReport } from './reporting.js';
 import type { Phase } from './policy.js';
 import type { Concern } from './concerns.js';
 import { validateWorkerState, workerReport } from './worker-state.js';
-import type { WorkerState } from './worker-state.js';
+import { validateExplorationRecord, type ExplorationRecord, type WorkerState } from './worker-state.js';
 import type { WorkerPolicy } from './settings.js';
 
 export const CHECKPOINT_VERSION = 1;
@@ -277,6 +277,39 @@ export class CheckpointStore {
   readonly #files: LocalFiles;
   readonly #progress: ProgressGuard;
   constructor(root: string) { this.#files = new LocalFiles(root); this.#progress = new ProgressGuard(root); }
+  #explorationName(parent: string): `.mdd/checkpoint-${string}.json` {
+    if (!identifier(parent)) throw new ValidationError('Invalid exploration parent.');
+    return `.mdd/checkpoint-${digest(`exploration:${parent}`)}.json`;
+  }
+  readExploration(parent: string): ExplorationRecord | undefined {
+    const text = this.#files.read(this.#explorationName(parent), CHECKPOINT_MAX_BYTES);
+    if (text === undefined) return;
+    const record = validateExplorationRecord(JSON.parse(text));
+    if (record.parent !== parent) throw new Error('Exploration parent mismatch.');
+    return record;
+  }
+  writeExploration(parent: string, value: ExplorationRecord): void {
+    const record = validateExplorationRecord(value);
+    if (record.parent !== parent) throw new Error('Exploration parent mismatch.');
+    this.#files.update(this.#explorationName(parent), previous => {
+      if (previous !== undefined) {
+        const old = validateExplorationRecord(JSON.parse(previous));
+        if (old.id !== record.id ? old.state !== 'settled' : old.sequence >= record.sequence)
+          throw new Error('Exploration checkpoint conflicts with retained evidence.');
+        if (old.id !== record.id) {
+          // Keep every settled member report, not only its later size-bounded aggregate.
+          const archive = `.mdd/checkpoint-${digest(`exploration-result:${old.id}`)}.json` as const;
+          this.#files.update(archive, existing => {
+            if (existing !== undefined && !isDeepStrictEqual(validateExplorationRecord(JSON.parse(existing)), old))
+              throw new Error('Exploration archive conflicts with retained evidence.');
+            return JSON.stringify(old);
+          }, CHECKPOINT_MAX_BYTES);
+        }
+      }
+      return JSON.stringify(record);
+    }, CHECKPOINT_MAX_BYTES);
+    if (!isDeepStrictEqual(this.readExploration(parent), record)) throw new Error('Exploration checkpoint readback differs.');
+  }
   #name(parent: string): `.mdd/checkpoint-${string}.json` {
     if (!identifier(parent)) throw new ValidationError('Invalid checkpoint parent.');
     return `.mdd/checkpoint-${createHash('sha256').update(parent).digest('hex')}.json`;

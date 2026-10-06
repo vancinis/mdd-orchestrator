@@ -6,6 +6,24 @@ import { tmpdir } from 'node:os';
 import { MDD_ASSETS, MDD_PACKAGED_ASSETS } from '../dist/project-assets.js';
 import { phaseName } from '../dist/phase-assets.js';
 
+test('assets: worker instructions preserve exact grouped dispatch and bounded member authority', () => {
+  const coordinator = fs.readFileSync('assets/opencode/agents/mdd-orchestrator.md', 'utf8');
+  assert.match(coordinator, /tasks or nextAction\.calls/);
+  assert.match(coordinator, /one grouped native foreground tool-call message in provider order/);
+  assert.match(coordinator, /Never use Code Mode, Promise\.all or background/);
+  for (const role of ['plan', 'tasks']) {
+    const text = fs.readFileSync(`assets/opencode/agents/mdd-${role}.md`, 'utf8');
+    assert.match(text, /complete read\/write footprints/);
+    assert.match(text, /uncertainty keeps execution serial/);
+  }
+  for (const path of ['assets/opencode/mdd-instructions.md', 'assets/opencode/agents/mdd-apply.md', 'assets/opencode/agents/mdd-explore.md']) {
+    const text = fs.readFileSync(path, 'utf8');
+    assert.match(text, /scoped worker/);
+    assert.match(text, /shell/);
+    assert.match(text, /singular Verify/);
+  }
+});
+
 // Capability is the user's native decision, not MDD's. No packaged agent may ship its own
 // permission map: a phase that cannot act is exactly what made the workflow unusable.
 for (const role of ['explore', 'propose', 'spec', 'design', 'tasks', 'apply', 'verify']) {
