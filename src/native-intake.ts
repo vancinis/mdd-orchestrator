@@ -782,6 +782,15 @@ export class NativeIntake {
     if (entry && entry.state !== 'active') throw new Error('A task cannot execute before accepted preflight or its exact phase approval.');
   }
 
+  /** A standalone judgment spends no phase approval and must not replace a pending interaction. */
+  guardStandalone(sessionID: string): void {
+    const entry = this.#sessions.get(sessionID);
+    if (this.durable.ownership?.intake(sessionID)?.state === 'pending' || this.#unresolved(sessionID) ||
+        (entry && (entry.restore || !['active', 'review-ready', 'paused'].includes(entry.state)))) {
+      throw new Error('Finish the pending native intake interaction before standalone Judgment Day work.');
+    }
+  }
+
   nativeError(call: TaskCall): void {
     this.runner.owner?.(call.sessionID, call.callID);
     const entry = this.#sessions.get(call.sessionID);

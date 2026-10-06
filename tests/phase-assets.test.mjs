@@ -87,7 +87,7 @@ test('Judgment Day model roles and installation do not expand phase or report-ch
   assert.match(v2, /PINNED_AGENTS = Object\.freeze\(\[\.\.\.PHASES, 'mdd-risk'\] as const\)/);
 });
 
-test('Judgment Day judges share a neutral standalone JSON contract and deny all but local reads', () => {
+test('Judgment Day judges share a neutral standalone JSON contract and allow only immutable inspection', () => {
   const bodies = [];
   for (const role of ['mdd-jd-judge-a', 'mdd-jd-judge-b']) {
     const text = fs.readFileSync(`assets/opencode/agents/${role}.md`, 'utf8');
@@ -95,7 +95,9 @@ test('Judgment Day judges share a neutral standalone JSON contract and deny all 
     assert.match(front, /\nmode: subagent\n/);
     assert.doesNotMatch(front, /model:|tools:/);
     const permissions = Object.fromEntries([...front.matchAll(/^  ("\*"|\w+): (allow|ask|deny)$/gm)].map(m => [m[1], m[2]]));
-    assert.deepEqual(permissions, { '"*"': 'deny', read: 'allow', glob: 'allow', grep: 'allow' });
+    assert.deepEqual(permissions, { '"*"': 'deny', mdd_jd_inspect: 'allow' });
+    assert.match(text, /Never use live read\/glob\/grep/);
+    assert.match(text, /full lowercase commit object IDs/);
     assert.match(text, /immutable/);
     assert.match(text, /blind/);
     assert.match(text, /frozen ledger/);

@@ -122,13 +122,32 @@ phase reports, require `mdd_check_report`, or receive phase-instruction policy j
 their models are configurable. Phase telemetry accepts only workflow phases and their existing
 fallback executors, never the standalone actors.
 
-This increment packages actors and model configuration only; it does **not yet enable native
-Judgment Day dispatch**. Explicit-request routing, immutable-target inspection and workflow
-guards require the subsequent integration. Judges currently deny shell and all tools except
-local read/glob/grep; those reads alone do not prove an immutable committed target. The fix actor
-requests native consent for edits and shell, which is not a sandbox. Configuration or judgment
-never authorizes correction, commit, push, PR creation, or release, and Judgment Day does not
-run automatically after Verify.
+Exact standalone foreground native tasks can dispatch these actor IDs without becoming workflow
+phases. Both judge calls may be admitted before either finishes. Models and the judge inspection
+permission settle before native dispatch. Moved parents, unresolved transfers, unfinished native
+tasks, pending durable intake and unconfirmed workflow claims still block admission. Standalone correction cannot bypass
+an unfinished workflow's implementation ownership; starting a workflow while that correction is
+in flight is also refused.
+
+Judges can invoke only `mdd_jd_inspect`: `tree` lists committed paths, `blob` reads an exact committed
+path, and `diff` compares full base/target commit IDs. It accepts local commits identified by 40 or
+64 lowercase hexadecimal characters, never refs or revision expressions. Paths are validated exact
+repository-relative paths. Diff attributes are pinned to the target commit and text changes cannot
+be hidden by dirty binary/submodule attributes. Fixed argv execution disables shell, external diff,
+textconv, pager, replacement objects and lazy fetching; inherited Git configuration variables are not forwarded.
+Git resolves to an absolute native executable on the host PATH outside the target checkout; relative
+PATH entries and checkout-supplied executables are never launched.
+Each Git command is bounded to 128 KiB and five seconds; binary/invalid UTF-8, missing or oversized
+material fails without partial evidence. Git must support `--no-lazy-fetch` and `--attr-source`
+(unsupported versions fail closed). Live source reads, shell, delegation, memory, MCP and all other tools are denied in
+native hooks as well as actor permissions. Skills must be supplied by value or read at committed
+paths through the inspection tool, not resolved from the live shared registry.
+
+The complete explicit-request protocol, immutable dirty/untracked snapshot authorization, finding
+corroboration and correction-round coordination are pending the subsequent packaged skill unit.
+Native hooks alone do not establish those protocol decisions. The fix actor still requests native
+consent for edits and shell, which is not a sandbox. Configuration or judgment never authorizes
+correction, commit, push, PR creation, or release, and Judgment Day does not run automatically after Verify.
 
 ## Optional memory
 

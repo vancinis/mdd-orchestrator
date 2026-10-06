@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import plugin from '../dist/opencode-plugin.js';
@@ -17,6 +18,7 @@ async function fixture(t, completeProfile = true) {
   const settings = defaultSettings();
   settings.profiles.default.answers = completeProfile ? { ...answers } : {};
   settings.profiles.default.models['mdd-plan'] = 'openai/test-model#high';
+  settings.profiles.default.models['mdd-jd-judge-a'] = 'openai/judge-model#high';
   saveGlobalSettings(settings);
   const sessionID = 'ses_parent';
   const sessions = new Map([[sessionID, { id: sessionID, agent: 'mdd-orchestrator', projectID: 'project', location: { directory: root }, time: { created: 1, updated: 1 } }]]);
@@ -77,6 +79,67 @@ test('V2 setup registers native tools, model variants and ordered isolation perm
   assert.deepEqual(f.agents.find(agent => agent.id === 'mdd-apply').permissions.slice(-3).map(rule => [rule.action, rule.effect]),
     [['subagent', 'deny'], ['skill', 'deny'], ['mdd_check_report', 'allow']]);
   assert.equal(f.agents.find(agent => agent.id === 'general').permissions.at(-1).effect, 'deny');
+});
+
+test('V2 standalone dispatch settles late actor model and exact inspection permission before both judges', async t => {
+  const f = await fixture(t);
+  // Actors contributed after MDD setup must see the settled transform before any dispatch.
+  f.agents.push({ id: 'mdd-jd-judge-a', permissions: [{ action: '*', resource: '*', effect: 'allow' }], request: {} });
+  f.agents.push({ id: 'mdd-jd-judge-b', permissions: [], request: {} });
+  f.user('Judge the committed target.');
+  const calls = ['mdd-jd-judge-a', 'mdd-jd-judge-b'].map(agent => f.begin('subagent', { agent, description: 'Judge', prompt: 'Committed target' }));
+  await Promise.all(calls.map(call => f.toolHooks.get('execute.before')(call)));
+  const judge = f.agents.find(agent => agent.id === 'mdd-jd-judge-a');
+  assert.deepEqual(judge.model, { providerID: 'openai', id: 'judge-model', variant: 'high' });
+  assert.deepEqual(judge.permissions.slice(-2), [{ action: '*', resource: '*', effect: 'deny' }, { action: 'mdd_jd_inspect', resource: '*', effect: 'allow' }]);
+  for (const call of calls) await f.toolHooks.get('execute.after')({ ...call, status: 'completed', result: {
+    output: { sessionID: `child-${call.id}`, status: 'completed', output: '{"findings":[],"evidence":[]}' },
+    content: `<subagent sessionID="child-${call.id}" state="completed">\n{"findings":[],"evidence":[]}\n</subagent>`,
+  } });
+  assert.equal((await f.call('mdd_status', {})).state, 'not-started');
+});
+
+test('V2 judge live hooks deny reads, shell, MCP and delegation despite permissive session rules', async t => {
+  const f = await fixture(t);
+  const judge = { ...f.sessions.get(f.sessionID), id: 'judge', parentID: f.sessionID, agent: 'mdd-jd-judge-a' };
+  f.sessions.set(judge.id, judge); f.messages.set(judge.id, []);
+  for (const tool of ['read', 'bash', 'edit', 'subagent', 'engram_mem_save', 'mdd_status', 'mdd_check_report', 'execute']) {
+    await assert.rejects(f.toolHooks.get('execute.before')({ sessionID: judge.id, agent: judge.agent, id: tool, tool, input: {} }), /judge|immutable|inspection/);
+  }
+  judge.location.directory = join(f.root, 'elsewhere');
+  await assert.rejects(f.toolHooks.get('execute.before')({ sessionID: judge.id, agent: judge.agent, id: 'moved', tool: 'mdd_jd_inspect', input: {} }), /workspace|location|differs/);
+});
+
+test('V2 live judge identity denies tools even before assistant history has recorded that actor', async t => {
+  const f = await fixture(t);
+  await assert.rejects(f.toolHooks.get('execute.before')({ sessionID: f.sessionID, agent: 'mdd-jd-judge-a',
+    id: 'early-shell', tool: 'bash', input: {} }), /judge|immutable|inspection/);
+});
+
+test('V2 judge inspection reaches immutable Git through the exact native tool call and hides other tools', async t => {
+  const f = await fixture(t);
+  const git = (...args) => execFileSync('git', args, { cwd: f.root, encoding: 'utf8' }).trim();
+  git('init', '--quiet'); git('config', 'core.autocrlf', 'false');
+  await writeFile(join(f.root, 'source.txt'), 'immutable source\n');
+  git('add', '--', 'source.txt');
+  git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', '-c', 'commit.gpgsign=false', 'commit', '--quiet', '-m', 'target');
+  const commit = git('rev-parse', 'HEAD');
+  await writeFile(join(f.root, 'source.txt'), 'dirty live source');
+  const judge = { ...f.sessions.get(f.sessionID), id: 'judge', parentID: f.sessionID, agent: 'mdd-jd-judge-a' };
+  f.sessions.set(judge.id, judge);
+  const args = { operation: 'blob', commit, path: 'source.txt' };
+  const native = { id: 'judge-message', type: 'assistant', agent: judge.agent, content: [{
+    type: 'tool', id: 'inspect-call', name: 'mdd_jd_inspect', state: { status: 'running', input: args, metadata: {} }, time: { created: 1 },
+  }], time: { created: 1 } };
+  f.messages.set(judge.id, [native]);
+  await f.toolHooks.get('execute.before')({ sessionID: judge.id, agent: judge.agent, id: 'inspect-call', tool: 'mdd_jd_inspect', input: args });
+  const context = { sessionID: judge.id, agent: judge.agent, messageID: native.id, id: 'inspect-call', signal: new AbortController().signal };
+  const result = await f.tools.get('mdd_jd_inspect').execute(args, context);
+  assert.equal(JSON.parse(result.content).content, 'immutable source\n');
+  await assert.rejects(f.tools.get('mdd_jd_inspect').execute({ ...args, path: 'other.txt' }, context), /exact.*call/);
+  const event = { agent: judge.agent, tools: { read: {}, bash: {}, eng_mem_save: {}, execute: {}, mdd_check_report: {}, mdd_jd_inspect: {} } };
+  await f.sessionHooks.get('context')(event);
+  assert.deepEqual(Object.keys(event.tools), ['mdd_jd_inspect']);
 });
 
 test('V2 history preserves native authored provenance, tool IDs, streaming calls and moved workspace boundaries', () => {
@@ -171,7 +234,7 @@ test('V2 tracked native fallback children cannot recursively orchestrate', async
   const child = { ...f.sessions.get(f.sessionID), id: 'ses_child', parentID: f.sessionID, agent: 'general' };
   f.sessions.set(child.id, child); f.messages.set(child.id, []);
   await f.emit({ type: 'session.created', location: { directory: f.root }, data: { ...child, sessionID: child.id } });
-  for (const tool of ['subagent', 'skill', 'mdd_start', 'mdd_check_report']) {
+  for (const tool of ['subagent', 'skill', 'mdd_start', 'mdd_check_report', 'mdd_jd_inspect']) {
     await assert.rejects(f.toolHooks.get('execute.before')({ sessionID: child.id, agent: 'general', id: `child-${tool}`, tool, input: {} }), /tracked native fallback/);
   }
 });

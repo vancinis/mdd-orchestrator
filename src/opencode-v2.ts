@@ -8,9 +8,10 @@ import { PHASES } from './policy.js';
 import { loadGlobalSettings } from './global-settings.js';
 import { collapsedPrompt, COLLAPSE_MIN_BYTES } from './dispatch-transcript.js';
 import { DISPATCH_HANDLE_PREFIX } from './phase-runner.js';
+import { JD_INSPECT, isJudge, isJudgmentActor } from './judgment-day.js';
 
 const COORDINATOR = 'mdd-orchestrator';
-/** Every actor with a configurable model: the eight workflow phases plus `mdd-risk`. */
+/** Configurable actors include standalone roles, independently of phase permission policy. */
 const MODEL_AGENTS = MODEL_ROLES.filter(role => role !== 'orchestrator');
 /**
  * Actors pinned to the phase-actor tool profile: dispatch nothing further, read no skill by
@@ -176,6 +177,8 @@ export async function setupV2(ctx: Plugin.Context, createMotor: LegacyPlugin): P
       if (PINNED_AGENTS.includes(id as typeof PINNED_AGENTS[number])) draft.permissions.push(
         { action: 'subagent', resource: '*', effect: 'deny' }, { action: 'skill', resource: '*', effect: 'deny' },
         { action: 'mdd_check_report', resource: '*', effect: 'allow' });
+      if (isJudge(id)) draft.permissions.push(
+        { action: '*', resource: '*', effect: 'deny' }, { action: JD_INSPECT, resource: '*', effect: 'allow' });
     });
   };
   let agentRegistration = await ctx.agent.transform(agentPolicy);
@@ -200,9 +203,14 @@ export async function setupV2(ctx: Plugin.Context, createMotor: LegacyPlugin): P
     });
   });
   await ctx.tool.hook('execute.before', async event => {
-    const call = { sessionID: event.sessionID, callID: event.id, tool: event.tool === 'subagent' ? 'task' : event.tool };
+    await settleAgentPolicy();
+    const call = { sessionID: event.sessionID, callID: event.id, tool: event.tool === 'subagent' ? 'task' : event.tool, agent: event.agent };
     const session = await ctx.session.get({ sessionID: event.sessionID });
-    if (session.location.directory !== directory || session.projectID !== ctx.location.project.id) return;
+    if (session.location.directory !== directory || session.projectID !== ctx.location.project.id) {
+      if (isJudgmentActor(event.agent) || (event.tool === 'subagent' && isJudgmentActor(object(event.input).agent)))
+        throw new Error('Standalone Judgment Day workspace differs from its plugin location.');
+      return;
+    }
     if (session.parentID) await hooks.event?.({ event: { type: 'session.created', properties: { info: session } } } as never);
     if (event.tool === 'subagent' && event.agent === COORDINATOR) {
       const args = taskInput(event.input);
@@ -249,6 +257,10 @@ export async function setupV2(ctx: Plugin.Context, createMotor: LegacyPlugin): P
   })();
   // V2 supplies model messages, not durable parts. Only settled tool calls with matching results are collapsed.
   await ctx.session.hook('context', event => {
+    if (isJudge(event.agent)) {
+      for (const name of Object.keys(event.tools)) if (name !== JD_INSPECT) delete event.tools[name];
+      return;
+    }
     if (event.agent !== COORDINATOR) return;
     const results = new Set(event.messages.flatMap(message => message.content.flatMap(part => part.type === 'tool-result' ? [part.id] : [])));
     event.messages = event.messages.map(message => {

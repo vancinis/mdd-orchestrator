@@ -889,6 +889,31 @@ export class PhaseRunner {
     return callID !== undefined && this.#nativeDispatches.get(sessionID)?.has(callID) === true;
   }
 
+  /** Standalone work reads authority but never reserves, advances or records a workflow phase. */
+  guardStandalone(sessionID: string, fix = false): void {
+    this.#refuseMovedAway(sessionID);
+    this.owner(sessionID);
+    const run = this.#runs.get(sessionID);
+    const claim = this.options.ownership?.parentClaim(sessionID);
+    const saved = this.options.checkpoint?.read(sessionID)?.checkpoint;
+    if (!run && claim?.transfer)
+      throw new Error('The target has an unresolved transfer claim; no standalone task may dispatch.');
+    if (!run && claim && !claim.retired && (!saved || saved.version !== STABLE_CHECKPOINT_VERSION))
+      throw new Error('The durable workflow owner lacks a confirmed checkpoint; standalone work cannot bypass it.');
+    const solo = this.#solo.get(sessionID);
+    if (this.#inflight.has(sessionID) || (run && !['ready', 'await-approval', 'complete', 'blocked'].includes(run.state)) ||
+        (solo && !['ready', 'settled', 'blocked'].includes(solo.state))) {
+      throw new Error('A native task or operation is in flight; standalone work cannot bypass its writer.');
+    }
+    const marker = this.options.progress?.read(sessionID);
+    if (marker?.state === 'pending') throw new Error('An unfinished native task still holds this parent; standalone work cannot bypass its writer.');
+    if (fix && ((run && run.state !== 'complete') || (!run && saved && (saved.version !== STABLE_CHECKPOINT_VERSION || saved.stable.state !== 'complete')) ||
+        (!run && marker && marker.state !== 'complete') ||
+        (solo && !['settled', 'blocked'].includes(solo.state)))) {
+      throw new Error('An unfinished workflow owns implementation; standalone correction cannot bypass it.');
+    }
+  }
+
   /**
    * The child a reset would have to release, if any: the in-flight dispatch of a live run, or the
    * call a pending marker names after the process that dispatched it is gone.
