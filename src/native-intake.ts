@@ -790,6 +790,16 @@ export class NativeIntake {
         (entry && (entry.restore || ['starting', 'accepting', 'await-answer', 'question-ready'].includes(entry.state)))) {
       throw new Error('Finish the pending native interaction before a standalone security audit.');
     }
+    this.guardStandalone(sessionID);
+  }
+
+  /** A standalone judgment spends no phase approval and must not replace a pending interaction. */
+  guardStandalone(sessionID: string): void {
+    const entry = this.#sessions.get(sessionID);
+    if (this.durable.ownership?.intake(sessionID)?.state === 'pending' || this.#unresolved(sessionID) ||
+        (entry && (entry.restore || !['active', 'review-ready', 'paused'].includes(entry.state)))) {
+      throw new Error('Finish the pending native intake interaction before standalone Judgment Day work.');
+    }
   }
 
   nativeError(call: TaskCall): void {

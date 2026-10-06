@@ -198,3 +198,91 @@ test('construction shares strict kernel validation, including incomplete profile
     { answers, config: { threshold: -1 } },
   ]) assert.throws(() => new Workflow(request), ValidationError);
 });
+
+test('Apply completes exactly one dependency-ordered deliverable before Verify, with replay', () => {
+  const workflow = new Workflow({ answers });
+  workflow.start('mdd-plan');
+  workflow.recordResult({ ...result('mdd-plan'), applyPlan: [
+    { id: 'first', dependsOn: [] }, { id: 'second', dependsOn: ['first'] },
+  ] });
+  workflow.start('mdd-apply');
+  for (const completed of [[], ['second'], ['first', 'second'], ['invented'], ['first', 'first']]) {
+    rejectsUnchanged(workflow, () => workflow.recordResult({ ...result('mdd-apply'), completed, batchID: 'batch-one' }));
+  }
+  workflow.recordResult({ ...result('mdd-apply'), completed: ['first'], batchID: 'batch-one' });
+  assert.deepEqual(workflow.nextAction(), { kind: 'execute', phase: 'mdd-apply' });
+  const resumed = Workflow.replay({ answers }, workflow.history());
+  assert.deepEqual(resumed.applyProgress(), workflow.applyProgress());
+  resumed.start('mdd-apply');
+  rejectsUnchanged(resumed, () => resumed.recordResult({ ...result('mdd-apply'), completed: ['first'], batchID: 'batch-two' }));
+  resumed.recordResult({ ...result('mdd-apply'), completed: ['second'], batchID: 'batch-two' });
+  assert.deepEqual(resumed.nextAction(), { kind: 'execute', phase: 'mdd-verify' });
+});
+
+// A run keeps the route it started on. Commit 57b0857 stopped scoring complexity, and every
+// checkpoint written before it whose answers now route differently became unreadable: the
+// replayed "start mdd-explore" no longer matched the route today's policy chose.
+test('replay follows the route a run recorded, not the one today\'s policy would choose', () => {
+  const lowExplore = ['mdd-explore', ...low];
+  const events = [{ kind: 'start', phase: 'mdd-explore' }, { kind: 'result', result: result('mdd-explore') },
+    { kind: 'start', phase: 'mdd-plan' }];
+  // Today these answers route to plan, apply and verify, without exploration.
+  assert.deepEqual(evaluate({ answers }).phases, low);
+  assert.throws(() => new Workflow({ answers }).start('mdd-explore'), ValidationError);
+  const recorded = Workflow.replay({ answers, route: lowExplore }, events);
+  assert.deepEqual(recorded.snapshot().evaluation.phases, lowExplore);
+  assert.deepEqual(recorded.nextAction(), { kind: 'await-result', phase: 'mdd-plan' });
+  assert.match(recorded.snapshot().evaluation.reasons.at(-1), /keeps the route it started with/);
+  // The record is the request plus the evaluated route, and replays to the same state.
+  const started = new Workflow({ answers, explore: true });
+  const request = Workflow.recordedRequest({ answers, explore: true }, started);
+  assert.deepEqual(request, { answers, explore: true, route: lowExplore });
+  assert.deepEqual(Workflow.replay(request, []).snapshot(), started.snapshot());
+});
+
+test('a record without its route is replayed on the only known route its history fits', () => {
+  const events = [{ kind: 'start', phase: 'mdd-explore' }, { kind: 'result', result: result('mdd-explore') },
+    { kind: 'start', phase: 'mdd-plan' }];
+  const legacy = Workflow.replay({ answers }, events);
+  assert.deepEqual(legacy.snapshot().evaluation.phases, ['mdd-explore', ...low]);
+  assert.deepEqual(legacy.snapshot().results, [result('mdd-explore')]);
+  // Exploration alone fits the high route and the explored low route: that is never guessed.
+  assert.throws(() => Workflow.replay({ answers }, [{ kind: 'start', phase: 'mdd-explore' }]), ValidationError);
+  // A recorded route is authoritative: it is never swapped for another one that would fit.
+  assert.throws(() => Workflow.replay({ answers, route: low }, events), ValidationError);
+});
+
+test('a recorded route must be a route the policy can choose', () => {
+  for (const route of [[], ['mdd-apply'], ['mdd-plan', 'mdd-verify'], [...low, 'mdd-verify'], 'mdd-plan', null,
+    ['mdd-explore', 'mdd-propose', 'mdd-spec', 'mdd-design', 'mdd-tasks', 'mdd-apply']]) {
+    assert.throws(() => new Workflow({ answers, route }), ValidationError, JSON.stringify(route));
+  }
+  assert.deepEqual(new Workflow({ answers, route: high }).snapshot().evaluation.route, 'high');
+});
+
+for (const recorded of [true, false]) {
+  test(`route-aware replay keeps completed Apply batches after interruption (${recorded ? 'recorded' : 'legacy'} route)`, () => {
+    const workflow = new Workflow({ answers, explore: true });
+    workflow.start('mdd-explore');
+    workflow.recordResult(result('mdd-explore'));
+    workflow.start('mdd-plan');
+    workflow.recordResult({ ...result('mdd-plan'), applyPlan: [
+      { id: 'first', dependsOn: [] }, { id: 'second', dependsOn: ['first'] },
+    ] });
+    workflow.start('mdd-apply');
+    workflow.recordResult({ ...result('mdd-apply'), completed: ['first'], batchID: 'batch-first' });
+    workflow.start('mdd-apply');
+    const request = recorded ? Workflow.recordedRequest({ answers }, workflow) : { answers };
+    const resumed = Workflow.replay(request, workflow.history());
+    assert.deepEqual(resumed.snapshot().evaluation.phases, ['mdd-explore', ...low]);
+    assert.deepEqual(resumed.applyProgress(), workflow.applyProgress());
+    assert.deepEqual(resumed.nextAction(), { kind: 'await-result', phase: 'mdd-apply' });
+    resumed.retry();
+    assert.deepEqual(resumed.applyProgress().completed, ['first']);
+    resumed.start('mdd-apply');
+    rejectsUnchanged(resumed, () => resumed.recordResult({ ...result('mdd-apply'), completed: ['first'], batchID: 'batch-second' }));
+    resumed.recordResult({ ...result('mdd-apply'), completed: ['second'], batchID: 'batch-second' });
+    assert.deepEqual(resumed.nextAction(), { kind: 'execute', phase: 'mdd-verify' });
+    assert.deepEqual(resumed.applyProgress().completed, ['first', 'second']);
+  });
+}

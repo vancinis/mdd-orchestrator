@@ -39,6 +39,7 @@ import type { Phase } from './policy.js';
 import { recordSession } from './session-log.js';
 import { staleAssets } from './project-assets.js';
 import { visualTitle, presentationSettings } from './visual-ux.js';
+import { JD_JUDGES, JD_FIX, JD_INSPECT, isJudge, judgmentTask, inspectJudgmentTarget } from './judgment-day.js';
 
 /**
  * Every MDD tool answers through here, so the derived next call and the payload budget are
@@ -97,11 +98,19 @@ export function restrictTools(config: { agent?: Record<string, Record<string, un
     const tools = { ...(agent.tools as Record<string, boolean> | undefined) };
     for (const tool of MDD_TOOLS) if (tools[tool] === undefined) tools[tool] = false;
     if (tools['mdd_*'] === undefined) tools['mdd_*'] = false;
+    if (!isJudge(name)) tools[JD_INSPECT] = false;
     agent.tools = tools;
   }
 }
 
-/** The eight phase actors. The coordinator may dispatch these and nothing else. */
+/** Judges get one deliberate exception to MDD isolation, never a phase report/tool profile. */
+export function pinJudgmentAgents(config: { agent?: Record<string, Record<string, unknown>> }): void {
+  config.agent ??= {};
+  for (const name of JD_JUDGES) config.agent[name] = { ...config.agent[name],
+    permission: { '*': 'deny', [JD_INSPECT]: 'allow' }, tools: { '*': false, [JD_INSPECT]: true } };
+}
+
+/** Only these eight actors belong to workflow dispatch; standalone actors never enter this list. */
 export const PHASE_AGENTS: readonly string[] = Object.freeze([
   'mdd-explore', 'mdd-plan', 'mdd-propose', 'mdd-spec', 'mdd-design', 'mdd-tasks', 'mdd-apply', 'mdd-verify',
 ]);
@@ -193,7 +202,7 @@ async function readSdk<T>(operation: (signal: AbortSignal) => Promise<T>, timeou
  */
 export const ORPHAN_QUIET_MS = 2 * 60_000;
 
-export function createInspector(input: PluginInput, timeout = 5000, now: () => number = Date.now): Inspect & IntakeInspect & SecurityInspect {
+export function createInspector(input: PluginInput, timeout = 5000, now: () => number = Date.now) {
   if (!Number.isInteger(timeout) || timeout < 1 || timeout > 5000) throw new Error('Invalid inspection timeout.');
   const session = async (id: string, directory: string) => {
     const response = await readSdk(signal => input.client.session.get({
@@ -360,7 +369,10 @@ export function createInspector(input: PluginInput, timeout = 5000, now: () => n
     if (childID && record(state.metadata ?? {}).sessionId !== childID) throw new Error('Security child does not belong to the exact native task.');
     return state;
   };
-  const inspector: Inspect & IntakeInspect & SecurityInspect = {
+  const inspector: Inspect & IntakeInspect & SecurityInspect & {
+    nativeActor(sessionID: string, liveAgent?: string): Promise<{ agent: string; session: Record<string, unknown> }>;
+    judgeInspection(runtime: Runtime & { messageID: string }, args: unknown): Promise<void>;
+  } = {
     async securityCaller(runtime, messageID, userText) {
       await inspector.parent(runtime);
       const history = await messages(runtime.sessionID, runtime.directory);
@@ -433,6 +445,38 @@ export function createInspector(input: PluginInput, timeout = 5000, now: () => n
           parts.filter(part => part.type === 'text').some(part => part.synthetic === true || part.ignored === true || part.sessionID !== completed.childID || part.messageID !== info.id) ||
           parts.filter(part => part.type === 'text').map(part => part.text).join('\n') !== completed.report)
         throw new Error('Security result differs from the native terminal child report.');
+    },
+    async nativeActor(sessionID, liveAgent) {
+      const current = await session(sessionID, input.directory);
+      const history = await messages(sessionID, input.directory);
+      const latest = history.findLast(message => record(message.info, 'message').role === 'assistant');
+      const recordedAgent = latest ? record(latest.info, 'message').agent : current.agent;
+      // Neither a session switch nor a stale message may relax an already identified judge.
+      const agent = isJudge(current.agent) ? current.agent : recordedAgent;
+      // V2's native hook identity can precede recorded history; tool arguments are never identity.
+      const resolvedAgent = typeof agent === 'string' && agent.trim() ? agent : liveAgent;
+      return { session: current, agent: boundedText(resolvedAgent, 'native actor identity', 256) };
+    },
+    async judgeInspection(runtime, args) {
+      checkWorkspace(runtime);
+      const actor = await inspector.nativeActor(runtime.sessionID);
+      if (!isJudge(runtime.agent) || actor.agent !== runtime.agent || actor.session.id !== runtime.sessionID ||
+          actor.session.directory !== runtime.directory || actor.session.projectID !== input.project.id) {
+        throw new Error('Immutable inspection belongs only to the exact native judge in this workspace.');
+      }
+      const history = await messages(runtime.sessionID, runtime.directory);
+      const current = history.at(-1);
+      const info = record(current?.info, 'judge caller');
+      const path = record(info.path, 'judge workspace');
+      const calls = list(current?.parts, 'judge tool parts', PARTS_MAX).filter(part => part.type === 'tool' && part.tool === JD_INSPECT &&
+        record(part.state, 'judge tool state').status === 'running' && isDeepStrictEqual(record(part.state, 'judge tool state').input, args));
+      const part = calls[0];
+      const state = part ? record(part.state, 'judge tool state') : {};
+      if (calls.length !== 1 || info.id !== runtime.messageID || info.role !== 'assistant' || info.agent !== runtime.agent || info.sessionID !== runtime.sessionID ||
+          path.cwd !== runtime.directory || path.root !== runtime.worktree || part?.tool !== JD_INSPECT ||
+          part.sessionID !== runtime.sessionID || part.messageID !== info.id || state.status !== 'running' || !isDeepStrictEqual(state.input, args)) {
+        throw new Error('Immutable inspection requires the exact current native judge tool call.');
+      }
     },
     async transferLiveness(runtime, sourceSessionID, runID, requestDigest, assistantMessageID) {
       await inspector.parent(runtime);
@@ -664,6 +708,9 @@ export function createInspector(input: PluginInput, timeout = 5000, now: () => n
 }
 
 const plugin: Plugin = async input => {
+  const inputDirectory = input.directory;
+  const inputWorktree = input.worktree;
+  const inputProjectID = input.project.id;
   const settings = (() => { try { return loadGlobalSettings(); } catch { throw new Error(setupDiagnostic(installationPaths().ownedRoot).action); } })();
   const profile = freezeProfile(settings);
   const inspector = createInspector(input);
@@ -688,7 +735,11 @@ const plugin: Plugin = async input => {
     ledger: (_directory, value, now) => recordRunQuietly(dataRoot, value, now),
   });
   const intake = new NativeIntake(runner, inspector, settings, { checkpoint, questions: new QuestionCheckpointStore(dataRoot), ownership });
-  const security = new SecurityAudit(inspector, sessionID => { runner.assertStandaloneIdle(sessionID); intake.guardSecurity(sessionID); });
+  const security = new SecurityAudit(inspector, sessionID => {
+    runner.assertStandaloneIdle(sessionID);
+    intake.guardSecurity(sessionID);
+    if (pendingStandalone(sessionID)) throw new Error('Standalone work is in flight; wait for its settled result before security auditing.');
+  });
   /**
    * The workspace only ever learned that MDD had been used here once a phase had already produced
    * a telemetry event, so every conversation that died earlier — at a question the host never
@@ -748,6 +799,25 @@ const plugin: Plugin = async input => {
   };
   const opened = new Set<string>();
   const nativeChildren = new Set<string>();
+  const judgeSessions = new Set<string>();
+  const standaloneCalls = new Map<string, { args: NonNullable<ReturnType<typeof judgmentTask>>; settled: boolean }>();
+  const standaloneFixes = new Set<string>();
+  const standaloneKey = (sessionID: string, callID: string) => JSON.stringify([sessionID, callID]);
+  const pendingStandalone = (sessionID: string) => [...standaloneCalls].some(([key, call]) =>
+    !call.settled && JSON.parse(key)[0] === sessionID);
+  const guardStandalone = (sessionID: string, fix: boolean) => {
+    runner.guardStandalone(sessionID, fix);
+    intake.guardStandalone(sessionID);
+  };
+  const settleStandalone = (sessionID: string, callID: string): boolean => {
+    const key = standaloneKey(sessionID, callID);
+    const call = standaloneCalls.get(key);
+    if (!call) return false;
+    if (call.settled) return true;
+    call.settled = true;
+    if (call.args.subagent_type === JD_FIX) standaloneFixes.delete(sessionID);
+    return true;
+  };
   const notify = async (sessionID: string, message: string, variant: 'success' | 'error' | 'info' = 'info'): Promise<void> => {
     if (!presentationSettings().toasts) return;
     try { await input.client.tui.showToast({ body: { message, variant }, query: { directory: input.directory } }); }
@@ -762,6 +832,10 @@ const plugin: Plugin = async input => {
   const enter = (context: { agent: string; sessionID: string; directory: string; worktree: string }, name: string): void => {
     coordinatorOnly(context.agent, name);
     if (name !== 'mdd_status') security.control(context.sessionID);
+    if (standaloneFixes.has(context.sessionID) && !['mdd_status', 'mdd_improve', 'mdd_improvements', 'mdd_pr_body'].includes(name))
+      throw new Error('Standalone correction is in flight; wait before changing workflow ownership or interactions.');
+    if (pendingStandalone(context.sessionID) && !['mdd_security', 'mdd_status', 'mdd_improve', 'mdd_improvements', 'mdd_pr_body'].includes(name))
+      throw new Error('Standalone work is in flight; wait before changing workflow ownership or interactions.');
     // A conversation whose run moved away by a finished transfer can only start over (or read
     // status, or record/list improvements); nothing may act on the run it handed over.
     const moved = runner.movedAway(context.sessionID);
@@ -782,6 +856,7 @@ const plugin: Plugin = async input => {
       applyModelOverrides(config, profile);
       restrictTools(config as Parameters<typeof restrictTools>[0]);
       pinPhaseAgents(config as Parameters<typeof pinPhaseAgents>[0]);
+      pinJudgmentAgents(config as Parameters<typeof pinJudgmentAgents>[0]);
     },
     tool: {
       mdd_security: tool({
@@ -791,6 +866,15 @@ const plugin: Plugin = async input => {
           enter(context, 'mdd_security');
           if (context.abort.aborted) throw new Error('Security audit intake aborted.');
           return JSON.stringify(await security.start(args, context, context.messageID));
+        },
+      }),
+      mdd_jd_inspect: tool({
+        description: 'Judge-only immutable local Git inspection. Supply a full commit object ID; tree lists committed paths, blob reads an exact committed path, diff compares two full commit IDs. No shell, live source, remote fetch, filters or partial output.',
+        args: { operation: tool.schema.enum(['tree', 'blob', 'diff']), commit: tool.schema.string(), base: tool.schema.string().optional(), path: tool.schema.string().optional() },
+        async execute(args, context) {
+          if (nativeChildren.has(context.sessionID)) throw new Error('A tracked native fallback cannot use judge inspection.');
+          await inspector.judgeInspection(context, args);
+          return JSON.stringify(await inspectJudgmentTarget(input.worktree, args, context.abort));
         },
       }),
       mdd_transfer: tool({
@@ -1256,19 +1340,60 @@ const plugin: Plugin = async input => {
         },
       }),
     },
-    // Actors work with their own tools under native permissions. MDD only observes the two calls
-    // that carry its own state: the phase task and the consent question.
+    // Normal actors retain native tool decisions. Standalone judges have an immutable-only
+    // boundary; phase tasks and consent questions keep their existing workflow observation.
     'tool.execute.before': async (input, output) => {
       await security.enforce(input.sessionID, input.tool, output.args);
       if (nativeChildren.has(input.sessionID) && (['task', 'skill', CHECK_TOOL].includes(input.tool) || input.tool.startsWith('mdd_'))) {
         throw new Error('A tracked native fallback must work directly and return its report to the parent. Recursive orchestration, skill loading, and MDD tools are not allowed.');
       }
-      if (input.tool === 'question') { security.control(input.sessionID); return intake.beforeQuestion(input, output.args); }
+      // V2 supplies the live hook actor before its assistant history necessarily catches up.
+      const liveAgent = (input as typeof input & { agent?: string }).agent;
+      const actor = await inspector.nativeActor(input.sessionID, liveAgent);
+      if (isJudge(actor.agent) || isJudge(liveAgent)) judgeSessions.add(input.sessionID);
+      if (judgeSessions.has(input.sessionID)) {
+        if (input.tool !== JD_INSPECT) throw new Error('A judge may use only immutable Git inspection; live reads, shell, delegation, memory and other tools are denied.');
+        return;
+      }
+      if (actor.agent === JD_FIX || liveAgent === JD_FIX) {
+        const parent = actor.session.parentID;
+        if (typeof parent !== 'string') throw new Error('Standalone correction requires its native parent.');
+        guardStandalone(parent, true);
+        if (!standaloneFixes.has(parent) || actor.session.directory !== inputDirectory || actor.session.projectID !== inputProjectID)
+          throw new Error('Standalone correction requires an admitted native fix task in this workspace.');
+        if (!['read', 'glob', 'grep', 'edit', 'write', 'apply_patch', 'bash'].includes(input.tool))
+          throw new Error('The bounded fix actor cannot delegate, write memory or invoke unrelated tools.');
+        return;
+      }
+      if (standaloneFixes.has(input.sessionID) && ['task', 'question'].includes(input.tool))
+        throw new Error('Standalone correction is in flight; wait for its result.');
+      if (input.tool === 'question') {
+        security.control(input.sessionID);
+        if (pendingStandalone(input.sessionID)) throw new Error('Standalone work is in flight; wait before another native interaction.');
+        return intake.beforeQuestion(input, output.args);
+      }
       if (input.tool !== 'task') return;
       const auditTask = output.args as { subagent_type?: unknown; prompt?: unknown };
       if (security.pending(input.sessionID) || auditTask?.subagent_type === SECURITY_AGENT ||
           (typeof auditTask?.prompt === 'string' && auditTask.prompt.startsWith(SECURITY_HANDLE_PREFIX))) {
         Object.assign(output.args, await security.before(input, output.args));
+        return;
+      }
+      const standalone = judgmentTask(output.args);
+      if (pendingStandalone(input.sessionID) && (!standalone || standalone.subagent_type === JD_FIX))
+        throw new Error('Standalone work is in flight; wait before another actor or correction.');
+      if (standalone) {
+        guardStandalone(input.sessionID, standalone.subagent_type === JD_FIX);
+        await inspector.parent({ sessionID: input.sessionID, directory: inputDirectory, worktree: inputWorktree, agent: COORDINATOR });
+        guardStandalone(input.sessionID, standalone.subagent_type === JD_FIX);
+        if (standalone.subagent_type === JD_FIX && pendingStandalone(input.sessionID))
+          throw new Error('Standalone work is in flight; wait before correction.');
+        if (standaloneFixes.has(input.sessionID)) throw new Error('Standalone correction is in flight; wait for its result.');
+        boundedText(input.callID, 'native callID', 256);
+        const key = standaloneKey(input.sessionID, input.callID);
+        if (standaloneCalls.has(key)) throw new Error('Standalone native call ID already admitted.');
+        standaloneCalls.set(key, { args: { ...standalone }, settled: false });
+        if (standalone.subagent_type === JD_FIX) standaloneFixes.add(input.sessionID);
         return;
       }
       // An MDD conversation dispatches MDD phases. Reaching past them into the shared registry is
@@ -1282,6 +1407,14 @@ const plugin: Plugin = async input => {
       if (args) Object.assign(output.args, args);
     },
     'tool.execute.after': async (input, output) => {
+      const standalone = standaloneCalls.get(standaloneKey(input.sessionID, input.callID));
+      if (input.tool === 'task' && (standalone || judgmentTask(input.args))) {
+        if (!standalone || !isDeepStrictEqual(standalone.args, input.args)) throw new Error('Standalone result does not match its admitted native task.');
+        if (standalone.settled) return;
+        try { guardStandalone(input.sessionID, standalone.args.subagent_type === JD_FIX); }
+        finally { settleStandalone(input.sessionID, input.callID); }
+        return;
+      }
       if (input.tool === 'question') await intake.afterQuestion(input, input.args, output);
       if (input.tool === 'task') {
         const auditTask = input.args as { subagent_type?: unknown; prompt?: unknown };
@@ -1323,6 +1456,7 @@ const plugin: Plugin = async input => {
       if (event.type === 'session.created') {
         const child = event.properties.info;
         if (child.parentID && runner.nativePending(child.parentID)) nativeChildren.add(child.id);
+        if (isJudge((child as unknown as Record<string, unknown>).agent)) judgeSessions.add(child.id);
       }
       if (event.type === 'server.instance.disposed' && event.properties.directory === input.directory) { await intake.close(); return; }
       // The host replaced this conversation with a summary. MDD's own state is untouched, because
@@ -1334,6 +1468,7 @@ const plugin: Plugin = async input => {
       const part = event.properties.part;
       if (part.type === 'tool' && part.tool === 'task' && part.state.status === 'error') {
         if (security.failed(part)) return;
+        if (settleStandalone(part.sessionID, part.callID)) return;
         runner.owner(part.sessionID, part.callID);
         await runner.nativeError(part.sessionID, part.callID);
         runner.releaseSettled(part.sessionID, part.callID);

@@ -10,7 +10,7 @@ export const PHASE_PATHS = Object.freeze({
   'mdd-spec': 'specs/{domain}/spec.md', 'mdd-design': 'design.md', 'mdd-tasks': 'tasks.md',
   'mdd-apply': 'apply-progress.md', 'mdd-verify': 'verify-report.md',
 } satisfies Record<Phase, string>);
-export type ArtifactIdentity = { runID: string; phase: Phase; domain?: string; explorationID?: string };
+export type ArtifactIdentity = { runID: string; phase: Phase; domain?: string; explorationID?: string; batchID?: string };
 export type ArtifactRef = Readonly<ArtifactIdentity & {
   recordID: string; digest: string; bytes: number; store: Answers['artifactStore'];
   path?: string; observationID?: number;
@@ -31,7 +31,7 @@ function slug(value: unknown): asserts value is string {
 }
 function identity(value: ArtifactIdentity): ArtifactIdentity {
   if (!value || typeof value !== 'object' || Array.isArray(value) ||
-      Object.keys(value).some(key => !['runID', 'phase', 'domain', 'explorationID'].includes(key))) {
+      Object.keys(value).some(key => !['runID', 'phase', 'domain', 'explorationID', 'batchID'].includes(key))) {
     throw new Error('Invalid artifact identity.');
   }
   slug(value.runID);
@@ -42,6 +42,10 @@ function identity(value: ArtifactIdentity): ArtifactIdentity {
     if (value.phase !== 'mdd-explore') throw new Error('Only exploration has a side identity.');
     slug(value.explorationID);
   }
+  if (value.batchID !== undefined) {
+    if (value.phase !== 'mdd-apply') throw new Error('Only Apply has a batch identity.');
+    slug(value.batchID);
+  }
   return { ...value };
 }
 function contentCheck(content: string): void {
@@ -50,7 +54,8 @@ function contentCheck(content: string): void {
 }
 function digest(content: string): string { return createHash('sha256').update(content).digest('hex'); }
 function artifactPath(value: ArtifactIdentity): string {
-  const name = value.explorationID ? `explorations/${value.explorationID}/exploration.md`
+  const name = value.batchID ? `apply/${value.batchID}/apply-progress.md`
+    : value.explorationID ? `explorations/${value.explorationID}/exploration.md`
     : PHASE_PATHS[value.phase].replace('{domain}', value.domain ?? '');
   return `openspec/changes/${value.runID}/${name}`;
 }

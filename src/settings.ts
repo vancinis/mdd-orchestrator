@@ -8,11 +8,12 @@ import { fileURLToPath } from 'node:url';
 export const MODEL_ROLES = Object.freeze([
   'orchestrator', 'mdd-explore', 'mdd-plan', 'mdd-propose', 'mdd-spec',
   'mdd-design', 'mdd-tasks', 'mdd-apply', 'mdd-verify', 'mdd-risk', 'mdd-security',
+  'mdd-jd-judge-a', 'mdd-jd-judge-b', 'mdd-jd-fix',
 ] as const);
 /**
- * `mdd-risk` and `mdd-security` are configurable actors, not workflow phases. Keeping them in `ModelRole`
- * rather than `Phase` lets them be installed, packaged and modeled like every other actor
- * without being accepted anywhere a `Phase` is required (routing, the ledger, telemetry phases).
+ * Configurable actors are not necessarily workflow phases. Risk, security and standalone
+ * Judgment Day roles are installed and modeled here without expanding routing, phase reports,
+ * telemetry phases, or the adapters' phase-instruction/tool policy.
  */
 export type ModelRole = typeof MODEL_ROLES[number];
 export type NamedProfile = { models: Partial<Record<ModelRole, string>>; answers: Partial<Answers> };

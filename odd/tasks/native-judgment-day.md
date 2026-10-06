@@ -1,0 +1,77 @@
+# Native Judgment Day
+
+Provide explicitly requested, standalone Judgment Day through MDD's packaged OpenCode actors and skill, with models selectable in `mdd-ai config`.
+
+## Intent and scope
+
+MDD already configures models per actor but lacks Judgment Day actors and native dispatch. Reuse the existing model editor and native task transport; do not introduce a ninth phase, a second workflow engine, or a dependency on Gentle AI.
+
+- Two blind, read-only foreground judges inspect the same immutable committed Git target.
+- The parent waits for both results, corroborates severe findings, and requests correction authorization.
+- At most two correction/rejudgment rounds; no delivery authority or automatic execution after Verify.
+- Preserve active workflow ownership, pending interactions, transfer guards, and normal phase behavior.
+- New actors, skill and references are namespaced under MDD; existing configurations remain valid.
+- Dirty/untracked target material requires an explicitly authorized immutable snapshot; never silently exclude it.
+
+## Tasks
+
+- [x] JD-1 — Package configurable judge/fix actors and preserve phase-role separation. Model round trips, config editor, schema, installation, assets, telemetry and existing phase membership verified.
+- [x] JD-2 — Enable exact standalone actor dispatch with native read-only inspection and workflow guards. Full regression fixture corrected and unresolved native actor identity now fails closed; independent verification confirms the correction.
+- [x] JD-3 — Package the explicit-request protocol, coordinator routing and usage documentation. Installed skill/reference paths, immutable targets, authorization, round limits and full regression suite verified; independent source/contract check passed.
+- [x] DEL-1 — Integrate the latest authorized `origin/main` changes while preserving Judgment Day and sequential Apply behavior; build, typecheck, full tests and diff cleanliness verified before normal direct-main delivery.
+
+Each task uses delegated direct execution: preparation requires repository exploration and each work unit touches multiple non-trivial files. One writer works sequentially; the parent owns commits and native review.
+
+## Acceptance and checks
+
+- Existing `mdd-ai config` lists both judges and the fix actor with model/variant inheritance.
+- Setup includes all namespaced agents and skill references without overwriting foreign assets.
+- Two native foreground judge calls can be admitted before either completes without changing workflow state.
+- Judge tools cannot mutate files, delegate, write memory, or execute unrestricted shell commands.
+- JD outputs never become MDD phase reports; fix authorization cannot bypass live implementation ownership.
+- Test-first policy: deterministic behavior tests observe RED, GREEN, then refactor; passive documents use structural checks. Source: default ODD policy; no configured TDD override found.
+- Commands: `npm run typecheck`, `npm run build`, focused `node --import ./tests/isolate-home.mjs --test <task test files>`, `npm test`, `git diff --check`.
+- Source-mutating normalization, if applicable, precedes final checks and review freeze.
+- Native host smoke is pending unless separately authorized: it starts a service and uses authentication. Mocks alone do not prove live host concurrency.
+
+## Delivery and review
+
+- Branch: `fix-limits` (existing non-default working branch).
+- Branch point / initial review boundary: `963895886e5786fb3af62ccb34ada3ecba4a9f51`.
+- Forecast: 550–800 authored changed lines, advisory only; never omit tests or compress source to fit.
+- User-selected delivery: multiple Conventional Commits on one branch toward main; `single-pr` organization. No push, PR creation, merge or global installation authorized.
+- RDD was on at implementation start; current effective mode is off, decided by clone-local preference. Do not reactivate it. Current checking/delivery is ordinary and unmanaged; the earlier native transaction is not approved or closed.
+- Running authored lines: 3,657 (feature and progress: 1,874; upstream integration: 1,777; integration proof readback: 6). The total includes upstream sequential-Apply integration; tests and complete protocols were preserved rather than compressed to fit the initial estimate.
+- Work-unit commits: `7c58cb9` — `feat(config): add configurable Judgment Day actors`; `a7900f4` — `feat(judgment): enable guarded native dual review`; `ff3f634` — `fix(judgment): reject unresolved native actor identity`; `9093e2d` — `feat(judgment): package standalone review protocol`; `aece23e` — `chore: integrate latest main with native Judgment Day`.
+- JD-1 native assessment: medium, `review_due=false`, `under_budget`; pending review slice retains the initial boundary.
+- JD-2 native assessment: high (`process_boundary`), review due. Exact committed range: 22 paths / 1,010 net authored diff lines. Candidate consent granted for lineage `review-fe95a8346d0656ec`; review remains blocked and no review approval or delivery authority exists.
+
+## Progress and recovery
+
+JD-1 complete: focused tests observed RED (140 pass / 9 expected failures), GREEN and post-refactor (149 pass / 0 failures); build, typecheck and parent `git diff --check` passed. Native worktree assessment was unassessable because new assets are untracked; do not treat this as low risk. Assess the exact committed work unit next.
+
+JD-2 complete: behavioral RED then GREEN; 123 focused tests passed. Build, typecheck and parent `git diff --check` passed. A dedicated bounded `mdd_jd_inspect` reads committed Git objects with fixed argv, no shell, no lazy fetch, no external diff/text conversion, and sanitized Git environment. Judge enforcement denies all other tools. Exact actors bypass phase recording while preserving ownership/intake guards. One fix writer is admitted at a time. Authenticated native-host concurrency remains unverified.
+
+The JD-2 diff exceeds the initial estimate (653 authored source/test/doc lines) because native ownership and immutable-read security boundaries require adversarial regression coverage; no tests were dropped or code compressed to fit.
+
+Recovery: the interrupted consent question was presented again and the user selected review. Exact START succeeded. One grouped foreground launch of all four provider-issued reviewer tasks returned `opencode_review_transport_relay_refused (reason: output_refused)` for every task. A single exact-bound read-only STATUS confirmed the same four slots remain pending; no result was admitted. Do not claim closure, substitute reviewers, synthesize captures or repeat launches in a loop.
+
+Diagnosis and report handoff: installed adapter inspection confirmed `output_refused` comes from the Gentle AI relay. The original child error remains unknown. User consented to report and separately authorized the current GitHub CLI session for the exact upstream repository. The privacy-scrubbed open/closed lookup found possible matches but a later search was incomplete; no issue/comment was created, no labels changed, and all further GitHub mutations stopped.
+
+The exact captured candidate-scoped decline was invoked once. It returned `rdd_disabled`, `mutation_outcome=not_started`, `next_action=stop`, `retry_safe=false`. Read-only mode status confirmed clone-local OFF with global ON. Do not retry that decline, invoke replacement lifecycle operations, change the preference, or claim native continuation/approval. All existing commits and review state are preserved.
+
+JD-3 packaging is committed as `9093e2d`: packaged skill/reference, coordinator activation, parent-loaded standards by value, strict result/round contracts and documentation. Initial focused checks passed (84 tests). Initial full suite failed one missing-session fixture; it was corrected without weakening production policy. Independent verification then found otherwise readable records could lack resolved actor identity; that gap was closed with 12 regressions, preserving trusted V2 early identity and rejecting identity supplied in tool arguments.
+
+Final writer checks: build and typecheck passed; 250 focused native tests passed; full `npm test` passed 1,108 tests, failed 0, skipped 2 (Windows file-symlink privilege and opt-in managed Engram smoke). Independent corrected-candidate verification passed 426 tests, failed/skipped/cancelled 0; typecheck and diff check passed. Its earlier 120-second timeout remains incomplete historical evidence, superseded for the corrected candidate by the completed 600-second-budget run (actual 132 seconds). Parent re-ran typecheck and diff check successfully.
+
+Final worktree assessment explicitly included the new skill/reference inventory: medium, 18 paths / 797 authored lines. No returned review transition was executed because RDD is disabled. Conservative high-risk independent verification was completed; neither check produces native authority. Native-host/model-backed smoke remains unverified without separate authorization.
+
+Feature implementation complete with functional and independent source/contract proof. Delivery remains ordinary disabled/unmanaged, not native-approved. The user now explicitly authorizes downloading the latest main and publishing directly to main, using the current configured Git HTTPS credential/session only for `github.com/vancinis/mdd-orchestrator`. No force push, history rewrite, global installation or authenticated host smoke is authorized.
+
+Delivery integration: fetched `origin/main` at `531ee36a475cd77469e5ab3c47be9f4ebfd66b85`; current feature tip `675b823`, 6 feature commits ahead and 7 upstream commits behind. Route: delegated direct, because upstream sequential-Apply changes overlap native guards, coordinator instructions and tests. A single writer will integrate that exact upstream commit, resolve only authorized integration surfaces, and run functional checks; the parent owns commits and normal push.
+
+DEL-1 proof: merged the pinned upstream with both histories preserved, resolving only coordinator instructions and phase-asset tests. Combined coordinator remains within the 16,000-byte installation limit (15,996 bytes), preserving both contracts. Writer build/typecheck passed; full suite passed 1,166 tests, failed 0, skipped 2 (Windows file-symlink privilege and opt-in managed Engram smoke). Parent typecheck, staged/unstaged diff checks and conflict inventory passed. Native assessment: medium; RDD remains clone-local OFF, so no returned review transition is executed and no native approval is claimed.
+
+Delivery: normal direct-main push is explicitly authorized for this verified integration, without force or history rewrite. Preserve both histories and stop on unexpected remote advancement; publication outcome is recorded separately. Model-backed native-host smoke remains pending without separate authorization.
+
+The memory service binds this runtime session to project `mdd`, despite the repository detector returning `mdd-orchestrator`; recovery mirrors follow that existing session binding without inventing a session.

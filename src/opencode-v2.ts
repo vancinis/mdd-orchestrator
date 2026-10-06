@@ -10,9 +10,10 @@ import { collapsedPrompt, COLLAPSE_MIN_BYTES } from './dispatch-transcript.js';
 import { DISPATCH_HANDLE_PREFIX } from './phase-runner.js';
 import { SECURITY_AGENT, SECURITY_RUNTIME_GUARD } from './security-audit.js';
 import type { SecurityRuntimeHooks } from './security-audit.js';
+import { JD_INSPECT, isJudge, isJudgmentActor } from './judgment-day.js';
 
 const COORDINATOR = 'mdd-orchestrator';
-/** Every actor with a configurable model: the eight workflow phases plus `mdd-risk`. */
+/** Configurable actors include standalone roles, independently of phase permission policy. */
 const MODEL_AGENTS = MODEL_ROLES.filter(role => role !== 'orchestrator');
 /**
  * Actors pinned to the phase-actor tool profile: dispatch nothing further, read no skill by
@@ -191,6 +192,8 @@ export async function setupV2(ctx: Plugin.Context, createMotor: LegacyPlugin): P
       if (PINNED_AGENTS.includes(id as typeof PINNED_AGENTS[number])) draft.permissions.push(
         { action: 'subagent', resource: '*', effect: 'deny' }, { action: 'skill', resource: '*', effect: 'deny' },
         { action: 'mdd_check_report', resource: '*', effect: 'allow' });
+      if (isJudge(id)) draft.permissions.push(
+        { action: '*', resource: '*', effect: 'deny' }, { action: JD_INSPECT, resource: '*', effect: 'allow' });
     });
   };
   let agentRegistration = await ctx.agent.transform(agentPolicy);
@@ -216,11 +219,14 @@ export async function setupV2(ctx: Plugin.Context, createMotor: LegacyPlugin): P
     });
   });
   await ctx.tool.hook('execute.before', async event => {
-    const call = { sessionID: event.sessionID, callID: event.id, tool: event.tool === 'subagent' ? 'task' : event.tool };
+    const call = { sessionID: event.sessionID, callID: event.id, tool: event.tool === 'subagent' ? 'task' : event.tool, agent: event.agent };
     await enforceSecurity(event.sessionID, call.tool, event.input, event.agent);
+    await settleAgentPolicy();
     const session = await ctx.session.get({ sessionID: event.sessionID });
     if (session.location.directory !== directory || session.projectID !== ctx.location.project.id) {
       if (event.agent === SECURITY_AGENT || session.agent === SECURITY_AGENT) throw new Error('Security session left its bound workspace.');
+      if (isJudgmentActor(event.agent) || (event.tool === 'subagent' && isJudgmentActor(object(event.input).agent)))
+        throw new Error('Standalone Judgment Day workspace differs from its plugin location.');
       return;
     }
     if (event.agent === SECURITY_AGENT || session.agent === SECURITY_AGENT) {
@@ -279,6 +285,10 @@ export async function setupV2(ctx: Plugin.Context, createMotor: LegacyPlugin): P
     if (!event.sessionID && event.agent === SECURITY_AGENT) throw new Error('Security context has no native session identity.');
     if (event.sessionID && await enforceSecurity(event.sessionID, 'mdd_check_report', { phase: SECURITY_AGENT, result: '' }, event.agent)) {
       event.tools = Object.fromEntries(Object.entries(event.tools).filter(([name]) => name === 'mdd_check_report'));
+      return;
+    }
+    if (isJudge(event.agent)) {
+      for (const name of Object.keys(event.tools)) if (name !== JD_INSPECT) delete event.tools[name];
       return;
     }
     if (event.agent !== COORDINATOR) return;

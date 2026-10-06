@@ -1,7 +1,6 @@
 import { LocalFiles } from './local-files.js';
 import { loadGlobalSettings } from './global-settings.js';
 import type { InstallationEnvironment } from './installation-paths.js';
-import { MODEL_ROLES } from './settings.js';
 import { PHASES } from './policy.js';
 import type { Phase } from './policy.js';
 import { objectWithKeys, ValidationError } from './validation.js';
@@ -105,7 +104,8 @@ function parseUsage(value: unknown): TelemetryUsage {
 
 function parseEvent(value: unknown): TelemetryEvent {
   const input = objectWithKeys(value, 'event', ['timestamp', 'event', 'phase', 'duration', 'route', 'outcome', 'runID', 'attempt', 'mode', 'executor', 'failure', 'usage']);
-  if (input.executor !== undefined && ![...MODEL_ROLES, 'explore', 'general', 'coordinator'].includes(input.executor as string)) throw new ValidationError('Invalid executor.');
+  // Model configuration also includes standalone actors; it grants no phase telemetry membership.
+  if (input.executor !== undefined && ![...PHASES, 'explore', 'general', 'coordinator'].includes(input.executor as string)) throw new ValidationError('Invalid executor.');
   if (!Number.isSafeInteger(input.timestamp) || (input.timestamp as number) < 0 || (input.timestamp as number) > 8640000000000000 ||
       !['preflight', 'phase-start', 'phase-end', 'approval', 'report', 'retry', 'handover', 'reset', 'compaction'].includes(input.event as string)) {
     throw new ValidationError('Invalid telemetry event.');

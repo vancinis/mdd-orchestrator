@@ -27,9 +27,10 @@ export const STABLE_CHECKPOINT_VERSION = 3;
 export const CHECKPOINT_MAX_BYTES = 16 * 1024 * 1024;
 /**
  * Runtime caps shared with PhaseRunner, so a list the runner holds can always be checkpointed.
- * The runner deduplicates and trims to these limits before a checkpoint is ever built.
+ * Advisory lists may be trimmed; changed-file evidence must fit in full or fail explicitly.
  */
-export const CHANGED_LIST_MAX = 64;
+// Every recorded phase may report 64 files; keep the full union for final verification.
+export const CHANGED_LIST_MAX = 256 * 64;
 export const CONCERNS_MAX = 64;
 export const CONTEXT_ENTRIES_MAX = 512;
 /** Explanations are clipped to this size when checkpointed; they describe, they never authorize. */
@@ -58,7 +59,7 @@ export type ResumeData = {
   directory: string; worktree: string; userMessageID: string; requirements: string;
   memoryProject?: string;
   context: { label: string; content: string; source: 'coordinator' }[];
-  dependencies: { phase: Phase; content: string; digest: string }[];
+  dependencies: { phase: Phase; content: string; digest: string; batchID?: string }[];
   contexts: { explorationID: string; outcome: 'passed' | 'failed'; summary: string; concerns: ReturnType<typeof concerns>; content: string; digest: string }[];
   acceptance?: Acceptance; decisions: Decision[]; planned: Deliverable[]; evidence: Evidence;
   verification?: Verification; executedChecks: Check[]; changedFiles: number;
@@ -119,9 +120,9 @@ function validateStable(value: unknown, workflow: Workflow, data: ResumeData): S
     if (!bounded(file.path, 400) || (file.reason !== undefined && !bounded(file.reason, 500))) throw new ValidationError('Invalid changed file.');
     return file;
   });
-  // The count is every distinct file the run changed; the list keeps the most recent 64 of them.
+  // Batch-aware records keep the entire union, not only the last batch's files.
   if (new Set(files.map(file => file.path)).size !== files.length ||
-      files.length !== Math.min(data.changedFiles, CHANGED_LIST_MAX)) throw new ValidationError('Changed-file count does not match stable state.');
+      files.length !== (workflow.applyProgress() ? data.changedFiles : Math.min(data.changedFiles, 64))) throw new ValidationError('Changed-file count does not match stable state.');
   const advisory = list(item.concerns, CONCERNS_MAX, 'stable concerns').map(value => concerns([value])[0]);
   if (!isDeepStrictEqual(advisory, item.concerns)) throw new ValidationError('Invalid stable concerns.');
   if (item.delivered !== undefined && !isDeepStrictEqual(delivered(item.delivered), item.delivered)) throw new ValidationError('Invalid delivered summary.');
@@ -163,8 +164,8 @@ function validateData(value: unknown, workflow: Workflow): ResumeData {
   const dependencies = list(data.dependencies, 256, 'dependencies');
   if (dependencies.length !== results.length) throw new ValidationError('Missing checkpoint dependency bytes.');
   for (const [index, entry] of dependencies.entries()) {
-    const item = objectWithKeys(entry, 'checkpoint dependency', ['phase', 'content', 'digest']);
-    if (item.phase !== results[index]!.phase) throw new ValidationError('Checkpoint dependency phase mismatch.');
+    const item = objectWithKeys(entry, 'checkpoint dependency', ['phase', 'content', 'digest', 'batchID']);
+    if (item.phase !== results[index]!.phase || item.batchID !== results[index]!.batchID) throw new ValidationError('Checkpoint dependency phase or batch mismatch.');
     body({ content: item.content, digest: item.digest });
   }
   for (const entry of list(data.contexts, 256, 'contextual findings')) {
@@ -178,6 +179,10 @@ function validateData(value: unknown, workflow: Workflow): ResumeData {
   const choices = accepted ? decisions(data.decisions, accepted) : [];
   const planned = list(data.planned, 32, 'plan').length ? deliverables(data.planned) : [];
   if (planned.length) validatePlan(accepted!, choices, planned);
+  const progress = workflow.applyProgress();
+  if (progress && !isDeepStrictEqual(progress.planned, planned.map(({ id, dependsOn }) => ({ id, dependsOn })))) {
+    throw new ValidationError('Checkpoint Apply plan contradicts replayed deliverables.');
+  }
   if (results.some(result => result.outcome === 'passed' && ['mdd-plan', 'mdd-spec'].includes(result.phase)) && !accepted) {
     throw new ValidationError('Checkpoint omits earned acceptance.');
   }
@@ -236,7 +241,7 @@ export function validateCheckpoint(value: unknown): { checkpoint: AnyCheckpoint;
     const results = workflow.snapshot().results;
     if (attempt.state === 'pending' ? next.kind !== 'await-result' || next.phase !== attempt.phase :
       attempt.state === 'released' ? next.kind !== 'execute' || next.phase !== attempt.phase || workflow.history().at(-1)?.kind !== 'retry' :
-      results.at(-1)?.phase !== attempt.phase || workflow.history().at(-1)?.kind !== 'result') throw new ValidationError('Checkpoint attempt contradicts workflow.');
+      results.at(-1)?.phase !== attempt.phase || workflow.history().filter(event => event.kind !== 'apply-plan').at(-1)?.kind !== 'result') throw new ValidationError('Checkpoint attempt contradicts workflow.');
   } else if (workflow.nextAction().kind === 'await-result') throw new ValidationError('Running phase needs an attempt.');
   if (item.version !== 1) {
     if (typeof item.dataDigest !== 'string' || !/^[a-f0-9]{64}$/.test(item.dataDigest) ||

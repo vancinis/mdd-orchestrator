@@ -5,8 +5,43 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { MDD_ASSETS, MDD_PACKAGED_ASSETS } from '../dist/project-assets.js';
 import { phaseName } from '../dist/phase-assets.js';
+import { PHASES } from '../dist/policy.js';
+import { defaultSettings, freezeProfile, MODEL_ROLES } from '../dist/settings.js';
+import { applyModelOverrides } from '../dist/native-models.js';
+import { PHASE_AGENTS, CHECK_AGENTS, pinPhaseAgents } from '../dist/opencode-plugin.js';
 
-// Capability is the user's native decision, not MDD's. No packaged agent may ship its own
+const JD_ROLES = ['mdd-jd-judge-a', 'mdd-jd-judge-b', 'mdd-jd-fix'];
+
+for (const role of ['plan', 'tasks']) {
+  test(`assets: ${role} sizes dependency-ordered deliverables for fresh Apply actors`, () => {
+    const text = fs.readFileSync(`assets/opencode/agents/mdd-${role}.md`, 'utf8');
+    assert.match(text, /1–32 dependency-ordered, bounded coherent deliverables/);
+    assert.match(text, /fresh Apply actor/);
+    assert.match(text, /own checks and handoff/);
+    assert.match(text, /line count is not a hard stop or arbitrary cap/);
+    assert.match(text, /single deliverable remains too large/);
+  });
+}
+
+test('assets: Apply completes only its assignment and reports genuine blockers without a diff ceiling', () => {
+  const text = fs.readFileSync('assets/opencode/agents/mdd-apply.md', 'utf8');
+  assert.match(text, /completed=\[assignedStepID\]/);
+  assert.match(text, /Never stop the whole feature just because its total diff is large/);
+  assert.match(text, /missing decision, failed checks, environment failure or uncertain writes/);
+  assert.match(text, /Never silently add scope or task IDs/);
+  assert.match(text, /preserved filesystem progress/);
+});
+
+test('assets: coordinator follows durable same-phase success without speculative dispatch', () => {
+  const text = fs.readFileSync('assets/opencode/agents/mdd-orchestrator.md', 'utf8');
+  assert.match(text, /durable success.*same-phase Apply nextAction/s);
+  assert.match(text, /no per-batch approval/);
+  assert.match(text, /Never dispatch speculatively/);
+  assert.match(text, /Verify checks the full plan after the final batch/);
+  assert.ok(Buffer.byteLength(text) <= 16000);
+});
+
+// Phase capability is the user's native decision, not MDD's. No packaged phase may ship its own
 // permission map: a phase that cannot act is exactly what made the workflow unusable.
 for (const role of ['explore', 'propose', 'spec', 'design', 'tasks', 'apply', 'verify']) {
   test(`assets: ${role} ships no permission map and keeps a strict handoff`, () => {
@@ -31,7 +66,7 @@ for (const role of ['explore', 'propose', 'spec', 'design', 'tasks', 'apply', 'v
   });
 }
 
-for (const name of ['mdd-pr-body', 'mdd-cleanup', 'mdd-doc']) {
+for (const name of ['mdd-pr-body', 'mdd-cleanup', 'mdd-doc', 'mdd-judgment-day']) {
   test(`assets: ${name} trigger metadata, structure and explicit registry`, () => {
     const text = fs.readFileSync(`assets/opencode/skills/${name}/SKILL.md`, 'utf8');
     assert.match(text, new RegExp(`name: ${name}\\n`));
@@ -47,12 +82,12 @@ for (const name of ['mdd-pr-body', 'mdd-cleanup', 'mdd-doc']) {
 }
 
 // phaseName accepts only the eight workflow phases. Neither the coordinator nor an actor with a
-// configurable model but no stop on the route (mdd-risk) is a Phase, whatever else it is.
-test('phaseName accepts only the eight workflow phases, not orchestrator or mdd-risk', () => {
+// configurable model but no stop on the route is a Phase, whatever else it is.
+test('phaseName accepts only the eight workflow phases, not configurable standalone actors', () => {
   for (const phase of ['mdd-explore', 'mdd-plan', 'mdd-propose', 'mdd-spec', 'mdd-design', 'mdd-tasks', 'mdd-apply', 'mdd-verify']) {
     assert.equal(phaseName(phase), phase);
   }
-  for (const bad of ['orchestrator', 'mdd-risk', 'mdd-security', 'mdd-unknown', '']) {
+  for (const bad of ['orchestrator', 'mdd-risk', 'mdd-security', ...JD_ROLES, 'mdd-unknown', '']) {
     assert.throws(() => phaseName(bad), /Unknown MDD phase/);
   }
 });
@@ -72,6 +107,211 @@ test('security actor is packaged with deny-all permissions and no standalone dis
   assert.match(text, /separate user authorization.*mdd-apply/);
   assert.match(text, /Write your report in English/);
   assert.ok(Buffer.byteLength(text) <= 16000);
+});
+
+test('Judgment Day model roles and installation do not expand phase or report-check membership', () => {
+  assert.deepEqual(PHASE_AGENTS, [...PHASES]);
+  assert.deepEqual(CHECK_AGENTS, [...PHASES, 'mdd-risk', 'mdd-security']);
+  const settings = defaultSettings();
+  const config = { agent: {} };
+  for (const role of JD_ROLES) {
+    assert.ok(MODEL_ROLES.includes(role), role);
+    assert.ok(MDD_ASSETS.includes(`assets/opencode/agents/${role}.md`), role);
+    assert.equal(PHASES.includes(role), false);
+    settings.profiles.default.models[role] = 'provider/judge#high';
+    config.agent[role] = { mode: 'subagent', permission: { '*': 'deny', read: 'allow' } };
+  }
+  applyModelOverrides(config, freezeProfile(settings));
+  pinPhaseAgents(config);
+  for (const role of JD_ROLES) {
+    assert.deepEqual(config.agent[role], { mode: 'subagent', permission: { '*': 'deny', read: 'allow' },
+      model: 'provider/judge', variant: 'high' });
+  }
+  // V2 model selection shares roles, but phase instruction/tool pinning remains a separate list.
+  const v2 = fs.readFileSync('src/opencode-v2.ts', 'utf8');
+  assert.match(v2, /MODEL_AGENTS = MODEL_ROLES\.filter/);
+  assert.match(v2, /PINNED_AGENTS = Object\.freeze\(\[\.\.\.PHASES, 'mdd-risk'\] as const\)/);
+});
+
+test('Judgment Day judges share a neutral standalone JSON contract and allow only immutable inspection', () => {
+  const bodies = [];
+  for (const role of ['mdd-jd-judge-a', 'mdd-jd-judge-b']) {
+    const text = fs.readFileSync(`assets/opencode/agents/${role}.md`, 'utf8');
+    const front = text.split('---')[1];
+    assert.match(front, /\nmode: subagent\n/);
+    assert.doesNotMatch(front, /model:|tools:/);
+    const permissions = Object.fromEntries([...front.matchAll(/^  ("\*"|\w+): (allow|ask|deny)$/gm)].map(m => [m[1], m[2]]));
+    assert.deepEqual(permissions, { '"*"': 'deny', mdd_jd_inspect: 'allow' });
+    assert.match(text, /Never use live read\/glob\/grep/);
+    assert.match(text, /full lowercase commit object IDs/);
+    assert.match(text, /immutable/);
+    assert.match(text, /blind/);
+    assert.match(text, /frozen ledger/);
+    assert.match(text, /fix-caused defects/);
+    assert.match(text, /Return one JSON object and no prose/);
+    assert.doesNotMatch(text, /mdd_check_report|## MDD Outcome/);
+    const example = JSON.parse(text.match(/```json\n([\s\S]*?)\n```/)[1]);
+    assert.deepEqual(Object.keys(example), ['findings', 'evidence']);
+    assert.deepEqual(Object.keys(example.findings[0]), ['location', 'severity', 'claim', 'evidence_class', 'causal_disposition', 'proof_refs']);
+    assert.ok(Buffer.byteLength(text) < 16000);
+    bodies.push(text.split('---').slice(2).join('---'));
+  }
+  assert.equal(bodies[0], bodies[1], 'blind judges receive identical criteria and output contracts');
+});
+
+test('Judgment Day fix actor requires correction authorization and a bounded severe ledger', () => {
+  const text = fs.readFileSync('assets/opencode/agents/mdd-jd-fix.md', 'utf8');
+  const front = text.split('---')[1];
+  assert.match(front, /\nmode: subagent\n/);
+  assert.doesNotMatch(front, /model:|tools:/);
+  assert.deepEqual(Object.fromEntries([...front.matchAll(/^  ("\*"|\w+): (allow|ask|deny)$/gm)].map(m => [m[1], m[2]])),
+    { '"*"': 'deny', read: 'allow', glob: 'allow', grep: 'allow', edit: 'ask', bash: 'ask' });
+  assert.match(text, /explicit correction authorization/);
+  assert.match(text, /confirmed severe ledger IDs/);
+  assert.match(text, /at most two correction rounds/);
+  assert.match(text, /rollback boundary/);
+  assert.match(text, /Do not commit, push/);
+  assert.match(text, /not a sandbox/);
+  assert.doesNotMatch(text, /mdd_check_report|## MDD Outcome/);
+});
+
+const jdSkillPath = 'assets/opencode/skills/mdd-judgment-day/SKILL.md';
+const jdReferencePath = 'assets/opencode/skills/mdd-judgment-day/references/prompts-and-formats.md';
+const jdText = () => fs.readFileSync(jdSkillPath, 'utf8');
+const jdReference = () => fs.readFileSync(jdReferencePath, 'utf8');
+
+test('Judgment Day routing is explicit, namespaced and precedes generic phase routing within the size cap', () => {
+  const text = fs.readFileSync('assets/opencode/agents/mdd-orchestrator.md', 'utf8');
+  assert.match(text, /Standalone override:.*explicit request/);
+  for (const trigger of ['judgment-day', 'judgment day', 'judment-day']) assert.ok(text.includes(trigger));
+  assert.match(text, /skills\/mdd-judgment-day\/SKILL\.md/);
+  assert.ok(text.indexOf('Standalone override:') < text.indexOf('Information-only requests'));
+  assert.ok(text.indexOf('Standalone override:') < text.indexOf('For any other implementation request'));
+  assert.match(text, /no mdd_start or automatic review after Verify/);
+  assert.match(text, /instead of phase\/status routing/);
+  assert.match(text, /exceptions to phase-only dispatch/);
+  assert.ok(Buffer.byteLength(text) <= 16000);
+});
+
+test('Judgment Day protocol is self-contained and preserves snapshot, blindness, causality and authorization gates', () => {
+  const skill = jdText(); const reference = jdReference();
+  assert.ok(MDD_ASSETS.includes(jdSkillPath)); assert.ok(MDD_ASSETS.includes(jdReferencePath));
+  assert.ok(Buffer.byteLength(reference) <= 16000, 'the complete installed reference retains the asset size cap');
+  assert.match(skill, /\[.*\]\(references\/prompts-and-formats\.md\)/);
+  assert.ok(Buffer.byteLength(skill) < 6000, 'keep the protocol detail in its local reference');
+  for (const text of [skill, reference]) {
+    assert.match(text, /explicit user request/);
+    assert.match(text, /dirty\/untracked/);
+    assert.match(text, /separately authorized.*snapshot/s);
+    assert.match(text, /both fresh results/);
+    assert.match(text, /two native.*one response/s);
+    assert.match(text, /standards by value/);
+    assert.match(text, /at most two correction/);
+    assert.match(text, /live.*workflow.*ownership/s);
+    assert.match(text, /no receipt or delivery authority/i);
+  }
+  assert.match(reference, /CRITICAL.*ERROR/);
+  assert.match(reference, /WARNING.*SUGGESTION/);
+  assert.match(reference, /suspect/);
+  assert.match(reference, /contradiction/);
+  assert.match(reference, /uncertain/);
+  assert.match(reference, /introduced/);
+  assert.match(reference, /independent ordinary verifier/);
+  assert.match(reference, /not model-run proof/);
+  assert.match(reference, /128 KiB.*five seconds/s);
+  assert.match(reference, /40 or 64 lowercase/);
+  assert.match(reference, /Never ask judges to read skills/);
+  assert.match(reference, /no background, sessionID or inline model/);
+  assert.match(reference, /no refuter or RDD dependency/i);
+  for (const role of JD_ROLES) assert.ok(reference.includes(role), role);
+  assert.doesNotMatch(skill + reference, /\.\.\/_shared|review-ledger-contract\.md|receipt-driven.*required/i);
+});
+
+test('both judge assets consume parent-loaded standards only and share the strict neutral result contract', () => {
+  const examples = [];
+  for (const role of ['mdd-jd-judge-a', 'mdd-jd-judge-b']) {
+    const text = fs.readFileSync(`assets/opencode/agents/${role}.md`, 'utf8');
+    assert.match(text, /parent loads matching project skills/);
+    assert.match(text, /standards by value with path provenance/);
+    assert.match(text, /Never read SKILL\.md/);
+    assert.doesNotMatch(text, /inspect their exact committed paths|Load applicable skills|Read matching skills/);
+    const example = JSON.parse(text.match(/```json\n([\s\S]*?)\n```/)[1]);
+    assert.deepEqual(Object.keys(example.evidence), ['target', 'scope', 'standards', 'status', 'inspected', 'limitations']);
+    examples.push(example);
+  }
+  assert.deepEqual(examples[0], examples[1]);
+});
+
+// Exercise the shipped parent-only validation recipe, not an LLM or a native review launch.
+function judgeValidator() {
+  const code = jdReference().match(/```javascript\n([\s\S]*?)\n```/)[1];
+  return new Function(`${code}\nreturn validateJudgeResult;`)();
+}
+function judgeFixture() {
+  const target = { base: '1'.repeat(40), commit: '2'.repeat(40) };
+  const expected = { target, scope: ['src/example.ts'], standards: ['AGENTS.md#sha256:' + 'a'.repeat(64)] };
+  const result = { findings: [], evidence: { ...structuredClone(expected), status: 'complete', inspected: [
+    { operation: 'diff', commit: target.commit, base: target.base, path: 'src/example.ts' },
+    { operation: 'blob', commit: target.commit, path: 'src/example.ts' },
+  ], limitations: [] } };
+  return { expected, result };
+}
+
+test('parent JSON validation accepts complete neutral results and committed severe proof without granting a verdict', () => {
+  const validate = judgeValidator(); const { expected, result } = judgeFixture();
+  assert.deepEqual(validate(JSON.stringify(result), expected), result);
+  result.findings.push({ location: 'src/example.ts:3', severity: 'ERROR', claim: 'Introduced null dereference.',
+    evidence_class: 'deterministic', causal_disposition: 'introduced', proof_refs: [`${expected.target.commit}:src/example.ts:3`] });
+  assert.deepEqual(validate(JSON.stringify(result), expected), result);
+  for (const role of ['mdd-jd-judge-a', 'mdd-jd-judge-b']) {
+    const example = JSON.parse(fs.readFileSync(`assets/opencode/agents/${role}.md`, 'utf8').match(/```json\n([\s\S]*?)\n```/)[1]);
+    assert.deepEqual(validate(JSON.stringify(example), example.evidence), example);
+  }
+});
+
+for (const [name, mutate] of Object.entries({
+  'unknown top-level field': r => { r.verdict = 'APPROVED'; },
+  'missing findings': r => { delete r.findings; },
+  'unknown evidence field': r => { r.evidence.complete = true; },
+  'missing inspection': r => { r.evidence.inspected = []; },
+  'tree-only source proof': r => { r.evidence.inspected[1].operation = 'tree'; },
+  'wrong target': r => { r.evidence.target.commit = '3'.repeat(40); },
+  'omitted scope': r => { r.evidence.scope = []; },
+  'different standards': r => { r.evidence.standards = []; },
+  'unavailable inspection': r => { r.evidence.status = 'unavailable'; },
+  'incomplete inspection': r => { r.evidence.status = 'incomplete'; },
+  'hidden limitations': r => { r.evidence.limitations = ['Source was unreadable.']; },
+  'unsafe path': r => { r.evidence.inspected[1].path = '../outside'; },
+  'ref rather than full object': r => { r.evidence.inspected[1].commit = 'HEAD'; },
+  'wrong diff base': r => { r.evidence.inspected[0].base = '4'.repeat(40); },
+  'incomplete finding': r => { r.findings = [{ severity: 'ERROR' }]; },
+  'unread claimed proof': r => { r.findings = [{ location: 'src/example.ts:3', severity: 'ERROR', claim: 'Bad behavior.',
+    evidence_class: 'deterministic', causal_disposition: 'introduced', proof_refs: [`${'3'.repeat(40)}:src/example.ts:3`] }]; },
+  'out-of-scope finding': r => { r.findings = [{ location: 'src/other.ts:3', severity: 'ERROR', claim: 'Bad behavior.',
+    evidence_class: 'inference', causal_disposition: 'uncertain', proof_refs: [`${r.evidence.target.commit}:src/example.ts:3`] }]; },
+})) {
+  test(`parent JSON validation refuses ${name} instead of accepting a clean judgment`, () => {
+    const validate = judgeValidator(); const { expected, result } = judgeFixture();
+    assert.deepEqual(validate(JSON.stringify(result), expected), result);
+    mutate(result);
+    assert.throws(() => validate(JSON.stringify(result), expected));
+  });
+}
+test('parent JSON validation rejects markdown, malformed JSON and duplicate members, including escaped names', () => {
+  const { expected, result } = judgeFixture(); const json = JSON.stringify(result); const validate = judgeValidator();
+  for (const raw of ['{}', '{broken', `\`\`\`json\n${json}\n\`\`\``, json.replace('"findings":[]', '"findings":[],"findings":[]'),
+    json.replace('"findings":[]', '"findings":[],"find\\u0069ngs":[]'),
+    json.replace('"status":"complete"', '"status":"unavailable","status":"complete"')]) assert.throws(() => validate(raw, expected));
+});
+
+test('parent JSON validation supports full SHA-256 targets and base-only deleted source without issuing a verdict', () => {
+  const { expected, result } = judgeFixture();
+  expected.target = { base: 'a'.repeat(64), commit: 'b'.repeat(64) };
+  result.evidence.target = expected.target;
+  result.evidence.inspected[0] = { operation: 'diff', ...expected.target, path: expected.scope[0] };
+  result.evidence.inspected[1].commit = expected.target.base;
+  assert.deepEqual(judgeValidator()(JSON.stringify(result), expected), result);
+  assert.equal(Object.hasOwn(result, 'verdict'), false);
 });
 
 // mdd-risk ships the same handoff discipline as every other actor: no baked-in permission map,

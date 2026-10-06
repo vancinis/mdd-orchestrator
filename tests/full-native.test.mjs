@@ -56,13 +56,48 @@ test('opt-in pending child releases only after explicit stopped-child confirmati
   const blocked = JSON.parse(await resumed.tool.mdd_status.execute({ detail: 'full' }, f.context));
   assert.equal(blocked.state, 'recovery-blocked');
   assert.equal(blocked.task, undefined);
+  // What the coordinator is told to do must be the call that keeps this run, never scope run.
+  assert.equal(blocked.nextAction.tool, 'mdd_reset');
+  assert.notDeepEqual(blocked.nextAction.args, { scope: 'run' });
+  assert.match(blocked.nextAction.why, /scope phase/);
   f.user('I stopped the interrupted subagent.');
   const released = JSON.parse(await resumed.tool.mdd_reset.execute({ scope: 'phase', userText: 'I stopped the interrupted subagent.' }, f.context));
   assert.equal(released.state, 'ready');
   assert.equal(released.runID, ready.runID);
   assert.equal(released.phase, 'mdd-apply');
+  assert.equal(released.question, undefined, 'continuing never asks the preflight again');
+  assert.deepEqual(released.workflow.results.map(item => item.phase), ready.workflow.results.map(item => item.phase));
   assert.notEqual(released.task.prompt, ready.task.prompt);
 });
+
+// The run behind this test is the one entrecuadras-mobile kept after 57b0857: explored, planned,
+// interrupted in apply, and refused on restart because today's policy no longer explores for its
+// answers. Its replayed "start mdd-explore" failed and the whole checkpoint read as invalid.
+for (const recorded of [true, false]) {
+  test(`a restart keeps a run today's policy would route differently (${recorded ? 'recorded route' : 'record without route'})`, async t => {
+    const f = await fixture(t, { route: 'low-explore', memoryEnabled: false, store: 'none' });
+    await f.phase();
+    await f.phase();
+    const ready = await f.status();
+    assert.equal(ready.phase, 'mdd-apply');
+    const file = join(f.root, '.mdd', `checkpoint-${createHash('sha256').update(f.runtime.sessionID).digest('hex')}.json`);
+    const saved = JSON.parse(await readFile(file, 'utf8'));
+    assert.deepEqual(saved.request.route, ['mdd-explore', 'mdd-plan', 'mdd-apply', 'mdd-verify'], 'a new run records its route');
+    // Answers that today's policy routes to plan, apply and verify, without exploration.
+    saved.request.answers.certainty = 'very-sure';
+    if (!recorded) delete saved.request.route;
+    await writeFile(file, JSON.stringify(saved));
+    const resumed = await plugin(f.input);
+    const status = JSON.parse(await resumed.tool.mdd_status.execute({ detail: 'full' }, f.context));
+    assert.equal(status.state, 'ready', status.reason);
+    assert.equal(status.runID, ready.runID);
+    assert.equal(status.phase, 'mdd-apply');
+    assert.equal(status.question, undefined);
+    assert.deepEqual(status.workflow.results.map(item => item.phase), ['mdd-explore', 'mdd-plan']);
+    assert.deepEqual(status.workflow.evaluation.phases, ['mdd-explore', 'mdd-plan', 'mdd-apply', 'mdd-verify']);
+    assert.ok(status.task, 'the interrupted phase is ready to dispatch again');
+  });
+}
 
 test('two restored plugins racing reset never both replay a pending child', async t => {
   const f = await fixture(t, { memoryEnabled: false, store: 'none' });
@@ -619,7 +654,7 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
     // A standalone read-only investigation has its own prompt and no phase result fields at all.
     const standalone = args.prompt.includes('Standalone read-only investigation only');
     const own = { 'mdd-explore': [], 'mdd-propose': [], 'mdd-plan': ['acceptance', 'decisions', 'deliverables'], 'mdd-spec': ['domain', 'acceptance'],
-      'mdd-design': ['decisions'], 'mdd-tasks': ['deliverables'], 'mdd-apply': ['changes', 'noChangeReason', 'checks', 'delivered'], 'mdd-verify': ['checks', 'verification'] }[phase];
+      'mdd-design': ['decisions'], 'mdd-tasks': ['deliverables'], 'mdd-apply': ['changes', 'noChangeReason', 'checks', 'delivered', 'completed'], 'mdd-verify': ['checks', 'verification'] }[phase];
     if (!standalone) {
       assert.equal(args.prompt.includes(own.length ? `exactly these keys: ${own.join(', ')}.` : 'This phase reports no structured data'), true, `own field list in ${phase}`);
       // The report is prose with one structured block, never a serialized object.
@@ -668,6 +703,7 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
     if (options.concerns) result.concerns = options.concerns;
     if (options.unauthorized) await tool('write', { filePath: join(root, 'feature.txt'), content: 'not permitted' }, { output: 'write', metadata: {} }, () => writeFile(join(root, 'feature.txt'), 'not permitted'));
     if (phase === 'mdd-apply') {
+      if (result.outcome === 'passed') result.completed = ['feature'];
       if (options.noChange) {
         await tool('read', { filePath: join(root, 'feature.txt') }, { output: 'Inspected existing implementation.', metadata: { truncated: false } });
         result.noChangeReason = 'Inspected implementation already satisfies the scoped task.';
@@ -726,7 +762,7 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
   }
   if (start) await hooks.tool.mdd_start.execute({ requirements }, context);
   return { root, mainRoot, settings, hooks, status, phase, answer, user, change, input, context, parent, runtime, visited, requirements, memory,
-    delivered: () => delivered, writes: memory.writes, questions: () => questionCount };
+    sessions, histories, delivered: () => delivered, writes: memory.writes, questions: () => questionCount };
 }
 
 for (const route of ['low', 'high']) for (const store of ['none', 'openspec']) for (const mode of ['automatic', 'interactive']) {
@@ -1948,11 +1984,22 @@ test('tracked native children cannot recurse or use MDD tools; unrelated native 
   await assert.rejects(f.hooks.tool.mdd_check_report.execute({ phase: 'mdd-plan', result: 'anything' }, { ...f.context, sessionID: 'child-1', agent: 'general' }), /belongs to MDD phase actors/);
   const args = { subagent_type: 'general', description: 'Unrelated work', prompt: 'Independent native task' };
   const before = structuredClone(args);
-  await f.hooks['tool.execute.before']({ sessionID: 'unrelated-parent', callID: 'unrelated', tool: 'task' }, { args });
+  const call = { sessionID: 'unrelated-parent', callID: 'unrelated', tool: 'task' };
+  // Unresolved native identity fails closed; a valid unrelated conversation remains untouched.
+  await assert.rejects(f.hooks['tool.execute.before'](call, { args }), /Unknown OpenCode response structure/);
+  assert.deepEqual(args, before);
+  f.sessions.set(call.sessionID, { id: call.sessionID, agent: 'general', directory: f.root, projectID: 'project' });
+  f.histories.set(call.sessionID, [{
+    info: { id: 'msg_unrelated', sessionID: call.sessionID, agent: 'general', role: 'assistant',
+      providerID: 'contract-only', modelID: 'model', path: { cwd: f.root, root: f.root } },
+    parts: [{ type: 'tool', tool: call.tool, callID: call.callID, sessionID: call.sessionID,
+      messageID: 'msg_unrelated', state: { status: 'running', input: structuredClone(args) } }],
+  }]);
+  await f.hooks['tool.execute.before'](call, { args });
   assert.deepEqual(args, before);
 });
 
-test('native fallback cannot skip interactive approval and preserves partial writes', async t => {
+test('uncertain Apply cannot skip interactive approval or automatically retry partial writes', async t => {
   const f = await fixture(t, { mode: 'interactive', memoryEnabled: false });
   await f.hooks.tool.mdd_phase_result.execute({ result: 'Use native planning.' }, f.context);
   await f.phase();
@@ -1961,14 +2008,13 @@ test('native fallback cannot skip interactive approval and preserves partial wri
   assert.equal(approval.task, undefined);
   await assert.rejects(f.hooks.tool.mdd_phase_result.execute({ result: 'Skip approval.' }, f.context), /approval|question|not waiting|active/);
   await f.answer();
-  for (let i = 0; i < 3; i++) await assert.rejects(f.phase({ badEnvelope: true }));
+  await assert.rejects(f.phase({ badEnvelope: true }));
   assert.equal(await readFile(join(f.root, 'feature.txt'), 'utf8'), 'implemented\n');
-  const fallback = await f.status();
-  assert.equal(fallback.phase, 'mdd-apply');
-  assert.equal(fallback.task.subagent_type, 'general');
-  await f.phase();
-  assert.match(f.delivered(), /inspect git status and git diff and preserve partial work/);
-  assert.equal((await f.status()).state, 'question-ready');
+  const stopped = await f.status();
+  assert.equal(stopped.phase, 'mdd-apply');
+  assert.equal(stopped.state, 'blocked');
+  assert.equal(stopped.task, undefined);
+  assert.equal(new ProgressGuard(f.root).read(f.runtime.sessionID).state, 'pending');
 });
 
 // A harness that cannot be told what it did badly can only be corrected by the person who
@@ -2238,7 +2284,7 @@ test('a compacted conversation is handed the run back as a card, not left to rec
   assert.equal(after.runCard.objective, f.requirements);
   assert.deepEqual(after.runCard.completed, ['mdd-plan: passed']);
   assert.equal(after.runCard.phase, after.phase);
-  assert.match(after.runCard.note, /must not be run again/);
+  assert.match(after.runCard.note, /Recorded results must not be repeated/);
   // The card is a description, never a capability: nothing about the run moved.
   assert.deepEqual(after.workflow, before.workflow);
   assert.deepEqual(after.evidence, before.evidence);
@@ -2533,36 +2579,29 @@ test('audit D4: a long reworked route of maximum escaped artifacts plus context 
   assert.equal(restored.workflow.results.length, 7 + 2 * rounds);
 });
 
-test('audit D4: a checkpoint that cannot be written degrades to data-only recovery instead of blocking the live run', async t => {
+test('audit D4: an uncertain Apply checkpoint blocks the live run and stale restart dispatch', async t => {
   const f = await fixture(t, { memoryEnabled: false, store: 'none' });
   await f.phase();
   const rename = fs.renameSync;
-  let failing = true; let refused = 0;
+  let refused = 0;
   t.mock.method(fs, 'renameSync', (from, to) => {
-    if (failing && /checkpoint-[a-f0-9]{64}\.json$/.test(String(to))) { refused++; throw Object.assign(new Error('locked by scanner'), { code: 'EPERM' }); }
+    if (/checkpoint-[a-f0-9]{64}\.json$/.test(String(to))) { refused++; throw Object.assign(new Error('locked by scanner'), { code: 'EPERM' }); }
     return rename(from, to);
   });
-  await f.phase();
+  await assert.rejects(f.phase(), /Checkpoint outcome is unconfirmed/);
   const live = await f.status();
-  assert.ok(refused > 1, 'the write was retried before degrading');
-  assert.equal(live.state, 'ready', 'the live run is not blocked by a checkpoint write failure');
-  assert.equal(live.phase, 'mdd-verify');
-  assert.equal(new ProgressGuard(f.root).read(f.runtime.sessionID).resumable, false);
-  // A restart now must not resume the stale checkpoint; it falls back to data-only recovery.
+  // LocalFiles already retries EPERM rename six times inside one metadata write. The runner
+  // must not repeat that checkpoint write or dispatch any substantive Apply writer.
+  assert.equal(refused, 6, 'only one CheckpointStore write, including its bounded filesystem retries');
+  assert.equal(live.state, 'blocked');
+  assert.equal(live.task, undefined);
+  assert.equal(new ProgressGuard(f.root).read(f.runtime.sessionID).state, 'pending');
+  // A restart must not resume the older ready Apply checkpoint.
   const stale = await plugin(f.input);
   const dataOnly = JSON.parse(await stale.tool.mdd_status.execute({ detail: 'full' }, f.context));
   assert.notEqual(dataOnly.phase, 'mdd-apply');
   assert.equal(dataOnly.task, undefined);
-  assert.equal(dataOnly.state, 'recoverable');
-  // The transient failure ends; the live run writes a full checkpoint again and becomes resumable.
-  failing = false;
-  await f.phase();
-  assert.equal((await f.status()).state, 'complete');
-  assert.equal(new ProgressGuard(f.root).read(f.runtime.sessionID).resumable, undefined);
-  const recovered = await plugin(f.input);
-  const restored = JSON.parse(await recovered.tool.mdd_status.execute({ detail: 'full' }, f.context));
-  assert.equal(restored.state, 'complete');
-  assert.equal(restored.runID, live.runID);
+  assert.equal(dataOnly.state, 'recovery-blocked');
 });
 
 test('audit D7: after restart a complete run closes for a new native objective and keeps its evidence', async t => {

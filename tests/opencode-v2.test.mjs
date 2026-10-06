@@ -8,6 +8,7 @@ import plugin from '../dist/opencode-plugin.js';
 import { legacyHistory, v2Payload, contentText } from '../dist/opencode-v2.js';
 import { defaultSettings } from '../dist/settings.js';
 import { saveGlobalSettings } from '../dist/global-settings.js';
+import { RunOwnershipStore } from '../dist/run-ownership.js';
 import { isolateHome, answers, reportDocument, traceFixture } from './adapter-fixture.mjs';
 
 // Public host fakes follow @opencode/plugin/client/core 2.0.22, not the V1 hooks.
@@ -19,6 +20,7 @@ async function fixture(t, completeProfile = true, securityModel) {
   settings.profiles.default.answers = completeProfile ? { ...answers } : {};
   settings.profiles.default.models['mdd-plan'] = 'openai/test-model#high';
   if (securityModel) settings.profiles.default.models['mdd-security'] = securityModel;
+  settings.profiles.default.models['mdd-jd-judge-a'] = 'openai/judge-model#high';
   saveGlobalSettings(settings);
   const sessionID = 'ses_parent';
   const sessions = new Map([[sessionID, { id: sessionID, agent: 'mdd-orchestrator', projectID: 'project', location: { directory: root }, time: { created: 1, updated: 1 } }]]);
@@ -161,6 +163,70 @@ test('V2 security model override is frozen and inheritance stays native', async 
   assert.equal(f.agents.find(agent => agent.id === 'mdd-security').model.id, 'audit-model');
   assert.deepEqual(f.agents.find(agent => agent.id === 'mdd-security').permissions.slice(-2),
     [{ action: '*', resource: '*', effect: 'deny' }, { action: 'mdd_check_report', resource: '*', effect: 'allow' }]);
+});
+
+for (const actor of ['mdd-jd-judge-a', 'mdd-jd-fix']) {
+  test(`V2 security waits for admitted ${actor} settlement, not just native completion`, async t => {
+    const f = await auditFixture(t);
+    const task = f.begin('subagent', { agent: actor, description: 'Standalone task', prompt: 'Explicitly authorized frozen target.' });
+    await f.toolHooks.get('execute.before')(task);
+    // Host completion can be visible before the plugin after-hook settles its admitted call.
+    const part = f.messages.get(f.sessionID).at(-1).content.find(part => part.id === task.id);
+    part.state.status = 'completed';
+    f.user(f.text);
+    if (actor === 'mdd-jd-fix') await assert.rejects(f.call('mdd_security', { userText: f.text }), /flight|standalone/i);
+    else assert.equal((await f.call('mdd_security', { userText: f.text })).state, 'security-refused');
+    await f.toolHooks.get('execute.after')({ ...task, status: 'completed', result: {
+      output: { sessionID: 'standalone-child', status: 'completed', output: 'Standalone result.' },
+      content: '<subagent sessionID="standalone-child" state="completed">\nStandalone result.\n</subagent>',
+    } });
+    assert.equal((await f.call('mdd_security', { userText: f.text })).state, 'security-ready');
+  });
+}
+
+test('V2 standalone judges hold coordinator controls without losing concurrent dual admission', async t => {
+  const f = await fixture(t);
+  f.user('Judge the committed target.');
+  const calls = ['mdd-jd-judge-a', 'mdd-jd-judge-b'].map(agent => f.begin('subagent', { agent, description: 'Judge', prompt: 'Frozen committed target.' }));
+  await Promise.all(calls.map(call => f.toolHooks.get('execute.before')(call)));
+  f.user('Implement a separate change.');
+  await assert.rejects(f.call('mdd_start', { requirements: 'Implement a separate change.' }), /standalone.*flight/i);
+  await assert.rejects(f.toolHooks.get('execute.before')(f.begin('question', {})), /standalone.*flight/i);
+  await assert.rejects(f.toolHooks.get('execute.before')(f.begin('subagent', { agent: 'mdd-jd-fix', description: 'Fix', prompt: 'Authorized correction.' })), /standalone.*flight/i);
+  for (const call of calls) await f.toolHooks.get('execute.after')({ ...call, status: 'error', error: {} });
+  assert.equal((await f.call('mdd_start', { requirements: 'Implement a separate change.' })).task.agent, 'mdd-plan');
+});
+
+test('V2 security cannot bypass an unconfirmed durable workflow claim after restart', async t => {
+  const f = await auditFixture(t);
+  const owners = new RunOwnershipStore(f.root);
+  owners.claimParent(f.sessionID, 'unconfirmed-run');
+  owners.claim({ runID: 'unconfirmed-run', sessionID: f.sessionID, directory: f.root, worktree: f.root });
+  const before = owners.read('unconfirmed-run');
+  assert.equal((await f.call('mdd_security', { userText: f.text })).state, 'security-refused');
+  assert.deepEqual(owners.read('unconfirmed-run'), before);
+});
+
+for (const actors of [['mdd-jd-judge-a', 'mdd-jd-fix'], ['mdd-jd-fix', 'mdd-jd-judge-a']]) {
+  test(`V2 concurrent ${actors.join(' then ')} admission never overlaps review and correction`, async t => {
+    const f = await fixture(t); f.user('Review and correction fixture.');
+    const calls = actors.map(agent => f.begin('subagent', { agent, description: 'Standalone', prompt: 'Authorized frozen target.' }));
+    const results = await Promise.allSettled(calls.map(call => f.toolHooks.get('execute.before')(call)));
+    assert.equal(results.filter(result => result.status === 'fulfilled').length, 1);
+    assert.equal(results.filter(result => result.status === 'rejected').length, 1);
+  });
+}
+
+test('V2 security and Judgment Day inspection privileges never substitute for each other', async t => {
+  const f = await auditFixture(t); const audit = await dispatchAudit(f);
+  await assert.rejects(f.toolHooks.get('execute.before')({ sessionID: audit.child.id, agent: 'mdd-jd-judge-a',
+    id: 'forged-judge', tool: 'mdd_jd_inspect', input: {} }), /security/i);
+  await assert.rejects(f.toolHooks.get('execute.before')(f.begin('subagent', { agent: 'mdd-jd-judge-a', description: 'Judge', prompt: 'Target' })), /security/i);
+  await finishAudit(f, audit, auditReport(audit.snapshot).render());
+  const judge = { ...f.sessions.get(f.sessionID), id: 'judge', parentID: f.sessionID, agent: 'mdd-jd-judge-a' };
+  f.sessions.set(judge.id, judge); f.messages.set(judge.id, []);
+  await assert.rejects(f.toolHooks.get('execute.before')({ sessionID: judge.id, agent: judge.agent,
+    id: 'security-check', tool: 'mdd_check_report', input: { phase: 'mdd-security', result: '' } }), /judge|immutable/i);
 });
 
 for (const mutation of ['synthetic', 'wrong-text', 'wrong-agent', 'nested-parent', 'workspace', 'pending-question', 'pending-task']) {
@@ -419,6 +485,126 @@ test('V2 registers opt-in security dispatch and fails closed for an unbound secu
   }
 });
 
+test('V2 standalone dispatch settles late actor model and exact inspection permission before both judges', async t => {
+  const f = await fixture(t);
+  // Actors contributed after MDD setup must see the settled transform before any dispatch.
+  f.agents.push({ id: 'mdd-jd-judge-a', permissions: [{ action: '*', resource: '*', effect: 'allow' }], request: {} });
+  f.agents.push({ id: 'mdd-jd-judge-b', permissions: [], request: {} });
+  f.user('Judge the committed target.');
+  const calls = ['mdd-jd-judge-a', 'mdd-jd-judge-b'].map(agent => f.begin('subagent', { agent, description: 'Judge', prompt: 'Committed target' }));
+  await Promise.all(calls.map(call => f.toolHooks.get('execute.before')(call)));
+  const judge = f.agents.find(agent => agent.id === 'mdd-jd-judge-a');
+  assert.deepEqual(judge.model, { providerID: 'openai', id: 'judge-model', variant: 'high' });
+  assert.deepEqual(judge.permissions.slice(-2), [{ action: '*', resource: '*', effect: 'deny' }, { action: 'mdd_jd_inspect', resource: '*', effect: 'allow' }]);
+  for (const call of calls) await f.toolHooks.get('execute.after')({ ...call, status: 'completed', result: {
+    output: { sessionID: `child-${call.id}`, status: 'completed', output: '{"findings":[],"evidence":[]}' },
+    content: `<subagent sessionID="child-${call.id}" state="completed">\n{"findings":[],"evidence":[]}\n</subagent>`,
+  } });
+  assert.equal((await f.call('mdd_status', {})).state, 'not-started');
+});
+
+test('V2 judge live hooks deny reads, shell, MCP and delegation despite permissive session rules', async t => {
+  const f = await fixture(t);
+  const judge = { ...f.sessions.get(f.sessionID), id: 'judge', parentID: f.sessionID, agent: 'mdd-jd-judge-a' };
+  f.sessions.set(judge.id, judge); f.messages.set(judge.id, []);
+  for (const tool of ['read', 'bash', 'edit', 'subagent', 'engram_mem_save', 'mdd_status', 'mdd_check_report', 'execute']) {
+    await assert.rejects(f.toolHooks.get('execute.before')({ sessionID: judge.id, agent: judge.agent, id: tool, tool, input: {} }), /judge|immutable|inspection/);
+  }
+  judge.location.directory = join(f.root, 'elsewhere');
+  await assert.rejects(f.toolHooks.get('execute.before')({ sessionID: judge.id, agent: judge.agent, id: 'moved', tool: 'mdd_jd_inspect', input: {} }), /workspace|location|differs/);
+});
+
+test('V2 live judge identity denies tools even before assistant history has recorded that actor', async t => {
+  const f = await fixture(t);
+  await assert.rejects(f.toolHooks.get('execute.before')({ sessionID: f.sessionID, agent: 'mdd-jd-judge-a',
+    id: 'early-shell', tool: 'bash', input: {} }), /judge|immutable|inspection/);
+});
+
+test('V2 native actor identity refuses readable records with neither recorded nor live actor', async t => {
+  const f = await fixture(t);
+  delete f.sessions.get(f.sessionID).agent;
+  f.messages.set(f.sessionID, [{ id: 'nameless', type: 'assistant', content: [], time: { created: 1 } }]);
+  for (const tool of ['bash', 'read', 'edit']) {
+    await assert.rejects(f.toolHooks.get('execute.before')({ sessionID: f.sessionID, id: tool, tool,
+      input: { agent: 'general' } }), /native actor identity/i);
+  }
+});
+
+test('V2 native live ordinary identity remains usable before recorded actor history exists', async t => {
+  const f = await fixture(t);
+  delete f.sessions.get(f.sessionID).agent;
+  assert.deepEqual(f.messages.get(f.sessionID), []);
+  const event = { sessionID: f.sessionID, agent: 'general', id: 'early-edit', tool: 'edit', input: { filePath: 'not accessed' } };
+  const before = structuredClone(event.input);
+  await f.toolHooks.get('execute.before')(event);
+  assert.deepEqual(event.input, before);
+});
+
+test('V2 native live judge identity enforces inspection-only policy without any recorded actor', async t => {
+  const f = await fixture(t);
+  delete f.sessions.get(f.sessionID).agent;
+  for (const tool of ['bash', 'read', 'edit']) {
+    await assert.rejects(f.toolHooks.get('execute.before')({ sessionID: f.sessionID, agent: 'mdd-jd-judge-a',
+      id: tool, tool, input: { agent: 'general' } }), /judge.*only immutable/i);
+  }
+});
+
+for (const source of ['session', 'history']) {
+  test(`V2 recorded ${source} judge identity cannot be relaxed by a live ordinary actor`, async t => {
+    const f = await fixture(t);
+    f.sessions.get(f.sessionID).agent = source === 'session' ? 'mdd-jd-judge-a' : 'general';
+    f.messages.set(f.sessionID, [{ id: 'recorded', type: 'assistant', agent: source === 'history' ? 'mdd-jd-judge-a' : 'general',
+      content: [], time: { created: 1 } }]);
+    await assert.rejects(f.toolHooks.get('execute.before')({ sessionID: f.sessionID, agent: 'general',
+      id: 'conflicting-edit', tool: 'edit', input: {} }), /judge.*only immutable/i);
+  });
+}
+
+test('V2 native live fix identity still requires an admitted parent before early-history edits', async t => {
+  const f = await fixture(t);
+  f.agents.push({ id: 'mdd-jd-fix', permissions: [], request: {} });
+  const fix = { ...f.sessions.get(f.sessionID), id: 'early-fix', parentID: f.sessionID };
+  delete fix.agent;
+  f.sessions.set(fix.id, fix); f.messages.set(fix.id, []);
+  const edit = { sessionID: fix.id, agent: 'mdd-jd-fix', id: 'fix-edit', tool: 'edit', input: {} };
+  await assert.rejects(f.toolHooks.get('execute.before')(edit), /requires an admitted native fix task/);
+  f.user('Apply the explicitly authorized bounded correction.');
+  const dispatch = f.begin('subagent', { agent: 'mdd-jd-fix', description: 'Bounded fix', prompt: 'Authorized correction.' });
+  await f.toolHooks.get('execute.before')(dispatch);
+  await f.toolHooks.get('execute.before')(edit);
+  await f.toolHooks.get('execute.after')({ ...dispatch, status: 'completed', result: {
+    output: { sessionID: fix.id, status: 'completed', output: 'Correction handoff.' },
+    content: `<subagent sessionID="${fix.id}" state="completed">\nCorrection handoff.\n</subagent>`,
+  } });
+  await assert.rejects(f.toolHooks.get('execute.before')({ ...edit, id: 'late-edit' }), /requires an admitted native fix task/);
+});
+
+test('V2 judge inspection reaches immutable Git through the exact native tool call and hides other tools', async t => {
+  const f = await fixture(t);
+  const git = (...args) => execFileSync('git', args, { cwd: f.root, encoding: 'utf8' }).trim();
+  git('init', '--quiet'); git('config', 'core.autocrlf', 'false');
+  await writeFile(join(f.root, 'source.txt'), 'immutable source\n');
+  git('add', '--', 'source.txt');
+  git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', '-c', 'commit.gpgsign=false', 'commit', '--quiet', '-m', 'target');
+  const commit = git('rev-parse', 'HEAD');
+  await writeFile(join(f.root, 'source.txt'), 'dirty live source');
+  const judge = { ...f.sessions.get(f.sessionID), id: 'judge', parentID: f.sessionID, agent: 'mdd-jd-judge-a' };
+  f.sessions.set(judge.id, judge);
+  const args = { operation: 'blob', commit, path: 'source.txt' };
+  const native = { id: 'judge-message', type: 'assistant', agent: judge.agent, content: [{
+    type: 'tool', id: 'inspect-call', name: 'mdd_jd_inspect', state: { status: 'running', input: args, metadata: {} }, time: { created: 1 },
+  }], time: { created: 1 } };
+  f.messages.set(judge.id, [native]);
+  await f.toolHooks.get('execute.before')({ sessionID: judge.id, agent: judge.agent, id: 'inspect-call', tool: 'mdd_jd_inspect', input: args });
+  const context = { sessionID: judge.id, agent: judge.agent, messageID: native.id, id: 'inspect-call', signal: new AbortController().signal };
+  const result = await f.tools.get('mdd_jd_inspect').execute(args, context);
+  assert.equal(JSON.parse(result.content).content, 'immutable source\n');
+  await assert.rejects(f.tools.get('mdd_jd_inspect').execute({ ...args, path: 'other.txt' }, context), /exact.*call/);
+  const event = { agent: judge.agent, tools: { read: {}, bash: {}, eng_mem_save: {}, execute: {}, mdd_check_report: {}, mdd_jd_inspect: {} } };
+  await f.sessionHooks.get('context')(event);
+  assert.deepEqual(Object.keys(event.tools), ['mdd_jd_inspect']);
+});
+
 test('V2 history preserves native authored provenance, tool IDs, streaming calls and moved workspace boundaries', () => {
   const session = { id: 'ses', location: { directory: '/repo' } };
   const native = [{ type: 'user', id: 'user', text: 'Objective', time: { created: 1 } },
@@ -470,7 +656,7 @@ test('V2 foreground phase hooks complete plan, Apply and Verify with durable mot
     assert.equal(call.input.subagent_type, undefined);
     const result = { phase, runID: ready.runID, callID: call.id, outcome: 'passed', evidenceSummary: 'Scoped contract evidence.', artifact: `Artifact for ${phase}.` };
     if (phase === 'mdd-plan') Object.assign(result, trace);
-    if (phase === 'mdd-apply') { result.changes = [{ path: join(f.root, 'feature.txt'), reason: 'Implement the planned boundary.' }]; result.delivered = { what: 'Requested behavior is implemented.', implies: 'Consumers use the new boundary.' }; }
+    if (phase === 'mdd-apply') { result.completed = ['feature']; result.changes = [{ path: join(f.root, 'feature.txt'), reason: 'Implement the planned boundary.' }]; result.delivered = { what: 'Requested behavior is implemented.', implies: 'Consumers use the new boundary.' }; }
     if (phase === 'mdd-verify') {
       result.checks = [{ command: 'npm test', exit: 0 }];
       const assessment = { status: 'verified', checks: ['npm test'], assessment: 'Scoped checks support the expected behavior.' };
@@ -499,6 +685,45 @@ test('V2 dispatch rejects extra capabilities and fabricated completion envelopes
   assert.equal((await f.call('mdd_status', {})).state, 'await-result');
 });
 
+for (const failed of [false, true]) {
+  test(`V2 sequential Apply uses fresh foreground children and ${failed ? 'blocks on failure' : 'advances only after the full plan'}`, async t => {
+    const f = await fixture(t);
+    f.user('Implement two dependent deliverables.');
+    await f.call('mdd_start', { requirements: 'Implement two dependent deliverables.' });
+    const trace = traceFixture(join(f.root, 'first.txt'), 'first');
+    trace.deliverables[0].scenarios = ['S1'];
+    trace.deliverables.push({ ...trace.deliverables[0], id: 'second', path: join(f.root, 'second.txt'), scenarios: ['S2'], dependsOn: ['first'] });
+    const children = new Set();
+    for (const [index, step] of ['plan', 'first', 'second'].entries()) {
+      const ready = await f.call('mdd_status', {});
+      const phase = index ? 'mdd-apply' : 'mdd-plan';
+      assert.equal(ready.task.agent, phase);
+      assert.deepEqual(Object.keys(ready.task).sort(), ['agent', 'description', 'prompt']);
+      const call = f.begin('subagent', ready.task);
+      await f.toolHooks.get('execute.before')(call);
+      if (index) assert.deepEqual(JSON.parse(call.input.prompt.match(/^Applicable deliverables: (.*)$/m)[1]).map(item => item.id), [step]);
+      const outcome = failed && step === 'second' ? 'failed' : 'passed';
+      const text = reportDocument({ phase, runID: ready.runID, outcome, evidenceSummary: `Completed ${step}.`, artifact: `Artifact ${step}.`,
+        ...(index ? { ...(outcome === 'passed' ? { completed: [step] } : {}), changes: [join(f.root, `${step}.txt`)] } : trace) });
+      const child = `child-batch-${index}`;
+      assert.equal(children.has(child), false);
+      children.add(child);
+      await f.toolHooks.get('execute.after')({ ...call, status: 'completed', result: {
+        output: { sessionID: child, status: 'completed', output: text }, content: `<subagent sessionID="${child}" state="completed">\n${text}\n</subagent>`,
+      } });
+      if (step === 'first') {
+        const next = await f.call('mdd_status', {});
+        assert.equal(next.phase, 'mdd-apply');
+        assert.equal(next.nextAction.tool, 'subagent');
+      }
+    }
+    const done = await f.call('mdd_status', {});
+    assert.equal(done.state, failed ? 'blocked' : 'ready');
+    assert.equal(done.phase, failed ? 'mdd-apply' : 'mdd-verify');
+    if (failed) assert.equal(done.task, undefined);
+  });
+}
+
 test('V2 tracked native fallback children cannot recursively orchestrate', async t => {
   const f = await fixture(t); f.user('Implement the requested change.');
   await f.call('mdd_start', { requirements: 'Implement the requested change.' });
@@ -511,7 +736,7 @@ test('V2 tracked native fallback children cannot recursively orchestrate', async
   const child = { ...f.sessions.get(f.sessionID), id: 'ses_child', parentID: f.sessionID, agent: 'general' };
   f.sessions.set(child.id, child); f.messages.set(child.id, []);
   await f.emit({ type: 'session.created', location: { directory: f.root }, data: { ...child, sessionID: child.id } });
-  for (const tool of ['subagent', 'skill', 'mdd_start', 'mdd_check_report']) {
+  for (const tool of ['subagent', 'skill', 'mdd_start', 'mdd_check_report', 'mdd_jd_inspect']) {
     await assert.rejects(f.toolHooks.get('execute.before')({ sessionID: child.id, agent: 'general', id: `child-${tool}`, tool, input: {} }), /tracked native fallback/);
   }
 });

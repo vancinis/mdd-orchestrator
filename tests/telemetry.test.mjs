@@ -116,6 +116,24 @@ test('rejecting standalone phases preserves every valid phase event and readable
   assert.equal(telemetryTotals(root).events, PHASES.length + 1);
 });
 
+test('configurable standalone actors cannot become telemetry phases or phase executors', t => {
+  const root = fixture(t);
+  for (const role of ['orchestrator', 'mdd-risk', 'mdd-security', 'mdd-jd-judge-a', 'mdd-jd-judge-b', 'mdd-jd-fix']) {
+    for (const field of ['phase', 'executor']) {
+      assert.deepEqual(recordTelemetry(root, { ...event(), [field]: role }, now),
+        { ok: false, diagnostic: 'invalid-event' }, `${field}: ${role}`);
+    }
+  }
+  assert.deepEqual(fs.readdirSync(root), []);
+  for (const phase of PHASES) {
+    assert.equal(recordTelemetry(root, { ...event(), phase, executor: phase }, now).ok, true, phase);
+  }
+  for (const executor of ['explore', 'general', 'coordinator']) {
+    assert.equal(recordTelemetry(root, { ...event(), executor }, now).ok, true, executor);
+  }
+  assert.deepEqual(Object.keys(rollupOf(root).phases), [...PHASES]);
+});
+
 test('malformed log is not overwritten; errors never expose stored data', t => {
   const root = fixture(t);
   fs.mkdirSync(join(root, '.mdd'));

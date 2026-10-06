@@ -97,7 +97,7 @@ for (const [label, text] of [
 
 test('the form an actor is shown names only its own fields', () => {
   assert.match(reportFormatLines('mdd-verify').join('\n'), /exactly these keys: checks, verification\./);
-  assert.match(reportFormatLines('mdd-apply').join('\n'), /exactly these keys: changes, noChangeReason, checks, delivered\./);
+  assert.match(reportFormatLines('mdd-apply').join('\n'), /exactly these keys: changes, noChangeReason, checks, delivered, completed\./);
   assert.match(reportFormatLines('mdd-explore').join('\n'), /omit "## MDD Data" entirely/);
   assert.doesNotMatch(reportFormatLines('mdd-plan').join('\n'), /verification=/);
   for (const phase of ['mdd-explore', 'mdd-plan', 'mdd-apply', 'mdd-verify']) {

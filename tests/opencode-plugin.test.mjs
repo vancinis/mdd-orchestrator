@@ -2,6 +2,9 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createLegacyPlugin as plugin, createInspector, AGENTS_MAX, PERMISSION_MAX } from '../dist/opencode-plugin.js';
 import { NativeIntake } from '../dist/native-intake.js';
+import { PhaseRunner } from '../dist/phase-runner.js';
+import { RunOwnershipStore } from '../dist/run-ownership.js';
+import { ProgressGuard } from '../dist/progress.js';
 import { memoryServer, request, result, runtime, call, answers, installCleanup, isolateHome, SUMMARY_TEXT, reportDocument } from './adapter-fixture.mjs';
 import { MODEL_ROLES } from '../dist/settings.js';
 import { defaultSettings, saveSettings } from '../dist/settings.js';
@@ -382,7 +385,7 @@ test('OpenCode SDK contract: bounded callback even if injected client ignores ab
 test('plugin contract: scoped tools, in-place native args, result gating, no native override', async t => {
   const f = await pluginFixture(t);
   const { hooks, context, writes } = f;
-  assert.deepEqual(Object.keys(hooks.tool).sort(), ['mdd_change_request', 'mdd_check_report', 'mdd_context', 'mdd_contextual_explore', 'mdd_improve', 'mdd_improvements', 'mdd_phase_result', 'mdd_pr_body', 'mdd_prepare_advance', 'mdd_reset', 'mdd_revisit', 'mdd_security', 'mdd_start', 'mdd_status', 'mdd_transfer', 'mdd_transfer_recover']);
+  assert.deepEqual(Object.keys(hooks.tool).sort(), ['mdd_change_request', 'mdd_check_report', 'mdd_context', 'mdd_contextual_explore', 'mdd_improve', 'mdd_improvements', 'mdd_jd_inspect', 'mdd_phase_result', 'mdd_pr_body', 'mdd_prepare_advance', 'mdd_reset', 'mdd_revisit', 'mdd_security', 'mdd_start', 'mdd_status', 'mdd_transfer', 'mdd_transfer_recover']);
   assert.deepEqual(Object.keys(hooks.tool.mdd_start.args), ['requirements', 'context']);
   const ready = JSON.parse(await hooks.tool.mdd_start.execute({ requirements: f.requirements }, context));
   const nativeArgs = ready.task;
@@ -428,6 +431,172 @@ test('plugin contract: a phase actor may check its own report, and nobody else m
     hooks.tool.mdd_check_report.execute({ phase: 'mdd-explore', result: report }, { ...context, agent: 'build' }),
     /belongs to MDD phase actors/);
 });
+
+const jdTask = role => ({ subagent_type: role, description: 'Standalone judgment', prompt: 'Inspect the committed target only.' });
+
+test('standalone judges are admitted concurrently without phase before/after or intake recording', async t => {
+  const f = await pluginFixture(t);
+  const before = t.mock.method(PhaseRunner.prototype, 'before', () => assert.fail('not a phase'));
+  const after = t.mock.method(PhaseRunner.prototype, 'after', () => assert.fail('not a phase'));
+  const recorded = t.mock.method(NativeIntake.prototype, 'phaseRecorded', () => assert.fail('not a phase'));
+  const initial = JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context));
+  const tasks = ['mdd-jd-judge-a', 'mdd-jd-judge-b'].map(jdTask);
+  await Promise.all(tasks.map((args, i) => f.hooks['tool.execute.before'](
+    { sessionID: f.runtime.sessionID, callID: `jd-${i}`, tool: 'task' }, { args })));
+  for (const [i, args] of tasks.entries()) {
+    await f.hooks['tool.execute.after']({ sessionID: f.runtime.sessionID, callID: `jd-${i}`, tool: 'task', args },
+      { title: 'Judge', output: '{"findings":[],"evidence":[]}', metadata: {} });
+  }
+  assert.equal(before.mock.callCount(), 0); assert.equal(after.mock.callCount(), 0); assert.equal(recorded.mock.callCount(), 0);
+  assert.deepEqual(JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context)), initial);
+});
+
+test('standalone fix dispatch refuses an unfinished workflow and judges refuse in-flight phases', async t => {
+  const f = await pluginFixture(t);
+  const ready = JSON.parse(await f.hooks.tool.mdd_start.execute({ requirements: f.requirements }, f.context));
+  await assert.rejects(f.hooks['tool.execute.before']({ ...call, tool: 'task' }, { args: jdTask('mdd-jd-fix') }), /implementation|unfinished|workflow/);
+  await f.hooks['tool.execute.before']({ ...call, tool: 'task' }, { args: ready.task });
+  await assert.rejects(f.hooks['tool.execute.before']({ ...call, callID: 'judge', tool: 'task' }, { args: jdTask('mdd-jd-judge-a') }), /flight|writer|owner/);
+});
+
+test('standalone dispatch refuses preflight interactions, extra capabilities and actor-name lookalikes', async t => {
+  const f = await setupFixture(t);
+  await f.hooks.tool.mdd_start.execute({ requirements: f.requirements }, f.context);
+  await assert.rejects(f.hooks['tool.execute.before']({ ...call, tool: 'task' }, { args: jdTask('mdd-jd-judge-a') }), /interaction|question|preflight/);
+  const fresh = await pluginFixture(t);
+  for (const extra of [{ background: true }, { session_id: 'child' }, { model: 'p/m' }]) {
+    await assert.rejects(fresh.hooks['tool.execute.before']({ ...call, tool: 'task' }, { args: { ...jdTask('mdd-jd-judge-a'), ...extra } }), /exact|foreground/);
+  }
+  await fresh.hooks.tool.mdd_start.execute({ requirements: fresh.requirements }, fresh.context);
+  await assert.rejects(fresh.hooks['tool.execute.before']({ ...call, tool: 'task' }, { args: jdTask('mdd-jd-judge-a-extra') }), /dispatch|subagent|match/);
+});
+
+test('judges deny arbitrary native/MCP tools live even when native permission is overridden', async t => {
+  const f = await pluginFixture(t);
+  f.child.agent = 'mdd-jd-judge-a'; f.childMessages[0].info.agent = f.child.agent;
+  for (const tool of ['bash', 'edit', 'write', 'apply_patch', 'read', 'glob', 'grep', 'task', 'skill', 'question',
+    'mdd_start', 'mdd_check_report', 'engram_mem_save', 'codegraph_explore', 'webfetch', 'execute', 'list_mcp_resources']) {
+    await assert.rejects(f.hooks['tool.execute.before']({ tool, sessionID: f.child.id, callID: `judge-${tool}` }, { args: {} }), /immutable|judge|inspection/);
+  }
+  await assert.rejects(f.hooks.tool.mdd_jd_inspect.execute({ operation: 'tree', commit: 'a'.repeat(40) }, f.context), /judge/);
+});
+
+for (const [name, agent] of [['missing', undefined], ['empty', ''], ['whitespace', '   '], ['non-string', 42]]) {
+  test(`native actor identity refuses ${name} names in otherwise readable legacy records`, async t => {
+    const f = await pluginFixture(t);
+    f.child.agent = agent;
+    f.childMessages[0].info.agent = agent;
+    for (const tool of ['bash', 'read', 'edit']) {
+      const args = { agent: 'general', command: 'not executed', filePath: 'not accessed' };
+      const before = structuredClone(args);
+      await assert.rejects(f.hooks['tool.execute.before']({ sessionID: f.child.id, callID: tool, tool }, { args }),
+        /native actor identity/i);
+      assert.deepEqual(args, before, 'task/tool arguments cannot supply missing native identity');
+    }
+  });
+}
+
+test('native actor identity preserves completed assistant history fallback and known unrelated sessions', async t => {
+  const f = await pluginFixture(t);
+  delete f.child.agent;
+  f.childMessages[0].info.agent = 'general';
+  assert.equal(typeof f.childMessages[0].info.time.completed, 'number');
+  const args = { command: 'not executed' };
+  const before = structuredClone(args);
+  await f.hooks['tool.execute.before']({ sessionID: f.child.id, callID: 'history', tool: 'bash' }, { args });
+  assert.deepEqual(args, before);
+  f.child.agent = 'general';
+  f.childMessages.length = 0;
+  await f.hooks['tool.execute.before']({ sessionID: f.child.id, callID: 'session', tool: 'edit' }, { args });
+  assert.deepEqual(args, before);
+});
+
+test('native actor identity does not replace a nameless latest assistant with stale ordinary session identity', async t => {
+  const f = await pluginFixture(t);
+  f.child.agent = 'general';
+  delete f.childMessages[0].info.agent;
+  await assert.rejects(f.hooks['tool.execute.before']({ sessionID: f.child.id, callID: 'nameless', tool: 'edit' }, { args: {} }),
+    /native actor identity/i);
+});
+
+test('standalone judges preserve ready workflow bytes and do not record error callbacks as phases', async t => {
+  const f = await pluginFixture(t);
+  const ready = JSON.parse(await f.hooks.tool.mdd_start.execute({ requirements: f.requirements }, f.context));
+  const snapshot = JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context));
+  const before = t.mock.method(PhaseRunner.prototype, 'before', () => assert.fail('not a phase'));
+  const recorded = t.mock.method(NativeIntake.prototype, 'phaseRecorded', () => assert.fail('not a phase'));
+  const nativeError = t.mock.method(PhaseRunner.prototype, 'nativeError', () => assert.fail('not a phase error'));
+  const args = jdTask('mdd-jd-judge-a');
+  await f.hooks['tool.execute.before']({ ...call, tool: 'task' }, { args });
+  const failure = { event: { type: 'message.part.updated', properties: { part: {
+    type: 'tool', tool: 'task', sessionID: f.runtime.sessionID, callID: call.callID, state: { status: 'error' },
+  } } } };
+  await f.hooks.event(failure);
+  await f.hooks.event(failure);
+  assert.equal(before.mock.callCount(), 0); assert.equal(recorded.mock.callCount(), 0);
+  assert.equal(nativeError.mock.callCount(), 0);
+  assert.deepEqual(JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context)), snapshot);
+  assert.equal(ready.runID, snapshot.runID);
+});
+
+test('standalone admission still rejects a reserved owner, transfer fence and moved parent', async t => {
+  const f = await pluginFixture(t);
+  const ready = JSON.parse(await f.hooks.tool.mdd_start.execute({ requirements: f.requirements }, f.context));
+  const owners = new RunOwnershipStore(f.root);
+  const original = owners.read(ready.runID);
+  const reserved = owners.reserve(ready.runID, f.runtime.sessionID, 'other-writer', original.epoch);
+  const dispatch = () => f.hooks['tool.execute.before']({ ...call, tool: 'task' }, { args: jdTask('mdd-jd-judge-a') });
+  await assert.rejects(dispatch(), /writer|owner/);
+  owners.release(ready.runID, f.runtime.sessionID, 'other-writer', reserved.epoch);
+  owners.beginTransfer(ready.runID, f.runtime.sessionID, { sessionID: 'target', directory: f.root, worktree: f.root },
+    'a'.repeat(64), owners.read(ready.runID).epoch);
+  await assert.rejects(dispatch(), /owner|transfer/);
+  t.mock.method(PhaseRunner.prototype, 'movedAway', () => ({ runID: ready.runID, targetSessionID: 'moved-target' }));
+  await assert.rejects(dispatch(), /moved|another conversation|transferred/);
+});
+
+test('standalone correction holds parent mutations until completion and cannot recurse through tools', async t => {
+  const f = await pluginFixture(t);
+  const args = jdTask('mdd-jd-fix');
+  await f.hooks['tool.execute.before']({ ...call, tool: 'task' }, { args });
+  await assert.rejects(f.hooks.tool.mdd_start.execute({ requirements: f.requirements }, f.context), /correction.*flight/);
+  await assert.rejects(f.hooks['tool.execute.before']({ ...call, callID: 'second', tool: 'task' }, { args: jdTask('mdd-jd-fix') }), /correction.*flight/);
+  f.child.agent = 'mdd-jd-fix'; f.childMessages[0].info.agent = f.child.agent;
+  for (const tool of ['task', 'skill', 'mdd_start', 'mdd_jd_inspect', 'engram_mem_save']) {
+    await assert.rejects(f.hooks['tool.execute.before']({ sessionID: f.child.id, tool, callID: tool }, { args: {} }), /fix actor|correction/);
+  }
+  await f.hooks['tool.execute.before']({ sessionID: f.child.id, tool: 'edit', callID: 'edit' }, { args: {} });
+  await f.hooks['tool.execute.after']({ ...call, tool: 'task', args }, { title: 'Fix', output: 'Hand off correction.', metadata: {} });
+  await assert.rejects(f.hooks['tool.execute.before']({ sessionID: f.child.id, tool: 'edit', callID: 'late-edit' }, { args: {} }), /admitted|correction/);
+});
+
+test('concurrent standalone fix calls admit only one writer after native parent inspection', async t => {
+  const f = await pluginFixture(t);
+  const results = await Promise.allSettled(['one', 'two'].map(callID => f.hooks['tool.execute.before'](
+    { ...call, callID, tool: 'task' }, { args: jdTask('mdd-jd-fix') })));
+  assert.equal(results.filter(result => result.status === 'fulfilled').length, 1);
+  assert.equal(results.filter(result => result.status === 'rejected').length, 1);
+});
+
+for (const [name, prepare, roles, reason] of [
+  ['durable pending intake', f => new RunOwnershipStore(f.root).claimIntake(f.runtime.sessionID, 'pending-intake', 'native-user'),
+    ['mdd-jd-judge-a', 'mdd-jd-fix'], /intake|interaction/],
+  ['workflow claim without checkpoint', f => {
+    const owners = new RunOwnershipStore(f.root);
+    owners.claimParent(f.runtime.sessionID, 'unconfirmed-run');
+    owners.claim({ runID: 'unconfirmed-run', sessionID: f.runtime.sessionID, directory: f.root, worktree: f.root });
+  }, ['mdd-jd-judge-a', 'mdd-jd-fix'], /owner|workflow|checkpoint/],
+  ['data-only unfinished implementation', f => new ProgressGuard(f.root).write(f.runtime.sessionID,
+    { runID: 'unconfirmed-run', state: 'settled', userMessageID: 'native-user', resumable: false }),
+    ['mdd-jd-fix'], /implementation|unfinished|workflow/],
+]) {
+  test(`standalone admission preserves ${name} after restart`, async t => {
+    const f = await pluginFixture(t);
+    prepare(f);
+    for (const role of roles) await assert.rejects(f.hooks['tool.execute.before'](
+      { ...call, callID: role, tool: 'task' }, { args: jdTask(role) }), reason);
+  });
+}
 
 // mdd-risk is not one of the eight phases the coordinator dispatches, but it shares the same
 // report-check tool and the same restricted call permission as every phase actor.
@@ -664,7 +833,7 @@ test('plugin config contract: settings frozen at startup; only explicit model ov
   await hooks.config(config);
   // Every agent but the coordinator loses the MDD tools: they are registered app-wide but are
   // meaningless, and misleading, anywhere else.
-  const denied = { mdd_security: false, mdd_start: false, mdd_status: false, mdd_prepare_advance: false, mdd_revisit: false, mdd_phase_result: false, mdd_reset: false, mdd_change_request: false, mdd_contextual_explore: false, mdd_context: false, mdd_pr_body: false, mdd_improve: false, mdd_improvements: false, mdd_transfer: false, mdd_transfer_recover: false, 'mdd_*': false };
+  const denied = { mdd_security: false, mdd_start: false, mdd_status: false, mdd_prepare_advance: false, mdd_revisit: false, mdd_phase_result: false, mdd_reset: false, mdd_change_request: false, mdd_contextual_explore: false, mdd_context: false, mdd_pr_body: false, mdd_improve: false, mdd_improvements: false, mdd_transfer: false, mdd_transfer_recover: false, 'mdd_*': false, mdd_jd_inspect: false };
   // And every phase actor loses `task` and `skill`: it is the actor, and the skills it needs are
   // already inlined in its prompt by value, so a name lookup can only reach someone else's. It
   // gains exactly one MDD tool back, which reads nothing and only tells it whether the report it
@@ -687,6 +856,8 @@ test('plugin config contract: settings frozen at startup; only explicit model ov
       // profile: it may call only mdd_check_report, the same as every phase actor above.
       'mdd-risk': { tools: { ...pinned } },
       'mdd-security': { permission: { '*': 'deny', mdd_check_report: 'allow' }, tools: { '*': false, mdd_check_report: true } },
+      'mdd-jd-judge-a': { permission: { '*': 'deny', mdd_jd_inspect: 'allow' }, tools: { '*': false, mdd_jd_inspect: true } },
+      'mdd-jd-judge-b': { permission: { '*': 'deny', mdd_jd_inspect: 'allow' }, tools: { '*': false, mdd_jd_inspect: true } },
     },
   });
   // The coordinator dispatches phases, so it keeps both.

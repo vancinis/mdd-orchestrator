@@ -8,6 +8,7 @@ import type { RiskVerdict } from './risk.js';
 import type { Phase } from './policy.js';
 import { parseSecurityAssessment, securityReportFormatLines, SECURITY_REPORT_KEYS } from './security.js';
 import type { SecurityAssessment } from './security.js';
+import { taskIDs } from './apply-batches.js';
 
 /**
  * Lets the actor that wrote a report find out whether MDD can read it, before it stops running.
@@ -77,7 +78,9 @@ export function checkReportForm(phase: Phase, text: unknown): ReportCheck {
     ...(phase === 'mdd-spec' ? [() => boundedText(fields.domain, 'spec domain', 64)] : []),
     ...(passed && (phase === 'mdd-plan' || phase === 'mdd-spec') ? [() => acceptance(fields.acceptance)] : []),
     ...(passed && (phase === 'mdd-plan' || phase === 'mdd-tasks') ? [() => deliverables(fields.deliverables)] : []),
-    ...(passed && phase === 'mdd-apply' ? [() => changed(fields.changes, fields.noChangeReason)] : []),
+    ...(passed && phase === 'mdd-apply' ? [() => changed(fields.changes, fields.noChangeReason), () => {
+      if (taskIDs(fields.completed).length !== 1) throw new Error('Successful Apply must name exactly one completed task.');
+    }] : []),
     ...(passed && (phase === 'mdd-apply' || phase === 'mdd-verify') ? [() => executed(fields.checks)] : []),
   ]));
 }

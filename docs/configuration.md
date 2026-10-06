@@ -92,7 +92,7 @@ no Engram setup, and telemetry enabled. Reading never creates a settings file.
 |---|---|
 | `version`, `activeProfile`, `profiles` | Required. Version exactly 1; active name must exist; 1–64 profiles. Unknown keys rejected at every level. |
 | Names | 1–64 ASCII letters/digits/underscores/hyphens, starting alphanumeric; prototype/device names rejected. |
-| Profile `models` | Optional `orchestrator`, all eight exact phase mappings, and standalone `mdd-risk`/`mdd-security` actors. `provider/model`, nested model paths allowed, an optional trailing `#variant` reasoning-effort suffix, at most 256 characters. No whitespace/traversal. Omitted role inherits native selection, not the orchestrator override. |
+| Profile `models` | Optional `orchestrator`, all eight exact phase mappings, `mdd-risk`, `mdd-security`, `mdd-jd-judge-a`, `mdd-jd-judge-b`, and `mdd-jd-fix`. `provider/model`, nested model paths allowed, an optional trailing `#variant` reasoning-effort suffix, at most 256 characters. No whitespace/traversal. Omitted role inherits native selection, not the orchestrator override. |
 | Profile `answers` | Optional partial/complete original five-field canonical answers. Missing fields remain missing. |
 | `engram` | Omitted means memory off. `{ endpoint }` opts into an explicit loopback service; `{ mode: 'local', binary, dataDirectory }` opts into a managed installed binary. Legacy `project` is deprecated and ignored with a runtime notice. No secrets or session IDs in settings. |
 | `telemetry` | Optional `{ "enabled": boolean }`, default enabled. No external destination. |
@@ -101,6 +101,88 @@ Capture active profile/model mappings **once at runtime startup** with `freezePr
 Restart after changing them; never replace an in-flight workflow's answers. General
 Engram memory stays independent of artifacts, including `none`. The adapter verifies the
 exact registered runtime session/project/directory; it never fabricates a session.
+
+### Standalone Judgment Day model roles
+
+`mdd-ai config` includes three independently configurable actors:
+
+| Role | Packaged contract |
+|---|---|
+| `mdd-jd-judge-a` | Blind, read-only judge returning neutral JSON findings. |
+| `mdd-jd-judge-b` | A second blind judge with identical criteria and output contract. |
+| `mdd-jd-fix` | Bounded correction actor requiring explicit authorization and confirmed severe ledger IDs. |
+
+Choose models and optional variants through **Modelos**, Save, then restart OpenCode. Each
+omitted mapping retains native selection independently; existing version-1 profiles need no
+migration. Setup derives agent installation from the configurable role list and preserves
+foreign assets rather than overwriting conflicting content.
+
+These actors are **not workflow phases**. They do not extend the eight-phase route, submit
+phase reports, require `mdd_check_report`, or receive phase-instruction policy just because
+their models are configurable. Phase telemetry accepts only workflow phases and their existing
+fallback executors, never the standalone actors.
+
+Exact standalone foreground native tasks can dispatch these actor IDs without becoming workflow
+phases. Both judge calls may be admitted before either finishes. Models and the judge inspection
+permission settle before native dispatch. Moved parents, unresolved transfers, unfinished native
+tasks, pending durable intake and unconfirmed workflow claims still block admission. Standalone correction cannot bypass
+an unfinished workflow's implementation ownership; starting a workflow while that correction is
+in flight is also refused.
+
+Security auditing and Judgment Day share idle-parent admission, not actor capabilities. An
+admitted standalone call remains pending until the adapter settles its result/error, even if
+native history already says completed. Dual judges may run together; audits, correction writers,
+workflow controls and questions wait for that pair to settle. Unconfirmed durable workflow claims
+and pending intake still block security auditing after restart. The security checker never grants
+judge inspection, and judge inspection never grants security checking or workflow authority.
+
+Judges can invoke only `mdd_jd_inspect`: `tree` lists committed paths, `blob` reads an exact committed
+path, and `diff` compares full base/target commit IDs. It accepts local commits identified by 40 or
+64 lowercase hexadecimal characters, never refs or revision expressions. Paths are validated exact
+repository-relative paths. Diff attributes are pinned to the target commit and text changes cannot
+be hidden by dirty binary/submodule attributes. Fixed argv execution disables shell, external diff,
+textconv, pager, replacement objects and lazy fetching; inherited Git configuration variables are not forwarded.
+Git resolves to an absolute native executable on the host PATH outside the target checkout; relative
+PATH entries and checkout-supplied executables are never launched.
+Each Git command is bounded to 128 KiB and five seconds; binary/invalid UTF-8, missing or oversized
+material fails without partial evidence. Git must support `--no-lazy-fetch` and `--attr-source`
+(unsupported versions fail closed). Live source reads, shell, delegation, memory, MCP and all other tools are denied in
+native hooks as well as actor permissions. The parent loads matching project skills before dispatch
+and supplies identical relevant standards by value with path/digest provenance. Judges never read
+skill/reference documents themselves; the inspection tool cannot load arbitrary live skill documents.
+
+#### Explicit activation and installed protocol
+
+In `mdd-orchestrator`, ask: **"Run judgment-day on the complete committed delta from <base commit>
+to <target commit>, including tests and relevant dependencies."** Natural-language `judgment day`
+and the spelling `judment-day` also activate only on an explicit request, never an incidental mention,
+ordinary review, implementation request or completed Verify.
+
+Existing setup/update installs the namespaced pair under the OpenCode config root:
+
+- `skills/mdd-judgment-day/SKILL.md`
+- `skills/mdd-judgment-day/references/prompts-and-formats.md`
+
+The source copies are under `assets/opencode/skills/mdd-judgment-day/`. The parent loads those
+installation-owned files by exact path; a different registry skill is not a substitute. See
+[setup](setup.md) for consent-driven installation; configuration alone installs or launches nothing.
+
+The parent freezes the complete target and standards, issues both foreground judge calls in one
+response, waits for both fresh results, strictly validates neutral JSON and corroborates causality.
+Malformed/incomplete/inspection-unavailable outputs, unresolved suspects, contradictions or unknown
+causality cannot produce APPROVED. Warnings are informational. The packaged reference includes a
+parent-only validation recipe; it is not a new native tool, semantic proof or an automatic runner.
+Functional checks belong to the parent or an independent ordinary verifier, never the read-only judges.
+
+Dirty/untracked target material requires a separately authorized complete committed snapshot;
+never quietly drop it from scope. Snapshot authorization is separate from review and correction
+consent. Confirmed severe introduced defects may be corrected only after explicit authorization,
+within exact allowed surfaces, with one writer and at most two correction/scoped rejudgment rounds.
+An unfinished workflow still owns implementation; no review result overrides native ownership guards.
+The fix actor requests native consent for edits and shell, which is not a sandbox. No refuter or
+RDD dependency, and no receipt/delivery approval: configuration or judgment never authorizes commit,
+push, PR creation or release. Native-host model/concurrency/permission smoke remains unverified and
+requires separate authorization; packaging/contract tests are not model-run proof.
 
 ## Optional memory
 
@@ -152,7 +234,7 @@ read-only setup checks. See [installation and prerequisites](setup.md).
 ### Settings (`settings.ts`)
 
 ```typescript
-type ModelRole = 'orchestrator' | 'mdd-risk' | 'mdd-security' | Phase;
+type ModelRole = typeof MODEL_ROLES[number];
 type NamedProfile = { models: Partial<Record<ModelRole, string>>; answers: Partial<Answers> };
 type Settings = {
   version: 1; activeProfile: string; profiles: Record<string, NamedProfile>;
@@ -172,12 +254,14 @@ function profileName(value: unknown): string;
 function parseModel(value: unknown): string;
 ```
 
-`MODEL_ROLES` is the readonly eleven-role list, shared by the editor and installer. The native config hook sets agent
+`MODEL_ROLES` is the readonly fourteen-role list shared by the editor and installer: the coordinator,
+eight workflow phases, risk assessment, security auditing, and three standalone Judgment Day actors.
+The native config hook sets agent
 models only when `modelFor` returns a string. `undefined` leaves native selection intact.
 Settings parsing detaches data; the startup profile and its nested maps are frozen.
 
 The plugin does not modify the default agent, top-level model, other agents, or permissions.
-At run initialization the configured MDD actor roster must exist in its expected modes. Resolved
+At run initialization the coordinator and eight phase actors must exist in their expected modes. Resolved
 agent models and the actual parent assistant model are captured per parent. Subsequent
 inspection rejects changes, missing identities, and disagreement between task metadata
 and any child assistant model. An omitted override preserves any native phase model;

@@ -5,7 +5,7 @@ permission:
   question: allow
 ---
 
-An MDD run uses its eight phase actors: mdd-explore, mdd-plan, mdd-propose, mdd-spec, mdd-design,
+MDD uses eight phase actors: mdd-explore, mdd-plan, mdd-propose, mdd-spec, mdd-design,
 mdd-tasks, mdd-apply and mdd-verify. Only an exact adapter-issued fallback task may select native
 explore or general; never pick an arbitrary agent from the shared registry. Other tools share this
 OpenCode installation: instruction files the host prepends (a global or project AGENTS.md, another
@@ -22,9 +22,14 @@ its structure exactly: same sections, same order, nothing added, merged or dropp
 an error message, a command, a path or an identifier is quoted verbatim and never translated.
 MDD's own questions are already Spanish and are copied exactly as they are.
 
-Delegate exact phase tasks; never do substantive phase work inline. Follow attemptsLeft and the
-tracked fallback rules below; native permissions still apply.
-Follow the available safe step; surface a blocked state rather than inventing retries.
+Delegate exact phase tasks, never substantive phase work inline. Native permissions apply.
+Follow attemptsLeft and the tracked fallback rules below.
+Follow the available safe step; surface a blocked state.
+Standalone override: an explicit request for judgment-day, judgment day or judment-day loads
+the installed skills/mdd-judgment-day/SKILL.md and its reference by exact path
+instead of phase/status routing: no mdd_start or automatic review after Verify.
+Both judges are exceptions to phase-only dispatch. Their JSON is not a phase report and grants
+no review receipt or delivery authority.
 Information-only requests MUST NOT use mdd_start: answer from context or use mdd_contextual_explore.
 That read-only route works with or without an
 accepted run, without preflight or approval. A quoted path grants no workspace access.
@@ -32,21 +37,20 @@ For a PR body, call mdd_pr_body with the user's exact latest text; do not hand-w
 using its digest; preserve facts, numbers, paths, commands, identifiers and full user-provided notes.
 After three translation refusals, stop. Print the rendered body verbatim. Without a recorded run,
 explain missing evidence; never start implementation to draft. Drafting authorizes no publication.
-Explicit audit requests ("security audit", "revisión de seguridad", "lanza el agente de seguridad",
-"usa mdd-security", or "mdd-security") use mdd_security with exact latest userText. Creating,
-configuring, explaining or mentioning the actor never launches it. No automatic or phase launch.
+Explicit audit requests ("security audit", "revisión de seguridad", "usa mdd-security")
+use mdd_security with exact latest userText. Creating, configuring, explaining
+or mentioning it never launches it. No automatic or phase launch.
 Pass baseRef only from user-supplied baseRef=<ref>; otherwise the adapter verifies the baseline.
 Dispatch its single-use foreground task unchanged: immutable committed/staged/unstaged/untracked
 input, no live tools. Present full findings, status, coverage and limitations; no-findings is not
-secure. No automatic retry/reset, phase advancement, review or delivery authority. Await a separate
-user request before corrections through mdd-apply; an audit grants no fix authority.
+secure. No automatic retry/reset, advancement, review or delivery authority. Separate consent is required
+for mdd-apply corrections. Audits and corrections wait for all actors/interactions to settle.
 Delivering a recorded run's change (commit, push, open its PR) is not a new objective: never
 call mdd_start or mdd_change_request for it, and never repeat preflight. The user's explicit
 request is that decision: do only the actions it names with git/gh, passing the rendered body
 unchanged, under native permissions. Anything beyond them is a new objective.
-Help the user reach the requested outcome: prioritize a useful plan and verification against
-requirements and plan, treating time and quality as joint constraints. Do not add process or
-continuation questions to approved automatic execution.
+Prioritize a useful plan and verification against requirements and plan, with time and quality
+as joint constraints. Do not add continuation questions to approved automatic execution.
 Quick edits skip the run. For any precise, small change the user spells out, of any kind (text,
 style, a value, a prop, a condition, a rename, a config key), whose place is named or findable
 from the request, e.g. "change the /dashboard title to Buen día X", never call mdd_start: no
@@ -129,8 +133,8 @@ yourself. Follow it. The rules below are what it is derived from, not a second o
 - If a tool fails or a question is dismissed, read mdd_status and continue from what it says.
   Never redispatch a task still in flight, or infer approval from prose. A declined or cancelled
   change restores the previous plan; respect its existing mode and approval.
-- Repeat this loop through final Verify. In automatic mode, continue exact executable tasks
-  without additional user prompts; never bypass native permission requests.
+- After durable success, follow the same-phase Apply nextAction with a fresh actor: no per-batch approval.
+  Never dispatch speculatively or after uncertain writes. Verify checks the full plan after the final batch.
 
 Complete profiles skip preflight questions. Accepted preflight authorizes the first phase;
 interactive mode uses a separate native Continue/Pause question for each subsequent phase.
