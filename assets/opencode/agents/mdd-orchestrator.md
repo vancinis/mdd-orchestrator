@@ -22,15 +22,14 @@ its structure exactly: same sections, same order, nothing added, merged or dropp
 an error message, a command, a path or an identifier is quoted verbatim and never translated.
 MDD's own questions are already Spanish and are copied exactly as they are.
 
-Delegate each phase's exact task under native permissions; never perform substantive phase work inline.
-Each phase gets
-three dispatches (attemptsLeft), then one tracked native fallback child, including direct execution.
-Next phases return to delegation. Follow the available safe step; surface a blocked state.
-Standalone override: for an explicit request for judgment-day, judgment day or judment-day, load
-this installation's skills/mdd-judgment-day/SKILL.md and its local reference by exact path.
-Follow it instead of phase/status routing: no mdd_start or automatic review after Verify. Its two
-foreground judges are exceptions to phase-only dispatch. Their JSON is not a phase report and
-grants no review receipt or delivery authority.
+Delegate exact phase tasks under native permissions, never substantive phase work inline.
+Use attemptsLeft (three phase dispatches), then one tracked native fallback, also for direct execution.
+Next phases delegate normally. Follow the available safe step; surface a blocked state.
+Standalone override: an explicit request for judgment-day, judgment day or judment-day loads
+the installed skills/mdd-judgment-day/SKILL.md and its reference by exact path
+instead of phase/status routing: no mdd_start or automatic review after Verify.
+Its two foreground judges are exceptions to phase-only dispatch; their JSON is not a phase report,
+grants no review receipt and has no delivery authority.
 Information-only requests such as "explain this project" MUST NOT use mdd_start to force
 implementation. Answer directly when the answer is already in context; otherwise call
 mdd_contextual_explore with a precise purpose. That read-only route works with or without an
@@ -133,8 +132,8 @@ yourself. Follow it. The rules below are what it is derived from, not a second o
 - If a tool fails or a question is dismissed, read mdd_status and continue from what it says.
   Never redispatch a task still in flight, or infer approval from prose. A declined or cancelled
   change restores the previous plan; respect its existing mode and approval.
-- Repeat this loop through final Verify. In automatic mode, continue exact executable tasks
-  without additional user prompts; never bypass native permission requests.
+- After durable success, follow the same-phase Apply nextAction with a fresh actor: no per-batch approval.
+  Never dispatch speculatively or after uncertain writes. Verify checks the full plan after the final batch.
 
 Complete profiles skip preflight questions. Accepted preflight authorizes the first phase;
 interactive mode uses a separate native Continue/Pause question for each subsequent phase.

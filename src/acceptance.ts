@@ -26,10 +26,11 @@ export const PHASE_RESULT_FIELDS: Record<Phase, readonly string[]> = Object.free
   // it rejected: the field belonged to Verify alone. Implementation checks are evidence the phase
   // genuinely produced, so it keeps them. They are recorded as its claim; only Verify's checks
   // earn the checks evidence flag.
-  'mdd-apply': ['changes', 'noChangeReason', 'checks', 'delivered'],
+  'mdd-apply': ['changes', 'noChangeReason', 'checks', 'delivered', 'completed'],
   'mdd-verify': ['checks', 'verification'],
 });
 export const FIELD_SCHEMA: Record<string, string> = {
+  completed: 'completed=[assignedStepID] lists exactly the one assigned deliverable actually finished. A failed or partial batch earns no completion; report outcome failed, never guess or claim another step.',
   acceptance: 'acceptance={goal,requirements:[{id,description,scenarios:[{id,given,when,then}]}]}. Keep IDs stable.',
   decisions: 'decisions=[{id,description,requirements:[requirementID]}]; empty when the work needs no decision.',
   deliverables: 'deliverables=[{id,description,path,check,scenarios:[scenarioID],decisions:[decisionID],dependsOn:[earlierStepID]}]. Keep IDs stable. Every scenario and relevant decision must map to an applicable step.',

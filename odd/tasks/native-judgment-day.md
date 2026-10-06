@@ -18,6 +18,7 @@ MDD already configures models per actor but lacks Judgment Day actors and native
 - [x] JD-1 — Package configurable judge/fix actors and preserve phase-role separation. Model round trips, config editor, schema, installation, assets, telemetry and existing phase membership verified.
 - [x] JD-2 — Enable exact standalone actor dispatch with native read-only inspection and workflow guards. Full regression fixture corrected and unresolved native actor identity now fails closed; independent verification confirms the correction.
 - [x] JD-3 — Package the explicit-request protocol, coordinator routing and usage documentation. Installed skill/reference paths, immutable targets, authorization, round limits and full regression suite verified; independent source/contract check passed.
+- [x] DEL-1 — Integrate the latest authorized `origin/main` changes while preserving Judgment Day and sequential Apply behavior; build, typecheck, full tests and diff cleanliness verified before normal direct-main delivery.
 
 Each task uses delegated direct execution: preparation requires repository exploration and each work unit touches multiple non-trivial files. One writer works sequentially; the parent owns commits and native review.
 
@@ -65,6 +66,12 @@ Final writer checks: build and typecheck passed; 250 focused native tests passed
 
 Final worktree assessment explicitly included the new skill/reference inventory: medium, 18 paths / 797 authored lines. No returned review transition was executed because RDD is disabled. Conservative high-risk independent verification was completed; neither check produces native authority. Native-host/model-backed smoke remains unverified without separate authorization.
 
-Implementation complete with functional and independent source/contract proof. Delivery remains ordinary disabled/unmanaged, not native-approved. Next optional step: separately authorize installation and model-backed native-host smoke; commit/push/PR/merge decisions remain user-owned. No push, merge or global installation was performed.
+Feature implementation complete with functional and independent source/contract proof. Delivery remains ordinary disabled/unmanaged, not native-approved. The user now explicitly authorizes downloading the latest main and publishing directly to main, using the current configured Git HTTPS credential/session only for `github.com/vancinis/mdd-orchestrator`. No force push, history rewrite, global installation or authenticated host smoke is authorized.
+
+Delivery integration: fetched `origin/main` at `531ee36a475cd77469e5ab3c47be9f4ebfd66b85`; current feature tip `675b823`, 6 feature commits ahead and 7 upstream commits behind. Route: delegated direct, because upstream sequential-Apply changes overlap native guards, coordinator instructions and tests. A single writer will integrate that exact upstream commit, resolve only authorized integration surfaces, and run functional checks; the parent owns commits and normal push.
+
+DEL-1 proof: merged the pinned upstream with both histories preserved, resolving only coordinator instructions and phase-asset tests. Combined coordinator remains within the 16,000-byte installation limit (15,996 bytes), preserving both contracts. Writer build/typecheck passed; full suite passed 1,166 tests, failed 0, skipped 2 (Windows file-symlink privilege and opt-in managed Engram smoke). Parent typecheck, staged/unstaged diff checks and conflict inventory passed. Native assessment: medium; RDD remains clone-local OFF, so no returned review transition is executed and no native approval is claimed.
+
+Next: refresh the authorized remote to detect races, commit the verified integration and record its identity, then publish normally to origin/main if it has not advanced. Model-backed native-host smoke remains pending without separate authorization.
 
 The memory service binds this runtime session to project `mdd`, despite the repository detector returning `mdd-orchestrator`; recovery mirrors follow that existing session binding without inventing a session.
