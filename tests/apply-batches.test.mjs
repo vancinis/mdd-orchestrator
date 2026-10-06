@@ -197,6 +197,40 @@ for (const stopped of [true, false]) {
   });
 }
 
+test('explicit second-batch recovery keeps complete Spanish clarification, first completion and full-plan Verify', async t => {
+  const f = await fixture(t, { store: 'openspec' });
+  const question = '¿Qué comportamiento necesitás conservar? '.repeat(150);
+  const answer = 'Necesito conservar la configuración íntegra. '.repeat(400);
+  const content = `Question: ${question}\nAnswer: ${answer}`;
+  // NativeIntake contributes answered clarification through this exact context boundary.
+  f.runner.contribute({ label: 'Clarification', content }, f.runtime);
+  const first = await f.finish(applied('first'));
+  assert.ok(first.args.prompt.includes(JSON.stringify(content)));
+  const before = f.status();
+  const interrupted = await f.dispatch();
+  assert.ok(interrupted.args.prompt.includes(JSON.stringify(content)));
+  assert.equal((await f.restart()).restored, false, 'a missing result never reissues the second writer');
+  assert.equal(f.status().task, undefined);
+  assert.equal((await f.runner.confirmStopped(f.runtime.sessionID, f.runtime)).verdict, 'stopped');
+  assert.deepEqual(await f.restart(), { restored: true });
+  assert.equal(f.status().state, 'blocked', 'host-confirmed release still requires explicit phase reset');
+  assert.deepEqual(f.status().evidence, { requirements: 'confirmed', plan: 'confirmed', implementation: 'invalidated', checks: 'invalidated' });
+  assert.deepEqual(f.runner.reset(f.runtime.sessionID, 'phase'), { scope: 'phase', phase: 'mdd-apply' });
+  assert.equal(f.status().runID, before.runID);
+  assert.deepEqual(f.status().workflow.results, before.workflow.results);
+  assert.deepEqual(f.durable.read(f.runtime.sessionID).workflow.applyProgress().completed, ['first']);
+  await assert.rejects(f.runner.after(interrupted.call, interrupted.args, report(applied('second'))), /current dispatch/);
+  const second = await f.finish(applied('second'));
+  assert.notEqual(second.call.callID, interrupted.call.callID);
+  assert.deepEqual(JSON.parse(second.args.prompt.match(/^Applicable deliverables: (.*)$/m)[1]).map(step => step.id), ['second']);
+  assert.ok(second.args.prompt.includes(JSON.stringify(content)));
+  assert.deepEqual(await f.restart(), { restored: true });
+  const verify = await f.dispatch();
+  assert.deepEqual(JSON.parse(verify.args.prompt.match(/^Applicable deliverables: (.*)$/m)[1]).map(step => step.id), ['first', 'second']);
+  assert.deepEqual(JSON.parse(verify.args.prompt.match(/^All changed-file evidence from every Apply batch: (.*)$/m)[1]).map(file => file.path), ['src/first.ts', 'src/second.ts']);
+  assert.ok(verify.args.prompt.includes(JSON.stringify(content)));
+});
+
 test('ambiguous Apply artifact never retries substantive work or settles its pending marker', async t => {
   const f = await fixture(t, { store: 'openspec' });
   const attempt = await f.dispatch();

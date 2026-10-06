@@ -12,6 +12,15 @@ export type Evaluation = {
   reasons: string[];
 };
 
+/**
+ * Every route the policy can choose, in order. A run records the one it started with, and replay
+ * follows that record: a later routing policy must not reshape a run that is already under way.
+ */
+export const HIGH_ROUTE: readonly Phase[] = Object.freeze(['mdd-explore', 'mdd-propose', 'mdd-spec', 'mdd-design', 'mdd-tasks', 'mdd-apply', 'mdd-verify']);
+export const LOW_ROUTE: readonly Phase[] = Object.freeze(['mdd-plan', 'mdd-apply', 'mdd-verify']);
+export const LOW_EXPLORE_ROUTE: readonly Phase[] = Object.freeze(['mdd-explore', ...LOW_ROUTE]);
+export const ROUTES: readonly (readonly Phase[])[] = Object.freeze([HIGH_ROUTE, LOW_EXPLORE_ROUTE, LOW_ROUTE]);
+
 export function preflight(value: unknown): { answers: Answers; evaluation: Evaluation } {
   const request = objectWithKeys(value, 'request', ['answers', 'profile', 'config', 'explore']);
   const hasAnswers = Object.hasOwn(request, 'answers');
@@ -46,7 +55,7 @@ export function preflight(value: unknown): { answers: Answers; evaluation: Evalu
   ];
   let phases: Phase[];
   if (route === 'high') {
-    phases = ['mdd-explore', 'mdd-propose', 'mdd-spec', 'mdd-design', 'mdd-tasks', 'mdd-apply', 'mdd-verify'];
+    phases = [...HIGH_ROUTE];
     reasons.push('High route always includes exactly one exploration phase.');
   } else {
     const explorationReasons: string[] = [];
@@ -54,9 +63,9 @@ export function preflight(value: unknown): { answers: Answers; evaluation: Evalu
       explorationReasons.push(`Low-route exploration required: certainty is ${answers.certainty}.`);
     }
     if (request.explore === true) explorationReasons.push('Low-route exploration explicitly requested.');
-    phases = ['mdd-plan', 'mdd-apply', 'mdd-verify'];
+    phases = [...LOW_ROUTE];
     if (explorationReasons.length > 0) {
-      phases.unshift('mdd-explore');
+      phases = [...LOW_EXPLORE_ROUTE];
       reasons.push(...explorationReasons);
     } else {
       reasons.push('Low-route exploration not required: very-sure requirements.');

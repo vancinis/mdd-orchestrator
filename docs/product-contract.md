@@ -144,6 +144,18 @@ The first phase is ready after construction. A pass makes the next phase ready i
 
 Controller results are **caller-supplied claims, not independent verification**. The OpenCode adapter separately checks native child invocation/result/history evidence and Engram readbacks before recording results. Explicit native-confirmed changes create a new planned run in the same conversation, retaining old evidence. Contextual exploration uses a separate execution slot without advancing the main controller. A run resumes after process loss only from a validated checkpoint of a *settled* state, in the same conversation or — on the user's explicit request naming the source conversation and run — in a new one: a ready phase is dispatchable again, an approval is asked again, and nothing in flight is ever replayed, because MDD cannot know what an interrupted implementation phase wrote to the working tree; such an attempt is released only when the host confirms it stopped or the user says so in their own latest message. When no usable checkpoint exists (for example after a checkpoint write kept failing), the plan, acceptance map, artifacts and reported evidence of the lost run are reported as read-only data, so new work begins holding them while still earning its own preflight and its own approvals.
 
+### Clarification conversation boundary
+
+User-facing conversation is always Spanish, including clarification/question text, option labels
+and descriptions inside tool arguments. Technical artifacts, phase reports and protocol keys stay
+English. Exact native user text is never translated or rewritten.
+
+Clarification prose has no individual question, option or answer byte ceiling. Full question and
+answer strings are durable and become attributed context content under a short stable label,
+not phase approval. Nonempty/type validation, choice counts, distinct/reserved labels, exact host
+answer matching and parent/call ownership checks remain unchanged. Aggregate storage and transport
+safety limits remain explicit; no truncation or automatic re-asking substitutes for an answer.
+
 ## 4. Runnable proof and verification boundaries
 
 The [README](../README.md) provides working PowerShell commands and exit codes. `examples/answers.json` and `examples/profile.json` are equivalent complete sources. `examples/config.json` demonstrates the equality boundary. The CLI reads UTF-8 JSON files, accepts a leading BOM, validates input, and prints a decision. It never executes the returned phases or creates artifact folders.

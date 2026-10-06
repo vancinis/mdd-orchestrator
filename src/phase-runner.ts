@@ -366,6 +366,12 @@ function mergeChangedFiles(held: readonly ChangedFile[], added: readonly Changed
   return [...byPath.values()];
 }
 
+/** Clarification prose has no individual byte ceiling; composed payloads retain their bounds. */
+export function nonemptyText(value: unknown, label: string): string {
+  if (typeof value !== 'string' || !value.trim()) throw new ValidationError(`${label} must be nonempty text.`);
+  return value;
+}
+
 export function boundedText(value: unknown, label: string, max: number): string {
   if (typeof value !== 'string' || !value.trim() || Buffer.byteLength(value) > max) {
     throw new ValidationError(`${label} must be nonempty text of at most ${max} bytes.`);
@@ -763,6 +769,8 @@ export class PhaseRunner {
         brief: '', report: structuredClone(stable.report),
       };
       if (releasedAttempt) {
+        run.evidence = invalidateEvidence(run.evidence, this.#affected(run.phase));
+        run.report = { phase: run.phase, summary: 'La ejecución se detuvo; la evidencia afectada quedó retirada.', how: [], status: 'blocked', evidence: run.evidence };
         run.reason = 'The prior child was released without a recorded result. Inspect partial changes, then explicitly reset this phase to retry it.';
         run.attemptID = checkpoint.attempt!.id;
         run.lastCallID = marker!.callID!;
@@ -1089,7 +1097,9 @@ export class PhaseRunner {
     this.#inheritedCalls.delete(runtime.sessionID);
     const run: Run = {
       id, runtime: { ...runtime }, workflow, phase: first.phase, requirements,
-      ...(this.options.checkpoint ? { checkpointRequest: structuredClone(request.preflight), checkpointSequence: -1 } : {}),
+      // The persisted request names the route this run started on, so replay after a restart
+      // follows it even when a later routing policy would choose another one.
+      ...(this.options.checkpoint ? { checkpointRequest: Workflow.recordedRequest(request.preflight, workflow), checkpointSequence: -1 } : {}),
       // A confirmed replacement supersedes the previous run's checkpoint in this same parent.
       ...(previous ? { replacesRunID: previous.id } : {}),
       memory, artifacts: new ArtifactStore(runtime.directory, workflow.snapshot().answers.artifactStore, memory),

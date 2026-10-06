@@ -3,7 +3,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { EngramHttp, LESSON_TITLE_PREFIX, mddDataRoot } from './engram-http.js';
 import { readLessons, recordLesson, renderLessonsReport } from './lessons.js';
 import type { LessonState } from './lessons.js';
-import { boundedText, runContext } from './phase-runner.js';
+import { boundedText, nonemptyText, runContext } from './phase-runner.js';
 import type { PhaseRunner, Runtime, TaskCall } from './phase-runner.js';
 import { answersFromLabels, questionEnvelope } from './preflight.js';
 import type { QuestionEnvelope } from './preflight.js';
@@ -393,12 +393,12 @@ export class NativeIntake {
     if (!Array.isArray(input.questions) || input.questions.length > 8) throw new Error('Provide up to eight clarification questions, or an empty array when none remain.');
     const questions: Clarification[] = input.questions.map(raw => {
       const item = objectWithKeys(raw, 'clarification', ['question', 'options', 'deferrable']);
-      const question = boundedText(item.question, 'clarification question', 1000);
+      const question = nonemptyText(item.question, 'clarification question');
       if (!Array.isArray(item.options) || !item.options.length || item.options.length > 6 || (item.deferrable !== undefined && typeof item.deferrable !== 'boolean')) throw new Error('Clarifications require one to six options and a boolean deferrable flag.');
       const options = item.options.map(rawOption => {
         const option = objectWithKeys(rawOption, 'clarification option', ['label', 'description', 'recommended']);
         if (option.recommended !== undefined && typeof option.recommended !== 'boolean') throw new Error('recommended must be boolean.');
-        return { label: boundedText(option.label, 'option label', 100), description: boundedText(option.description, 'option description', 500), recommended: option.recommended === true };
+        return { label: nonemptyText(option.label, 'option label'), description: nonemptyText(option.description, 'option description'), recommended: option.recommended === true };
       });
       const labels = options.map(clarificationOptionLabel);
       if (new Set([...labels, CLARIFICATION_LABELS.defer, CLARIFICATION_LABELS.delegate]).size !== labels.length + 2) throw new Error('Clarification option labels must be unique and not reserved.');
@@ -679,7 +679,7 @@ export class NativeIntake {
       try { selections = nativeQuestionAnswers(slot.args, output); }
       catch (error) {
         if (!(error instanceof UnselectedAnswer) || slot.kind !== 'clarification') throw error;
-        selections = [[boundedText(error.text, 'free-text clarification', 12000)]];
+        selections = [[nonemptyText(error.text, 'free-text clarification')]];
       }
       // A native callback is evidence of an answer, not replayable consent. Persist its exact
       // selections before any approval or plan transition; an incomplete write blocks the route.
@@ -700,10 +700,10 @@ export class NativeIntake {
         const item = entry.clarifications[0]!;
         const answer = selections[0]![0]!;
         const deferred = answer === CLARIFICATION_LABELS.defer;
-        // A deferral is context, not a choice: the next actor must not silently decide it.
-        this.runner.contribute?.({ label: `Clarification: ${item.question}`, content: deferred
-          ? 'Deferred by the user; unresolved. Do not assume a choice. Continue only with work safe without this decision.'
-          : `Answer: ${answer}` }, entry.runtime);
+        // Keep prose in content, not the bounded label. A deferral remains unresolved context.
+        this.runner.contribute?.({ label: 'Clarification', content: `Question: ${item.question}\nAnswer: ${answer}${deferred
+          ? '\nDeferred by the user; unresolved. Do not assume a choice. Continue only with work safe without this decision.'
+          : ''}` }, entry.runtime);
         entry.clarificationAnswers.push({ question: item.question, answer, phase: slot.phase!, disposition: deferred ? 'deferred' : 'answered' });
         if (deferred) entry.deferred.push(item);
         entry.clarifications.shift();

@@ -13,16 +13,16 @@ Before T1, Apply received the whole plan; completion IDs were discarded and a pa
 - Stop on failed, interrupted or ambiguous substantive writes; never auto-retry an uncertain writer.
 - Preserve settled legacy records and support explicit rework without stale completion authority.
 - Split large plans into bounded deliverables; do not impose a changed-line cap.
-- No global installation, push, PR creation, merge or remote execution.
+- No global installation, PR creation or remote execution. Latest explicit user authorization allows fetching origin/main, local integration and normal direct push to origin/main using configured Git authentication; no force push.
 - Technical artifacts are English. Keep tests/docs with behavior.
 
 ## Delivery
 
 - Branch: `feat-apply-improvements`; initial reviewed boundary: `57b0857c9374204dd2ddfc745f62b229107a5f10`.
-- Strategy: `ask-on-risk`, resolved by user: `stacked-to-main` (future dependent PR slices directed to main).
+- Strategy: initially `stacked-to-main`; latest explicit user instruction selects direct normal delivery to main without PRs.
 - Forecast: approximately 1,100–1,650 authored changed lines, mostly regression tests; generated output excluded.
-- Running authored count: 1,460 (T1: 851; T2: 609), excluding this progress document. No PRs created; slice boundaries follow work-unit commits.
-- RDD: on, global source. User explicitly deferred review until later and authorized continuing T2. Preserve the existing T1 transaction without approval, decline, abandonment or mode changes; do not retry it automatically. T2 is a separate implementation work unit with ordinary functional checks.
+- Running authored count: 1,523 (T1: 851; T2: 609; T3 compatibility fix/tests: 63), excluding this progress document and pre-existing upstream changes. No PRs created.
+- RDD: latest read-only status is off (clone-local source; global remains on). This session did not toggle it. User explicitly deferred review; preserve the existing T1 transaction without approval, decline or abandonment. No native review actors are invoked; ordinary checks and delivery remain disabled/unmanaged with respect to receipts.
 - TDD: no configured mode found; default applicable test-first policy. Runner: Node v26.9.0, `npm run build` then Node test runner.
 - Engram mirror: `odd/sequential-apply-batches/tasks` in runtime session project `mdd` (repository detection uses `mdd-orchestrator`).
 
@@ -36,6 +36,7 @@ Before T1, Apply received the whole plan; completion IDs were discarded and a pa
   - GREEN: focused 69 passed / 0 failed; full suite 1,082 passed / 0 failed / 2 known skips; typecheck, build and diff checks passed. Parent reran smoke and final diff check; independent verifier confirmed exception-safe cleanup.
   - Proof: three deterministic scenarios passed (success, failure, ambiguous completion), using real motor/checkpoints/files/commands with host/identity doubles. Native smoke unavailable because ancestor configuration would defeat isolation; no native host/provider started, credentials or running service reused. External paid-model execution not run.
   - Risk: medium; review deferred per user. See committed assessment and slice evidence below.
+- [ ] **T3 — Integrate current main and deliver.** Route: delegated direct; triggers: multi-file merge and compatibility verification. Integrated upstream `f8962d2b3750f8a86bc4c1e3e11c0772dae7d1e6`, resolving conflicts in adapter documentation and workflow tests while preserving both behaviors. Fixed restored interrupted batches to invalidate affected evidence without discarding completed task IDs/prior results. RED: 49 passed / 1 failed; GREEN: 50 passed / 0 failed. Final focused suite: 481 passed / 0 failed / 1 skipped; full suite: 1,098 passed / 0 failed / 2 known skips. Typecheck, build, both diff checks, empty unmerged index and marker search passed; parent reran typecheck. Native risk: medium. Integration commit and authorized normal push still pending; review and native-host proof remain deferred/unavailable.
 
 ## Verification and recovery
 
@@ -44,9 +45,11 @@ Dependencies are absent initially; install only locked local dependencies withou
 ## Progress
 
 - Investigation completed from a clean initial worktree; T1 verified with regression tests.
-- User selected a future chain directed to main; this does not authorize publication.
+- User initially selected a future PR chain, then explicitly authorized fetching origin/main and direct normal push to main using existing Git authentication.
 - T1 adds 851 authored lines because its coherent durability boundary includes restart and uncertainty tests; no artificial size split.
 - T2 adds 609 authored lines to keep isolation, failure cleanup, smoke scenarios and regression tests together; no artificial size split.
 - Real-host/model proof remains unavailable; passing doubles is not native proof. A huge individual deliverable and provider/context limits remain limitations.
 - T2 commit: `584c84df7811719b2ecf5f82e5c71c49def3d431`, second future PR slice, based on T1. Committed native assessment: medium, 624 lines including progress-document changes, review due (`slice_budget_reached`) but explicitly deferred. No START or capture was invoked for T2.
-- Both implementation tasks are committed. Next: resume the deferred review and native-host validation later under explicit user authorization and a safely isolated host. No publication performed.
+- Both implementation tasks are committed. Upstream fetch completed: four incoming commits, three local commits; common base `57b0857c9374204dd2ddfc745f62b229107a5f10`.
+- T3 compatibility coverage includes retained completion across interruption, complete Spanish context, stale-result rejection and final full-plan Verify.
+- Next: commit the verified merge and perform the authorized normal direct push. Deferred review/native-host validation remain separate; no publication performed yet.

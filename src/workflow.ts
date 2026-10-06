@@ -1,9 +1,22 @@
-import { preflight } from './kernel.js';
+import { isDeepStrictEqual } from 'node:util';
+import { HIGH_ROUTE, preflight, ROUTES } from './kernel.js';
 import type { Evaluation } from './kernel.js';
 import type { Answers, Phase } from './policy.js';
 import { objectWithKeys, ValidationError } from './validation.js';
 import { applyPlan, completeStep, selectedStep, taskIDs } from './apply-batches.js';
 import type { ApplyProgress, ApplyStep } from './apply-batches.js';
+
+/**
+ * A request may carry `route`: the phases its run was evaluated with when it started. It is not
+ * a preflight answer and grants nothing; it only has to be one of the routes the policy can
+ * choose, so a persisted run keeps the route it was started on after the routing policy changes.
+ */
+function recordedRoute(request: unknown): { base: unknown; route?: Phase[] } {
+  if (!request || typeof request !== 'object' || Array.isArray(request) || !Object.hasOwn(request, 'route')) return { base: request };
+  const { route, ...base } = request as Record<string, unknown>;
+  if (!ROUTES.some(known => isDeepStrictEqual(route, [...known]))) throw new ValidationError('The recorded route is not a known MDD route.');
+  return { base, route: [...route as Phase[]] };
+}
 
 export type NextAction =
   | { kind: 'execute' | 'approve' | 'await-result' | 'blocked'; phase: Phase }
@@ -32,10 +45,22 @@ export class Workflow {
   #apply: ApplyProgress | undefined;
 
   constructor(request: unknown) {
-    const resolved = preflight(request);
+    const { base, route } = recordedRoute(request);
+    const resolved = preflight(base);
     this.#answers = resolved.answers;
-    this.#evaluation = resolved.evaluation;
+    const current = resolved.evaluation;
+    this.#evaluation = !route || isDeepStrictEqual(route, current.phases) ? current : {
+      ...current, route: isDeepStrictEqual(route, [...HIGH_ROUTE]) ? 'high' : 'low', phases: route,
+      reasons: [...current.reasons, `This run keeps the route it started with (${route.join(', ')}); the current routing policy would choose ${current.phases.join(', ')}.`],
+    };
     this.#next = { kind: 'execute', phase: this.#evaluation.phases[0]! };
+  }
+
+  /** The request to persist for this run: its preflight request plus the route it started on. */
+  static recordedRequest(request: unknown, workflow: Workflow): unknown {
+    const { base } = recordedRoute(request);
+    if (!base || typeof base !== 'object' || Array.isArray(base)) return structuredClone(base);
+    return { ...structuredClone(base as Record<string, unknown>), route: [...workflow.#evaluation.phases] };
   }
 
   nextAction(): NextAction {
@@ -53,6 +78,22 @@ export class Workflow {
 
   /** Replay only transitions validated by the ordinary state machine; never restore authority from a snapshot. */
   static replay(request: unknown, events: readonly WorkflowEvent[]): Workflow {
+    try { return Workflow.#replay(request, events); }
+    catch (error) {
+      // A record written before runs kept their route is replayed under today's policy, which
+      // may route the same answers differently. Its own history then names the route it ran on,
+      // and it is accepted only when exactly one known route reproduces that history.
+      if (!request || typeof request !== 'object' || Array.isArray(request) || Object.hasOwn(request, 'route')) throw error;
+      const fits = ROUTES.flatMap(route => {
+        try { return [Workflow.#replay({ ...request as Record<string, unknown>, route: [...route] }, events)]; }
+        catch { return []; }
+      });
+      if (fits.length === 1) return fits[0]!;
+      throw error;
+    }
+  }
+
+  static #replay(request: unknown, events: readonly WorkflowEvent[]): Workflow {
     if (!Array.isArray(events) || events.length > 512) throw new ValidationError('Invalid workflow history.');
     const workflow = new Workflow(request);
     for (const event of events) {

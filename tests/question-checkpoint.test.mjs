@@ -48,6 +48,41 @@ function fixture(t) {
     changeCheckpointRunID: value => { checkpointRunID = value; }, workflow: () => workflow };
 }
 
+test('regression: clarification durable prepare answer settle retains long multibyte prose verbatim', async t => {
+  const f = fixture(t);
+  const intake = f.gate();
+  await f.start(intake);
+  intake.revisit(runtime);
+  const question = '¿Qué configuración necesitás?\n"Ruta" \\ íntegra. '.repeat(100);
+  const option = { label: 'Conservar íntegramente. '.repeat(600), description: 'No perder ningún detalle. '.repeat(30) };
+  const answer = 'Usar esta respuesta íntegra.\n"Detalle" \\ final. '.repeat(300);
+  intake.prepareAdvance({ questions: [{ question, options: [option] }] }, runtime);
+  const records = [];
+  const write = f.store.write.bind(f.store);
+  t.mock.method(f.store, 'write', (parent, record) => { write(parent, record); records.push(f.store.read(parent)); });
+  const args = intake.status(runtime.sessionID).question;
+  const call = { sessionID: runtime.sessionID, callID: 'long-clarification' };
+  await intake.beforeQuestion(call, args);
+  await intake.afterQuestion(call, args, output(args, [[answer]]));
+  const answered = records.find(record => record.state === 'answered');
+  assert.equal(answered.slot.args.questions[0].question, args.questions[0].question);
+  assert.deepEqual(answered.clarifications[0], { question, options: [{ ...option, recommended: false }], deferrable: false });
+  assert.equal(answered.answer[0][0], answer);
+  const approval = intake.status(runtime.sessionID).question;
+  const approvalCall = { sessionID: runtime.sessionID, callID: 'approval-after-long-clarification' };
+  await intake.beforeQuestion(approvalCall, approval);
+  await intake.afterQuestion(approvalCall, approval, output(approval, [['Continuar']]));
+  const reconstructed = new QuestionCheckpointStore(f.root).read(runtime.sessionID);
+  assert.equal(reconstructed.state, 'settled');
+  assert.equal(reconstructed.clarificationAnswers[0].question, question);
+  assert.equal(reconstructed.clarificationAnswers[0].answer, answer);
+  assert.equal(f.approvals(), 1);
+  for (const value of ['', '  ', 42, null]) {
+    assert.throws(() => validateQuestionRecord({ ...answered, answer: [[value]] }));
+  }
+  assert.throws(() => validateQuestionRecord({ ...answered, answer: [['á'.repeat(80000)]] }), /Invalid native question record/);
+});
+
 test('prepared and pending native questions survive a restart as blocked, never reissued', async t => {
   const f = fixture(t);
   const intake = f.gate();
