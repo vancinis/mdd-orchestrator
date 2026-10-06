@@ -1,10 +1,10 @@
 # Independent parallel MDD workers
 
-Add a default-on configuration switch for independent exploration and Apply workers. Parallelism must not bypass file ownership, task dependencies, durable recovery, or the sequential phase workflow.
+MDD now supports default-on, bounded independent exploration and Apply workers. Parallelism preserves file ownership, declared dependencies, durable recovery, and the sequential phase workflow.
 
 ## Problem and outcome
 
-MDD currently owns one native dispatch per phase. A second call loses authority unless ownership, result aggregation, and checkpoint recovery become batch-aware. Different primary file names do not prove independence.
+Before this feature, MDD owned one native dispatch per phase. Safe concurrency required batch-aware ownership, result aggregation, and checkpoint recovery. Different primary file names do not prove independence.
 
 ## Authorized scope
 
@@ -36,11 +36,11 @@ MDD currently owns one native dispatch per phase. A second call loses authority 
 - [x] PW-3 — Make native ownership, result aggregation, and recovery batch-aware without advancing a phase early.
   - Route: delegated direct; shared runner/hooks/checkpoints require one bounded writer.
   - Checks: overlapping call admission, reverse completion, duplicates, sibling failures, persistence faults, pending restart, transfer, no completed-member replay.
-- [ ] PW-4 — Enable independent exploration/Apply dispatch with scoped tool confinement, coordinator instructions, integration tests, and operational documentation.
+- [x] PW-4 — Enable independent exploration/Apply dispatch with scoped tool confinement, coordinator instructions, integration tests, and operational documentation.
   - Route: delegated direct; runtime fences and packaged prompts must change together.
   - Checks: deterministic native-hook integration, forbidden tools/out-of-scope edits, disabled/legacy fallback, full suite, typecheck, build.
   - [x] PW-4E — Enable progress-bound, read-only exploration batches and prove actual native overlap with mutation-denying gates.
-  - [ ] PW-4A — Enable Apply through formatter-free scoped editing primitives, deny alternate mutation routes, and prove actual native confinement/overlap.
+  - [x] PW-4A — Enable Apply through formatter-free scoped editing primitives, deny alternate mutation routes, and prove actual native confinement/overlap.
 
 ## Verification policy
 
@@ -54,9 +54,9 @@ RDD status: off, explicitly selected by the user for this clone; global preferen
 
 - Existing feature branch: `feat-add-workers`.
 - Branch point / initial review boundary: `57b0857c9374204dd2ddfc745f62b229107a5f10`.
-- Updated forecast: approximately 4,500–5,500 authored changed lines across the coherent work units, tests and docs included; generated files excluded. Native safety and real-host proof increased the initial estimate. The user-selected single-branch strategy remains in effect.
+- Final behavior work-unit footprint: 4,223 authored changed lines, including tests, docs, and earlier recovery updates; generated files excluded. The final passive tracking closeout is included in the running total below. Native safety and real-host proof increased the initial estimate; the user-selected single-branch strategy remained in effect.
 - Delivery strategy: `single-pr`, explicitly selected by the user: one branch against `main`. Keep all coherent local work-unit commits on `feat-add-workers`; do not create stacked branches, publish, push, or open a PR.
-- Running committed authored lines: 3,222 across four work-unit commits (includes recovery-document updates).
+- Running authored changed lines: 4,253 across five behavior work-unit commits and this 30-line passive tracking closeout (includes recovery-document updates).
 - PW-1 work-unit commit: `2aeb1661224f6f5ac85d35ad79b392e1e8ec5916`, `feat(config): expose default-on independent worker preference`.
 - PW-1 native tier/outcome: medium, `under_budget`; review slice remains pending against the initial boundary. No review receipt or approval is claimed.
 - PW-2 work-unit commit: `892946c96ed9fca6a5f25eb047ad90216a4b15f8`, `feat(workers): select only explicitly independent task batches`.
@@ -65,12 +65,14 @@ RDD status: off, explicitly selected by the user for this clone; global preferen
 - PW-3 native tier/outcome: medium, RDD `disabled/unmanaged`; writer functional proof and parent typecheck/structural spot checks passed. No receipt review ran.
 - PW-4E work-unit commit: `938c58c07a62156c9069f649807e679bb65294bb`, `feat(workers): run confined independent exploration in parallel`.
 - PW-4E native tier/outcome: high, RDD `disabled/unmanaged`; writer checks, independent verifier, actual native exploration proof, and parent spot checks passed. No receipt review ran.
-- Delivery slice: one eventual branch/PR against `main`, currently contains PW-1 through PW-3 and PW-4E. No publication authorized.
+- PW-4A work-unit commit: `2e28cd246fafeefa4b536fe6c30c845aaf96b5e1`, `feat(workers): enable formatter-free independent Apply`.
+- PW-4A native tier/outcome: medium, RDD `disabled/unmanaged`; writer full/native checks, independent verification and fault recheck, and final parent typecheck/staged-whitespace spot checks passed. No receipt review ran.
+- Delivery slice: one eventual branch/PR against `main`, contains PW-1 through PW-4, with PW-4 split into exploration and Apply work units. No publication authorized.
 - The approximately 400-line heuristic is advisory: no minification, cosmetic compression, omitted tests, or artificial task splits.
 
 ## Progress and next step
 
-Read-only repository mapping and a bounded native-concurrency feasibility challenge are complete. Pinned V2 supports concurrent foreground calls, but MDD's existing singular authority needs explicit extension.
+Initial mapping established that concurrent native calls were available and MDD's previously singular authority required batch-aware extension. Completed implementation and proof are recorded per unit below.
 
 PW-1 is complete and committed. Changed eight allowed configuration/schema/docs/test files, 223 additions and 10 deletions, plus the recovery document. `freezeProfile(...).workers` exposes a detached immutable preference. At PW-1 closure runtime dispatch was still sequential; later PW-4E enabled confined exploration.
 
@@ -128,7 +130,7 @@ PW-3 is complete and committed. Sixteen behavior/docs/test files changed, 870 ad
 PW-4E is complete and committed: 25 files, 1,495 additions and 66 deletions, including preserved earlier partial guidance/probe changes and tracking updates.
 
 - Main `mdd_start({ requirements, exploration: { workItems } })` and `mdd_contextual_explore({ purpose, workItems })` support two complete independent read-only items, with explicit roots/files and preserved external-directory permission.
-- Exact native progress binding gates every child action; lost/delayed/conflicting/stale/manual identities fail closed. Production capability is read-only and phase-scoped to exploration; Apply remains serial.
+- At PW-4E closure, exact native progress binding gated every child action and failed closed for lost/delayed/conflicting/stale/manual identities. Production capability was read-only and phase-scoped to exploration; Apply was still serial until PW-4A.
 - Writer proof: typecheck/build, 500 focused tests, 61 plugin contract tests, and full suite 1,195 passed, zero failed, two skipped.
 - Independent proof: typecheck/build, 247 focused tests, baseline pinned-native probe, and seven actual native scenarios passed. Main/contextual/delayed/dropped/conflicting/external-denied showed two simultaneously live foreground children with reverse completion; disabled stayed singular.
 - Synthetic-only coverage, not actual-host claims: literal grep, implicit `AGENTS.md`, alias/schema rejection, stale/manual quarantine, persistence failures, and restart recovery.
@@ -138,7 +140,7 @@ PW-4E is complete and committed: 25 files, 1,495 additions and 66 deletions, inc
 
 ### PW-4A final verification
 
-- Writer implementation and one scoped correction are verified, not yet committed: a formatter-free scoped `mdd_worker_edit` primitive and production Apply activation, with strict live child/ownership/path authorization and alternate-tool denial.
+- PW-4A implementation and one scoped correction are verified and committed: a formatter-free scoped `mdd_worker_edit` primitive and production Apply activation, with strict live child/ownership/path authorization and alternate-tool denial.
 - Final writer checks: 1,227 full-suite tests passed, two skipped, zero failed; 342 focused tests; typecheck/build; baseline native probe, seven exploration cases and eight actual Apply cases passed after the correction.
 - Independent initial verification passed 340 focused tests and the same native matrices, and identified a medium create-publication reporting defect plus low serial/scoped documentation ambiguity. Both were corrected within the existing task scope.
 - Correction RED: 28 passed, two failed before the fix; GREEN: all 30 editor tests passed. Successful publication is recorded before cleanup; cleanup failures cannot mask retained changes or publication errors. Partial publication is reported, without blind rollback over human changes.
@@ -147,7 +149,13 @@ PW-4E is complete and committed: 25 files, 1,495 additions and 66 deletions, inc
 - Proof limits: native scenarios stop at singular Verify readiness, not Verify command execution. Create/delete, encoding/modes, drift, partial publication, restart and transfer are unit proof, not native-host claims. Persistent cleanup failures may leave reported adapter temporaries; there is no arbitrary-script sandbox or all-files atomicity claim.
 - RDD remains off. Native risk assessment is medium; independent verification was also run because file confinement is critical. No review continuation or receipt is claimed.
 
-Next: run the final parent spot check, commit the verified PW-4A work unit, then record its identity and close PW-4A/PW-4. Reviews remain disabled; publishing and global installation remain unauthorized.
+## Outcome and next step
+
+All implementation tasks are complete. Eligible declared-independent exploration and Apply tasks run as at most two native foreground workers; incomplete, dependent, overlapping, unsupported, or unsafe-bootstrap work remains serial. `workers.enabled` defaults on and is configurable through `mdd-ai config` or `mdd-ai workers status|on|off`. Settings are startup-frozen and captured for runs; no hot-reload claim is made.
+
+Ordinary functional verification is complete within the proof limits above. The two skipped tests and correct-project memory resynchronization remain disclosed, not fabricated as passing. No final source check failed. Receipt reviews remain explicitly disabled for this clone, and the historical pending review state was preserved.
+
+Next: the user decides whether to publish or install globally. Neither push, PR creation, merge, nor global installation was performed or authorized.
 
 ## Recovery mirror
 
