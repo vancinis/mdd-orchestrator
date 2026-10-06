@@ -15,6 +15,9 @@ import { evidenceCoverage, renderReport } from './reporting.js';
 import type { Evidence, PhaseReport } from './reporting.js';
 import type { Phase } from './policy.js';
 import type { Concern } from './concerns.js';
+import { validateWorkerState, workerReport } from './worker-state.js';
+import type { WorkerState } from './worker-state.js';
+import type { WorkerPolicy } from './settings.js';
 
 export const CHECKPOINT_VERSION = 1;
 export const RESUME_CHECKPOINT_VERSION = 2;
@@ -64,6 +67,8 @@ export type ResumeData = {
   verification?: Verification; executedChecks: Check[]; changedFiles: number;
   calls: string[]; usedMessages: string[]; proposed: string[];
   rework?: { after: Phase; summary: string };
+  workerPolicy?: WorkerPolicy;
+  workerState?: WorkerState;
 };
 export type ResumeCheckpoint = Omit<Checkpoint, 'version'> & { version: typeof RESUME_CHECKPOINT_VERSION; data: ResumeData; dataDigest: string };
 /** Process state, not a dispatch token or proof of a fresh native approval. */
@@ -150,7 +155,7 @@ function body(value: unknown): void {
 function validateData(value: unknown, workflow: Workflow): ResumeData {
   const data = objectWithKeys(value, 'checkpoint data', ['directory', 'worktree', 'userMessageID', 'requirements', 'memoryProject', 'context',
     'dependencies', 'contexts', 'acceptance', 'decisions', 'planned', 'evidence', 'verification', 'executedChecks',
-    'changedFiles', 'calls', 'usedMessages', 'proposed', 'rework']);
+    'changedFiles', 'calls', 'usedMessages', 'proposed', 'rework', 'workerPolicy', 'workerState']);
   if (![data.directory, data.worktree].every(item => bounded(item, 4096)) || !identifier(data.userMessageID) ||
       !bounded(data.requirements, 12000)) throw new ValidationError('Invalid checkpoint identity or requirements.');
   if (data.memoryProject !== undefined && (typeof data.memoryProject !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(data.memoryProject))) throw new ValidationError('Invalid checkpoint memory project.');
@@ -209,6 +214,14 @@ function validateData(value: unknown, workflow: Workflow): ResumeData {
     const item = objectWithKeys(data.rework, 'checkpoint rework', ['after', 'summary']);
     if (item.after !== 'mdd-verify' || !bounded(item.summary, 8000)) throw new ValidationError('Invalid checkpoint rework.');
   }
+  if (data.workerPolicy !== undefined) {
+    const policy = objectWithKeys(data.workerPolicy, 'captured worker policy', ['enabled']);
+    if (typeof policy.enabled !== 'boolean') throw new ValidationError('Invalid captured worker policy.');
+  }
+  if (data.workerState !== undefined) {
+    if (!(data.workerPolicy as WorkerPolicy | undefined)?.enabled) throw new ValidationError('Workers require captured opt-in.');
+    validateWorkerState(data.workerState, planned, data.calls as string[]);
+  }
   return structuredClone(value) as ResumeData;
 }
 
@@ -243,6 +256,18 @@ export function validateCheckpoint(value: unknown): { checkpoint: AnyCheckpoint;
         sealResumeData(item.data as ResumeData, item.runID as string, item.parent as string, item.events as WorkflowEvent[],
           item.version === STABLE_CHECKPOINT_VERSION ? item.stable as StableRunnerState : undefined) !== item.dataDigest) throw new ValidationError('Checkpoint data digest mismatch.');
     const data = validateData(item.data, workflow);
+    if (data.workerState) {
+      for (const member of data.workerState.completed) {
+        // A sealed report may omit its run identity, but an explicit contradictory identity refuses.
+        const report = workerReport(member.text, data.planned.find(task => task.id === member.taskID)!, member.callID, item.runID as string);
+        if (report.result.outcome !== 'passed') throw new ValidationError('Completed worker is not successful.');
+      }
+    }
+    if (data.workerState?.batch) {
+      if (workflow.nextAction().kind !== 'await-result' || item.attempt === undefined ||
+          (item.attempt as { id: string }).id !== data.workerState.batch.id ||
+          (item.attempt as { state: string }).state !== 'pending') throw new ValidationError('Worker batch contradicts pending phase.');
+    }
     if (item.version === STABLE_CHECKPOINT_VERSION) validateStable(item.stable, workflow, data);
   }
   return { checkpoint: structuredClone(value) as AnyCheckpoint, workflow };
@@ -333,6 +358,8 @@ export function reconcileProgress(marker: Progress | undefined, checkpoint: AnyC
   if (!marker || marker.state !== 'pending' || !checkpoint) return 'blocked';
   try {
     const { checkpoint: valid } = validateCheckpoint(checkpoint);
+    if (marker.workerCalls && (valid.version !== STABLE_CHECKPOINT_VERSION ||
+        marker.workerCalls.some(call => !valid.data.calls.includes(call)))) return 'blocked';
     return marker.runID === valid.runID && marker.attemptID !== undefined &&
       marker.attemptID === valid.attempt?.id && valid.attempt.state === 'settled' ? 'clear' : 'blocked';
   } catch { return 'blocked'; }

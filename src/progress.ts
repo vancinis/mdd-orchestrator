@@ -12,10 +12,14 @@ import { objectWithKeys } from './validation.js';
  * failing). The marker stays the duplicate-dispatch guard; the checkpoint beside it is stale and a
  * restart must treat the run as data-only instead of resuming an older state.
  */
-export type Progress = { runID: string; callID?: string; attemptID?: string; state: 'pending' | 'settled' | 'complete'; userMessageID: string; resumable?: false };
+export type Progress = { runID: string; callID?: string; attemptID?: string; workerCalls?: string[]; state: 'pending' | 'settled' | 'complete'; userMessageID: string; resumable?: false };
 const LIMIT = 2048;
 function parse(value: unknown): Progress {
-  const item = objectWithKeys(value, 'progress marker', ['runID', 'callID', 'attemptID', 'state', 'userMessageID', 'resumable']);
+  const item = objectWithKeys(value, 'progress marker', ['runID', 'callID', 'attemptID', 'workerCalls', 'state', 'userMessageID', 'resumable']);
+  if (item.workerCalls !== undefined && (!Array.isArray(item.workerCalls) || !item.workerCalls.length || item.workerCalls.length > 2 ||
+      !item.callID || item.attemptID !== item.callID || new Set(item.workerCalls).size !== item.workerCalls.length ||
+      item.workerCalls.some(call => typeof call !== 'string' || !call.trim() || call.length > 256 || /[\x00-\x1f]/.test(call) || call === item.callID)))
+    throw new Error('Invalid worker progress correlation.');
   if (!['pending', 'settled', 'complete'].includes(String(item.state)) || (item.resumable !== undefined && item.resumable !== false) ||
       [item.runID, item.userMessageID, ...(item.callID === undefined ? [] : [item.callID]), ...(item.attemptID === undefined ? [] : [item.attemptID])]
         .some(value => typeof value !== 'string' || !value.trim() || value.length > 256 || /[\x00-\x1f]/.test(value))) throw new Error('Invalid progress correlation.');

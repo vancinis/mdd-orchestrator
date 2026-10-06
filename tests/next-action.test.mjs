@@ -1,5 +1,14 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+
+test('plural foreground tasks preserve exact objects and cannot advance a phase early', () => {
+  const tasks = [{ description: 'first', subagent_type: 'mdd-apply', prompt: 'handle-one' },
+    { description: 'second', subagent_type: 'mdd-apply', prompt: 'handle-two' }];
+  const action = nextAction({ state: 'await-result', tasks });
+  assert.equal(action.tool, 'task'); assert.deepEqual(action.calls, tasks); assert.equal(action.args, undefined);
+  action.calls[0].prompt = 'changed'; assert.equal(tasks[0].prompt, 'handle-one');
+  assert.equal(nextAction({ state: 'await-result', tasks: [] }).tool, 'mdd_status');
+});
 import { nextAction, withNextAction } from '../dist/next-action.js';
 
 const task = { description: 'MDD plan phase', subagent_type: 'mdd-plan', prompt: 'mdd:dispatch:token' };

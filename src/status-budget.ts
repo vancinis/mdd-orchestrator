@@ -18,7 +18,7 @@ export const STATUS_BUDGET_BYTES = 46000;
  * dispatch, answer, recover, or tell the user what happened.
  */
 export const STATUS_PROTECTED_FIELDS: readonly string[] = Object.freeze([
-  'task', 'brief', 'question', 'state', 'phase', 'next', 'mode', 'reason', 'runID', 'sessionID',
+  'task', 'tasks', 'workerProgress', 'workers', 'brief', 'question', 'state', 'phase', 'next', 'mode', 'reason', 'runID', 'sessionID',
   'runtime', 'questionReceipts', 'recovery', 'pendingStart', 'notice', 'provenance', 'reset',
   'evidence', 'coverage', 'recoverable',
   // The derived next call and the note explaining the dispatch handle are both small and both

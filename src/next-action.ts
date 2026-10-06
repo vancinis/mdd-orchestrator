@@ -20,6 +20,7 @@
 export type NextAction = {
   tool: 'question' | 'task' | 'mdd_start' | 'mdd_status' | 'mdd_prepare_advance' | 'mdd_phase_result' | 'mdd_reset';
   args?: Record<string, unknown>;
+  calls?: Record<string, unknown>[];
   why: string;
 };
 
@@ -72,7 +73,16 @@ export function nextAction(status: unknown): NextAction | undefined {
       why: 'The work is done and only its wording was refused. Take rejected.text, fix exactly what rejected.reason names, and send it back with mdd_phase_result. Do not re-dispatch and do not redo the work: this costs no attempt.' };
   }
 
+  const workerProgress = object(value.workerProgress);
+  if (workerProgress?.blocked && Array.isArray(workerProgress.members) && workerProgress.members.some(member => {
+    const item = object(member); return item && ['pending', 'uncertain'].includes(String(item.state));
+  })) return { tool: 'mdd_status', why: 'A worker batch is blocked while a sibling may still run. Retain all successful evidence, wait for or explicitly stop every pending member, and never redispatch completed tasks or release only the last call.' };
+
   const task = object(value.task);
+  if (Array.isArray(value.tasks) && value.tasks.length > 0 && value.tasks.length <= 2 && value.tasks.every(task => object(task))) {
+    return { tool: 'task', calls: value.tasks.map(task => object(task)!),
+      why: 'Dispatch each exact issued object once as a native foreground call. These are members of one bounded batch, not separate phases. Wait for every member; one result never releases a sibling or advances the phase.' };
+  }
   if (task) {
     return { tool: 'task', args: task,
       why: 'This phase is ready to delegate. Call the native task tool once, foreground, with exactly this object and no extra arguments. The prompt may be a single-use MDD dispatch handle; pass it through unchanged.' };

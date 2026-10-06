@@ -30,7 +30,7 @@ MDD currently owns one native dispatch per phase. A second call loses authority 
 - [x] PW-1 — Add and expose the captured worker preference with legacy/default/invalid-value coverage and configuration documentation.
   - Route: delegated direct; configuration, CLI, UI, schema, and tests require preparation and multiple non-trivial files.
   - Checks: focused settings/UI/CLI tests, typecheck, build, diff whitespace check.
-- [ ] PW-2 — Add explicit complete task scopes and conservative deterministic batch eligibility, preserving legacy sequential behavior.
+- [x] PW-2 — Add explicit complete task scopes and conservative deterministic batch eligibility, preserving legacy sequential behavior.
   - Route: delegated direct; parsing, acceptance, path validation, and scheduling tests require multi-file implementation.
   - Checks: scope/dependency/path-alias tests, acceptance and phase-report tests, typecheck, build.
 - [ ] PW-3 — Make native ownership, result aggregation, and recovery batch-aware without advancing a phase early.
@@ -46,7 +46,7 @@ Default deterministic test-first policy applies: observe RED, implement GREEN, t
 
 Normalize edited files to UTF-8/LF before functional proof and candidate freeze. Use `git diff --check` and scoped `git ls-files --eol`; do not renormalize the whole tree. Native host-service smoke is pending explicit authorization and is not replaced by a registration-only smoke.
 
-RDD status: on, global. Native risk assessment and candidate-scoped consent remain separate from ordinary functional verification. Do not change the user's mode.
+RDD status: off, explicitly selected by the user for this clone; global preference remains on. Continue ordinary functional checks and native risk assessment without starting, retrying, or reactivating receipt reviews. Delivery is `disabled/unmanaged`, not approved.
 
 ## Work units and delivery
 
@@ -54,10 +54,12 @@ RDD status: on, global. Native risk assessment and candidate-scoped consent rema
 - Branch point / initial review boundary: `57b0857c9374204dd2ddfc745f62b229107a5f10`.
 - Forecast: approximately 1,100–1,600 authored changed lines across four coherent units, tests and docs included; generated files excluded.
 - Delivery strategy: `single-pr`, explicitly selected by the user: one branch against `main`. Keep all coherent local work-unit commits on `feat-add-workers`; do not create stacked branches, publish, push, or open a PR.
-- Running committed authored lines: 315 (including the recovery document; behavior/docs/tests alone: 233).
+- Running committed authored lines: 748 across work-unit commits; cumulative branch diff: 734 (includes recovery-document updates).
 - PW-1 work-unit commit: `2aeb1661224f6f5ac85d35ad79b392e1e8ec5916`, `feat(config): expose default-on independent worker preference`.
 - PW-1 native tier/outcome: medium, `under_budget`; review slice remains pending against the initial boundary. No review receipt or approval is claimed.
-- Delivery slice: one eventual branch/PR against `main`, currently contains PW-1. No publication authorized.
+- PW-2 work-unit commit: `892946c96ed9fca6a5f25eb047ad90216a4b15f8`, `feat(workers): select only explicitly independent task batches`.
+- PW-2 native tier/outcome: medium; review was granted but returned no admitted result. The user then disabled RDD for this clone. Outcome: `disabled/unmanaged`, ordinary writer verification plus parent spot check; no review receipt. Initial reviewed boundary remains unchanged.
+- Delivery slice: one eventual branch/PR against `main`, currently contains PW-1 and PW-2. No publication authorized.
 - The approximately 400-line heuristic is advisory: no minification, cosmetic compression, omitted tests, or artificial task splits.
 
 ## Progress and next step
@@ -79,7 +81,20 @@ PW-1 is complete and committed. Changed eight allowed configuration/schema/docs/
 - Nonblocking follow-up: top-level CLI help does not list the new workers command; configuration docs do. Consider discoverability alongside final operational documentation, without broadening unrelated behavior.
 - Runtime parallel-dispatch proof and local host smoke remain pending in later tasks; current tests establish configuration behavior only.
 
-Next: implement PW-2 scope metadata and conservative batch eligibility on the same branch. PW-3 and PW-4 remain pending; no parallel execution is claimed yet.
+### PW-2 observed checks
+
+PW-2 is complete and committed under ordinary policy after the user disabled reviews. Eight behavior/docs/test files changed, 410 additions and five deletions. The work-unit commit also includes prior PW-1 tracking updates.
+
+- Added `Deliverable.parallel` with complete read/write footprints and a conservative, filesystem-validated `selectWorkerBatch` helper selecting zero, one, or two ready tasks.
+- Missing explicitly declared dependencies discard opt-in metadata before normalization; legacy and incomplete plans remain sequential across JSON/checkpoint reconstruction.
+- Writer meaningful RED: 108 passed and 25 failed, including additive metadata rejection before implementation.
+- Writer GREEN: typecheck/build and 164 focused tests passed. Full suite: 1,120 passed, two skipped, zero failed, approximately 105 seconds.
+- Writer and parent diff checks passed; parent typecheck spot check passed. Edited files are UTF-8/LF.
+- Current and committed-only native assessments returned medium with review due (`slice_budget_reached`). The committed slice has 734 authored changed lines.
+- Native consent was granted once. The reviewer returned no admitted result; one target-bound read-only STATUS preserved the pending slot. The user explicitly disabled RDD for this clone; no further review operation, approval, acknowledgement, authority deletion, or retry followed.
+- Path validation is a read-only snapshot, not an edit fence; native tool confinement and revalidation remain mandatory in PW-3/PW-4.
+
+Next: implement PW-3 ownership and durable recovery on this same branch, with reviews disabled. PW-4 dispatch/confinement remains pending; no parallel execution is claimed yet.
 
 ## Recovery mirror
 

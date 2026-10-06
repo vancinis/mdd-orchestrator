@@ -9,6 +9,14 @@ import { defaultSettings } from '../dist/settings.js';
 import { saveGlobalSettings } from '../dist/global-settings.js';
 import { isolateHome, answers, reportDocument, traceFixture } from './adapter-fixture.mjs';
 
+test('plural task payloads map native arguments without a wrapper or single-member instruction', () => {
+  const tasks = ['one', 'two'].map(prompt => ({ description: prompt, subagent_type: 'mdd-apply', prompt }));
+  const payload = JSON.parse(v2Payload(JSON.stringify({ tasks, nextAction: { tool: 'task', calls: tasks, why: 'batch' } })));
+  assert.deepEqual(payload.tasks, tasks.map(({ subagent_type, ...rest }) => ({ ...rest, agent: subagent_type })));
+  assert.deepEqual(payload.nextAction.calls, payload.tasks); assert.equal(payload.nextAction.tool, 'subagent');
+  assert.match(payload.nextAction.why, /each exact object/);
+});
+
 // Public host fakes follow @opencode/plugin/client/core 2.0.22, not the V1 hooks.
 async function fixture(t, completeProfile = true) {
   isolateHome(t);

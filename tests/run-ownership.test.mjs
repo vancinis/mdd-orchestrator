@@ -18,6 +18,25 @@ function root(t) { const path = mkdtempSync(join(tmpdir(), 'mdd-owner-')); t.aft
 function ownerPath(root) { return join(root, '.mdd', `owner-${createHash('sha256').update(runID).digest('hex')}.json`); }
 function claim(store, directory) { return store.claim({ runID, sessionID: sourceID, directory, worktree: directory }); }
 
+test('worker reservation holds both calls through reverse settlement and rejects stale CAS', t => {
+  const directory = root(t); const store = new RunOwnershipStore(directory);
+  claim(store, directory);
+  let owner = store.reserveWorkers(runID, sourceID, 'batch-1', ['T1', 'T2'], 0);
+  owner = store.admitWorker(runID, sourceID, 'batch-1', 'T1', 'call-1', owner.epoch);
+  assert.throws(() => store.admitWorker(runID, sourceID, 'batch-1', 'T2', 'call-2', owner.epoch - 1));
+  owner = store.admitWorker(runID, sourceID, 'batch-1', 'T2', 'call-2', owner.epoch);
+  assert.throws(() => store.admitWorker(runID, sourceID, 'batch-1', 'T2', 'call-3', owner.epoch));
+  assert.throws(() => store.settleWorker(runID, sourceID, 'batch-1', 'wrong', owner.epoch));
+  owner = store.settleWorker(runID, sourceID, 'batch-1', 'call-2', owner.epoch);
+  assert.throws(() => store.release(runID, sourceID, 'batch-1', owner.epoch));
+  assert.throws(() => store.handoff(runID, sourceID, 'batch-1', 'reset', owner.epoch,
+    { sourceCallID: 'batch-1', kind: 'task', checkpointSequence: 0, checkpointDigest: 'a'.repeat(64) }));
+  assert.throws(() => store.beginTransfer(runID, sourceID, { sessionID: targetID, directory, worktree: directory }, 'a'.repeat(64), owner.epoch));
+  owner = store.settleWorker(runID, sourceID, 'batch-1', 'call-1', owner.epoch);
+  assert.throws(() => store.settleWorker(runID, sourceID, 'batch-1', 'call-1', owner.epoch));
+  assert.equal(store.release(runID, sourceID, 'batch-1', owner.epoch).state, 'idle');
+});
+
 function transferSource(directory, parent, id) {
   const request = { answers: { certainty: 'very-sure', artifactStore: 'none', mode: 'automatic', summary: 'low', complexity: 'not-complex' } };
   const evidence = { requirements: 'confirmed', plan: 'unearned', implementation: 'unearned', checks: 'unearned' };

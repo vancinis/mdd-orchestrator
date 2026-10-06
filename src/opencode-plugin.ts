@@ -576,6 +576,7 @@ const plugin: Plugin = async input => {
   const checkpoint = new CheckpointStore(dataRoot);
   const ownership = new RunOwnershipStore(dataRoot);
   const runner = new PhaseRunner(inspector, {
+    workers: profile.workers,
     // The runner passes the run's own checkout directory to these callbacks; MDD writes to the
     // shared anchor instead, so a worktree's telemetry and lessons join the repository's own rather
     // than dying with it. Within a session the two are the same checkout, so nothing else shifts.

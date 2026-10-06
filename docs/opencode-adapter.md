@@ -97,6 +97,39 @@ model requests. Contract tests cover intake, grouped questions, foreground Plan/
 native fallback restrictions, workspace isolation and CLI events. Neither check proves model-backed
 end-to-end execution or interactive permission/UI behavior.
 
+### Bounded worker authority (internal host capability)
+
+**Production dispatch remains serial.** The captured `workers.enabled` preference alone never
+authorizes concurrent writes. PW-3 adds durable batch authority; PW-4 must wire native child
+edit/tool confinement before the production adapter supplies `workerCapability: { confined: true }`.
+The capability is a host constructor option, not a tool argument or an actor-controlled flag.
+`runner.workerAssignment({ sessionID, callID })` returns a detached assigned task/scope only for
+an admitted pending member. The confinement hook must bind that call to the actual native child,
+revalidate filesystem aliases, enforce read/write scope on native edits, and refuse uncontrolled
+tools before supplying the capability. Status or a prompt claiming a scope is never a fence.
+
+With that explicit capability and checkpoint/ownership/progress stores, independent Apply tasks
+may expose `tasks` and `nextAction.calls` (one or two exact native foreground argument objects).
+Legacy status still exposes singular `task` and `nextAction.args`. The V2 adapter maps both to
+`agent`, `description`, and the unchanged provider-issued dispatch handle. Verify remains singular.
+
+| Boundary | Contract |
+|---|---|
+| Selection | Complete dependency and read/write declarations; at most two independent ready tasks. Snapshot validation is not an edit fence. |
+| Admission | One parent/run reservation for the entire batch; serialized per-run admission and CAS member updates. |
+| Result | Exact call and expanded arguments bind the existing sealed Apply report to its assigned task. Changed paths must fit declared writes; `checks=[]`. Actor reports are claims, not independent verification. |
+| Completion | Persist each successful member before settlement. Aggregate in held-plan order only after all required tasks succeed; emit one Apply phase result. |
+| Failure | Retain successful member reports; block malformed, missing, transport, unknown-liveness, and durability outcomes. Never automatically replay completed tasks. |
+| Recovery | Inspect every pending member before release. One running sibling fences the whole batch; explicit recovery retries only unfinished tasks. |
+| Restart/transfer | Pending batches never resume or transfer automatically. Settled task evidence travels as checkpoint data; live handles never do. |
+
+Version 3 checkpoints accept optional `workerPolicy` and `workerState` data without changing the
+legacy format. Missing captured policy keeps old checkpoints serial, even on a capable host.
+If a host loses confinement capability after partial completion, restoration refuses whole-phase
+replay. Complete member reports remain in the checkpoint even when the aggregate artifact uses
+size-bounded summaries and digests. Explicit Verify rework starts a new implementation pass.
+Read-only investigations capture the preference but still dispatch singularly in this unit.
+
 ### Legacy setup-only recovery
 
 Read `mdd_status`, not `mdd_start`, for status updates. Absent Engram settings are now normal

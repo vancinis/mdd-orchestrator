@@ -8,6 +8,16 @@ import { ProgressGuard } from '../dist/progress.js';
 import { PhaseRunner } from '../dist/phase-runner.js';
 import { memoryServer, request } from './adapter-fixture.mjs';
 
+test('plural progress round-trips exact member calls and rejects duplicate/cross-batch identities', t => {
+  const directory = mkdtempSync(join(tmpdir(), 'mdd-worker-progress-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const guard = new ProgressGuard(directory);
+  const marker = { runID: 'run', callID: 'batch', attemptID: 'batch', workerCalls: ['one', 'two'], state: 'pending', userMessageID: 'user' };
+  guard.write('parent', marker); assert.deepEqual(guard.read('parent'), marker);
+  for (const workerCalls of [['one', 'one'], ['batch'], ['one', 'two', 'three']]) assert.throws(() => guard.write('parent', { ...marker, workerCalls }));
+  assert.throws(() => guard.write('parent', { ...marker, attemptID: 'wrong' }));
+});
+
 const marker = { runID: 'run', callID: 'call', state: 'pending', userMessageID: 'native-user' };
 function root(t) { const path = mkdtempSync(join(tmpdir(), 'mdd-progress-')); t.after(() => rmSync(path, { recursive: true, force: true })); return path; }
 function file(path, parent) { return join(path, '.mdd', `progress-${createHash('sha256').update(parent).digest('hex')}.json`); }

@@ -31,6 +31,10 @@ import type { PRFacts } from './pr-body.js';
 import { phaseVisual, presentationSettings } from './visual-ux.js';
 import { STATUS_BUDGET_BYTES } from './status-budget.js';
 import type { RunOwnershipStore, RunOwner } from './run-ownership.js';
+import type { WorkerPolicy } from './settings.js';
+import { selectWorkerBatch } from './worker-batch.js';
+import { aggregateWorkerReports, workerReport } from './worker-state.js';
+import type { WorkerState } from './worker-state.js';
 
 export type Runtime = { sessionID: string; agent: string; directory: string; worktree: string };
 export type TaskCall = { sessionID: string; callID: string };
@@ -48,6 +52,7 @@ export const DISPATCHABLE_PROMPT_BYTES = 38000;
 export type RunContext = { label: string; content: string; source: 'coordinator' };
 type TaskArgs = { description: string; subagent_type: string; prompt: string };
 type Executor = Phase | 'explore' | 'general';
+type PendingWorkers = { runtime: Runtime; runID: string; batch: NonNullable<WorkerState['batch']>; calls: TaskCall[] };
 
 /**
  * A phase prompt used to be written into the parent conversation twice per attempt: once as the
@@ -134,6 +139,8 @@ function dispatchMismatchMessage(verdict: DispatchVerdict, noun: 'task' | 'inves
 const DISPATCH_NOTE = 'The prompt in task is a single-use MDD dispatch handle, not a shortened or truncated prompt. MDD expands it into the full phase prompt inside the hook, so the actor receives the complete instructions, dependency artifacts and packaged MDD instructions exactly as before. Pass the three fields through unchanged: do not expand the handle yourself, do not substitute a prompt of your own, and do not ask MDD for the full text. Keeping it out of this conversation is what stops a long run from filling the context window and being compacted.';
 type State = 'starting' | 'ready' | 'persisting-intent' | 'await-result' | 'persisting-result' | 'blocked' | 'await-approval' | 'complete';
 type Run = {
+  workerPolicy?: WorkerPolicy; workerState?: WorkerState;
+  workerTasks?: { taskID: string; token: string; args: TaskArgs; dispatchedArgs?: TaskArgs }[];
   id: string; runtime: Runtime; workflow: Workflow; phase: Phase;
   requirements: string; memory: EngramHttp | undefined; args: TaskArgs; state: State;
   /**
@@ -195,10 +202,11 @@ type Run = {
   /** A confirmed replacement run may overwrite exactly this superseded run's checkpoint once. */
   replacesRunID?: string;
   contexts: { explorationID: string; outcome: 'passed' | 'failed'; artifact: ArtifactResult; summary: string; concerns: Concern[] }[];
-  side?: { id: string; purpose: string; phase: Phase; state: State; args: TaskArgs; report: PhaseReport; brief: string; attempts: number; mode: Run['mode']; nativeUsed?: boolean; lastFailure?: string; fallbackExhausted?: boolean; reason?: string; executor?: Executor };
+  side?: { workerPolicy: WorkerPolicy; id: string; purpose: string; phase: Phase; state: State; args: TaskArgs; report: PhaseReport; brief: string; attempts: number; mode: Run['mode']; nativeUsed?: boolean; lastFailure?: string; fallbackExhausted?: boolean; reason?: string; executor?: Executor };
 };
 /** A read-only investigation that exists without an accepted run: no workflow, artifacts, memory or progress marker. */
 type Solo = {
+  workerPolicy?: WorkerPolicy;
   id: string; purpose: string; runtime: Runtime; args: TaskArgs; token?: string; expose?: 'full';
   state: 'ready' | 'persisting-intent' | 'await-result' | 'persisting-result' | 'blocked' | 'settled';
   callID?: string; dispatchedArgs?: TaskArgs; calls: Set<string>; started?: number; reason?: string; report?: string;
@@ -398,7 +406,22 @@ export class PhaseRunner {
   readonly #reservations = new Map<string, { runID: string; callID: string }>();
   /** Consumed native call IDs of a run closed for a fresh start; a replay guard only, never authority. */
   readonly #inheritedCalls = new Map<string, string[]>();
-  constructor(readonly inspect: Inspect, readonly options: { now?: () => number; progress?: ProgressGuard; dossier?: RunDossierStore; checkpoint?: CheckpointStore; ownership?: RunOwnershipStore; telemetry?: (root: string, value: TelemetryEvent, now: number) => TelemetryResult; lessons?: (root: string, value: LessonInput, now: number) => void; ledger?: (root: string, value: RunLedgerInput, now: number) => void } = {}) {}
+  readonly #workerOperations = new Map<string, Promise<unknown>>();
+  constructor(readonly inspect: Inspect, readonly options: { workers?: WorkerPolicy;
+    /** Internal host attestation only: production must not supply this until native confinement is wired. */
+    workerCapability?: Readonly<{ confined: true }>;
+    now?: () => number; progress?: ProgressGuard; dossier?: RunDossierStore; checkpoint?: CheckpointStore; ownership?: RunOwnershipStore; telemetry?: (root: string, value: TelemetryEvent, now: number) => TelemetryResult; lessons?: (root: string, value: LessonInput, now: number) => void; ledger?: (root: string, value: RunLedgerInput, now: number) => void } = {}) {}
+
+  #captureWorkers(): WorkerPolicy { return Object.freeze({ enabled: this.options.workers?.enabled ?? true }); }
+
+  /** Serialize admission, callbacks and durable publication, not the foreground children themselves. */
+  async #workerOperation<T>(sessionID: string, work: () => Promise<T>): Promise<T> {
+    const prior = this.#workerOperations.get(sessionID) ?? Promise.resolve();
+    const operation = prior.catch(() => {}).then(work);
+    this.#workerOperations.set(sessionID, operation);
+    try { return await operation; }
+    finally { if (this.#workerOperations.get(sessionID) === operation) this.#workerOperations.delete(sessionID); }
+  }
 
   /** Check durable authority even when the local runner still holds a ready task. */
   owner(sessionID: string, callID?: string): RunOwner | undefined {
@@ -482,6 +505,8 @@ export class PhaseRunner {
 
   /** A coordinator operation owns the same CAS slot as native calls until its last async mutation. */
   async withOperation<T>(sessionID: string, name: string, work: () => Promise<T>): Promise<T> {
+    if (this.#runs.get(sessionID)?.workerState?.batch && name !== 'mdd_status')
+      throw new ValidationError('A worker batch holds this run; settle or explicitly recover every member before another operation.');
     const active = this.#operation.getStore();
     if (active?.sessionID === sessionID) return work();
     const callID = `operation-${randomUUID()}`;
@@ -638,6 +663,7 @@ export class PhaseRunner {
 
   releaseSettled(sessionID: string, callID: string): void {
     const run = this.#runs.get(sessionID);
+    if (run?.workerState?.batch || this.#workerOperations.has(sessionID)) return;
     if (this.#inflight.has(sessionID) || (run && ['persisting-intent', 'persisting-result', 'await-result'].includes(run.state))) return;
     this.release(sessionID, callID);
   }
@@ -655,6 +681,17 @@ export class PhaseRunner {
     if (owner.state !== 'reserved' || owner.operation || owner.recovery) return undefined;
     const marker = this.options.progress?.read(sessionID);
     if (!marker || marker.state !== 'pending') return undefined;
+    const batch = saved.data.workerState?.batch;
+    if (batch) {
+      if (marker.runID !== saved.runID || marker.userMessageID !== saved.data.userMessageID ||
+          marker.callID !== batch.id || marker.attemptID !== batch.id || owner.callID !== batch.id ||
+          saved.attempt?.id !== batch.id || saved.attempt.state !== 'pending' || !owner.workers ||
+          !isDeepStrictEqual(marker.workerCalls, batch.members.flatMap(member => member.callID ? [member.callID] : [])) ||
+          !isDeepStrictEqual(owner.workers.map(member => ({ taskID: member.taskID, callID: member.callID })),
+            batch.members.map(member => ({ taskID: member.taskID, callID: member.callID }))))
+        throw new Error('Worker reservation and pending checkpoint do not match; no recovery is authorized.');
+      return owner;
+    }
     if (marker.runID !== saved.runID || marker.userMessageID !== saved.data.userMessageID ||
         marker.callID !== owner.callID || marker.attemptID !== owner.callID || saved.attempt?.state !== 'pending' || saved.attempt.id !== owner.callID)
       throw new Error('Reserved owner has no matching pending child checkpoint; no recovery is authorized.');
@@ -737,6 +774,8 @@ export class PhaseRunner {
           recordID: `restored-${index}`, digest, bytes: Buffer.byteLength(content), store: 'none' },
       });
       const run: Run = {
+        ...(data.workerPolicy ? { workerPolicy: Object.freeze({ ...data.workerPolicy }) } : {}),
+        ...(data.workerState ? { workerState: structuredClone(data.workerState) } : {}),
         id: checkpoint.runID, runtime: { ...runtime }, workflow,
         phase: stable.state === 'await-approval' ? workflow.snapshot().results.at(-1)!.phase : stable.phase, requirements: data.requirements,
         memory, artifacts, args: { description: '', subagent_type: stable.phase, prompt: '' },
@@ -760,10 +799,16 @@ export class PhaseRunner {
         malformed: stable.malformed, ...(stable.rejected ? { rejected: { ...stable.rejected } } : {}),
         brief: '', report: structuredClone(stable.report),
       };
+      // Explicit Verify rework is a new implementation pass, not recovery of an incomplete batch.
+      if (data.rework && workflow.history().at(-1)?.kind === 'rework') delete run.workerState;
       if (releasedAttempt) {
         run.reason = 'The prior child was released without a recorded result. Inspect partial changes, then explicitly reset this phase to retry it.';
         run.attemptID = checkpoint.attempt!.id;
         run.lastCallID = marker!.callID!;
+        if (run.workerState) {
+          run.evidence = invalidateEvidence(run.evidence, this.#affected(run.phase));
+          run.report = { ...run.report, status: 'blocked', evidence: run.evidence };
+        }
       } else if (stable.state === 'ready') {
         if (stable.rejected) {
           const prompts = this.#phasePrompts(run, run.phase);
@@ -846,6 +891,12 @@ export class PhaseRunner {
       ...(run.handoff ? { handoff: structuredClone(run.handoff) } : {}),
       ...(run.artifact ? { artifact: structuredClone(run.artifact) } : {}),
       ...(run.artifactAttempts ? { artifactAttempts: structuredClone(run.artifactAttempts) } : {}),
+      ...(run.workerPolicy ? { workers: { ...(run.side?.workerPolicy ?? run.workerPolicy) } } : {}),
+      ...(run.workerState ? { workerProgress: {
+        completed: run.workerState.completed.map(member => member.taskID),
+        members: run.workerState.batch?.members.map(({ taskID, state, callID }) => ({ taskID, state, ...(callID ? { callID } : {}) })) ?? [],
+        ...(run.workerState.batch?.blocked ? { blocked: run.workerState.batch.blocked } : {}),
+      } } : {}),
       // A report MDD could not read is handed back whole. The work it describes is finished, so
       // restating it must not mean producing it again, and that is only possible if the text
       // survives the rejection that refused it.
@@ -859,7 +910,11 @@ export class PhaseRunner {
       // the run restates itself from state that never lived there. It costs a few hundred bytes
       // and it is the difference between a coordinator that resumes and one that starts guessing.
       ...(run.compactions ? { compacted: run.compactions, runCard: this.#runCard(run) } : {}),
-      ...(run.state === 'ready' && !run.rejected
+      ...(run.workerTasks && !run.rejected && !run.workerState?.batch?.blocked && ['ready', 'await-result'].includes(run.state)
+        ? { tasks: run.workerTasks.filter(task => !run.workerState?.batch?.members.find(member => member.taskID === task.taskID)?.callID)
+            .map(task => ({ ...task.args, prompt: task.token })), dispatch: { mode: 'handle' as const, note: DISPATCH_NOTE } }
+        : {}),
+      ...(run.state === 'ready' && !run.rejected && !run.workerTasks
         ? { task: this.#dispatchable(run), ...(run.expose === 'full' ? {} : { dispatch: { mode: 'handle' as const, note: DISPATCH_NOTE } }),
             resultFormat: reportFormatLines(run.phase), ...(run.mode === 'inline' ? { brief: run.brief } : {}) }
         : {}),
@@ -879,6 +934,7 @@ export class PhaseRunner {
   #arm(run: { token?: string }): void { run.token = `${DISPATCH_HANDLE_PREFIX}${randomUUID()}`; }
 
   nativePending(sessionID: string): boolean {
+    if (this.#runs.get(sessionID)?.workerState?.batch?.members.some(member => ['pending', 'uncertain'].includes(member.state))) return true;
     const callID = this.#inflight.get(sessionID);
     return callID !== undefined && this.#nativeDispatches.get(sessionID)?.has(callID) === true;
   }
@@ -917,6 +973,11 @@ export class PhaseRunner {
    * status can show it and the coordinator can tell the user what MDD actually sees.
    */
   async probe(sessionID: string, runtime?: Runtime): Promise<Liveness | undefined> {
+    const workers = this.#pendingWorkers(sessionID, runtime);
+    if (workers) {
+      const seen = await Promise.all(workers.calls.map(call => this.#liveness(workers.runtime, call)));
+      return this.#workerLiveness(seen);
+    }
     const pending = this.#pendingChild(sessionID, runtime);
     return pending ? this.#liveness(pending.runtime, pending.call) : undefined;
   }
@@ -945,6 +1006,10 @@ export class PhaseRunner {
    * it unless the host still reports it busy. Returns what the host said, for the caller to show.
    */
   async confirmStopped(sessionID: string, runtime?: Runtime, attested = false, resetCallID?: string): Promise<Liveness | undefined> {
+    const workers = this.#pendingWorkers(sessionID, runtime);
+    if (workers) {
+      return this.#workerOperation(sessionID, () => this.#confirmWorkers(sessionID, workers, attested, resetCallID));
+    }
     // Inline work has no child to probe. An unknown marker stays pending unless the user explicitly
     // attests the interruption; this is a user release, never a claim that OpenCode saw it stop.
     if (!this.#runs.has(sessionID) && !this.#solo.has(sessionID)) {
@@ -990,6 +1055,16 @@ export class PhaseRunner {
   ownsNativePrompt(sessionID: unknown, callID: unknown, args: unknown): boolean {
     return typeof sessionID === 'string' && typeof callID === 'string' &&
       isDeepStrictEqual(this.#nativeDispatches.get(sessionID)?.get(callID), args) && args !== undefined;
+  }
+
+  /** PW-4 binds native child edit/tool fences to this exact admitted parent call, never actor text. */
+  workerAssignment(call: TaskCall): { taskID: string; phase: 'mdd-apply'; scope: Deliverable['parallel'] } | undefined {
+    const run = this.#runs.get(call.sessionID);
+    const member = run?.workerState?.batch?.members.find(member => member.callID === call.callID);
+    if (!run || !member || member.state !== 'pending' || this.options.workerCapability?.confined !== true) return undefined;
+    this.owner(call.sessionID);
+    const task = run.planned.find(task => task.id === member.taskID)!;
+    return { taskID: task.id, phase: 'mdd-apply', scope: structuredClone(task.parallel) };
   }
 
   #trackNative(call: TaskCall, args: TaskArgs): void {
@@ -1079,6 +1154,7 @@ export class PhaseRunner {
     const inherited = previous ? undefined : [...(this.#inheritedCalls.get(runtime.sessionID) ?? []), ...(this.#prior(runtime.sessionID)?.calls ?? [])];
     this.#inheritedCalls.delete(runtime.sessionID);
     const run: Run = {
+      workerPolicy: this.#captureWorkers(),
       id, runtime: { ...runtime }, workflow, phase: first.phase, requirements,
       ...(this.options.checkpoint ? { checkpointRequest: structuredClone(request.preflight), checkpointSequence: -1 } : {}),
       // A confirmed replacement supersedes the previous run's checkpoint in this same parent.
@@ -1316,6 +1392,7 @@ export class PhaseRunner {
     if (!run && this.options.ownership?.parentClaim(call.sessionID)?.transfer)
       throw new ValidationError('The target has an unresolved transfer claim; no task may dispatch.');
     if (!run) return this.#soloBefore(call, args);
+    if (run.workerTasks) return this.#workerOperation(call.sessionID, () => this.#workerBefore(run, call, args));
     if (run.rejected) throw new ValidationError('Only report restatement is pending; do not rerun the work.');
     if (run.state !== 'ready') {
       // A task that arrives while one is already running is a duplicate, not a failure: refusing
@@ -1395,6 +1472,7 @@ export class PhaseRunner {
     this.owner(call.sessionID, call.callID);
     const run = this.#runs.get(call.sessionID);
     if (!run) return this.#soloAfter(call, args, output);
+    if (run.workerState?.batch) return this.#workerOperation(call.sessionID, () => this.#workerAfter(run, call, args, output));
     if (run.state !== 'await-result' || run.callID !== call.callID || !isDeepStrictEqual(args, run.dispatchedArgs)) {
       // Nothing here is read, not even to measure it: a result this run did not dispatch is not
       // its own, and following the session it names would be following a stranger's.
@@ -1475,6 +1553,7 @@ export class PhaseRunner {
     if (runtime.agent !== 'mdd-orchestrator') throw new ValidationError('Only mdd-orchestrator may contribute run context.');
     const run = this.#runs.get(runtime.sessionID);
     if (!run) throw new ValidationError('No MDD run in this conversation can carry context yet. Read mdd_status; supply startup context through mdd_start instead.');
+    if (run.workerState?.batch || this.#workerOperations.has(runtime.sessionID)) throw new ValidationError('Worker batch persistence and authority must settle before changing context.');
     if (!['ready', 'await-approval', 'blocked', 'complete'].includes(run.state)) {
       throw new ValidationError('A native task is in flight for this run, so its prompt cannot change now. Wait for its result, then contribute again; nothing was recorded.');
     }
@@ -1676,6 +1755,23 @@ export class PhaseRunner {
 
   async nativeError(sessionID: string, callID: string): Promise<void> {
     const run = this.#runs.get(sessionID);
+    if (run?.workerState?.batch) {
+      return this.#workerOperation(sessionID, async () => {
+        const batch = run.workerState!.batch!;
+        const member = batch.members.find(member => member.callID === callID);
+        if (!member || member.state !== 'pending') throw new ValidationError('Native error does not match a pending worker.');
+        this.#workerBlocked(run, 'Native worker transport failed; explicit recovery is required.');
+        const stopped = await this.#liveness(run.runtime, { sessionID, callID });
+        if (stopped.verdict !== 'stopped') member.state = 'uncertain';
+        else {
+          member.state = 'settled';
+          this.#checkpoint(run, 'pending');
+          this.#settleWorkerOwner(run, callID);
+        }
+        this.#checkpoint(run, 'pending');
+        await this.#finishWorkers(run);
+      });
+    }
     const pending = run ?? this.#solo.get(sessionID);
     if (pending?.callID !== callID || pending.state !== 'await-result') return;
     let stopped = false;
@@ -1696,6 +1792,7 @@ export class PhaseRunner {
    */
   attemptRejected(sessionID: string, reason: string, failure: FailureClass = 'result-rejected'): void {
     const run = this.#runs.get(sessionID);
+    if (run?.workerState) { this.#workerBlocked(run, reason); return; }
     if (!run) {
       const solo = this.#solo.get(sessionID);
       if (solo) { try { this.#soloFail(solo, new Error(reason)); } catch { /* Status carries the outcome. */ } }
@@ -1714,6 +1811,8 @@ export class PhaseRunner {
   }
 
   block(sessionID: string, reason: string): void {
+    const workerRun = this.#runs.get(sessionID);
+    if (workerRun?.workerState?.batch) { this.#workerBlocked(workerRun, reason); return; }
     if (this.#inflight.has(sessionID)) {
       const pending = this.#runs.get(sessionID) ?? this.#solo.get(sessionID);
       if (pending) { pending.state = 'await-result'; pending.reason = `${reason} Child termination is unconfirmed; no new work is allowed yet. ${ATTEST_HINT}`; }
@@ -1758,8 +1857,11 @@ export class PhaseRunner {
   }
 
   reset(sessionID: string, scope: 'phase' | 'run' | 'rework'): { scope: 'phase' | 'run' | 'rework'; phase?: Phase; approval?: true; preserved?: { file: string; runID: string } } {
+    if (this.#workerOperations.has(sessionID)) throw new ValidationError('Wait for pending worker persistence before resetting.');
     if (this.#inflight.has(sessionID)) throw new ValidationError(`The child may still be running: OpenCode has not confirmed it stopped. ${ATTEST_HINT}`);
     const run = this.#runs.get(sessionID);
+    if (run?.workerState?.batch?.members.some(member => ['pending', 'uncertain'].includes(member.state)))
+      throw new ValidationError('Workers may still be running; account for every pending member before reset.');
     if (!run && scope !== 'run' && this.options.checkpoint?.read(sessionID)) throw new ValidationError('A durable run has not been restored. Phase reset cannot discard it; inspect mdd_status or explicitly discard the run.');
     if (run?.checkpointFailed && scope !== 'run') throw new ValidationError('Checkpoint durability is unknown; phase recovery cannot replay this result. Explicit run discard is required.');
     const pending = run ?? this.#solo.get(sessionID);
@@ -1793,6 +1895,8 @@ export class PhaseRunner {
       return { scope: 'run', ...(preserved ? { preserved } : {}) };
     }
     if (run.side) this.#restoreSide(run);
+    if (run.workerState) delete run.workerState.batch;
+    delete run.workerTasks;
     delete run.callID;
     delete run.dispatchedArgs;
     delete run.reason;
@@ -1809,6 +1913,7 @@ export class PhaseRunner {
     run.malformed = 0;
     delete run.lastFailure;
     if (scope === 'rework') {
+      delete run.workerState;
       // The user chose to correct the implementation rather than re-check it unchanged. Apply
       // runs again with the failed verification as its newest dependency artifact, and Verify
       // follows it through the route's ordinary approval.
@@ -1963,11 +2068,12 @@ export class PhaseRunner {
       return this.#soloStart(runtime, purpose);
     }
     if (run.side) throw new Error('A read-only investigation is already in progress for this run; wait for its result.');
+    if (run.workerState?.batch || this.#workerOperations.has(runtime.sessionID)) throw new Error('Every worker member must settle before another investigation.');
     if (run.rejected) throw new Error('Restate the pending report before requesting another investigation.');
     // Investigation only waits for a task that is actually running; a stopped or failed run must
     // still be able to answer questions about the project.
     if (runtime.directory !== run.runtime.directory || runtime.worktree !== run.runtime.worktree || !['ready', 'await-approval', 'complete', 'blocked'].includes(run.state)) throw new Error('A native task is in flight. Wait for its result before requesting investigation; nothing is locked.');
-    const side = { id: randomUUID(), purpose, phase: run.phase, state: run.state, args: run.args, report: run.report, brief: run.brief,
+    const side = { workerPolicy: this.#captureWorkers(), id: randomUUID(), purpose, phase: run.phase, state: run.state, args: run.args, report: run.report, brief: run.brief,
       attempts: run.attempts, mode: run.mode, ...(run.nativeUsed ? { nativeUsed: true } : {}), ...(run.lastFailure ? { lastFailure: run.lastFailure } : {}),
       ...(run.fallbackExhausted ? { fallbackExhausted: true } : {}), ...(run.reason ? { reason: run.reason } : {}), ...(run.executor ? { executor: run.executor } : {}) };
     run.side = side;
@@ -2024,6 +2130,7 @@ export class PhaseRunner {
     const previous = this.#solo.get(runtime.sessionID);
     if (previous && !['settled', 'blocked'].includes(previous.state)) throw new Error('A read-only investigation is already in progress; wait for its result.');
     const solo: Solo = { id: randomUUID(), purpose, runtime: { ...runtime }, args: { description: '', subagent_type: 'mdd-explore', prompt: '' },
+      workerPolicy: this.#captureWorkers(),
       state: 'ready', calls: new Set(previous?.calls), findings: previous?.findings ?? [], attempts: 0 };
     solo.args = this.#soloArgs(solo);
     solo.token = `${DISPATCH_HANDLE_PREFIX}${randomUUID()}`;
@@ -2115,6 +2222,7 @@ export class PhaseRunner {
     return {
       state: solo.state === 'ready' ? 'ready' : solo.state === 'blocked' ? 'blocked' : 'await-result',
       sessionID, contextual: true, explorationID: solo.id,
+      ...(solo.workerPolicy ? { workers: { ...solo.workerPolicy } } : {}),
       attempts: solo.attempts, attemptsLeft: Math.max(0, DELEGATION_ATTEMPTS - solo.attempts), mode: solo.args.subagent_type === 'explore' ? 'native' : 'delegate',
       ...(solo.state === 'blocked' ? { fallbackExhausted: true } : {}),
       reason: solo.reason ?? (solo.state === 'ready'
@@ -2313,13 +2421,15 @@ export class PhaseRunner {
     // A run carried out inline has no call at all, and must still be marked: skipping it is what
     // made an interrupted inline phase indistinguishable from a conversation that never started.
     const inline = run.mode === 'inline' && !run.callID;
-    const callID = inline ? undefined : run.callID ?? run.lastCallID;
+    const callID = run.workerState?.batch?.id ?? (inline ? undefined : run.callID ?? run.lastCallID);
     // A side investigation has its own call ID. Never correlate its pending marker with the last
     // settled main-phase attempt, even though that attempt remains in this run's history.
     try { this.options.progress.write(run.runtime.sessionID, { runID: run.id, ...(callID ? { callID } : {}),
-      ...(run.attemptID && !run.side && (inline || run.callID === run.attemptID ||
+      ...(run.attemptID && !run.side && (run.workerState?.batch || inline || run.callID === run.attemptID ||
         (state !== 'pending' && run.lastCallID === run.attemptID)) ? { attemptID: run.attemptID } : {}),
-      state, userMessageID: run.userMessageID, ...(run.checkpointDegraded ? { resumable: false as const } : {}) }); }
+      state, userMessageID: run.userMessageID,
+      ...(run.workerState?.batch ? { workerCalls: run.workerState.batch.members.flatMap(member => member.callID ? [member.callID] : []) } : {}),
+      ...(run.checkpointDegraded ? { resumable: false as const } : {}) }); }
     catch (error) { run.uncertain = true; throw error; }
   }
 
@@ -2352,7 +2462,7 @@ export class PhaseRunner {
         if (attempt < CHECKPOINT_ATTEMPTS) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25 * attempt);
       }
     }
-    if (!conflict && this.#degradeCheckpoint(run)) {
+    if (!run.workerState && !conflict && this.#degradeCheckpoint(run)) {
       // A write that failed after its rename may still have landed; never reuse its sequence.
       if (checkpoint) run.checkpointSequence = checkpoint.sequence;
       return;
@@ -2411,6 +2521,8 @@ export class PhaseRunner {
       const body = (item: ArtifactResult) => ({ phase: item.ref.phase, content: item.content,
         digest: createHash('sha256').update(item.content).digest('hex') });
       const data: ResumeData = {
+        ...(run.workerPolicy ? { workerPolicy: { ...run.workerPolicy } } : {}),
+        ...(run.workerState ? { workerState: structuredClone(run.workerState) } : {}),
         directory: run.runtime.directory, worktree: run.runtime.worktree, userMessageID: run.userMessageID,
         ...(run.memory ? { memoryProject: run.memory.project } : {}),
         requirements: run.requirements, context: structuredClone(run.context),
@@ -2477,8 +2589,202 @@ export class PhaseRunner {
     run.args = prompts.args;
     run.brief = prompts.brief;
     this.#arm(run);
+    this.#prepareWorkers(run);
     run.state = 'ready';
     run.report = { phase, summary: `Listo para ${phaseLabel(phase).toLowerCase()}.`, how: [], status: 'in-progress', evidence: run.evidence };
+  }
+
+  #prepareWorkers(run: Run): void {
+    delete run.workerTasks;
+    if (run.phase === 'mdd-apply' && run.workerState &&
+        (this.options.workerCapability?.confined !== true || !run.workerPolicy?.enabled))
+      throw new Error('Retained worker evidence cannot become an unfenced whole-phase replay. Restore with a confined host or explicitly discard.');
+    if (run.phase !== 'mdd-apply' || run.side || run.mode !== 'delegate' || !run.workerPolicy?.enabled ||
+        this.options.workerCapability?.confined !== true || !this.options.checkpoint || !this.options.ownership || !this.options.progress) return;
+    const tasks = selectWorkerBatch(run.runtime.directory, run.planned, run.workerState?.completed.map(member => member.taskID) ?? []);
+    // Unknown/legacy plans remain the existing singular phase unless a batch already earned work.
+    if (!run.workerState && tasks.length !== 2) return;
+    if (!tasks.length) throw new Error('No remaining ready worker task.');
+    run.workerState ??= { completed: [] };
+    run.workerTasks = tasks.map(task => ({ taskID: task.id, token: `${DISPATCH_HANDLE_PREFIX}${randomUUID()}`,
+      args: { ...run.args, description: `${run.args.description} / ${task.id}`,
+        prompt: `${run.args.prompt}\nAssigned worker task: ${JSON.stringify(task)}\nImplement ONLY this assigned task, not the other applicable deliverables. Report changes only within its declared writes. Report checks=[]; commands, tests and builds remain singular in Verify. Return the existing Apply report for this task only.` } }));
+  }
+
+  #pendingWorkers(sessionID: string, runtime?: Runtime): PendingWorkers | undefined {
+    const run = this.#runs.get(sessionID);
+    const saved = !run ? this.options.checkpoint?.read(sessionID)?.checkpoint : undefined;
+    const batch = run?.workerState?.batch ?? (saved && 'data' in saved ? saved.data.workerState?.batch : undefined);
+    const native = run?.runtime ?? runtime;
+    if (!batch || !native) return undefined;
+    const owner = this.options.ownership?.read(run?.id ?? saved!.runID);
+    if (owner?.workers && (owner.callID !== batch.id || !isDeepStrictEqual(
+        owner.workers.map(member => ({ taskID: member.taskID, callID: member.callID })),
+        batch.members.map(member => ({ taskID: member.taskID, callID: member.callID })))))
+      throw new Error('Worker owner and checkpoint members differ; explicit reconciliation is required.');
+    const pending = batch.members.filter(member => member.callID && (['pending', 'uncertain'].includes(member.state) ||
+      owner?.workers?.find(held => held.callID === member.callID)?.state === 'pending'));
+    if (!pending.length && !owner?.workers) return undefined;
+    return { runtime: native, runID: run?.id ?? saved!.runID, batch: structuredClone(batch),
+      calls: pending.map(member => ({ sessionID, callID: member.callID! })) };
+  }
+
+  async #confirmWorkers(sessionID: string, workers: PendingWorkers, attested: boolean, resetCallID?: string): Promise<Liveness> {
+    if (!isDeepStrictEqual(this.#pendingWorkers(sessionID, workers.runtime), workers)) throw new Error('Worker recovery changed before inspection.');
+    const seen = await Promise.all(workers.calls.map(call => this.#check(workers.runtime, call, attested)));
+    if (seen.some(result => !result.released)) return this.#workerLiveness(seen);
+    if (!resetCallID) throw new Error('Worker recovery requires an explicit reset reservation.');
+    const run = this.#runs.get(sessionID);
+    const savedBatch = !run ? this.options.checkpoint!.read(sessionID)!.checkpoint : undefined;
+    const currentBatch = run?.workerState?.batch ?? (savedBatch && 'data' in savedBatch ? savedBatch.data.workerState?.batch : undefined);
+    if (!currentBatch || !isDeepStrictEqual(currentBatch, workers.batch)) throw new Error('Worker recovery changed during liveness inspection.');
+    const owner = this.options.ownership!.read(workers.runID)!;
+    if (owner.callID !== workers.batch.id || owner.state !== 'reserved' || owner.ownerSessionID !== sessionID)
+      throw new Error('Worker recovery owner changed.');
+    // All liveness decisions precede mutation; one running sibling leaves the whole batch fenced.
+    for (const call of workers.calls) {
+      const current = this.options.ownership!.read(workers.runID)!;
+      if (current.workers?.find(member => member.callID === call.callID)?.state === 'pending')
+        this.options.ownership!.settleWorker(workers.runID, sessionID, workers.batch.id, call.callID, current.epoch);
+    }
+    if (run) {
+      for (const member of run.workerState!.batch!.members) if (['pending', 'uncertain'].includes(member.state)) member.state = 'settled';
+      this.#workerBlocked(run, 'Every pending worker was explicitly released. Retained successes are not replayed.');
+      this.#checkpoint(run, 'pending'); this.#mark(run, 'settled');
+    } else {
+      const saved = this.options.checkpoint!.read(sessionID)!.checkpoint;
+      if (saved.version !== STABLE_CHECKPOINT_VERSION) throw new Error('No worker checkpoint.');
+      for (const member of saved.data.workerState!.batch!.members) if (['pending', 'uncertain'].includes(member.state)) member.state = 'settled';
+      saved.data.workerState!.batch!.blocked = 'Every pending worker was explicitly released. Retained successes are not replayed.';
+      saved.sequence++;
+      saved.dataDigest = sealResumeData(saved.data, saved.runID, saved.parent, saved.events, saved.stable);
+      this.options.checkpoint!.write(sessionID, saved);
+      const marker = this.options.progress!.read(sessionID)!;
+      this.options.progress!.write(sessionID, { ...marker, state: 'settled' });
+    }
+    this.#inflight.delete(sessionID);
+    this.#handoffReset(sessionID, workers.batch.id, resetCallID, 'task');
+    return this.#workerLiveness(seen);
+  }
+
+  #workerLiveness(seen: readonly Liveness[]): Liveness {
+    const verdict = seen.some(result => result.verdict === 'running') ? 'running' : seen.some(result => result.verdict === 'unknown') ? 'unknown' : 'stopped';
+    return { verdict, detail: `Worker batch: ${seen.length} pending member(s); ${seen.map(result => result.verdict).join(', ') || 'all settled'}.` };
+  }
+
+  #workerBlocked(run: Run, reason: string): void {
+    if (run.workerState?.batch) run.workerState.batch.blocked = clip(reason, 2000);
+    run.state = 'blocked'; run.uncertain = true; run.reason = reason;
+    run.evidence = invalidateEvidence(run.evidence, this.#affected(run.phase));
+    run.report = { ...run.report, status: 'blocked', evidence: run.evidence };
+  }
+
+  #settleWorkerOwner(run: Run, callID: string): void {
+    const owner = this.owner(run.runtime.sessionID)!;
+    this.options.ownership!.settleWorker(run.id, run.runtime.sessionID, run.workerState!.batch!.id, callID, owner.epoch);
+  }
+
+  async #workerBefore(run: Run, call: TaskCall, args: unknown): Promise<TaskArgs> {
+    this.owner(call.sessionID);
+    if (run.checkpointFailed || !['ready', 'await-result'].includes(run.state) || run.workerState?.batch?.blocked)
+      throw new ValidationError('Worker batch is blocked or not ready; no dispatch is authorized.');
+    const task = run.workerTasks?.find(task => isDeepStrictEqual(args, { ...task.args, prompt: task.token }));
+    if (!task) throw new ValidationError('Worker arguments do not match an exact issued handle.');
+    boundedText(call.callID, 'native worker call ID', 256);
+    if (run.calls.has(call.callID) || task.dispatchedArgs) throw new ValidationError('Worker dispatch was already consumed.');
+    const state = run.workerState!;
+    try {
+      if (!state.batch) {
+        const batchID = `worker-batch-${randomUUID()}`;
+        const owner = this.owner(call.sessionID)!;
+        this.options.ownership!.reserveWorkers(run.id, call.sessionID, batchID, run.workerTasks!.map(task => task.taskID), owner.epoch);
+        this.#reservations.set(call.sessionID, { runID: run.id, callID: batchID });
+        state.batch = { id: batchID, members: run.workerTasks!.map(task => ({ taskID: task.taskID, state: 'ready' })) };
+        run.workflow.start(run.phase); run.attemptID = batchID; run.lastCallID = batchID;
+        run.callID = batchID;
+        run.settledCheckpoint = false;
+      }
+      const member = state.batch.members.find(member => member.taskID === task.taskID)!;
+      if (member.state !== 'ready') throw new ValidationError('Worker member is not ready.');
+      const owner = this.owner(call.sessionID)!;
+      this.options.ownership!.admitWorker(run.id, call.sessionID, state.batch.id, task.taskID, call.callID, owner.epoch);
+      member.callID = call.callID; member.state = 'pending'; run.calls.add(call.callID);
+      run.state = 'persisting-intent'; run.uncertain = true;
+      this.#inflight.set(call.sessionID, state.batch.id);
+      task.dispatchedArgs = { ...task.args, prompt: `${task.args.prompt}\nNative callID=${JSON.stringify(call.callID)}` };
+      await this.inspect.parent(run.runtime, call.callID);
+      this.owner(call.sessionID);
+      if (run.state !== 'persisting-intent') throw new Error('Worker admission changed during native inspection.');
+      this.#checkpoint(run, 'pending'); this.#mark(run, 'pending');
+      await run.memory?.save(`MDD worker intent ${run.id}`, JSON.stringify({ kind: 'intent', runID: run.id,
+        phase: run.phase, batchID: state.batch.id, taskID: task.taskID, callID: call.callID }));
+      this.owner(call.sessionID);
+      if (run.state !== 'persisting-intent') throw new Error('Worker admission changed during persistence.');
+      run.state = 'await-result'; this.#inflight.set(call.sessionID, state.batch.id);
+      this.#trackNative(call, task.dispatchedArgs);
+      return { ...task.dispatchedArgs };
+    } catch (error) {
+      this.#workerBlocked(run, error instanceof Error ? error.message : 'Worker admission is unconfirmed.');
+      throw error;
+    }
+  }
+
+  async #workerAfter(run: Run, call: TaskCall, args: unknown, output: unknown): Promise<void> {
+    this.owner(call.sessionID);
+    const batch = run.workerState!.batch!;
+    const member = batch.members.find(member => member.callID === call.callID);
+    const task = run.workerTasks?.find(task => task.taskID === member?.taskID);
+    if (!member || member.state !== 'pending' || !task || !isDeepStrictEqual(task.dispatchedArgs, args))
+      throw new ValidationError('Result does not match a pending worker dispatch.');
+    if (run.checkpointFailed) throw new ValidationError('Worker persistence is unconfirmed; no result may advance.');
+    try {
+      const text = await this.inspect.result(run.runtime, call, run.phase, output);
+      if (await this.inspect.stopped?.(run.runtime, call, output) !== true) {
+        member.state = 'uncertain';
+        throw new Error('Worker termination is unconfirmed; no result may advance.');
+      }
+      const assigned = run.planned.find(task => task.id === member.taskID)!;
+      const report = workerReport(text, assigned, call.callID, run.id);
+      this.#readReport(run, text, call.callID);
+      member.state = 'settled'; member.text = text;
+      if (report.result.outcome === 'passed') {
+        run.workerState!.completed.push({ taskID: member.taskID, callID: call.callID, text });
+        run.workerState!.completed.sort((a, b) => run.planned.findIndex(task => task.id === a.taskID) - run.planned.findIndex(task => task.id === b.taskID));
+      } else this.#workerBlocked(run, 'A worker reported failure. Successful task evidence is retained; explicit recovery is required.');
+      this.#checkpoint(run, 'pending');
+      this.#settleWorkerOwner(run, call.callID);
+    } catch (error) {
+      this.#workerBlocked(run, error instanceof Error ? error.message : 'Worker result is unconfirmed.');
+      // Malformed/transport outcomes are never automatic retries or evidence of stopped work.
+      if (member.state === 'pending') member.state = 'uncertain';
+      if (!run.checkpointFailed) this.#checkpoint(run, 'pending');
+      throw error;
+    }
+    await this.#finishWorkers(run);
+  }
+
+  async #finishWorkers(run: Run): Promise<void> {
+    const batch = run.workerState!.batch!;
+    if (batch.members.some(member => member.state !== 'settled')) return;
+    this.#inflight.delete(run.runtime.sessionID);
+    if (batch.blocked) {
+      this.#checkpoint(run, 'pending'); this.#mark(run, 'settled');
+      this.release(run.runtime.sessionID, batch.id);
+      return;
+    }
+    if (run.workerState!.completed.length === run.planned.length) {
+      const aggregate = aggregateWorkerReports(run.workerState!, run.planned);
+      delete run.workerState!.batch; delete run.workerTasks;
+      run.state = 'persisting-result';
+      try { await this.#record(run, aggregate); this.release(run.runtime.sessionID, batch.id); }
+      catch (error) { run.checkpointFailed = true; this.#workerBlocked(run, 'Worker aggregation or persistence failed; no completed work may replay.'); throw error; }
+      return;
+    }
+    // Settle the batch before offering the next one; the workflow remains the same Apply phase.
+    run.workflow.retry(); delete run.workerState!.batch;
+    this.#prepare(run);
+    this.#checkpoint(run, 'released'); this.#mark(run, 'settled');
+    this.release(run.runtime.sessionID, batch.id);
   }
 
   /** Change executor, never semantic phase, approval, dependencies, or report contract. */

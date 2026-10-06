@@ -21,6 +21,7 @@ export type RunOwner = {
   formerOwners?: string[];
   state: 'idle' | 'reserved' | 'transferring';
   callID?: string;
+  workers?: { taskID: string; state: 'ready' | 'pending' | 'settled'; callID?: string }[];
   operation?: { name: string; checkpointSequence: number; checkpointDigest: string };
   recovery?: { sourceCallID: string; kind: 'task' | 'question'; checkpointSequence: number; checkpointDigest: string };
   recoveringTransfer?: TargetTransferClaim & { targetSessionID: string; action: 'release-claim' | 'abort-fenced' };
@@ -61,7 +62,7 @@ function parseParent(value: unknown, sessionID: string): ParentOwner {
   return structuredClone(value) as ParentOwner;
 }
 function parse(value: unknown): RunOwner {
-  const item = objectWithKeys(value, 'run owner', ['version', 'runID', 'ownerSessionID', 'originSessionID', 'formerOwners', 'directory', 'worktree', 'epoch', 'state', 'callID', 'transfer', 'operation', 'recovery', 'receipt', 'recoveringTransfer', 'recoveredTransfer']);
+  const item = objectWithKeys(value, 'run owner', ['version', 'runID', 'ownerSessionID', 'originSessionID', 'formerOwners', 'directory', 'worktree', 'epoch', 'state', 'callID', 'workers', 'transfer', 'operation', 'recovery', 'receipt', 'recoveringTransfer', 'recoveredTransfer']);
   if (item.formerOwners !== undefined && (!Array.isArray(item.formerOwners) || item.formerOwners.length > 64 ||
       item.formerOwners.some(entry => !text(entry, 256)) || new Set(item.formerOwners).size !== item.formerOwners.length ||
       item.formerOwners.includes(item.ownerSessionID))) throw new ValidationError('Invalid former owners.');
@@ -71,6 +72,19 @@ function parse(value: unknown): RunOwner {
   if (item.state === 'reserved') {
     if (!text(item.callID, 256) || item.transfer !== undefined) throw new ValidationError('Invalid reserved owner.');
   } else if (item.callID !== undefined) throw new ValidationError('An idle/transferring owner cannot hold a task.');
+  if (item.workers !== undefined) {
+    if (item.state !== 'reserved' || item.operation || item.recovery || !Array.isArray(item.workers) || !item.workers.length || item.workers.length > 2)
+      throw new ValidationError('Invalid worker reservation.');
+    const tasks = new Set(); const calls = new Set();
+    for (const value of item.workers) {
+      const member = objectWithKeys(value, 'worker reservation member', ['taskID', 'state', 'callID']);
+      if (!text(member.taskID, 64) || tasks.has(member.taskID) || !['ready', 'pending', 'settled'].includes(String(member.state)) ||
+          (member.state === 'ready' ? member.callID !== undefined : !text(member.callID, 256)) ||
+          (member.callID !== undefined && (calls.has(member.callID) || member.callID === item.callID)))
+        throw new ValidationError('Invalid worker reservation member.');
+      tasks.add(member.taskID); if (member.callID !== undefined) calls.add(member.callID);
+    }
+  }
   if (item.operation !== undefined) {
     const operation = objectWithKeys(item.operation, 'owner operation', ['name', 'checkpointSequence', 'checkpointDigest']);
     if (item.state !== 'reserved' || item.recovery !== undefined || !text(operation.name, 128) ||
@@ -329,15 +343,45 @@ export class RunOwnershipStore {
       throw new ValidationError('Invalid owner handoff.');
     return this.#write(runID, old => {
       if (!old || old.ownerSessionID !== sessionID || old.state !== 'reserved' || old.callID !== oldCallID ||
-          old.operation || old.recovery || old.epoch !== epoch) throw new Error('Original reservation no longer owns this run.');
-      return { ...old, callID: resetCallID, recovery, epoch: epoch + 1 };
+          old.operation || old.recovery || old.workers?.some(member => member.state === 'pending') || old.epoch !== epoch) throw new Error('Original reservation no longer owns this run.');
+      const { workers: _workers, ...rest } = old;
+      return { ...rest, callID: resetCallID, recovery, epoch: epoch + 1 };
     });
   }
   release(runID: string, sessionID: string, callID: string, epoch: number): RunOwner {
     return this.#write(runID, old => {
-      if (!old || old.ownerSessionID !== sessionID || old.state !== 'reserved' || old.callID !== callID || old.epoch !== epoch) throw new Error('Reserved writer does not match.');
-      const { callID: _callID, operation: _operation, recovery: _recovery, ...rest } = old;
+      if (!old || old.ownerSessionID !== sessionID || old.state !== 'reserved' || old.callID !== callID || old.epoch !== epoch ||
+          old.workers?.some(member => member.state === 'pending')) throw new Error('Reserved writer does not match or workers remain pending.');
+      const { callID: _callID, workers: _workers, operation: _operation, recovery: _recovery, ...rest } = old;
       return { ...rest, state: 'idle', epoch: epoch + 1 };
+    });
+  }
+  reserveWorkers(runID: string, sessionID: string, batchID: string, taskIDs: readonly string[], epoch: number): RunOwner {
+    if (!text(batchID, 256) || !taskIDs.length || taskIDs.length > 2 || new Set(taskIDs).size !== taskIDs.length || taskIDs.some(id => !text(id, 64)))
+      throw new ValidationError('Invalid worker batch reservation.');
+    const current = this.read(runID);
+    if (current?.originSessionID && current.originSessionID !== current.ownerSessionID) this.confirmReceipt(runID, sessionID);
+    return this.#write(runID, old => {
+      if (!old || old.ownerSessionID !== sessionID || old.state !== 'idle' || old.epoch !== epoch) throw new Error('No idle worker owner.');
+      return { ...old, state: 'reserved', callID: batchID, epoch: epoch + 1,
+        workers: taskIDs.map(taskID => ({ taskID, state: 'ready' })) };
+    });
+  }
+  admitWorker(runID: string, sessionID: string, batchID: string, taskID: string, callID: string, epoch: number): RunOwner {
+    if (!text(callID, 256)) throw new ValidationError('Invalid native worker call.');
+    return this.#write(runID, old => {
+      const member = old?.workers?.find(member => member.taskID === taskID);
+      if (!old || old.ownerSessionID !== sessionID || old.state !== 'reserved' || old.callID !== batchID || old.epoch !== epoch ||
+          member?.state !== 'ready' || old.workers!.some(member => member.callID === callID)) throw new Error('Worker admission changed.');
+      return { ...old, epoch: epoch + 1, workers: old.workers!.map(member => member.taskID === taskID ? { taskID, callID, state: 'pending' } : member) };
+    });
+  }
+  settleWorker(runID: string, sessionID: string, batchID: string, callID: string, epoch: number): RunOwner {
+    return this.#write(runID, old => {
+      const member = old?.workers?.find(member => member.callID === callID);
+      if (!old || old.ownerSessionID !== sessionID || old.state !== 'reserved' || old.callID !== batchID || old.epoch !== epoch ||
+          member?.state !== 'pending') throw new Error('Pending worker does not match.');
+      return { ...old, epoch: epoch + 1, workers: old.workers!.map(member => member.callID === callID ? { ...member, state: 'settled' } : member) };
     });
   }
   beginTransfer(runID: string, sourceSessionID: string, target: { sessionID: string; directory: string; worktree: string },

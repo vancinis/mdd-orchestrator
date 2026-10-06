@@ -1,5 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+
+test('compact status protects plural exact handles and member progress', () => {
+  const tasks = ['one', 'two'].map(prompt => ({ description: prompt, subagent_type: 'mdd-apply', prompt }));
+  const workerProgress = { completed: ['T1'], members: [{ taskID: 'T2', state: 'pending', callID: 'two' }] };
+  const payload = JSON.parse(statusPayload({ state: 'await-result', tasks, workerProgress, planned: Array(32).fill('x'.repeat(2000)) }, 'compact'));
+  assert.deepEqual(payload.tasks, tasks); assert.deepEqual(payload.workerProgress, workerProgress);
+});
 import { statusPayload, STATUS_BUDGET_BYTES, STATUS_COMPACT_KEEP, STATUS_DROP_ORDER, STATUS_PROTECTED_FIELDS } from '../dist/status-budget.js';
 
 const filler = size => 'x'.repeat(size);

@@ -46,11 +46,15 @@ export function v2Payload(text: string): string {
   let value: ObjectValue;
   try { value = object(JSON.parse(text)); } catch { return text; }
   if (value.task) value.task = nativeTask(value.task);
+  if (Array.isArray(value.tasks)) value.tasks = value.tasks.map(nativeTask);
   if (value.nextAction && object(value.nextAction).tool === 'task') {
     const next = object(value.nextAction);
     next.tool = 'subagent';
     if (next.args) next.args = nativeTask(next.args);
-    next.why = 'Call the native subagent tool once, foreground, with exactly these three arguments. Pass the dispatch handle unchanged.';
+    if (Array.isArray(next.calls)) next.calls = next.calls.map(nativeTask);
+    next.why = Array.isArray(next.calls)
+      ? 'Call each exact object once through the native foreground subagent tool. These members share one batch; wait for all results and pass every dispatch handle unchanged.'
+      : 'Call the native subagent tool once, foreground, with exactly these three arguments. Pass the dispatch handle unchanged.';
   }
   return JSON.stringify(value);
 }
