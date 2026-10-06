@@ -36,7 +36,12 @@ Before T1, Apply received the whole plan; completion IDs were discarded and a pa
   - GREEN: focused 69 passed / 0 failed; full suite 1,082 passed / 0 failed / 2 known skips; typecheck, build and diff checks passed. Parent reran smoke and final diff check; independent verifier confirmed exception-safe cleanup.
   - Proof: three deterministic scenarios passed (success, failure, ambiguous completion), using real motor/checkpoints/files/commands with host/identity doubles. Native smoke unavailable because ancestor configuration would defeat isolation; no native host/provider started, credentials or running service reused. External paid-model execution not run.
   - Risk: medium; review deferred per user. See committed assessment and slice evidence below.
-- [ ] **T3 — Integrate current main and deliver.** Route: delegated direct; triggers: multi-file merge and compatibility verification. Integrated upstream `f8962d2b3750f8a86bc4c1e3e11c0772dae7d1e6`, resolving conflicts in adapter documentation and workflow tests while preserving both behaviors. Fixed restored interrupted batches to invalidate affected evidence without discarding completed task IDs/prior results. RED: 49 passed / 1 failed; GREEN: 50 passed / 0 failed. Final focused suite: 481 passed / 0 failed / 1 skipped; full suite: 1,098 passed / 0 failed / 2 known skips. Typecheck, build, both diff checks, empty unmerged index and marker search passed; parent reran typecheck. Native risk: medium. Integration commit and authorized normal push still pending; review and native-host proof remain deferred/unavailable.
+- [x] **T3 — Integrate current main and deliver.** Merge commit: `7321e68d2982c3cb0c3088549ced4d348fe19deb`.
+  - Route: delegated direct; triggers: multi-file merge and compatibility verification.
+  - Integration: upstream `f8962d2b3750f8a86bc4c1e3e11c0772dae7d1e6`; adapter documentation/workflow-test conflicts resolved preserving both behaviors. Restored interrupted batches invalidate affected evidence without discarding completed IDs/prior results.
+  - RED: 49 passed / 1 failed; GREEN: 50 passed / 0 failed. Final focused suite: 481 passed / 0 failed / 1 skipped; full suite: 1,098 passed / 0 failed / 2 known skips. Typecheck/build/diff checks, empty unmerged index and marker search passed; parent reran typecheck.
+  - Delivery: refreshed origin/main before push; upstream unchanged and ancestor of merge. Normal push to origin/main succeeded, and read-only remote lookup confirmed the exact merge hash. No force push, PR or global installation.
+  - Native risk: medium; review remains deferred and mode is off for this clone, with no native approval/receipt claimed. Native-host proof remains unavailable.
 
 ## Verification and recovery
 
@@ -52,4 +57,5 @@ Dependencies are absent initially; install only locked local dependencies withou
 - T2 commit: `584c84df7811719b2ecf5f82e5c71c49def3d431`, second future PR slice, based on T1. Committed native assessment: medium, 624 lines including progress-document changes, review due (`slice_budget_reached`) but explicitly deferred. No START or capture was invoked for T2.
 - Both implementation tasks are committed. Upstream fetch completed: four incoming commits, three local commits; common base `57b0857c9374204dd2ddfc745f62b229107a5f10`.
 - T3 compatibility coverage includes retained completion across interruption, complete Spanish context, stale-result rejection and final full-plan Verify.
-- Next: commit the verified merge and perform the authorized normal direct push. Deferred review/native-host validation remain separate; no publication performed yet.
+- T3 merge `7321e68d2982c3cb0c3088549ced4d348fe19deb` delivered to origin/main and verified remotely.
+- Remaining: deferred review and safely isolated native-host validation; updating the user's global installation is not performed or authorized by this delivery request.
