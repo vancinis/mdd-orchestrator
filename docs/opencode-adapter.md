@@ -296,6 +296,45 @@ errors, changed/stale/duplicate callbacks, or a task before consent block the in
 records refusal without fabricating a failed phase result. A missed after hook remains
 pending; no automated recovery is attempted. Unrelated sessions remain unaffected.
 
+## On-demand security audit
+
+Ask the coordinator **“security audit”**, **“Run mdd-security”**, **“revisión de seguridad”**,
+**“lanza el agente de seguridad”**, or **“usa mdd-security”**. This optional actor runs only on
+an authenticated explicit latest native-user request. Creating, configuring, explaining, quoting,
+or negating a request does not launch it. No workflow, automatic verification, review or delivery
+step launches it. Choose the `mdd-security` model in `mdd-ai config`; an unset override preserves
+native inheritance. Settings are frozen at plugin startup, so restart after configuration changes.
+
+Consent recognition uses a closed whole-message grammar, not a keyword or an extracted clause.
+For example, **“Quiero que hagamos una revisión de seguridad”** and **“Please run a security audit
+of my changes”** are requests. A feature title, documented command, quoted prompt, negation or
+composite description is not. Unknown complex wording requires a clear standalone restatement,
+such as **“Run mdd-security”**; the adapter never removes quoted data to manufacture permission.
+An exact non-negating lead-in, “No hay errores conocidos,” is supported, not arbitrary context.
+
+The coordinator calls `mdd_security({ userText, baseRef? })`, passing the user's exact text.
+The tool returns one single-use foreground task. Never add a model, background execution,
+child-session reuse or other arguments. Another pending actor, native question or control transfer
+blocks admission; the audit never clears those interactions to run. Restart invalidates its pending
+authorization. The main workflow and its approval/evidence state remain unchanged.
+
+| Boundary | What the audit actually receives |
+|---|---|
+| Implementation scope | Every committed change since the baseline, plus staged, unstaged and nonignored untracked changes; layers remain separate even when later changes cancel earlier ones. |
+| Baseline | A unique verified local merge-base with an established default target. An inferred baseline equal to HEAD refuses. If unclear, select the actual implementation baseline and request `Run mdd-security baseRef=<ref>`; the tool argument must match that user-supplied token. It must resolve locally to an ancestor of HEAD. No remote fetch or invented HEAD-only scope. |
+| Input bounds | Frozen adapter-owned changed ranges and nearby context, up to 24,000 snapshot bytes and 38,000 composed prompt bytes, with inventory/file/read/time ceilings. Oversized or race-detected input refuses visibly, never silently audits a subset. |
+| Runtime tools | Only the pure standalone `mdd_check_report` form checker. Native provenance checks run before context/tool actor and workspace exits; known audit children and descendants remain fenced after completion or identity/location changes. Insufficient identity refuses, rather than exposing tools. Shell, live file reads/writes, network/MCP, delegation, skills, questions and coordination are prohibited. Packaged actor/documentation instructions arrive by value. |
+| Coverage gaps | Ignored files, binary/link/submodule source and unrelated dependencies are outside supplied coverage; only touched ranges and nearby context are available. Secret redaction is heuristic. Report coverage and limitations explicitly. |
+
+The returned report includes the full artifact and structured severity, location, source evidence,
+attack conditions, impact and recommendation. Final native-child, snapshot, coverage and literal
+changed-line evidence checks are independent of the actor's form checker. Rejected reports are
+not echoed; errors do not expose captured source or credentials. Status distinguishes `findings`,
+`no-findings` and `inconclusive`; no findings never certifies the implementation secure. Refusal,
+invalid results and incomplete coverage end only this audit, without retries or workflow resets.
+Findings are advisory: the coordinator presents them and waits for **separate user authorization
+for corrections through `mdd-apply`**. Nothing grants fix, commit, publication or delivery authority.
+
 ## Safety and storage boundaries
 
 | Boundary | Behavior |

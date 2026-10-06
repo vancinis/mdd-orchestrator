@@ -782,6 +782,16 @@ export class NativeIntake {
     if (entry && entry.state !== 'active') throw new Error('A task cannot execute before accepted preflight or its exact phase approval.');
   }
 
+  /** Inspection only: never recover, withdraw or answer an interaction to make an audit fit. */
+  guardSecurity(sessionID: string): void {
+    const entry = this.#sessions.get(sessionID);
+    const question = this.durable.questions?.read(sessionID);
+    if ((question && ['prepared', 'pending', 'answered'].includes(question.state)) ||
+        (entry && (entry.restore || ['starting', 'accepting', 'await-answer', 'question-ready'].includes(entry.state)))) {
+      throw new Error('Finish the pending native interaction before a standalone security audit.');
+    }
+  }
+
   nativeError(call: TaskCall): void {
     this.runner.owner?.(call.sessionID, call.callID);
     const entry = this.#sessions.get(call.sessionID);

@@ -1873,6 +1873,18 @@ export class PhaseRunner {
     }
   }
 
+  /** Standalone audits consume no phase and may not overlap another native actor or writer. */
+  assertStandaloneIdle(sessionID: string): void {
+    this.owner(sessionID);
+    this.assertChangeable(sessionID);
+    const solo = this.#solo.get(sessionID);
+    const run = this.#runs.get(sessionID);
+    if (this.#inflight.has(sessionID) || this.#reservations.has(sessionID) ||
+        (solo && solo.state !== 'settled') || run?.side || this.options.progress?.read(sessionID)?.state === 'pending') {
+      throw new Error('Standalone security audit requires no pending actor or control operation.');
+    }
+  }
+
   /**
    * Discarding a run this process never loaded must still free its parent claim, or every later
    * start is refused forever. The claim is retired only when it provably belongs to the discarded

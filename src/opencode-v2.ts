@@ -8,6 +8,8 @@ import { PHASES } from './policy.js';
 import { loadGlobalSettings } from './global-settings.js';
 import { collapsedPrompt, COLLAPSE_MIN_BYTES } from './dispatch-transcript.js';
 import { DISPATCH_HANDLE_PREFIX } from './phase-runner.js';
+import { SECURITY_AGENT, SECURITY_RUNTIME_GUARD } from './security-audit.js';
+import type { SecurityRuntimeHooks } from './security-audit.js';
 
 const COORDINATOR = 'mdd-orchestrator';
 /** Every actor with a configurable model: the eight workflow phases plus `mdd-risk`. */
@@ -165,6 +167,16 @@ export async function setupV2(ctx: Plugin.Context, createMotor: LegacyPlugin): P
     } },
   } as unknown as PluginInput;
   const hooks = await createMotor(input);
+  const securityGuard = (hooks as SecurityRuntimeHooks)[SECURITY_RUNTIME_GUARD];
+  const enforceSecurity = async (sessionID: string, name: string, args: unknown, agent: string): Promise<boolean> => {
+    if (!securityGuard) {
+      if (agent === SECURITY_AGENT) throw new Error('Security runtime provenance guard is unavailable.');
+      return false;
+    }
+    const bound = await securityGuard(sessionID, name, args, agent);
+    if (bound && agent !== SECURITY_AGENT) throw new Error('Security native actor attribution differs.');
+    return bound;
+  };
   const profile = freezeProfile(loadGlobalSettings());
   const agentPolicy: Parameters<typeof ctx.agent.transform>[0] = editor => {
     for (const agent of editor.list()) editor.update(String(agent.id), draft => {
@@ -172,7 +184,10 @@ export async function setupV2(ctx: Plugin.Context, createMotor: LegacyPlugin): P
       const role = id === COORDINATOR ? 'orchestrator' : MODEL_AGENTS.includes(id as typeof MODEL_AGENTS[number]) ? id as typeof MODEL_AGENTS[number] : undefined;
       const selected = role ? modelFor(profile, role) : undefined;
       if (selected) draft.model = Model.Ref.parse(selected);
-      if (id !== COORDINATOR) draft.permissions.push({ action: 'mdd_*', resource: '*', effect: 'deny' });
+      if (id === SECURITY_AGENT) draft.permissions.push(
+        { action: '*', resource: '*', effect: 'deny' },
+        { action: 'mdd_check_report', resource: '*', effect: 'allow' });
+      if (id !== COORDINATOR && id !== SECURITY_AGENT) draft.permissions.push({ action: 'mdd_*', resource: '*', effect: 'deny' });
       if (PINNED_AGENTS.includes(id as typeof PINNED_AGENTS[number])) draft.permissions.push(
         { action: 'subagent', resource: '*', effect: 'deny' }, { action: 'skill', resource: '*', effect: 'deny' },
         { action: 'mdd_check_report', resource: '*', effect: 'allow' });
@@ -190,6 +205,7 @@ export async function setupV2(ctx: Plugin.Context, createMotor: LegacyPlugin): P
     for (const [name, definition] of Object.entries(hooks.tool ?? {})) editor.add({
       name, description: definition.description, input: z.object(definition.args), options: { codemode: false },
       async execute(args, context) {
+        await enforceSecurity(context.sessionID, name, args, context.agent);
         await settleAgentPolicy();
         const session = await ctx.session.get({ sessionID: context.sessionID }, { signal: context.signal });
         if (session.location.directory !== directory || session.projectID !== ctx.location.project.id)
@@ -201,8 +217,15 @@ export async function setupV2(ctx: Plugin.Context, createMotor: LegacyPlugin): P
   });
   await ctx.tool.hook('execute.before', async event => {
     const call = { sessionID: event.sessionID, callID: event.id, tool: event.tool === 'subagent' ? 'task' : event.tool };
+    await enforceSecurity(event.sessionID, call.tool, event.input, event.agent);
     const session = await ctx.session.get({ sessionID: event.sessionID });
-    if (session.location.directory !== directory || session.projectID !== ctx.location.project.id) return;
+    if (session.location.directory !== directory || session.projectID !== ctx.location.project.id) {
+      if (event.agent === SECURITY_AGENT || session.agent === SECURITY_AGENT) throw new Error('Security session left its bound workspace.');
+      return;
+    }
+    if (event.agent === SECURITY_AGENT || session.agent === SECURITY_AGENT) {
+      if (event.agent !== SECURITY_AGENT || session.agent !== SECURITY_AGENT) throw new Error('Security native actor attribution differs.');
+    }
     if (session.parentID) await hooks.event?.({ event: { type: 'session.created', properties: { info: session } } } as never);
     if (event.tool === 'subagent' && event.agent === COORDINATOR) {
       const args = taskInput(event.input);
@@ -222,8 +245,12 @@ export async function setupV2(ctx: Plugin.Context, createMotor: LegacyPlugin): P
       return;
     }
     if (event.tool === 'subagent' && event.agent !== COORDINATOR) return;
-    await hooks['tool.execute.after']?.({ ...call, args: event.tool === 'subagent' ? taskInput(event.input) : event.input },
-      legacyResult(event.tool, event.input, event.result) as never);
+    const audit = event.tool === 'subagent' && object(event.input).agent === SECURITY_AGENT;
+    let result: ObjectValue;
+    try { result = legacyResult(event.tool, event.input, event.result); }
+    catch (error) { if (!audit) throw error; result = {}; }
+    await hooks['tool.execute.after']?.({ ...call, args: event.tool === 'subagent' ? taskInput(event.input) : event.input }, result as never);
+    if (audit || result.title === 'MDD security assessment') event.result = { content: String(result.output), output: { status: 'completed', output: String(result.output) } };
   });
   const stream = (async () => {
     try {
@@ -248,7 +275,12 @@ export async function setupV2(ctx: Plugin.Context, createMotor: LegacyPlugin): P
     finally { statuses.clear(); }
   })();
   // V2 supplies model messages, not durable parts. Only settled tool calls with matching results are collapsed.
-  await ctx.session.hook('context', event => {
+  await ctx.session.hook('context', async event => {
+    if (!event.sessionID && event.agent === SECURITY_AGENT) throw new Error('Security context has no native session identity.');
+    if (event.sessionID && await enforceSecurity(event.sessionID, 'mdd_check_report', { phase: SECURITY_AGENT, result: '' }, event.agent)) {
+      event.tools = Object.fromEntries(Object.entries(event.tools).filter(([name]) => name === 'mdd_check_report'));
+      return;
+    }
     if (event.agent !== COORDINATOR) return;
     const results = new Set(event.messages.flatMap(message => message.content.flatMap(part => part.type === 'tool-result' ? [part.id] : [])));
     event.messages = event.messages.map(message => {

@@ -30,7 +30,9 @@ import { recordLessonQuietly } from './lessons.js';
 import { recordRunQuietly } from './run-ledger.js';
 import { withNextAction } from './next-action.js';
 import { collapseDispatchPrompts } from './dispatch-transcript.js';
-import { checkReportForm, checkRiskReportForm } from './report-check.js';
+import { checkReportForm, checkRiskReportForm, checkSecurityReportForm } from './report-check.js';
+import { SecurityAudit, SECURITY_AGENT, SECURITY_HANDLE_PREFIX, SECURITY_RUNTIME_GUARD } from './security-audit.js';
+import type { SecurityInspect, SecurityBinding } from './security-audit.js';
 import { CHANGE_CATEGORIES, decodeConcerns } from './concerns.js';
 import { authoredNativeText, canonicalNativeText, firstDivergence } from './native-text.js';
 import type { Phase } from './policy.js';
@@ -69,7 +71,7 @@ const CONCERN_SCHEMA = tool.schema.object({
 });
 
 /** MDD tools belong to the MDD coordinator. Other agents share the registry but not this state. */
-export const MDD_TOOLS = ['mdd_start', 'mdd_status', 'mdd_prepare_advance', 'mdd_revisit', 'mdd_phase_result', 'mdd_reset', 'mdd_change_request', 'mdd_contextual_explore', 'mdd_context', 'mdd_pr_body', 'mdd_improve', 'mdd_improvements', 'mdd_transfer', 'mdd_transfer_recover'] as const;
+export const MDD_TOOLS = ['mdd_security', 'mdd_start', 'mdd_status', 'mdd_prepare_advance', 'mdd_revisit', 'mdd_phase_result', 'mdd_reset', 'mdd_change_request', 'mdd_contextual_explore', 'mdd_context', 'mdd_pr_body', 'mdd_improve', 'mdd_improvements', 'mdd_transfer', 'mdd_transfer_recover'] as const;
 /**
  * The one MDD tool that is not the coordinator's alone. It is kept out of `MDD_TOOLS` because
  * that list is what `restrictTools` switches off everywhere else, and this one has to reach the
@@ -110,7 +112,7 @@ export const PHASE_AGENTS: readonly string[] = Object.freeze([
  */
 export const RISK_AGENT = 'mdd-risk';
 /** Agents allowed to call `mdd_check_report`: the eight phase actors and the risk actor. */
-export const CHECK_AGENTS: readonly string[] = Object.freeze([...PHASE_AGENTS, RISK_AGENT]);
+export const CHECK_AGENTS: readonly string[] = Object.freeze([...PHASE_AGENTS, RISK_AGENT, SECURITY_AGENT]);
 /** Agents pinned to the restricted tool profile below: the eight phase actors and the risk actor. */
 const PINNED_AGENTS: readonly string[] = Object.freeze([...PHASE_AGENTS, RISK_AGENT]);
 
@@ -130,6 +132,8 @@ const PINNED_AGENTS: readonly string[] = Object.freeze([...PHASE_AGENTS, RISK_AG
  */
 export function pinPhaseAgents(config: { agent?: Record<string, Record<string, unknown>> }): void {
   config.agent ??= {};
+  config.agent[SECURITY_AGENT] = { ...config.agent[SECURITY_AGENT],
+    permission: { '*': 'deny', [CHECK_TOOL]: 'allow' }, tools: { '*': false, [CHECK_TOOL]: true } };
   for (const name of PINNED_AGENTS) {
     const agent = { ...config.agent[name] };
     // `mdd_check_report` is the one MDD tool a phase actor may call, and it runs after the
@@ -189,7 +193,7 @@ async function readSdk<T>(operation: (signal: AbortSignal) => Promise<T>, timeou
  */
 export const ORPHAN_QUIET_MS = 2 * 60_000;
 
-export function createInspector(input: PluginInput, timeout = 5000, now: () => number = Date.now): Inspect & IntakeInspect {
+export function createInspector(input: PluginInput, timeout = 5000, now: () => number = Date.now): Inspect & IntakeInspect & SecurityInspect {
   if (!Number.isInteger(timeout) || timeout < 1 || timeout > 5000) throw new Error('Invalid inspection timeout.');
   const session = async (id: string, directory: string) => {
     const response = await readSdk(signal => input.client.session.get({
@@ -332,7 +336,104 @@ export function createInspector(input: PluginInput, timeout = 5000, now: () => n
     }
     return candidates;
   };
-  const inspector: Inspect & IntakeInspect = {
+  const securityTaskPart = async (binding: SecurityBinding, call: { callID: string }, childID?: string) => {
+    await inspector.parent(binding.runtime);
+    const history = await messages(binding.runtime.sessionID, binding.runtime.directory);
+    const latestUser = history.findLast(message => record(message.info).role === 'user');
+    if (!latestUser || record(latestUser.info).id !== binding.userMessageID ||
+        authoredNativeText(list(latestUser.parts, 'user parts', PARTS_MAX).filter(part => part.type === 'text'), binding.runtime.sessionID, binding.userMessageID) !== binding.userText)
+      throw new Error('Security request is stale or changed.');
+    const matches = history.flatMap(message => list(message.parts, 'task parts', PARTS_MAX)
+      .filter(part => part.type === 'tool' && part.tool === 'task' && part.callID === call.callID)
+      .map(part => ({ part, info: record(message.info) })));
+    if (matches.length !== 1) throw new Error('Security task identity is ambiguous.');
+    const { part, info } = matches[0]!;
+    const location = record(info.path);
+    const state = record(part.state);
+    if (info.role !== 'assistant' || info.agent !== COORDINATOR || info.sessionID !== binding.runtime.sessionID ||
+        part.sessionID !== binding.runtime.sessionID || part.messageID !== info.id ||
+        location.cwd !== binding.runtime.directory || location.root !== binding.runtime.worktree ||
+        !['running', 'completed'].includes(String(state.status)) ||
+        (!isDeepStrictEqual(state.input, binding.task) && !isDeepStrictEqual(state.input, binding.full)))
+      throw new Error('Security task native caller or arguments differ.');
+    if (!childID && record(history.at(-1)!.info).id !== info.id) throw new Error('Security dispatch is not the current native call.');
+    if (childID && record(state.metadata ?? {}).sessionId !== childID) throw new Error('Security child does not belong to the exact native task.');
+    return state;
+  };
+  const inspector: Inspect & IntakeInspect & SecurityInspect = {
+    async securityCaller(runtime, messageID, userText) {
+      await inspector.parent(runtime);
+      const history = await messages(runtime.sessionID, runtime.directory);
+      const info = record(history.at(-1)?.info);
+      const location = record(info.path);
+      if (info.id !== messageID || info.role !== 'assistant' || info.agent !== COORDINATOR ||
+          info.sessionID !== runtime.sessionID || location.cwd !== runtime.directory || location.root !== runtime.worktree || info.error != null)
+        throw new Error('Security intake requires the native coordinator caller.');
+      const latestUser = history.findLast(message => record(message.info).role === 'user');
+      const user = record(latestUser?.info);
+      if (authoredNativeText(list(latestUser?.parts, 'user parts', PARTS_MAX).filter(part => part.type === 'text'), runtime.sessionID, String(user.id)) !== userText ||
+          history.some(message => list(message.parts, 'native control parts', PARTS_MAX).some(part => part.type === 'tool' &&
+            ['task', 'question', 'mdd_transfer', 'mdd_transfer_recover'].includes(String(part.tool)) && ['pending', 'running'].includes(String(record(part.state).status)))))
+        throw new Error('Security request differs or a native control is pending.');
+    },
+    async securitySession(sessionID) {
+      const response = await readSdk(signal => input.client.session.get({
+        path: { id: sessionID }, query: { directory: input.directory }, signal, throwOnError: true,
+      }), timeout);
+      // A missing unrelated native record carries no session capability. SDK errors still throw;
+      // an active/known security operation treats even this absence as unconfirmed identity.
+      if (response.data == null) return { agent: '', ancestors: [], directory: '', worktree: '', security: false };
+      const native = record(response.data);
+      const ancestors: string[] = [];
+      let security = native.agent === SECURITY_AGENT;
+      let childID = sessionID;
+      let parentID = native.parentID;
+      while (!security && typeof parentID === 'string') {
+        if (ancestors.length >= 16 || ancestors.includes(parentID) || parentID === sessionID) throw new Error('Security native ancestry cannot be confirmed within its inspection bound.');
+        const parent = await session(parentID, input.directory);
+        if (parent.id !== parentID) throw new Error('Security native ancestor identity differs.');
+        ancestors.push(parentID);
+        security = parent.agent === SECURITY_AGENT;
+        // Unrelated off-location histories are outside this adapter, not evidence of an audit.
+        if (!security && parent.projectID === input.project.id && parent.directory === input.directory) {
+          security = (await messages(parentID, input.directory)).some(message => list(message.parts, 'native parent parts', PARTS_MAX).some(part => {
+            if (part.type !== 'tool' || part.tool !== 'task') return false;
+            const state = record(part.state);
+            return state.input && typeof state.input === 'object' && record(state.input).subagent_type === SECURITY_AGENT &&
+              record(state.metadata ?? {}).sessionId === childID;
+          }));
+        }
+        childID = parentID;
+        parentID = parent.parentID;
+      }
+      return { agent: String(native.agent), directory: String(native.directory), worktree: input.worktree,
+        security, ancestors,
+        ...(typeof native.parentID === 'string' ? { parentID: native.parentID } : {}) };
+    },
+    async securityChild(binding, childID) {
+      await securityTaskPart(binding, { callID: binding.callID! }, childID);
+      const child = await session(childID, binding.runtime.directory);
+      if (child.id !== childID || child.agent !== SECURITY_AGENT || child.parentID !== binding.runtime.sessionID ||
+          child.directory !== binding.runtime.directory || child.projectID !== input.project.id)
+        throw new Error('Security child native identity differs.');
+    },
+    async securityTask(binding, call, completed) {
+      await securityTaskPart(binding, call, completed?.childID);
+      if (!completed) return;
+      await inspector.securityChild(binding, completed.childID);
+      const history = await messages(completed.childID, binding.runtime.directory);
+      const last = history.at(-1);
+      const info = record(last?.info);
+      const location = record(info.path);
+      const parts = list(last?.parts, 'security final parts', PARTS_MAX);
+      if (info.role !== 'assistant' || info.agent !== SECURITY_AGENT || info.sessionID !== completed.childID ||
+          info.error != null || !record(info.time).completed || !['stop', 'end-turn'].includes(String(info.finish)) ||
+          location.cwd !== binding.runtime.directory || location.root !== binding.runtime.worktree ||
+          parts.some(part => part.type === 'tool' && ['pending', 'running'].includes(String(record(part.state).status))) ||
+          parts.filter(part => part.type === 'text').some(part => part.synthetic === true || part.ignored === true || part.sessionID !== completed.childID || part.messageID !== info.id) ||
+          parts.filter(part => part.type === 'text').map(part => part.text).join('\n') !== completed.report)
+        throw new Error('Security result differs from the native terminal child report.');
+    },
     async transferLiveness(runtime, sourceSessionID, runID, requestDigest, assistantMessageID) {
       await inspector.parent(runtime);
       const statuses = await readSdk(signal => input.client.session.status({ query: { directory: runtime.directory }, signal, throwOnError: true }), timeout);
@@ -587,6 +688,7 @@ const plugin: Plugin = async input => {
     ledger: (_directory, value, now) => recordRunQuietly(dataRoot, value, now),
   });
   const intake = new NativeIntake(runner, inspector, settings, { checkpoint, questions: new QuestionCheckpointStore(dataRoot), ownership });
+  const security = new SecurityAudit(inspector, sessionID => { runner.assertStandaloneIdle(sessionID); intake.guardSecurity(sessionID); });
   /**
    * The workspace only ever learned that MDD had been used here once a phase had already produced
    * a telemetry event, so every conversation that died earlier — at a question the host never
@@ -659,6 +761,7 @@ const plugin: Plugin = async input => {
   const translationAttempts = new Map<string, number>();
   const enter = (context: { agent: string; sessionID: string; directory: string; worktree: string }, name: string): void => {
     coordinatorOnly(context.agent, name);
+    if (name !== 'mdd_status') security.control(context.sessionID);
     // A conversation whose run moved away by a finished transfer can only start over (or read
     // status, or record/list improvements); nothing may act on the run it handed over.
     const moved = runner.movedAway(context.sessionID);
@@ -681,6 +784,15 @@ const plugin: Plugin = async input => {
       pinPhaseAgents(config as Parameters<typeof pinPhaseAgents>[0]);
     },
     tool: {
+      mdd_security: tool({
+        description: 'Run a standalone read-only security audit ONLY on an explicit latest native-user audit request. Pass their exact text, not an implementation/configuration/explanation request. Includes committed and all pending implementation layers; returns one single-use foreground task. Never advances workflow or authorizes fixes, review or delivery.',
+        args: { userText: tool.schema.string().min(1), baseRef: tool.schema.string().min(1).optional() },
+        async execute(args, context) {
+          enter(context, 'mdd_security');
+          if (context.abort.aborted) throw new Error('Security audit intake aborted.');
+          return JSON.stringify(await security.start(args, context, context.messageID));
+        },
+      }),
       mdd_transfer: tool({
         description: 'Continue an MDD run from another conversation in this new one. Use it only when the user\'s latest message in this conversation explicitly names sourceSessionID=<id> and runID=<id> (mdd_status in the old conversation shows both); pass that message unchanged as userText. The run moves here with its evidence, the old conversation is fenced, and any approval is asked again here — old consent is never reused. If the result says publication is unknown, read mdd_status in both conversations instead of retrying.',
         args: {
@@ -933,6 +1045,13 @@ const plugin: Plugin = async input => {
           result: tool.schema.string().min(1).describe('The full report markdown you intend to return, exactly as you would return it.'),
         },
         async execute(args, context) {
+          if (context.agent === SECURITY_AGENT || args.phase === SECURITY_AGENT) {
+            await security.enforce(context.sessionID, CHECK_TOOL, args, context.agent);
+            if (context.agent !== SECURITY_AGENT) throw new Error('Only a bound native security child may check a security report.');
+            const checked = checkSecurityReportForm(args.result);
+            return statusPayload({ ok: checked.ok, problems: checked.ok ? [] : ['Standalone security report form is invalid; use the supplied bounded schema.'],
+              resultFormat: checked.resultFormat, note: checked.note });
+          }
           // Phase actors and the coordinator carrying a phase itself; nobody else has a report.
           if (context.agent !== COORDINATOR && !CHECK_AGENTS.includes(context.agent)) {
             throw new Error(`${CHECK_TOOL} belongs to MDD phase actors and the ${COORDINATOR} agent. This session is not carrying out an MDD phase; continue with your own tools.`);
@@ -1140,11 +1259,18 @@ const plugin: Plugin = async input => {
     // Actors work with their own tools under native permissions. MDD only observes the two calls
     // that carry its own state: the phase task and the consent question.
     'tool.execute.before': async (input, output) => {
+      await security.enforce(input.sessionID, input.tool, output.args);
       if (nativeChildren.has(input.sessionID) && (['task', 'skill', CHECK_TOOL].includes(input.tool) || input.tool.startsWith('mdd_'))) {
         throw new Error('A tracked native fallback must work directly and return its report to the parent. Recursive orchestration, skill loading, and MDD tools are not allowed.');
       }
-      if (input.tool === 'question') return intake.beforeQuestion(input, output.args);
+      if (input.tool === 'question') { security.control(input.sessionID); return intake.beforeQuestion(input, output.args); }
       if (input.tool !== 'task') return;
+      const auditTask = output.args as { subagent_type?: unknown; prompt?: unknown };
+      if (security.pending(input.sessionID) || auditTask?.subagent_type === SECURITY_AGENT ||
+          (typeof auditTask?.prompt === 'string' && auditTask.prompt.startsWith(SECURITY_HANDLE_PREFIX))) {
+        Object.assign(output.args, await security.before(input, output.args));
+        return;
+      }
       // An MDD conversation dispatches MDD phases. Reaching past them into the shared registry is
       // refused here rather than discouraged in a prompt, because the agent that answers an
       // unrelated name runs under instructions MDD never wrote and reports evidence MDD cannot
@@ -1158,6 +1284,16 @@ const plugin: Plugin = async input => {
     'tool.execute.after': async (input, output) => {
       if (input.tool === 'question') await intake.afterQuestion(input, input.args, output);
       if (input.tool === 'task') {
+        const auditTask = input.args as { subagent_type?: unknown; prompt?: unknown };
+        if (security.ownsCall(input) || auditTask?.subagent_type === SECURITY_AGENT ||
+            (typeof auditTask?.prompt === 'string' && auditTask.prompt.startsWith(SECURITY_HANDLE_PREFIX))) {
+          const result = await security.after(input, input.args, output);
+          output.title = 'MDD security assessment';
+          output.output = JSON.stringify(result);
+          output.metadata = {};
+          Object.assign(output, { attachments: [] });
+          return;
+        }
         runner.owner(input.sessionID, input.callID);
         try {
           const previousState = runner.status(input.sessionID).state;
@@ -1197,6 +1333,7 @@ const plugin: Plugin = async input => {
       if (event.type !== 'message.part.updated') return;
       const part = event.properties.part;
       if (part.type === 'tool' && part.tool === 'task' && part.state.status === 'error') {
+        if (security.failed(part)) return;
         runner.owner(part.sessionID, part.callID);
         await runner.nativeError(part.sessionID, part.callID);
         runner.releaseSettled(part.sessionID, part.callID);
@@ -1212,12 +1349,15 @@ const plugin: Plugin = async input => {
   // lessons file) never write a checkpoint, so they never hold the durable writer. Transfer and
   // its recovery manage their own fenced reservations.
   for (const name of MDD_TOOLS) {
-    if (['mdd_status', 'mdd_reset', 'mdd_improvements', 'mdd_improve', 'mdd_pr_body', 'mdd_transfer', 'mdd_transfer_recover'].includes(name)) continue;
+    if (['mdd_security', 'mdd_status', 'mdd_reset', 'mdd_improvements', 'mdd_improve', 'mdd_pr_body', 'mdd_transfer', 'mdd_transfer_recover'].includes(name)) continue;
     const registered = hooks.tool![name]!;
     const execute = registered.execute;
     registered.execute = ((args: never, context: { sessionID: string }) =>
       runner.withOperation(context.sessionID, name, () => execute(args, context as never))) as typeof execute;
   }
+  // Share only provenance enforcement with the V2 adapter, before its location/role exits.
+  Object.assign(hooks, { [SECURITY_RUNTIME_GUARD]: (sessionID: string, name: string, args: unknown, agent?: string) =>
+    security.enforce(sessionID, name, args, agent) });
   return hooks;
 };
 
