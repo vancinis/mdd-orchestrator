@@ -156,3 +156,55 @@ test('known IDs cannot be rewired into an unplanned scenario-step association', 
   f.result.scenarios[0].stepID = 'error-handling';
   assert.throws(() => verification(f.result, f.accepted, f.choices, f.steps, f.reported), /invents/);
 });
+
+test('complete parallel metadata survives normalization and held-plan JSON reconstruction', () => {
+  const f = fixture();
+  const parallel = { complete: true, reads: ['src/shared.ts'], writes: ['src/cli.ts', 'tests/cli.test.mjs'] };
+  f.data.deliverables[0].parallel = parallel;
+  const steps = deliverables(f.data.deliverables);
+  validatePlan(f.accepted, f.choices, steps);
+  assert.deepEqual(steps[0].parallel, parallel);
+  assert.deepEqual(deliverables(JSON.parse(JSON.stringify(steps))), steps);
+  parallel.writes.push('package-lock.json');
+  assert.equal(steps[0].parallel.writes.length, 2, 'scope arrays are detached');
+});
+
+test('omitted dependency declaration cannot become an opt-in through normalized empty dependencies', () => {
+  const f = fixture();
+  delete f.data.deliverables[0].dependsOn;
+  f.data.deliverables[0].parallel = { complete: true, reads: [], writes: ['src/cli.ts'] };
+  const steps = deliverables(f.data.deliverables);
+  validatePlan(f.accepted, f.choices, steps);
+  assert.deepEqual(steps[0].dependsOn, []);
+  assert.equal(steps[0].parallel, undefined);
+  assert.equal(deliverables(JSON.parse(JSON.stringify(steps)))[0].parallel, undefined);
+});
+
+for (const parallel of [{}, { complete: false }, { complete: true, reads: [] }, { complete: true, reads: [], writes: [] }]) {
+  test(`valid incomplete footprint remains accepted: ${JSON.stringify(parallel)}`, () => {
+    const f = fixture(); f.data.deliverables[0].parallel = parallel;
+    const steps = deliverables(f.data.deliverables);
+    validatePlan(f.accepted, f.choices, steps);
+    assert.deepEqual(steps[0].parallel, parallel);
+  });
+}
+
+for (const parallel of [null, [], true, { complete: 'true' }, { extra: true }, { reads: null },
+  { writes: [42] }, { reads: new Array(1) }, { writes: Array.from({ length: 65 }, (_, index) => `src/${index}.ts`) },
+  { reads: ['src/a.ts', 'src/a.ts'] }, { writes: ['src/A.ts', 'src/a.ts'] }]) {
+  test(`malformed parallel metadata is rejected: ${JSON.stringify(parallel)}`, () => {
+    const f = fixture(); f.data.deliverables[0].parallel = parallel;
+    assert.throws(() => deliverables(f.data.deliverables), /parallel|scope/);
+    delete f.data.deliverables[0].dependsOn;
+    assert.throws(() => deliverables(f.data.deliverables), /parallel|scope/, 'fallback never hides malformed metadata');
+  });
+}
+
+for (const path of ['../outside', 'src/../a.ts', '/absolute', 'C:/absolute', 'src\\a.ts', 'src//a.ts',
+  './a.ts', 'src/', 'src/*.ts', 'src/[a].ts', 'src/{a,b}', 'a?.ts', 'a:stream', 'a. ', 'a.', 'NUL.txt', 'a\u0000',
+  'src/SHORT~1.ts', 'src/\u00e9.ts']) {
+  test(`parallel scope rejects noncanonical path ${JSON.stringify(path)}`, () => {
+    const f = fixture(); f.data.deliverables[0].parallel = { complete: true, reads: [], writes: [path] };
+    assert.throws(() => deliverables(f.data.deliverables), /scope/);
+  });
+}

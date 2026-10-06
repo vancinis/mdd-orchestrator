@@ -27,7 +27,7 @@ MDD currently owns one native dispatch per phase. A second call loses authority 
 
 ## Tasks
 
-- [ ] PW-1 — Add and expose the captured worker preference with legacy/default/invalid-value coverage and configuration documentation.
+- [x] PW-1 — Add and expose the captured worker preference with legacy/default/invalid-value coverage and configuration documentation.
   - Route: delegated direct; configuration, CLI, UI, schema, and tests require preparation and multiple non-trivial files.
   - Checks: focused settings/UI/CLI tests, typecheck, build, diff whitespace check.
 - [ ] PW-2 — Add explicit complete task scopes and conservative deterministic batch eligibility, preserving legacy sequential behavior.
@@ -54,15 +54,17 @@ RDD status: on, global. Native risk assessment and candidate-scoped consent rema
 - Branch point / initial review boundary: `57b0857c9374204dd2ddfc745f62b229107a5f10`.
 - Forecast: approximately 1,100–1,600 authored changed lines across four coherent units, tests and docs included; generated files excluded.
 - Delivery strategy: `single-pr`, explicitly selected by the user: one branch against `main`. Keep all coherent local work-unit commits on `feat-add-workers`; do not create stacked branches, publish, push, or open a PR.
-- Running committed authored lines: 0.
-- Work-unit commits, assessed tiers, review outcomes, and slice boundaries: none yet.
+- Running committed authored lines: 315 (including the recovery document; behavior/docs/tests alone: 233).
+- PW-1 work-unit commit: `2aeb1661224f6f5ac85d35ad79b392e1e8ec5916`, `feat(config): expose default-on independent worker preference`.
+- PW-1 native tier/outcome: medium, `under_budget`; review slice remains pending against the initial boundary. No review receipt or approval is claimed.
+- Delivery slice: one eventual branch/PR against `main`, currently contains PW-1. No publication authorized.
 - The approximately 400-line heuristic is advisory: no minification, cosmetic compression, omitted tests, or artificial task splits.
 
 ## Progress and next step
 
 Read-only repository mapping and a bounded native-concurrency feasibility challenge are complete. Pinned V2 supports concurrent foreground calls, but MDD's existing singular authority needs explicit extension.
 
-PW-1 implementation is present, not committed or closed. Changed eight allowed configuration/schema/docs/test files, 223 additions and 10 deletions. `freezeProfile(...).workers` exposes a detached immutable preference; runtime dispatch remains sequential until PW-2 through PW-4 are implemented.
+PW-1 is complete and committed. Changed eight allowed configuration/schema/docs/test files, 223 additions and 10 deletions, plus the recovery document. `freezeProfile(...).workers` exposes a detached immutable preference; runtime dispatch remains sequential until PW-2 through PW-4 are implemented.
 
 ### PW-1 observed checks
 
@@ -71,11 +73,13 @@ PW-1 implementation is present, not committed or closed. Changed eight allowed c
 - Writer `npm test`: 1,055 passed, two skipped, zero failed, approximately 330 seconds. An earlier run exceeded its 120-second timeout; the completed rerun is the reported proof.
 - Writer and parent `git diff --check`: passed. Edited files are UTF-8/LF; lockfile and HEAD unchanged.
 - Dependency installation reported nine vulnerabilities; no remediation or scope expansion was attempted.
-- Native risk assessment: high/unassessable because the untracked task file requires an explicit native inventory declaration. No review started, consent requested, or receipt claimed.
-- Independent verifier could not start because DNS lookup failed. Independent verification remains pending; no source repair or automatic relaunch followed.
+- Native risk assessment initially failed because the untracked task file required declaration. After staging the intended files, assessment and committed-only assessment both returned medium/`under_budget` (315 authored lines). No review started, consent requested, or receipt claimed.
+- Independent verifier passed typecheck, build, 114 focused tests, and diff checks after explicit user continuation. Its earlier DNS launch failure remains historical, not a passing attempt.
+- Parent spot check: `npm run typecheck` passed before the work-unit commit.
+- Nonblocking follow-up: top-level CLI help does not list the new workers command; configuration docs do. Consider discoverability alongside final operational documentation, without broadening unrelated behavior.
 - Runtime parallel-dispatch proof and local host smoke remain pending in later tasks; current tests establish configuration behavior only.
 
-Next: complete the pending independent check, close PW-1 with an observed work-unit commit and native risk assessment, then continue PW-2 on the same branch.
+Next: implement PW-2 scope metadata and conservative batch eligibility on the same branch. PW-3 and PW-4 remain pending; no parallel execution is claimed yet.
 
 ## Recovery mirror
 

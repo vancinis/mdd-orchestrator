@@ -94,6 +94,17 @@ test('the form an actor is shown names only its own fields', () => {
   }
 });
 
+test('Plan and Tasks describe optional complete scopes without promising active concurrency', () => {
+  for (const phase of ['mdd-plan', 'mdd-tasks']) {
+    const form = reportFormatLines(phase).join('\n');
+    assert.match(form, /parallel\?/);
+    assert.match(form, /complete:true/);
+    assert.match(form, /explicit dependsOn/);
+    assert.match(form, /concurrency is not active/);
+  }
+  assert.doesNotMatch(reportFormatLines('mdd-explore').join('\n'), /parallel\?/);
+});
+
 test('restatements are bounded rather than unlimited', () => {
   assert.ok(MALFORMED_RESTATEMENTS >= 1 && MALFORMED_RESTATEMENTS <= 5);
 });

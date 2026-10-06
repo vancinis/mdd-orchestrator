@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { PhaseRunner } from '../dist/phase-runner.js';
+import { CheckpointStore } from '../dist/checkpoint.js';
+import { ProgressGuard } from '../dist/progress.js';
 import { reportFormatLines } from '../dist/phase-report.js';
 import { memoryServer, request, result, reportDocument, runtime, call, answers, installCleanup, traceFixture, ARTIFACT_TEXT, SUMMARY_TEXT } from './adapter-fixture.mjs';
 import { mkdtemp, rm, stat } from 'node:fs/promises';
@@ -21,6 +23,49 @@ async function fixture(t, fault) {
   const inspect = { parent: async () => {}, result: async (_runtime, _call, _phase, output) => output, stopped: async () => true };
   const runner = new PhaseRunner(inspect);
   return { ...memory, inspect, runner };
+}
+
+test('runner accepts and holds scoped plans but still exposes only one serial Apply task', async t => {
+  const { runner, endpoint } = await fixture(t);
+  const ready = await runner.start(request(endpoint), runtime);
+  const dispatched = await runner.before(call, ready.task);
+  const trace = traceFixture();
+  const parallel = { complete: true, reads: ['src/shared.ts'], writes: ['src/cli.ts', 'tests/cli.test.mjs'] };
+  trace.deliverables[0].parallel = parallel;
+  await runner.after(call, dispatched, reportDocument({ evidenceSummary: SUMMARY_TEXT, artifact: ARTIFACT_TEXT, ...trace }));
+  const status = runner.status(runtime.sessionID);
+  assert.equal(status.state, 'ready');
+  assert.equal(status.phase, 'mdd-apply');
+  assert.deepEqual(status.planned[0].parallel, parallel);
+  assert.match(status.artifact.content, /"parallel"/);
+  assert.equal(status.task.subagent_type, 'mdd-apply');
+  assert.equal(status.tasks, undefined);
+  status.planned[0].parallel.writes.push('package-lock.json');
+  assert.equal(runner.status(runtime.sessionID).planned[0].parallel.writes.length, 2);
+});
+
+for (const explicitDependencies of [true, false]) {
+  test(`checkpoint restores scope opt-in without inventing dependencies: ${explicitDependencies}`, async t => {
+    const root = await mkdtemp(join(tmpdir(), 'mdd-scoped-checkpoint-'));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const checkpoint = new CheckpointStore(root); const progress = new ProgressGuard(root);
+    const inspect = { parent: async () => {}, result: async (_runtime, _call, _phase, output) => output, stopped: async () => true };
+    const runner = new PhaseRunner(inspect, { checkpoint, progress });
+    const ready = await runner.start({ preflight: { answers }, requirements: 'Plan a scoped change.' }, runtime,
+      { requirementsConfirmed: true, userMessageID: 'message-scoped' });
+    const dispatched = await runner.before(call, ready.task);
+    const trace = traceFixture();
+    trace.deliverables[0].parallel = { complete: true, reads: [], writes: ['src/cli.ts'] };
+    if (!explicitDependencies) delete trace.deliverables[0].dependsOn;
+    await runner.after(call, dispatched, reportDocument({ evidenceSummary: SUMMARY_TEXT, artifact: ARTIFACT_TEXT, ...trace }));
+    const saved = checkpoint.read(runtime.sessionID).checkpoint.data.planned[0];
+    assert.deepEqual(saved.dependsOn, []);
+    assert.deepEqual(saved.parallel, explicitDependencies ? trace.deliverables[0].parallel : undefined);
+    const restored = new PhaseRunner(inspect, { checkpoint, progress });
+    assert.deepEqual(await restored.restore(runtime), { restored: true });
+    assert.deepEqual(restored.status(runtime.sessionID).planned, runner.status(runtime.sessionID).planned);
+    assert.equal(restored.status(runtime.sessionID).phase, 'mdd-apply');
+  });
 }
 
 for (const explore of [false, true]) {

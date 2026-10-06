@@ -461,7 +461,7 @@ is spent normally, because a report nobody can state correctly is no longer only
 - Spec: `acceptance: { goal, requirements: [{ id, description, scenarios: [{ id, given, when, then }] }] }`.
 - Design: `decisions: [{ id, description, requirements: [requirementID] }]`; empty is valid when
   no relevant decision needs tracking. Requirement/scenario IDs cannot be replaced here.
-- Plan/Tasks: `deliverables: [{ id, description, path, check, scenarios, decisions?, dependsOn? }]`.
+- Plan/Tasks: `deliverables: [{ id, description, path, check, scenarios, decisions?, dependsOn?, parallel? }]`.
   Scenario references are required; optional decision/dependency lists default to empty only
   when omitted. Every held scenario and relevant decision requirement must map to a step.
   Dependencies refer to earlier steps. Paths and commands retain existing scope checks.
@@ -486,6 +486,43 @@ Verify also requires `verification: { scenarios, steps, decisions, changes, limi
   A passed outcome with missing coverage or any not-verified/deviation row blocks; an explicit
   failed outcome with complete partial coverage remains failed and visible. No extra check
   commands or user approval questions are introduced to satisfy this map.
+
+### Optional task footprints: eligibility only
+
+**Concurrency is not active yet.** Plan/Tasks may record optional footprints for future
+bounded workers; the runner still exposes one sequential phase task. This metadata grants
+neither tool permissions nor file ownership, and eligibility is not an edit-boundary fence.
+
+```json
+{
+  "dependsOn": [],
+  "parallel": {
+    "complete": true,
+    "reads": ["src/shared.ts"],
+    "writes": ["src/feature.ts", "tests/feature.test.mjs", "docs/feature.md"]
+  }
+}
+```
+
+`complete: true` attests that both arrays enumerate **every** file read/written, including
+shared outputs, tests, documentation and lockfiles. Explicit `dependsOn` must name every
+task, code and data prerequisite; use `[]` only when there are none. The existing `path`
+field stays descriptive and never substitutes for these scopes.
+
+| Metadata or evidence | Conservative outcome |
+|---|---|
+| Legacy plan, omitted `dependsOn`, missing arrays/attestation, `complete: false`, or empty Apply writes | Sequential; omitted dependencies discard parallel metadata before normalization/reconstruction. |
+| Malformed fields, duplicate/case-alias paths, traversal, absolute paths, globs or ambiguous separators | Report rejected, even without dependency opt-in. |
+| Unknown dependency, damaged completion list, or completion without its prerequisites | No candidates; never treat the claim as proof. |
+| Directory, symlink/junction, hard-link, disk case alias, or unverified filesystem parent | That item cannot join a pair; if first ready, run it sequentially. |
+
+Scopes use portable ASCII exact root-relative file paths with `/` separators, not directory
+patterns; reserved device names, trailing dots/spaces and short-name `~` aliases are rejected.
+New files/parents are allowed only below verified real ancestors. Selection preserves plan
+order, caps a batch at two, and requires completed dependencies plus no write/write or
+write/read intersection (including parent/child and case aliases). Shared reads alone are
+safe. Tests/builds/shell commands are not authorized to overlap by this metadata. Filesystem
+checks are a snapshot: future dispatch must revalidate and enforce scopes at the native boundary.
 
 `mdd_status` exposes detached `acceptance`, `decisions`, `planned` and `verification` for
 drilldown. Terminal `report` leads with the goal, recorded changes, requirement/plan match,

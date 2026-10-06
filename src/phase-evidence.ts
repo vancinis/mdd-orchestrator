@@ -1,20 +1,25 @@
 import { objectWithKeys } from './validation.js';
 import { references, shortText } from './acceptance.js';
+import { parseParallelScope } from './worker-batch.js';
+import type { ParallelScope } from './worker-batch.js';
 
-export type Deliverable = { id: string; description: string; path: string; check: string; scenarios: string[]; decisions: string[]; dependsOn: string[] };
+export type Deliverable = { id: string; description: string; path: string; check: string; scenarios: string[]; decisions: string[]; dependsOn: string[]; parallel?: ParallelScope };
 export type Check = { command: string; exit: number | null };
 
 export function deliverables(value: unknown): Deliverable[] {
   if (!Array.isArray(value) || !value.length || value.length > 32) throw new Error('Planning requires 1–32 explicit deliverables.');
   const ids = new Set<string>();
   return value.map(item => {
-    const entry = objectWithKeys(item, 'deliverable', ['id', 'description', 'path', 'check', 'scenarios', 'decisions', 'dependsOn']);
+    const entry = objectWithKeys(item, 'deliverable', ['id', 'description', 'path', 'check', 'scenarios', 'decisions', 'dependsOn', 'parallel']);
     if (typeof entry.id !== 'string' || !/^[a-zA-Z0-9_-]{1,64}$/.test(entry.id)) throw new Error(`Deliverable id ${JSON.stringify(String(entry.id).slice(0, 64))} must be a stable short identifier of 1–64 letters, digits, underscores or hyphens.`);
     if (ids.has(entry.id)) throw new Error(`Deliverable id ${entry.id} is used more than once.`);
     ids.add(entry.id);
+    const parallel = Object.hasOwn(entry, 'parallel') ? parseParallelScope(entry.parallel) : undefined;
     return { id: entry.id, description: shortText(entry.description, `description of deliverable ${entry.id}`),
       path: shortText(entry.path, `implementation target of deliverable ${entry.id}`, 400), check: shortText(entry.check, `planned check command of deliverable ${entry.id}`, 500),
-      scenarios: references(entry.scenarios, `scenarios of deliverable ${entry.id}`), decisions: references(Object.hasOwn(entry, 'decisions') ? entry.decisions : [], `decisions of deliverable ${entry.id}`, true), dependsOn: references(Object.hasOwn(entry, 'dependsOn') ? entry.dependsOn : [], `dependencies of deliverable ${entry.id}`, true) };
+      scenarios: references(entry.scenarios, `scenarios of deliverable ${entry.id}`), decisions: references(Object.hasOwn(entry, 'decisions') ? entry.decisions : [], `decisions of deliverable ${entry.id}`, true), dependsOn: references(Object.hasOwn(entry, 'dependsOn') ? entry.dependsOn : [], `dependencies of deliverable ${entry.id}`, true),
+      // An omitted dependency declaration is not an attestation, even after JSON/checkpoint replay.
+      ...(parallel && Object.hasOwn(entry, 'dependsOn') ? { parallel } : {}) };
   });
 }
 
