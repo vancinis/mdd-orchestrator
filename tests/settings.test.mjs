@@ -58,6 +58,50 @@ const invalid = [
   Object.assign(Object.create({ hidden: true }), defaultSettings()),
   JSON.parse('{"version":1,"activeProfile":"default","profiles":{"default":{}},"__proto__":{}}'),
 ];
+
+test('workers default on for absent and legacy settings without rewriting legacy bytes', t => {
+  const root = fixture(t);
+  assert.deepEqual(loadSettings(root).workers, { enabled: true });
+  const legacy = { version: 1, activeProfile: 'default', profiles: { default: {} } };
+  const text = JSON.stringify(legacy);
+  fs.writeFileSync(join(root, 'mdd.config.json'), text);
+  assert.deepEqual(parseSettings(legacy).workers, { enabled: true });
+  assert.deepEqual(loadSettings(root).workers, { enabled: true });
+  assert.equal(fs.readFileSync(join(root, 'mdd.config.json'), 'utf8'), text);
+});
+
+for (const enabled of [true, false]) {
+  test(`workers ${enabled} round trip and startup policy is detached and immutable`, t => {
+    const root = fixture(t);
+    const input = { ...defaultSettings(), workers: { enabled } };
+    const saved = saveSettings(root, input);
+    assert.deepEqual(loadSettings(root).workers, { enabled });
+    const frozen = freezeProfile(saved);
+    input.workers.enabled = !enabled;
+    saved.workers.enabled = !enabled;
+    assert.deepEqual(frozen.workers, { enabled });
+    assert.ok(Object.isFrozen(frozen.workers));
+    assert.throws(() => { frozen.workers.enabled = !enabled; }, TypeError);
+    assert.throws(() => { frozen.workers = { enabled: !enabled }; }, TypeError);
+    assert.equal(freezeProfile({ version: 1, activeProfile: 'default', profiles: { default: {} } }).workers.enabled, true);
+  });
+}
+
+for (const workers of [undefined, null, [], true, 'on', {}, { enabled: undefined },
+  ...['true', 'false', 0, 1, null, [], {}].map(enabled => ({ enabled })),
+  { enabled: true, maxWorkers: 2 }, { enabled: false, unknown: true }]) {
+  test(`workers reject invalid preference ${JSON.stringify(workers)} without replacing settings`, t => {
+    const root = fixture(t);
+    saveSettings(root, defaultSettings());
+    const path = join(root, 'mdd.config.json');
+    const before = fs.readFileSync(path, 'utf8');
+    const input = { ...defaultSettings(), workers };
+    assert.throws(() => parseSettings(input));
+    assert.throws(() => saveSettings(root, input));
+    assert.equal(fs.readFileSync(path, 'utf8'), before);
+  });
+}
+
 for (const [index, value] of invalid.entries()) {
   test(`settings reject malformed/unsafe input ${index}`, () => assert.throws(() => parseSettings(value)));
 }
@@ -135,4 +179,10 @@ test('documented JSON schema matches supported roles/tokens and the guide exampl
   }
   assert.equal(parsed.activeProfile, 'work');
   assert.deepEqual(schema.required, ['version', 'activeProfile', 'profiles']);
+  assert.deepEqual(schema.properties.workers.required, ['enabled']);
+  assert.equal(schema.properties.workers.type, 'object');
+  assert.equal(schema.properties.workers.additionalProperties, false);
+  assert.equal(schema.properties.workers.properties.enabled.type, 'boolean');
+  assert.equal(schema.properties.workers.properties.enabled.default, true);
+  assert.deepEqual(example.workers, { enabled: true });
 });

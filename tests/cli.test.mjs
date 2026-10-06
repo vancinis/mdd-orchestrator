@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
+import { defaultSettings } from '../dist/settings.js';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
@@ -125,4 +126,69 @@ test('CLI accepts UTF-8 BOM and spaces in file paths', (t) => {
   const result = invoke('--answers', temporaryFile(t, contents));
   assert.equal(result.status, 0);
   assert.equal(JSON.parse(result.stdout).score, 20);
+});
+
+function workerCLI(t) {
+  const home = mkdtempSync(join(tmpdir(), 'mdd-workers-cli-'));
+  const workspace = mkdtempSync(join(tmpdir(), 'mdd-workers-workspace-'));
+  t.after(() => {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(workspace, { recursive: true, force: true });
+  });
+  const settingsPath = join(home, 'opencode/mdd/mdd.config.json');
+  return { home, workspace, settingsPath, run: (...args) => {
+    const result = spawnSync(process.execPath, [cli, 'workers', ...args], {
+      cwd: workspace, encoding: 'utf8', timeout: 10_000,
+      env: { ...process.env, HOME: home, USERPROFILE: home, XDG_CONFIG_HOME: home },
+    });
+    assert.ifError(result.error);
+    assert.equal(result.signal, null);
+    return result;
+  } };
+}
+
+test('workers CLI status is read-only; on/off persist only the global preference', t => {
+  const { home, workspace, settingsPath, run } = workerCLI(t);
+  const status = run('status');
+  assert.equal(status.status, 0, status.stderr);
+  assert.deepEqual(JSON.parse(status.stdout), { enabled: true });
+  assert.deepEqual(readdirSync(home), []);
+  assert.equal(run('off').status, 0);
+  assert.deepEqual(JSON.parse(run('status').stdout), { enabled: false });
+  const settings = JSON.parse(readFileSync(settingsPath, 'utf8'));
+  assert.deepEqual(settings, { ...defaultSettings(), workers: { enabled: false } });
+  settings.telemetry.enabled = false;
+  settings.profiles.work = { models: { 'mdd-apply': 'provider/model' }, answers: { mode: 'interactive' } };
+  settings.activeProfile = 'work';
+  writeFileSync(settingsPath, JSON.stringify(settings));
+  const on = run('on');
+  assert.equal(on.status, 0, on.stderr);
+  assert.match(on.stdout, /Restart OpenCode/);
+  assert.match(on.stdout, /dispatch remains sequential/);
+  assert.deepEqual(JSON.parse(readFileSync(settingsPath, 'utf8')), { ...settings, workers: { enabled: true } });
+  const before = readFileSync(settingsPath, 'utf8');
+  assert.deepEqual(JSON.parse(run('status').stdout), { enabled: true });
+  assert.equal(readFileSync(settingsPath, 'utf8'), before);
+  assert.deepEqual(readdirSync(workspace), []);
+});
+
+test('workers CLI rejects invalid actions and invalid settings without writes', t => {
+  const { settingsPath, run } = workerCLI(t);
+  for (const args of [[], ['enable'], ['status', 'extra'], ['off', 'extra'], ['on', 'extra'], ['--help']]) {
+    const result = run(...args);
+    assert.equal(result.status, 2);
+    assert.equal(result.stdout, '');
+    assert.match(result.stderr, /workers status \| on \| off/);
+    assert.equal(existsSync(settingsPath), false);
+  }
+  assert.equal(run('off').status, 0);
+  const invalid = JSON.stringify({ ...defaultSettings(), workers: { enabled: 'false' } });
+  writeFileSync(settingsPath, invalid);
+  for (const action of ['status', 'on', 'off']) {
+    const result = run(action);
+    assert.equal(result.status, 2);
+    assert.equal(result.stdout, '');
+    assert.match(result.stderr, /workers.enabled must be boolean/);
+    assert.equal(readFileSync(settingsPath, 'utf8'), invalid);
+  }
 });

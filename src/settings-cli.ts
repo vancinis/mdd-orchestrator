@@ -57,6 +57,19 @@ export async function settingsCommand(args: string[], root: string, write: (text
     await runTerminalConfig(root);
     return true;
   }
+  if (command === 'workers') {
+    if (args.length !== 2 || !['status', 'on', 'off'].includes(action ?? '')) {
+      throw new ValidationError('Usage: mdd-ai workers status | on | off');
+    }
+    const settings = loadGlobalSettings();
+    if (action === 'status') write(`${JSON.stringify(settings.workers)}\n`);
+    else {
+      settings.workers.enabled = action === 'on';
+      saveGlobalSettings(settings);
+      write(`Global worker preference: ${action === 'on' ? 'enabled' : 'disabled'}. Restart OpenCode to capture it. This sets a preference only; dispatch remains sequential.\n`);
+    }
+    return true;
+  }
   if (command === 'profile') {
     if (action === 'list' && args.length === 2) {
       const settings = loadGlobalSettings();

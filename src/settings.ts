@@ -18,12 +18,15 @@ export const MODEL_ROLES = Object.freeze([
 export type ModelRole = 'orchestrator' | 'mdd-risk' | Phase;
 export type NamedProfile = { models: Partial<Record<ModelRole, string>>; answers: Partial<Answers> };
 export type EngramSettings = { endpoint: string; project?: string } | { mode: 'local'; binary: string; dataDirectory: string };
+/** Preference only; batch eligibility and dispatch are separate runtime concerns. */
+export type WorkerPolicy = Readonly<{ enabled: boolean }>;
 export type Settings = {
   version: 1;
   activeProfile: string;
   profiles: Record<string, NamedProfile>;
   engram?: EngramSettings;
   telemetry: { enabled: boolean };
+  workers: { enabled: boolean };
 };
 
 export function profileName(value: unknown): string {
@@ -44,11 +47,14 @@ export function parseModel(value: unknown): string {
 }
 
 export function defaultSettings(): Settings {
-  return { version: 1, activeProfile: 'default', profiles: { default: { models: {}, answers: {} } }, telemetry: { enabled: true } };
+  return {
+    version: 1, activeProfile: 'default', profiles: { default: { models: {}, answers: {} } },
+    telemetry: { enabled: true }, workers: { enabled: true },
+  };
 }
 
 export function parseSettings(value: unknown): Settings {
-  const input = objectWithKeys(value, 'settings', ['version', 'activeProfile', 'profiles', 'engram', 'telemetry']);
+  const input = objectWithKeys(value, 'settings', ['version', 'activeProfile', 'profiles', 'engram', 'telemetry', 'workers']);
   if (input.version !== 1) throw new ValidationError('settings.version must be 1.');
   const names = typeof input.profiles === 'object' && input.profiles !== null ? Object.keys(input.profiles) : [];
   if (!names.length || names.length > 64) throw new ValidationError('Settings require 1–64 named profiles.');
@@ -69,6 +75,11 @@ export function parseSettings(value: unknown): Settings {
     const telemetry = objectWithKeys(input.telemetry, 'telemetry', ['enabled']);
     if (typeof telemetry.enabled !== 'boolean') throw new ValidationError('telemetry.enabled must be boolean.');
     result.telemetry.enabled = telemetry.enabled;
+  }
+  if (Object.hasOwn(input, 'workers')) {
+    const workers = objectWithKeys(input.workers, 'workers', ['enabled']);
+    if (typeof workers.enabled !== 'boolean') throw new ValidationError('workers.enabled must be boolean.');
+    result.workers.enabled = workers.enabled;
   }
   if (Object.hasOwn(input, 'engram')) {
     const engram = objectWithKeys(input.engram, 'engram', ['mode', 'binary', 'dataDirectory', 'endpoint', 'project']);
@@ -118,13 +129,17 @@ export type StartupProfile = Readonly<{
   name: string;
   models: Readonly<Partial<Record<ModelRole, string>>>;
   answers: Readonly<Partial<Answers>>;
+  workers: WorkerPolicy;
 }>;
 
 /** Capture once at plugin startup. Settings edits take effect after restart. */
 export function freezeProfile(value: unknown): StartupProfile {
   const settings = parseSettings(value);
   const profile = settings.profiles[settings.activeProfile]!;
-  return Object.freeze({ name: settings.activeProfile, models: Object.freeze(profile.models), answers: Object.freeze(profile.answers) });
+  return Object.freeze({
+    name: settings.activeProfile, models: Object.freeze(profile.models), answers: Object.freeze(profile.answers),
+    workers: Object.freeze(settings.workers),
+  });
 }
 
 /** undefined deliberately delegates model selection to the native runtime. */

@@ -19,6 +19,9 @@ npm run mdd -- config
 npm run mdd -- profile list
 npm run mdd -- profile create work
 npm run mdd -- profile use default
+npm run mdd -- workers status
+npm run mdd -- workers off
+npm run mdd -- workers on
 npm run mdd -- telemetry status
 npm run mdd -- telemetry report
 npm run mdd -- telemetry off
@@ -28,12 +31,14 @@ npm run mdd -- telemetry clear
 After installation, run `node "<OpenCode root>/mdd/node_modules/my-driven-development/dist/cli.js" config`
 from any directory. Projects need no MDD package, dependencies or configuration file.
 The editor is a Spanish terminal UI. Its header shows the settings path, the active profile,
-how many models and preflight answers are set, and the memory/telemetry state. Every list is
+how many models and preflight answers are set, and the memory/telemetry/worker state. Every list is
 navigated with the arrow keys plus Enter, or by pressing the option number directly; the
 marked `❯` option is the current value, so Enter keeps it. Terminals without raw-mode support
 fall back to the same numbered list read as one line, which also accepts an option name.
 The top-level entries are **Perfiles**, **Modelos**, **Respuestas de preflight**,
-**Memoria (Engram)**, **Telemetría**, **Guardar y salir** and **Cancelar**.
+**Memoria (Engram)**, **Telemetría**, **Guardar y salir**, **Cancelar** and **Workers**.
+The English **Workers** entry is appended to preserve existing option numbers. Its toggle
+changes only the draft until **Guardar y salir** (Save); cancel or EOF discards it.
 
 Option labels are display-only Spanish; the preflight answer tokens stored in
 `mdd.config.json` and exchanged with the native question tool are unchanged. When the
@@ -80,13 +85,14 @@ active-profile existence, safe names, explicit valid ports, and a 128 KiB file l
     }
   },
   "engram": { "endpoint": "http://127.0.0.1:7437" },
-  "telemetry": { "enabled": true }
+  "telemetry": { "enabled": true },
+  "workers": { "enabled": true }
 }
 ```
 
 These model strings and answers are examples, **not automatically chosen defaults**.
 An absent file resolves in memory to an empty `default` profile, no answers/models,
-no Engram setup, and telemetry enabled. Reading never creates a settings file.
+no Engram setup, and telemetry/workers enabled. Reading never creates a settings file.
 
 | Setting | Contract |
 |---|---|
@@ -96,11 +102,28 @@ no Engram setup, and telemetry enabled. Reading never creates a settings file.
 | Profile `answers` | Optional partial/complete original five-field canonical answers. Missing fields remain missing. |
 | `engram` | Omitted means memory off. `{ endpoint }` opts into an explicit loopback service; `{ mode: 'local', binary, dataDirectory }` opts into a managed installed binary. Legacy `project` is deprecated and ignored with a runtime notice. No secrets or session IDs in settings. |
 | `telemetry` | Optional `{ "enabled": boolean }`, default enabled. No external destination. |
+| `workers` | Optional `{ "enabled": boolean }`, default enabled when the whole field is omitted. Global, not per profile. If present, `enabled` is required; strings, numbers, null, arrays, and unknown keys are rejected. |
 
-Capture active profile/model mappings **once at runtime startup** with `freezeProfile`.
+Capture active profile/model mappings and worker preference **once at runtime startup** with `freezeProfile`.
 Restart after changing them; never replace an in-flight workflow's answers. General
 Engram memory stays independent of artifacts, including `none`. The adapter verifies the
 exact registered runtime session/project/directory; it never fabricates a session.
+
+## Worker preference (configuration only)
+
+Use `mdd-ai workers status` to read `{ "enabled": true }` or `{ "enabled": false }`
+without writing settings or workspace files. `mdd-ai workers on` and `mdd-ai workers off`
+save the global preference immediately, preserving other validated settings. The same
+toggle is available in `mdd-ai config`, where persistence requires Save. Restart OpenCode
+after saving: `freezeProfile` exposes a detached, immutable `workers` policy, so an existing
+startup snapshot does not change when the settings file changes.
+
+Existing version-1 files without `workers` remain valid and default to enabled in memory;
+reads never rewrite legacy files. An explicit save materializes the effective preference.
+**This unit does not enable concurrent execution.** Phase dispatch and shell commands,
+tests, and builds remain sequential. Run-level policy capture, eligibility checks, bounded
+native edits, and durable batch recovery belong to later execution units; enabling this
+preference grants no additional tool or file authority.
 
 ## Optional memory
 
@@ -154,13 +177,16 @@ read-only setup checks. See [installation and prerequisites](setup.md).
 ```typescript
 type ModelRole = 'orchestrator' | Phase;
 type NamedProfile = { models: Partial<Record<ModelRole, string>>; answers: Partial<Answers> };
+type WorkerPolicy = Readonly<{ enabled: boolean }>;
 type Settings = {
   version: 1; activeProfile: string; profiles: Record<string, NamedProfile>;
    engram?: { endpoint: string; project?: string } | { mode: 'local'; binary: string; dataDirectory: string }; telemetry: { enabled: boolean };
+  workers: { enabled: boolean };
 };
 type StartupProfile = Readonly<{
   name: string; models: Readonly<Partial<Record<ModelRole, string>>>;
   answers: Readonly<Partial<Answers>>;
+  workers: WorkerPolicy;
 }>;
 function defaultSettings(): Settings;
 function parseSettings(value: unknown): Settings;
@@ -174,7 +200,7 @@ function parseModel(value: unknown): string;
 
 `MODEL_ROLES` is the readonly nine-role list. The native config hook sets agent
 models only when `modelFor` returns a string. `undefined` leaves native selection intact.
-Settings parsing detaches data; the startup profile and its nested maps are frozen.
+Settings parsing detaches data; the startup profile, nested maps, and worker policy are frozen.
 
 The plugin does not modify the default agent, top-level model, other agents, or permissions.
 At run initialization all nine MDD actors must exist in their expected modes. Resolved

@@ -26,6 +26,7 @@ const MENU: readonly Choice[] = [
   { value: 'telemetria', label: 'Telemetría', hint: 'Métricas locales, nunca por red' },
   { value: 'guardar', label: 'Guardar y salir', hint: 'Escribe los cambios y cierra' },
   { value: 'cancelar', label: 'Cancelar', hint: 'Sale sin escribir nada' },
+  { value: 'workers', label: 'Workers', hint: 'Global parallel-worker preference; dispatch remains sequential' },
 ];
 const PROFILE_MENU: readonly Choice[] = [
   { value: 'crear', label: 'Crear perfil', hint: 'Empieza desde los valores por defecto' },
@@ -55,6 +56,7 @@ function overview(draft: Settings): string {
     ['Preflight', `${answered}/${ANSWER_FIELDS.length} respondidas; las vacías se preguntan en cada run`],
     ['Memoria', memoryLabel(draft)],
     ['Telemetría', draft.telemetry.enabled ? 'activada (eventos locales del workspace)' : 'apagada'],
+    ['Workers', `${draft.workers.enabled ? 'enabled' : 'disabled'} (preference only; dispatch remains sequential)`],
   ])}${note('Nada se escribe hasta elegir «Guardar y salir».')}`;
 }
 
@@ -187,6 +189,11 @@ export async function runConfigUI(root: string, io: ConfigIO, dependencies: { mo
             { value: 'on', label: 'Activada', hint: 'Eventos de ciclo de vida en el workspace, sin red' },
             { value: 'off', label: 'Apagada', hint: 'No se registra ningún evento' },
           ], { initial: draft.telemetry.enabled ? 0 : 1 }) === 'on';
+        } else if (action === 'workers') {
+          draft.workers.enabled = await choose(io, 'Parallel-worker preference', [
+            { value: 'on', label: 'Enabled', hint: 'Allow eligible independent workers once dispatch is supported' },
+            { value: 'off', label: 'Disabled', hint: 'Keep workers sequential' },
+          ], { initial: draft.workers.enabled ? 0 : 1 }) === 'on';
         } else if (action === 'guardar') {
           saveGlobalSettings(draft);
           io.write('\n  Listo: configuración global guardada.\n  Reiniciá OpenCode para cargar el perfil en cualquier proyecto.\n');

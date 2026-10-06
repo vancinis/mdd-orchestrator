@@ -39,6 +39,13 @@
         }
       }]
     },
+    "workers": {
+      "description": "Global parallel-worker preference, default on when omitted. Captured at startup; dispatch remains sequential until batch execution is supported.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": { "enabled": { "type": "boolean", "default": true } }
+    },
     "telemetry": {
       "type": "object",
       "additionalProperties": false,

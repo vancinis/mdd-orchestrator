@@ -183,6 +183,35 @@ test('nonTTY terminal and CLI reject immediately without reading input or writin
   assert.deepEqual(readdirSync(root), []);
 });
 
+test('workers editor defaults on and persists the global toggle only on Save', async t => {
+  const root = fixture(t);
+  const off = scripted(['workers', 'off', '6']);
+  assert.equal(await runConfigUI(root, off.io, noCatalog), 'saved');
+  assert.equal(loadSettings(root).workers.enabled, false);
+  assert.match(off.output.join(''), /Workers.*enabled/);
+  assert.match(off.output.join(''), /dispatch remains sequential/);
+  const keep = scripted(['workers', '', '6']);
+  assert.equal(await runConfigUI(root, keep.io, noCatalog), 'saved');
+  assert.equal(loadSettings(root).workers.enabled, false);
+  assert.match(keep.output.join(''), /❯ 2 {2}Disabled/);
+  assert.equal(await runConfigUI(root, scripted(['workers', 'on', '6']).io, noCatalog), 'saved');
+  assert.equal(loadSettings(root).workers.enabled, true);
+});
+
+test('workers draft edits are discarded on cancel and EOF, preserving existing bytes', async t => {
+  const root = fixture(t);
+  for (const exit of [['7'], []]) {
+    assert.equal(await runConfigUI(root, scripted(['workers', 'off', ...exit]).io, noCatalog), 'cancelled');
+    assert.deepEqual(readdirSync(root), []);
+  }
+  await runConfigUI(root, scripted(['6']).io, noCatalog);
+  const before = readFileSync(join(root, 'mdd.config.json'), 'utf8');
+  for (const exit of [['7'], []]) {
+    assert.equal(await runConfigUI(root, scripted(['workers', 'off', ...exit]).io, noCatalog), 'cancelled');
+    assert.equal(readFileSync(join(root, 'mdd.config.json'), 'utf8'), before);
+  }
+});
+
 test('isolated CLI smoke: profile create/use/list and telemetry on/off/status/clear', t => {
   const root = fixture(t);
   assert.equal(invoke(root, 'profile', 'list').stdout, '* default\n');
