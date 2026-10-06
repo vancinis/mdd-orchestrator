@@ -64,6 +64,18 @@ test('init installs only owned assets, preserves user files and is byte-idempote
   const installed = snapshot(root); const second = initProject(root);
   assert.equal(second.created, 0); assert.equal(second.unchanged, first.created); assert.deepEqual(snapshot(root), installed);
 });
+test('regression: clarification installed coordinator retains Spanish tool prose and English artifact boundary', t => {
+  const root = fixture(t);
+  initProject(root);
+  const installed = fs.readFileSync(join(root, 'agents/mdd-orchestrator.md'), 'utf8');
+  assert.equal(installed, fs.readFileSync('assets/opencode/agents/mdd-orchestrator.md', 'utf8'));
+  assert.match(installed, /User-visible question text, option labels and descriptions must be Spanish/);
+  assert.match(installed, /including inside mdd_prepare_advance and native question tool arguments/);
+  assert.match(installed, /Technical artifacts, phase task prompts, phase reports and protocol keys remain English/);
+  const actor = fs.readFileSync(join(root, 'agents/mdd-plan.md'), 'utf8');
+  assert.match(actor, /Write your report in English/);
+});
+
 test('TUI registration merges existing config and preserves attention and plugin options', t => {
   const root = fixture(t);
   const original = { theme: { name: 'smoke' }, attention: { sound: true, notifications: false }, plugins: ['other', { package: 'local.tsx', options: { flag: true } }] };

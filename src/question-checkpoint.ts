@@ -26,26 +26,26 @@ export type QuestionRecord = {
 };
 
 const PHASES = ['mdd-explore', 'mdd-plan', 'mdd-propose', 'mdd-spec', 'mdd-design', 'mdd-tasks', 'mdd-apply', 'mdd-verify'];
-/** Same rule as the runtime's boundedText: JSON stores control characters losslessly. */
-function text(value: unknown, max: number): value is string {
-  return typeof value === 'string' && !!value.trim() && Buffer.byteLength(value) <= max;
+/** Clarification prose is nonempty, with size checked on the whole record, not each field. */
+function text(value: unknown, max?: number): value is string {
+  return typeof value === 'string' && !!value.trim() && (max === undefined || Buffer.byteLength(value) <= max);
 }
 function array(value: unknown, max: number): unknown[] {
   if (!Array.isArray(value) || value.length > max) throw new ValidationError('Invalid native question record.');
   return value;
 }
-function envelope(value: unknown): QuestionEnvelope {
+function envelope(value: unknown, isClarification: boolean): QuestionEnvelope {
   const item = objectWithKeys(value, 'question envelope', ['questions']);
   const questions = array(item.questions, 5);
   if (!questions.length) throw new ValidationError('Empty native question envelope.');
   for (const raw of questions) {
     const question = objectWithKeys(raw, 'native question', ['header', 'question', 'multiple', 'options']);
-    if (!text(question.header, 100) || !text(question.question, 4000) || question.multiple !== false) throw new ValidationError('Invalid native question.');
+    if (!text(question.header, 100) || !text(question.question, isClarification ? undefined : 4000) || question.multiple !== false) throw new ValidationError('Invalid native question.');
     const options = array(question.options, 8);
     if (!options.length) throw new ValidationError('Native question needs choices.');
     const labels = options.map(rawOption => {
       const option = objectWithKeys(rawOption, 'native question option', ['label', 'description']);
-      if (!text(option.label, 120) || !text(option.description, 500)) throw new ValidationError('Invalid native question choice.');
+      if (!text(option.label, isClarification ? undefined : 120) || !text(option.description, isClarification ? undefined : 500)) throw new ValidationError('Invalid native question choice.');
       return option.label;
     });
     if (new Set(labels).size !== labels.length) throw new ValidationError('Duplicate native question choice.');
@@ -54,12 +54,12 @@ function envelope(value: unknown): QuestionEnvelope {
 }
 function clarification(value: unknown): void {
   const item = objectWithKeys(value, 'clarification', ['question', 'options', 'deferrable']);
-  if (!text(item.question, 1000) || (item.deferrable !== undefined && typeof item.deferrable !== 'boolean')) throw new ValidationError('Invalid clarification.');
+  if (!text(item.question) || (item.deferrable !== undefined && typeof item.deferrable !== 'boolean')) throw new ValidationError('Invalid clarification.');
   const options = array(item.options, 6);
   if (!options.length) throw new ValidationError('Missing clarification choices.');
   for (const raw of options) {
     const option = objectWithKeys(raw, 'clarification choice', ['label', 'description', 'recommended']);
-    if (!text(option.label, 100) || !text(option.description, 500) || (option.recommended !== undefined && typeof option.recommended !== 'boolean')) throw new ValidationError('Invalid clarification choice.');
+    if (!text(option.label) || !text(option.description) || (option.recommended !== undefined && typeof option.recommended !== 'boolean')) throw new ValidationError('Invalid clarification choice.');
   }
 }
 
@@ -78,7 +78,7 @@ export function validateQuestionRecord(value: unknown): QuestionRecord {
     if (!text(context.label, 200) || !text(context.content, 96000)) throw new ValidationError('Invalid native question context.');
   }
   if (!['preflight', 'approval', 'change', 'clarification'].includes(String(slot.kind))) throw new ValidationError('Invalid native question kind.');
-  const args = envelope(slot.args);
+  const args = envelope(slot.args, slot.kind === 'clarification');
   if (slot.phase !== undefined && !PHASES.includes(String(slot.phase))) throw new ValidationError('Invalid question phase.');
   if ((slot.kind === 'approval' || slot.kind === 'clarification') !== (slot.phase !== undefined) ||
       (slot.kind === 'change') !== (slot.requirements !== undefined) ||
@@ -100,7 +100,7 @@ export function validateQuestionRecord(value: unknown): QuestionRecord {
   if (item.state === 'answered') {
     const answer = array(item.answer, 5);
     if (answer.length !== args.questions.length || answer.some((selection, index) =>
-      !Array.isArray(selection) || selection.length !== 1 || !text(selection[0], 12000) ||
+      !Array.isArray(selection) || selection.length !== 1 || !text(selection[0], slot.kind === 'clarification' ? undefined : 12000) ||
       (slot.kind !== 'clarification' && !args.questions[index]!.options.some(option => option.label === selection[0])))) throw new ValidationError('Invalid native answer.');
   } else if (item.answer !== undefined) throw new ValidationError('Historical answer cannot authorize another question.');
   if (item.retiredCalls !== undefined) {
@@ -110,7 +110,7 @@ export function validateQuestionRecord(value: unknown): QuestionRecord {
   for (const raw of [...array(item.clarifications, 8), ...array(item.deferred, 8)]) clarification(raw);
   for (const raw of array(item.clarificationAnswers, 16)) {
     const answer = objectWithKeys(raw, 'clarification answer', ['question', 'answer', 'phase', 'disposition']);
-    if (!text(answer.question, 1000) || !text(answer.answer, 12000) || !PHASES.includes(String(answer.phase)) ||
+    if (!text(answer.question) || !text(answer.answer) || !PHASES.includes(String(answer.phase)) ||
         !['answered', 'deferred'].includes(String(answer.disposition))) throw new ValidationError('Invalid clarification answer.');
   }
   return structuredClone(value) as QuestionRecord;

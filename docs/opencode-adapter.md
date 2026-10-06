@@ -143,6 +143,23 @@ never does this while a phase task is in flight or an MDD question is pending, a
 few Spanish lines naming `file:line`, before and after. Native edit permissions still apply, and
 because no run is recorded there is no coverage, ledger row or `mdd_pr_body` evidence for it.
 
+### Complete Spanish clarification conversations
+
+The coordinator always converses in Spanish, including question text, option labels and
+descriptions embedded in `mdd_prepare_advance` or native question arguments. Protocol keys,
+technical artifacts and phase reports remain English; native user text is preserved verbatim.
+
+Clarification questions, option labels/descriptions and free-text answers have no individual
+prose byte ceilings. The adapter carries the complete question and answer in context content
+under the stable `Clarification` label, including deferred answers and their unresolved status.
+Durable question records and reconstructed phase prompts preserve those strings without truncation.
+Clarification answers do not authorize a phase: approval is still a separate native interaction.
+
+Nonempty string validation, choice counts, unique/reserved labels, exact native output matching
+and parent/call correlation still apply. Aggregate safety bounds also remain: the question record
+is at most 160000 bytes, and the combined phase handoff at most 96000 bytes. Oversized payloads
+fail explicitly rather than being shortened or treated as a reason to silently re-ask.
+
 ### Bootstrap the actual parent
 
 Only when memory is enabled, MDD checks health and `GET /project/current?cwd=<native-root>`.

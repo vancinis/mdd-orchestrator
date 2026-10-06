@@ -174,11 +174,28 @@ test('review questions precede approval and retain recommended, delegated, defer
   assert.deepEqual(f.gate.status(runtime.sessionID).pendingClarifications.map(item => item.question), ['Which date format?']);
   assert.equal(f.contributions.length, 4);
   assert.match(f.contributions[1].content, /unresolved.*Do not assume/);
-  assert.deepEqual(f.contributions[3], { label: 'Clarification: What copy?', content: 'Answer: Use this exact custom wording' });
+  assert.deepEqual(f.contributions[3], { label: 'Clarification', content: 'Question: What copy?\nAnswer: Use this exact custom wording' });
   assert.equal(f.gate.status(runtime.sessionID).question.questions[0].header, 'Aprobación');
   assert.equal(f.workflow().nextAction().kind, 'approve');
   await f.answer([[APPROVAL_LABELS.proceed]]);
   assert.equal(f.workflow().nextAction().kind, 'execute');
+});
+
+test('regression: clarification prose still requires nonempty strings and bounded choice counts', async t => {
+  const f = await fixture(t, { ...answers, mode: 'interactive' });
+  await f.start(); f.pass();
+  const base = { question: '¿Qué formato?', options: [{ label: 'ISO', description: 'Usar fechas ISO.' }] };
+  for (const value of ['', '  ', null, 42]) {
+    assert.throws(() => f.gate.prepareAdvance({ questions: [{ ...base, question: value }] }, runtime));
+    for (const key of ['label', 'description']) {
+      assert.throws(() => f.gate.prepareAdvance({ questions: [{ ...base, options: [{ ...base.options[0], [key]: value }] }] }, runtime));
+    }
+  }
+  for (const options of [[], Array(7).fill(base.options[0])]) {
+    assert.throws(() => f.gate.prepareAdvance({ questions: [{ ...base, options }] }, runtime));
+  }
+  assert.throws(() => f.gate.prepareAdvance({ questions: Array(9).fill(base) }, runtime));
+  assert.equal(f.gate.status(runtime.sessionID).state, 'review-ready');
 });
 
 test('deferred clarification is unresolved through approval and returns after the next phase, not immediately', async t => {

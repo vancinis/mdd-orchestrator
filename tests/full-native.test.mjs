@@ -754,6 +754,48 @@ for (const route of ['low', 'high']) for (const store of ['none', 'openspec']) f
   });
 }
 
+for (const [name, question, option, freeText] of [
+  ['question over the context-label budget', '¿Qué comportamiento necesitás? '.repeat(10), { label: 'Conservar', description: 'Conservar el comportamiento.' }],
+  ['multibyte question and selected option beyond prose ceilings', '¿Qué comportamiento necesitás? '.repeat(150),
+    { label: 'Conservar la configuración íntegra. '.repeat(400), description: 'Mantener el comportamiento actual. '.repeat(20), recommended: true }],
+  ['multibyte free-text answer beyond 12000 bytes', '¿Qué texto necesitás?', { label: 'Breve', description: 'Usar texto breve.' }, 'Necesito la configuración íntegra. '.repeat(400)],
+]) {
+  test(`regression: clarification real runner preserves ${name} through restart and dispatch`, async t => {
+    const f = await fixture(t, { mode: 'interactive', memoryEnabled: false });
+    await f.phase();
+    await f.hooks.tool.mdd_revisit.execute({}, f.context);
+    const prepared = JSON.parse(await f.hooks.tool.mdd_prepare_advance.execute({ questions: [{ question, options: [option] }] }, f.context));
+    assert.ok(prepared.question.questions[0].question.startsWith(question));
+    const answer = freeText ?? `${option.label}${option.recommended ? ' (Recomendada)' : ''}`;
+    await f.answer(answer);
+    const current = await f.status();
+    assert.equal(current.state, 'question-ready');
+    assert.equal(current.workflow.nextAction.kind, 'approve', 'clarification is not phase consent');
+    assert.equal(current.clarificationAnswers[0].question, question);
+    assert.equal(current.clarificationAnswers[0].answer, answer);
+    const questions = new QuestionCheckpointStore(f.root);
+    assert.equal(questions.read(f.runtime.sessionID).clarificationAnswers[0].answer, answer);
+    await f.answer('Continuar');
+    assert.equal(questions.read(f.runtime.sessionID).state, 'settled');
+    const checkpoint = new CheckpointStore(f.root).read(f.runtime.sessionID).checkpoint;
+    assert.deepEqual(checkpoint.data.context.at(-1), { label: 'Clarification', content: `Question: ${question}\nAnswer: ${answer}`, source: 'coordinator' });
+    const resumed = await plugin(f.input);
+    const ready = JSON.parse(await resumed.tool.mdd_status.execute({ detail: 'full' }, f.context));
+    assert.equal(ready.state, 'ready');
+    const args = structuredClone(ready.task);
+    const call = { sessionID: f.runtime.sessionID, callID: 'long-clarification-dispatch', tool: 'task' };
+    f.parent[1].parts = [{ type: 'tool', tool: 'task', callID: call.callID, state: { status: 'running', input: structuredClone(args) } }];
+    await resumed['tool.execute.before'](call, { args });
+    assert.ok(args.prompt.includes(JSON.stringify(`Question: ${question}\nAnswer: ${answer}`)), 'full content reaches the reconstructed native phase');
+    assert.match(args.prompt, /Report in English — summary, artifact, concerns and data/);
+  });
+}
+
+test('regression: clarification preparation tool requires Spanish user-visible fields', async t => {
+  const f = await fixture(t, { memoryEnabled: false });
+  assert.match(f.hooks.tool.mdd_prepare_advance.description, /question text, option labels and descriptions in Spanish/);
+});
+
 test('interactive review exposes expanded detail and carries clarification choices into the next actor', async t => {
   const f = await fixture(t, { mode: 'interactive', summary: 'low', store: 'none', memoryEnabled: false });
   await f.phase();
@@ -776,8 +818,8 @@ test('interactive review exposes expanded detail and carries clarification choic
   assert.equal((await f.status()).workflow.nextAction.kind, 'approve');
   await f.answer('Continuar');
   await f.phase();
-  assert.match(f.delivered(), /Clarification: Which date format\?/);
-  assert.match(f.delivered(), /Clarification: Which retry strategy\?/);
+  assert.match(f.delivered(), /Question: Which date format\?/);
+  assert.match(f.delivered(), /Question: Which retry strategy\?/);
 });
 
 for (const fault of [{ noChecks: true }, { coverageFault: 'missing' }]) {

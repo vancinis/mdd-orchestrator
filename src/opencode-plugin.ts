@@ -1022,7 +1022,7 @@ const plugin: Plugin = async input => {
         },
       }),
       mdd_prepare_advance: tool({
-        description: 'After presenting the phase result, submit all necessary clarification questions before offering phase approval. Pass [] only when none remain. Each question offers agent delegation, optional deferral, recommended choices and free text. Also resumes a paused review without approving it.',
+        description: 'After presenting the phase result, submit all necessary clarification questions before offering phase approval. Write question text, option labels and descriptions in Spanish: these tool arguments are shown to the user, unlike English protocol keys and technical artifacts. Preserve complete prose; do not shorten or re-ask to fit individual text limits. Pass [] only when none remain. Each question offers agent delegation, optional deferral, recommended choices and free text. Also resumes a paused review without approving it.',
         args: { questions: tool.schema.array(tool.schema.object({
           question: tool.schema.string().min(1),
           options: tool.schema.array(tool.schema.object({ label: tool.schema.string().min(1), description: tool.schema.string().min(1), recommended: tool.schema.boolean().optional() })).min(1).max(6),
