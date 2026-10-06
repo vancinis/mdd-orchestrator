@@ -127,10 +127,18 @@ test('assets: the coordinator asks approval natively, delegates fallback and dra
 // MDD asks its questions in Spanish and its actors answer in English, so the coordinator sits on
 // the seam. Leaving that unsaid is how a Spanish installation kept reporting its results in the
 // language of the subagent that happened to produce them.
+test('regression: clarification shipped coordinator requires Spanish visible tool prose and English artifacts', () => {
+  const text = fs.readFileSync('assets/opencode/agents/mdd-orchestrator.md', 'utf8');
+  assert.match(text, /User-visible question text, option labels and descriptions must be Spanish/);
+  assert.match(text, /including inside mdd_prepare_advance and native question tool arguments/);
+  assert.match(text, /Technical artifacts, phase task prompts, phase reports and protocol keys remain English/);
+  assert.doesNotMatch(text, /tool\narguments and tool payloads are English/);
+});
+
 test('assets: the coordinator writes to the user in Spanish and keeps the protocol in English', () => {
   const text = fs.readFileSync('assets/opencode/agents/mdd-orchestrator.md', 'utf8');
   assert.match(text, /Write to the user in Spanish, always/);
-  assert.match(text, /phase task prompts, phase reports, tool\narguments and tool payloads are English/);
+  assert.match(text, /Technical artifacts, phase task prompts, phase reports and protocol keys remain English/);
   assert.match(text, /translate its prose into Spanish and keep\nits structure exactly/);
   assert.match(text, /quoted verbatim and never translated/);
 });

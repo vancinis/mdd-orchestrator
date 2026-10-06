@@ -364,6 +364,12 @@ function mergeChangedFiles(held: readonly ChangedFile[], added: readonly Changed
   return [...byPath.values()].slice(-CHANGED_LIST_MAX);
 }
 
+/** Clarification prose has no individual byte ceiling; composed payloads retain their bounds. */
+export function nonemptyText(value: unknown, label: string): string {
+  if (typeof value !== 'string' || !value.trim()) throw new ValidationError(`${label} must be nonempty text.`);
+  return value;
+}
+
 export function boundedText(value: unknown, label: string, max: number): string {
   if (typeof value !== 'string' || !value.trim() || Buffer.byteLength(value) > max) {
     throw new ValidationError(`${label} must be nonempty text of at most ${max} bytes.`);
