@@ -3,11 +3,12 @@ import fs from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { recordTelemetry, telemetryStatus, clearTelemetry, telemetryReport, RETENTION_MS } from '../dist/telemetry.js';
-import { defaultSettings } from '../dist/settings.js';
+import { recordTelemetry, telemetryStatus, clearTelemetry, telemetryReport, telemetryTotals, RETENTION_MS } from '../dist/telemetry.js';
+import { defaultSettings, MODEL_ROLES } from '../dist/settings.js';
 import { saveGlobalSettings } from '../dist/global-settings.js';
 import { isolateHome } from './adapter-fixture.mjs';
 import { installationPaths } from '../dist/installation-paths.js';
+import { PHASES } from '../dist/policy.js';
 
 const now = 1800000000000;
 function fixture(t) {
@@ -82,6 +83,37 @@ test('telemetry validates all allowlists, bounded integers, timestamp, and unkno
   fs.writeFileSync(installationPaths().settingsPath, '{bad');
   assert.deepEqual(recordTelemetry(root, event(), now), { ok: false, diagnostic: 'telemetry-unavailable' });
   assert.equal(fs.existsSync(log(root)), false);
+});
+
+test('standalone security is not a telemetry phase and creates no log or rollup', t => {
+  const root = fixture(t);
+  assert.deepEqual(recordTelemetry(root, { ...event(), phase: 'mdd-security' }, now),
+    { ok: false, diagnostic: 'invalid-event' });
+  assert.deepEqual(fs.readdirSync(root), []);
+});
+
+test('rejecting standalone phases preserves every valid phase event and readable rollup', t => {
+  const root = fixture(t);
+  for (const phase of PHASES) {
+    assert.equal(recordTelemetry(root, { ...event(), phase }, now).ok, true);
+  }
+  const beforeLog = fs.readFileSync(log(root), 'utf8');
+  const beforeRollup = fs.readFileSync(rollupFile(root), 'utf8');
+  for (const phase of MODEL_ROLES.filter(role => !PHASES.includes(role))) {
+    assert.deepEqual(recordTelemetry(root, { ...event(), phase }, now),
+      { ok: false, diagnostic: 'invalid-event' }, phase);
+    assert.equal(fs.readFileSync(log(root), 'utf8'), beforeLog);
+    assert.equal(fs.readFileSync(rollupFile(root), 'utf8'), beforeRollup);
+  }
+  assert.deepEqual(telemetryStatus(root, now),
+    { ok: true, enabled: true, count: PHASES.length, retentionDays: 30 });
+  const totals = telemetryTotals(root);
+  assert.deepEqual(totals, rollupOf(root));
+  assert.equal(totals.events, PHASES.length);
+  for (const phase of PHASES) assert.equal(totals.phases[phase].passed, 1);
+  assert.equal(telemetryReport(root, now).ok, true);
+  assert.equal(recordTelemetry(root, event(), now).rollup, undefined);
+  assert.equal(telemetryTotals(root).events, PHASES.length + 1);
 });
 
 test('malformed log is not overwritten; errors never expose stored data', t => {

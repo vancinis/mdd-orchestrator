@@ -113,7 +113,8 @@ function parseEvent(value: unknown): TelemetryEvent {
   const result: TelemetryEvent = { timestamp: input.timestamp as number, event: input.event as TelemetryEvent['event'] };
   if (input.executor !== undefined) result.executor = input.executor as NonNullable<TelemetryEvent['executor']>;
   if (Object.hasOwn(input, 'phase')) {
-    if (!MODEL_ROLES.includes(input.phase as Phase) || input.phase === 'orchestrator') throw new ValidationError('Invalid phase.');
+    // Standalone model roles are not phases; admission must match the rollup's phase domain.
+    if (!PHASES.includes(input.phase as Phase)) throw new ValidationError('Invalid phase.');
     result.phase = input.phase as Phase;
   }
   if (Object.hasOwn(input, 'duration')) {
