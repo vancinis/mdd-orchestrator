@@ -6,6 +6,35 @@ import { tmpdir } from 'node:os';
 import { MDD_ASSETS, MDD_PACKAGED_ASSETS } from '../dist/project-assets.js';
 import { phaseName } from '../dist/phase-assets.js';
 
+for (const role of ['plan', 'tasks']) {
+  test(`assets: ${role} sizes dependency-ordered deliverables for fresh Apply actors`, () => {
+    const text = fs.readFileSync(`assets/opencode/agents/mdd-${role}.md`, 'utf8');
+    assert.match(text, /1–32 dependency-ordered, bounded coherent deliverables/);
+    assert.match(text, /fresh Apply actor/);
+    assert.match(text, /own checks and handoff/);
+    assert.match(text, /line count is not a hard stop or arbitrary cap/);
+    assert.match(text, /single deliverable remains too large/);
+  });
+}
+
+test('assets: Apply completes only its assignment and reports genuine blockers without a diff ceiling', () => {
+  const text = fs.readFileSync('assets/opencode/agents/mdd-apply.md', 'utf8');
+  assert.match(text, /completed=\[assignedStepID\]/);
+  assert.match(text, /Never stop the whole feature just because its total diff is large/);
+  assert.match(text, /missing decision, failed checks, environment failure or uncertain writes/);
+  assert.match(text, /Never silently add scope or task IDs/);
+  assert.match(text, /preserved filesystem progress/);
+});
+
+test('assets: coordinator follows durable same-phase success without speculative dispatch', () => {
+  const text = fs.readFileSync('assets/opencode/agents/mdd-orchestrator.md', 'utf8');
+  assert.match(text, /durable success.*same-phase Apply nextAction/s);
+  assert.match(text, /no per-batch approval/);
+  assert.match(text, /Never dispatch speculatively/);
+  assert.match(text, /Verify checks the full plan after the final batch/);
+  assert.ok(Buffer.byteLength(text) <= 16000);
+});
+
 // Capability is the user's native decision, not MDD's. No packaged agent may ship its own
 // permission map: a phase that cannot act is exactly what made the workflow unusable.
 for (const role of ['explore', 'propose', 'spec', 'design', 'tasks', 'apply', 'verify']) {

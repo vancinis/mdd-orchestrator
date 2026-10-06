@@ -95,9 +95,37 @@ within the approved Apply phase need no additional approval. Native edit/shell c
   Inspect partial changes and request explicit recovery; never automatically retry substantive work.
   Malformed completed reports may still be restated without starting a writer.
 
-Plans remain limited to 32 deliverables. There is no changed-line controller: a huge individual
-deliverable or an external provider interruption can still exceed an actor's capacity. Contract
-tests cover chaining and recovery; this does not claim model-backed real-host execution.
+Plan and Tasks split large requests into **1–32 bounded coherent deliverables**, ordered by
+dependencies. Each must fit a fresh Apply actor with scoped files, its own checks and a handoff;
+keep tests/docs with the behavior, not separate file-type slices. Size by implementation and
+context risk, not an arbitrary line cap. If one deliverable still cannot be bounded, report that
+unresolved limit honestly rather than dropping scope or stretching the contract.
+
+Apply finishes only its assignment, preserves filesystem progress and reports actual checks,
+skips and dependency assumptions for the next actor. A large total diff alone is not a stopping
+condition. Genuine missing decisions, failed checks, environment failures or uncertain writes
+block explicitly; the worker never silently expands scope or invents task IDs. There is no
+changed-line controller: an enormous individual assignment, context/provider limits or an external
+interruption can still stop an actor. Final Verify always assesses the **full plan**.
+
+#### Reproduce the batch execution evidence
+
+After building, run `node tests/apply-batches-host-smoke.mjs`. It requires no credentials, ambient
+session/service, network provider or additional installs. It uses private HOME/config/data/temp
+directories and checks for ancestor configuration before launching anything. It never probes or
+reuses a user-running host. It starts only its own loopback host/provider when safe admission and
+the installed V2 2.0.22 executable are available; otherwise it reports `unavailable`, not PASS.
+
+| Evidence | What it establishes | What it does not establish |
+|---|---|---|
+| Deterministic transport smoke | Real motor, durable checkpoints, checked files/commands, exact next actions and safe failed/malformed completion fences; host inspection and child identities are test doubles. | Native host behavior or model quality. |
+| Native-host branch | When exercised, real foreground child identities, automatic Plan → Apply → Apply → Verify, preserved files and no second writer after failed/ambiguous completion, with a local scripted model and fixture-only workload tool. | External paid-model execution, arbitrary workloads or interactive permission/UI behavior. |
+
+In the T2 verification environment, an ancestor `.opencode` directory prevented safe native-host
+admission. The native execution branch remains unverified; deterministic PASS must not be read
+as native-host PASS. Failed and malformed completion scenarios are distinct from ambiguous
+artifact/checkpoint transport writes, which the motor regressions cover separately. Paid-model
+end-to-end execution remains pending.
 
 ### V2 translation boundary
 

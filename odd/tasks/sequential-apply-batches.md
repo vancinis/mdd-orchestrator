@@ -4,7 +4,7 @@ Implement one bounded planned deliverable per fresh Apply actor, automatically a
 
 ## Problem and evidence
 
-Apply currently receives the whole plan; completion IDs are discarded and a passed Apply advances directly to Verify. No changed-line ceiling was found. The cause of the reported 2,600-line interruption remains unproven. Repeated Apply artifacts, evidence aggregation and restart correlation need batch-aware handling.
+Before T1, Apply received the whole plan; completion IDs were discarded and a passed Apply advanced directly to Verify. No changed-line ceiling was found. The cause of the reported 2,600-line interruption remains unproven. T1 implements batch-aware artifacts, evidence aggregation and restart correlation.
 
 ## Scope and constraints
 
@@ -21,15 +21,15 @@ Apply currently receives the whole plan; completion IDs are discarded and a pass
 - Branch: `feat-apply-improvements`; initial reviewed boundary: `57b0857c9374204dd2ddfc745f62b229107a5f10`.
 - Strategy: `ask-on-risk`, resolved by user: `stacked-to-main` (future dependent PR slices directed to main).
 - Forecast: approximately 1,100–1,650 authored changed lines, mostly regression tests; generated output excluded.
-- Running authored count: 851 for T1, excluding this progress document. No PRs created; slice boundaries follow work-unit commits.
-- RDD: on, global source. Native risk and candidate consent remain provider-owned.
+- Running authored count: 1,460 (T1: 851; T2: 609), excluding this progress document. No PRs created; slice boundaries follow work-unit commits.
+- RDD: on, global source. User explicitly deferred review until later and authorized continuing T2. Preserve the existing T1 transaction without approval, decline, abandonment or mode changes; do not retry it automatically. T2 is a separate implementation work unit with ordinary functional checks.
 - TDD: no configured mode found; default applicable test-first policy. Runner: Node v26.9.0, `npm run build` then Node test runner.
 - Engram mirror: `odd/sequential-apply-batches/tasks` in runtime session project `mdd` (repository detection uses `mdd-orchestrator`).
 
 ## Tasks
 
-- [x] **T1 — Durable sequential Apply execution.** Route: delegated direct; triggers: unfamiliar preparation, multi-file state-machine/runtime implementation. Exact-ID batching, replayable completion/rework epochs, immutable artifacts, aggregate evidence and pending-write fences implemented. RED: workflow 17 passed / 1 failed; GREEN: focused 364 passed / 1 skipped; full suite 1,067 passed / 0 failed / 2 skipped. Typecheck, build and diff check passed; parent independently reran typecheck. Baseline focused run timed out after 120 seconds; no complete baseline claimed. Local locked dependencies installed without manifest changes; 9 reported dependency vulnerabilities left untouched. Skips: Windows symlink privilege and gated managed-Engram smoke. Risk: high/unassessable before commit because new files require inventory declaration; committed-candidate assessment pending. Commit pending.
-- [ ] **T2 — Bounded planning guidance and execution proof.** Route: delegated direct; triggers: multi-file agent instructions and runtime harness. Teach Plan/Tasks/Apply/coordinator the bounded deliverable contract without expanding packaged asset limits. Add isolated runtime smoke coverage of automatic chaining and safe failure, or honestly record unavailable host proof. Document limitations (an oversized individual deliverable and external interruptions are not magically solved). Checks: focused asset/runtime tests, `npm run typecheck`, `npm test`, isolated host smoke if runnable, `git diff --check`. Commit and assessed review result pending.
+- [x] **T1 — Durable sequential Apply execution.** Route: delegated direct; triggers: unfamiliar preparation, multi-file state-machine/runtime implementation. Exact-ID batching, replayable completion/rework epochs, immutable artifacts, aggregate evidence and pending-write fences implemented. RED: workflow 17 passed / 1 failed; GREEN: focused 364 passed / 1 skipped; full suite 1,067 passed / 0 failed / 2 skipped. Typecheck, build and diff check passed; parent independently reran typecheck. Baseline focused run timed out after 120 seconds; no complete baseline claimed. Local locked dependencies installed without manifest changes; 9 reported dependency vulnerabilities left untouched. Skips: Windows symlink privilege and gated managed-Engram smoke. Commit: `0b4f5b896c9502309d5d4c05e09dc6107a3cba8e`, first future PR slice. Committed native assessment: medium, review due (`slice_budget_reached`), 895 lines including progress document. User granted review; initial and user-authorized retry returned no valid result. Review is deferred, not approved; reviewed boundary remains the original branch point.
+- [x] **T2 — Bounded planning guidance and execution proof.** Route: delegated direct; triggers: multi-file agent instructions and runtime harness. Plan/Tasks require bounded dependency-ordered deliverables; Apply reports only its exact assignment; coordinator continues durable successful batches automatically while preserving phase approvals. Coordinator stays at 15,921/16,000 bytes. Added reproducible smoke with separate native admission and deterministic transport-double evidence. RED: asset tests 28 passed / 4 failed; harness missing-module failure; cleanup regressions 9 passed / 2 failed. GREEN: focused 69 passed / 0 failed; full suite 1,082 passed / 0 failed / 2 known skips; typecheck, build and diff checks passed. Parent reran smoke and final diff check; independent verifier ran focused checks and confirmed exception-safe resource cleanup. Native smoke: unavailable because ancestor configuration would defeat isolation; no native host/provider was started, no credentials or running service reused. Three deterministic scenarios passed (success, failure, ambiguous completion), using real motor/checkpoints/files/commands with host/identity doubles. External paid-model execution not run. Risk: medium; review deferred per user. Commit pending.
 
 ## Verification and recovery
 
@@ -40,5 +40,6 @@ Dependencies are absent initially; install only locked local dependencies withou
 - Investigation completed from a clean initial worktree; T1 verified with regression tests.
 - User selected a future chain directed to main; this does not authorize publication.
 - T1 adds 851 authored lines because its coherent durability boundary includes restart and uncertainty tests; no artificial size split.
-- Real-host/model proof remains pending T2. A huge individual deliverable and provider/context limits remain limitations.
-- Next: commit T1 and assess its committed candidate, then implement T2 planning guidance and runtime proof.
+- T2 adds 609 authored lines to keep isolation, failure cleanup, smoke scenarios and regression tests together; no artificial size split.
+- Real-host/model proof remains unavailable; passing doubles is not native proof. A huge individual deliverable and provider/context limits remain limitations.
+- Next: commit T2, then resume the deferred review and native-host validation later under explicit user authorization and a safely isolated host. No publication performed.

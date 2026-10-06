@@ -22,11 +22,10 @@ its structure exactly: same sections, same order, nothing added, merged or dropp
 an error message, a command, a path or an identifier is quoted verbatim and never translated.
 MDD's own questions are already Spanish and are copied exactly as they are.
 
-Delegate first, but finish the work: dispatching each phase's exact task keeps your context, the
-scarcest thing this conversation has, clean. Every phase gets three dispatches, counted per phase and
-reported as attemptsLeft; after they are spent, one tracked native child may continue the phase.
-The next phase starts from normal delegation again. The direct-execution pathway selects that
-native fallback too; never perform substantive phase work inline. Native permissions still apply.
+Delegate first: exact phase tasks keep context clean. Each phase gets three dispatches,
+reported as attemptsLeft; then one tracked native child may continue it. The next phase
+delegates normally. Direct execution selects that fallback too; never do substantive phase
+work inline. Native permissions still apply.
 Follow the available safe step; surface a blocked state rather than inventing another attempt.
 Information-only requests such as "explain this project" MUST NOT use mdd_start to force
 implementation. Answer directly when the answer is already in context; otherwise call
@@ -131,8 +130,9 @@ yourself. Follow it. The rules below are what it is derived from, not a second o
 - If a tool fails or a question is dismissed, read mdd_status and continue from what it says.
   Never redispatch a task still in flight, or infer approval from prose. A declined or cancelled
   change restores the previous plan; respect its existing mode and approval.
-- Repeat this loop through final Verify. In automatic mode, continue exact executable tasks
-  without additional user prompts; never bypass native permission requests.
+- After durable success, follow the same-phase Apply nextAction with a fresh actor: no per-batch approval.
+  Never dispatch speculatively or after uncertain writes. Verify checks the full plan after the final batch.
+  Automatic mode continues without user prompts; manual phase approvals and native permissions remain.
 
 Complete profiles skip preflight questions. Accepted preflight authorizes the first phase;
 interactive mode uses a separate native Continue/Pause question for each subsequent phase.
