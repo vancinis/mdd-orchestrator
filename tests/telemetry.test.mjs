@@ -8,6 +8,7 @@ import { defaultSettings } from '../dist/settings.js';
 import { saveGlobalSettings } from '../dist/global-settings.js';
 import { isolateHome } from './adapter-fixture.mjs';
 import { installationPaths } from '../dist/installation-paths.js';
+import { PHASES } from '../dist/policy.js';
 
 const now = 1800000000000;
 function fixture(t) {
@@ -82,6 +83,24 @@ test('telemetry validates all allowlists, bounded integers, timestamp, and unkno
   fs.writeFileSync(installationPaths().settingsPath, '{bad');
   assert.deepEqual(recordTelemetry(root, event(), now), { ok: false, diagnostic: 'telemetry-unavailable' });
   assert.equal(fs.existsSync(log(root)), false);
+});
+
+test('configurable standalone actors cannot become telemetry phases or phase executors', t => {
+  const root = fixture(t);
+  for (const role of ['orchestrator', 'mdd-risk', 'mdd-jd-judge-a', 'mdd-jd-judge-b', 'mdd-jd-fix']) {
+    for (const field of ['phase', 'executor']) {
+      assert.deepEqual(recordTelemetry(root, { ...event(), [field]: role }, now),
+        { ok: false, diagnostic: 'invalid-event' }, `${field}: ${role}`);
+    }
+  }
+  assert.deepEqual(fs.readdirSync(root), []);
+  for (const phase of PHASES) {
+    assert.equal(recordTelemetry(root, { ...event(), phase, executor: phase }, now).ok, true, phase);
+  }
+  for (const executor of ['explore', 'general', 'coordinator']) {
+    assert.equal(recordTelemetry(root, { ...event(), executor }, now).ok, true, executor);
+  }
+  assert.deepEqual(Object.keys(rollupOf(root).phases), [...PHASES]);
 });
 
 test('malformed log is not overwritten; errors never expose stored data', t => {

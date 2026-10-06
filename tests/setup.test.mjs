@@ -167,6 +167,31 @@ test('init refuses a conflicting owned file before creating other assets', t => 
   fs.writeFileSync(path, 'existing user content'); const before = snapshot(root);
   assert.throws(() => initProject(root), /refuses to overwrite/); assert.deepEqual(snapshot(root), before);
 });
+
+test('init installs all namespaced Judgment Day actors byte-for-byte and preserves foreign actors', t => {
+  const root = fixture(t);
+  fs.mkdirSync(join(root, 'agents'));
+  fs.writeFileSync(join(root, 'agents/jd-judge-a.md'), 'foreign judge');
+  initProject(root);
+  for (const role of ['mdd-jd-judge-a', 'mdd-jd-judge-b', 'mdd-jd-fix']) {
+    assert.ok(MDD_ASSETS.includes(`assets/opencode/agents/${role}.md`), role);
+    assert.equal(fs.readFileSync(join(root, `agents/${role}.md`), 'utf8'),
+      fs.readFileSync(`assets/opencode/agents/${role}.md`, 'utf8'));
+  }
+  assert.equal(fs.readFileSync(join(root, 'agents/jd-judge-a.md'), 'utf8'), 'foreign judge');
+  assert.equal(initProject(root).created, 0);
+});
+
+test('init refuses foreign content at each namespaced Judgment Day destination without partial writes', t => {
+  for (const role of ['mdd-jd-judge-a', 'mdd-jd-judge-b', 'mdd-jd-fix']) {
+    const root = fixture(t);
+    fs.mkdirSync(join(root, 'agents'));
+    fs.writeFileSync(join(root, `agents/${role}.md`), 'foreign content');
+    const before = snapshot(root);
+    assert.throws(() => initProject(root), /refuses to overwrite/);
+    assert.deepEqual(snapshot(root), before);
+  }
+});
 test('init refuses linked target directories without writing outside the target', t => {
   const root = fixture(t); const outside = fixture(t, false);
   fs.symlinkSync(outside, join(root, 'agents'), process.platform === 'win32' ? 'junction' : 'dir');

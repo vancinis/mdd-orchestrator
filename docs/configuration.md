@@ -37,7 +37,7 @@ The top-level entries are **Perfiles**, **Modelos**, **Respuestas de preflight**
 
 Option labels are display-only Spanish; the preflight answer tokens stored in
 `mdd.config.json` and exchanged with the native question tool are unchanged. When the
-installed OpenCode catalog is reachable, **Modelos** walks each of the nine roles through
+installed OpenCode catalog is reachable, **Modelos** walks each configurable role through
 **proveedor → modelo → esfuerzo**: pick a provider, pick one of its models, then optionally
 pick a reasoning-effort variant declared for that exact model (`Por defecto del modelo` keeps
 none). Effort is always optional and per-model; models without declared variants skip that
@@ -92,7 +92,7 @@ no Engram setup, and telemetry enabled. Reading never creates a settings file.
 |---|---|
 | `version`, `activeProfile`, `profiles` | Required. Version exactly 1; active name must exist; 1–64 profiles. Unknown keys rejected at every level. |
 | Names | 1–64 ASCII letters/digits/underscores/hyphens, starting alphanumeric; prototype/device names rejected. |
-| Profile `models` | Optional `orchestrator` and all eight exact phase mappings. `provider/model`, nested model paths allowed, an optional trailing `#variant` reasoning-effort suffix, at most 256 characters. No whitespace/traversal. Omitted role inherits native selection, not the orchestrator override. |
+| Profile `models` | Optional `orchestrator`, all eight exact phase mappings, `mdd-risk`, `mdd-jd-judge-a`, `mdd-jd-judge-b`, and `mdd-jd-fix`. `provider/model`, nested model paths allowed, an optional trailing `#variant` reasoning-effort suffix, at most 256 characters. No whitespace/traversal. Omitted role inherits native selection, not the orchestrator override. |
 | Profile `answers` | Optional partial/complete original five-field canonical answers. Missing fields remain missing. |
 | `engram` | Omitted means memory off. `{ endpoint }` opts into an explicit loopback service; `{ mode: 'local', binary, dataDirectory }` opts into a managed installed binary. Legacy `project` is deprecated and ignored with a runtime notice. No secrets or session IDs in settings. |
 | `telemetry` | Optional `{ "enabled": boolean }`, default enabled. No external destination. |
@@ -101,6 +101,34 @@ Capture active profile/model mappings **once at runtime startup** with `freezePr
 Restart after changing them; never replace an in-flight workflow's answers. General
 Engram memory stays independent of artifacts, including `none`. The adapter verifies the
 exact registered runtime session/project/directory; it never fabricates a session.
+
+### Standalone Judgment Day model roles
+
+`mdd-ai config` includes three independently configurable actors:
+
+| Role | Packaged contract |
+|---|---|
+| `mdd-jd-judge-a` | Blind, read-only judge returning neutral JSON findings. |
+| `mdd-jd-judge-b` | A second blind judge with identical criteria and output contract. |
+| `mdd-jd-fix` | Bounded correction actor requiring explicit authorization and confirmed severe ledger IDs. |
+
+Choose models and optional variants through **Modelos**, Save, then restart OpenCode. Each
+omitted mapping retains native selection independently; existing version-1 profiles need no
+migration. Setup derives agent installation from the configurable role list and preserves
+foreign assets rather than overwriting conflicting content.
+
+These actors are **not workflow phases**. They do not extend the eight-phase route, submit
+phase reports, require `mdd_check_report`, or receive phase-instruction policy just because
+their models are configurable. Phase telemetry accepts only workflow phases and their existing
+fallback executors, never the standalone actors.
+
+This increment packages actors and model configuration only; it does **not yet enable native
+Judgment Day dispatch**. Explicit-request routing, immutable-target inspection and workflow
+guards require the subsequent integration. Judges currently deny shell and all tools except
+local read/glob/grep; those reads alone do not prove an immutable committed target. The fix actor
+requests native consent for edits and shell, which is not a sandbox. Configuration or judgment
+never authorizes correction, commit, push, PR creation, or release, and Judgment Day does not
+run automatically after Verify.
 
 ## Optional memory
 
@@ -152,7 +180,7 @@ read-only setup checks. See [installation and prerequisites](setup.md).
 ### Settings (`settings.ts`)
 
 ```typescript
-type ModelRole = 'orchestrator' | Phase;
+type ModelRole = typeof MODEL_ROLES[number];
 type NamedProfile = { models: Partial<Record<ModelRole, string>>; answers: Partial<Answers> };
 type Settings = {
   version: 1; activeProfile: string; profiles: Record<string, NamedProfile>;
@@ -172,12 +200,13 @@ function profileName(value: unknown): string;
 function parseModel(value: unknown): string;
 ```
 
-`MODEL_ROLES` is the readonly nine-role list. The native config hook sets agent
+`MODEL_ROLES` is the readonly thirteen-role list: the coordinator, eight workflow phases,
+risk assessment, and three standalone Judgment Day actors. The native config hook sets agent
 models only when `modelFor` returns a string. `undefined` leaves native selection intact.
 Settings parsing detaches data; the startup profile and its nested maps are frozen.
 
 The plugin does not modify the default agent, top-level model, other agents, or permissions.
-At run initialization all nine MDD actors must exist in their expected modes. Resolved
+At run initialization the coordinator and eight phase actors must exist in their expected modes. Resolved
 agent models and the actual parent assistant model are captured per parent. Subsequent
 inspection rejects changes, missing identities, and disagreement between task metadata
 and any child assistant model. An omitted override preserves any native phase model;

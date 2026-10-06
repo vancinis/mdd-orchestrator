@@ -5,8 +5,14 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { MDD_ASSETS, MDD_PACKAGED_ASSETS } from '../dist/project-assets.js';
 import { phaseName } from '../dist/phase-assets.js';
+import { PHASES } from '../dist/policy.js';
+import { defaultSettings, freezeProfile, MODEL_ROLES } from '../dist/settings.js';
+import { applyModelOverrides } from '../dist/native-models.js';
+import { PHASE_AGENTS, CHECK_AGENTS, pinPhaseAgents } from '../dist/opencode-plugin.js';
 
-// Capability is the user's native decision, not MDD's. No packaged agent may ship its own
+const JD_ROLES = ['mdd-jd-judge-a', 'mdd-jd-judge-b', 'mdd-jd-fix'];
+
+// Phase capability is the user's native decision, not MDD's. No packaged phase may ship its own
 // permission map: a phase that cannot act is exactly what made the workflow unusable.
 for (const role of ['explore', 'propose', 'spec', 'design', 'tasks', 'apply', 'verify']) {
   test(`assets: ${role} ships no permission map and keeps a strict handoff`, () => {
@@ -47,14 +53,78 @@ for (const name of ['mdd-pr-body', 'mdd-cleanup', 'mdd-doc']) {
 }
 
 // phaseName accepts only the eight workflow phases. Neither the coordinator nor an actor with a
-// configurable model but no stop on the route (mdd-risk) is a Phase, whatever else it is.
-test('phaseName accepts only the eight workflow phases, not orchestrator or mdd-risk', () => {
+// configurable model but no stop on the route is a Phase, whatever else it is.
+test('phaseName accepts only the eight workflow phases, not configurable standalone actors', () => {
   for (const phase of ['mdd-explore', 'mdd-plan', 'mdd-propose', 'mdd-spec', 'mdd-design', 'mdd-tasks', 'mdd-apply', 'mdd-verify']) {
     assert.equal(phaseName(phase), phase);
   }
-  for (const bad of ['orchestrator', 'mdd-risk', 'mdd-unknown', '']) {
+  for (const bad of ['orchestrator', 'mdd-risk', ...JD_ROLES, 'mdd-unknown', '']) {
     assert.throws(() => phaseName(bad), /Unknown MDD phase/);
   }
+});
+
+test('Judgment Day model roles and installation do not expand phase or report-check membership', () => {
+  assert.deepEqual(PHASE_AGENTS, [...PHASES]);
+  assert.deepEqual(CHECK_AGENTS, [...PHASES, 'mdd-risk']);
+  const settings = defaultSettings();
+  const config = { agent: {} };
+  for (const role of JD_ROLES) {
+    assert.ok(MODEL_ROLES.includes(role), role);
+    assert.ok(MDD_ASSETS.includes(`assets/opencode/agents/${role}.md`), role);
+    assert.equal(PHASES.includes(role), false);
+    settings.profiles.default.models[role] = 'provider/judge#high';
+    config.agent[role] = { mode: 'subagent', permission: { '*': 'deny', read: 'allow' } };
+  }
+  applyModelOverrides(config, freezeProfile(settings));
+  pinPhaseAgents(config);
+  for (const role of JD_ROLES) {
+    assert.deepEqual(config.agent[role], { mode: 'subagent', permission: { '*': 'deny', read: 'allow' },
+      model: 'provider/judge', variant: 'high' });
+  }
+  // V2 model selection shares roles, but phase instruction/tool pinning remains a separate list.
+  const v2 = fs.readFileSync('src/opencode-v2.ts', 'utf8');
+  assert.match(v2, /MODEL_AGENTS = MODEL_ROLES\.filter/);
+  assert.match(v2, /PINNED_AGENTS = Object\.freeze\(\[\.\.\.PHASES, 'mdd-risk'\] as const\)/);
+});
+
+test('Judgment Day judges share a neutral standalone JSON contract and deny all but local reads', () => {
+  const bodies = [];
+  for (const role of ['mdd-jd-judge-a', 'mdd-jd-judge-b']) {
+    const text = fs.readFileSync(`assets/opencode/agents/${role}.md`, 'utf8');
+    const front = text.split('---')[1];
+    assert.match(front, /\nmode: subagent\n/);
+    assert.doesNotMatch(front, /model:|tools:/);
+    const permissions = Object.fromEntries([...front.matchAll(/^  ("\*"|\w+): (allow|ask|deny)$/gm)].map(m => [m[1], m[2]]));
+    assert.deepEqual(permissions, { '"*"': 'deny', read: 'allow', glob: 'allow', grep: 'allow' });
+    assert.match(text, /immutable/);
+    assert.match(text, /blind/);
+    assert.match(text, /frozen ledger/);
+    assert.match(text, /fix-caused defects/);
+    assert.match(text, /Return one JSON object and no prose/);
+    assert.doesNotMatch(text, /mdd_check_report|## MDD Outcome/);
+    const example = JSON.parse(text.match(/```json\n([\s\S]*?)\n```/)[1]);
+    assert.deepEqual(Object.keys(example), ['findings', 'evidence']);
+    assert.deepEqual(Object.keys(example.findings[0]), ['location', 'severity', 'claim', 'evidence_class', 'causal_disposition', 'proof_refs']);
+    assert.ok(Buffer.byteLength(text) < 16000);
+    bodies.push(text.split('---').slice(2).join('---'));
+  }
+  assert.equal(bodies[0], bodies[1], 'blind judges receive identical criteria and output contracts');
+});
+
+test('Judgment Day fix actor requires correction authorization and a bounded severe ledger', () => {
+  const text = fs.readFileSync('assets/opencode/agents/mdd-jd-fix.md', 'utf8');
+  const front = text.split('---')[1];
+  assert.match(front, /\nmode: subagent\n/);
+  assert.doesNotMatch(front, /model:|tools:/);
+  assert.deepEqual(Object.fromEntries([...front.matchAll(/^  ("\*"|\w+): (allow|ask|deny)$/gm)].map(m => [m[1], m[2]])),
+    { '"*"': 'deny', read: 'allow', glob: 'allow', grep: 'allow', edit: 'ask', bash: 'ask' });
+  assert.match(text, /explicit correction authorization/);
+  assert.match(text, /confirmed severe ledger IDs/);
+  assert.match(text, /at most two correction rounds/);
+  assert.match(text, /rollback boundary/);
+  assert.match(text, /Do not commit, push/);
+  assert.match(text, /not a sandbox/);
+  assert.doesNotMatch(text, /mdd_check_report|## MDD Outcome/);
 });
 
 // mdd-risk ships the same handoff discipline as every other actor: no baked-in permission map,

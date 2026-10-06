@@ -172,6 +172,24 @@ test('the free-text fallback accepts a typed #variant suffix directly', async t 
   assert.equal(loadSettings(root).profiles.default.models.orchestrator, 'openai/gpt-a#high');
 });
 
+test('Judgment Day model editor selects variants, preserves and clears each independent role', async t => {
+  const root = fixture(t);
+  const roles = ['mdd-jd-judge-a', 'mdd-jd-judge-b', 'mdd-jd-fix'];
+  for (const role of roles) assert.ok(MODEL_ROLES.includes(role), role);
+  const choices = MODEL_ROLES.flatMap(role => roles.includes(role) ? ['2', '1', '2'] : ['']);
+  const withEffort = catalog(sample, { 'openai/gpt-a': ['high'] });
+  const choose = scripted(['2', ...choices, '6']);
+  assert.equal(await runConfigUI(root, choose.io, withEffort), 'saved');
+  const expected = Object.fromEntries(roles.map(role => [role, 'openai/gpt-a#high']));
+  assert.deepEqual(loadSettings(root).profiles.default.models, expected);
+  for (const role of roles) assert.ok(choose.output.join('').includes(role), role);
+  assert.equal(await runConfigUI(root, scripted(['2', ...MODEL_ROLES.map(() => ''), '6']).io, withEffort), 'saved');
+  assert.deepEqual(loadSettings(root).profiles.default.models, expected);
+  const clear = MODEL_ROLES.map(role => roles.includes(role) ? '2' : '');
+  assert.equal(await runConfigUI(root, scripted(['2', ...clear, '6']).io, withEffort), 'saved');
+  assert.deepEqual(loadSettings(root).profiles.default.models, {});
+});
+
 test('nonTTY terminal and CLI reject immediately without reading input or writing settings', async t => {
   const root = fixture(t);
   const script = scripted(['6'], false);
