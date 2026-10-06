@@ -52,9 +52,26 @@ test('phaseName accepts only the eight workflow phases, not orchestrator or mdd-
   for (const phase of ['mdd-explore', 'mdd-plan', 'mdd-propose', 'mdd-spec', 'mdd-design', 'mdd-tasks', 'mdd-apply', 'mdd-verify']) {
     assert.equal(phaseName(phase), phase);
   }
-  for (const bad of ['orchestrator', 'mdd-risk', 'mdd-unknown', '']) {
+  for (const bad of ['orchestrator', 'mdd-risk', 'mdd-security', 'mdd-unknown', '']) {
     assert.throws(() => phaseName(bad), /Unknown MDD phase/);
   }
+});
+
+test('security actor is packaged with deny-all permissions and no standalone dispatch authority', () => {
+  assert.ok(MDD_ASSETS.includes('assets/opencode/agents/mdd-security.md'));
+  assert.ok(MDD_PACKAGED_ASSETS.includes('assets/opencode/agents/mdd-security.md'));
+  const text = fs.readFileSync('assets/opencode/agents/mdd-security.md', 'utf8');
+  assert.match(text, /mode: subagent/);
+  assert.match(text, /permission:\n {2}"\*": deny/);
+  assert.match(text, /authenticated.*dispatch/i);
+  assert.match(text, /committed, index, worktree and untracked/);
+  assert.match(text, /SQL, command and template injection/);
+  assert.match(text, /XSS.*SSRF/);
+  assert.match(text, /tenant isolation/);
+  assert.match(text, /no-findings.*not.*secure/i);
+  assert.match(text, /separate user authorization.*mdd-apply/);
+  assert.match(text, /Write your report in English/);
+  assert.ok(Buffer.byteLength(text) <= 16000);
 });
 
 // mdd-risk ships the same handoff discipline as every other actor: no baked-in permission map,

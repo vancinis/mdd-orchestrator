@@ -2,12 +2,23 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { parsePhaseReport, reportFormatLines, MalformedReport, MALFORMED_RESTATEMENTS } from '../dist/phase-report.js';
 import { TASK_ENVELOPE } from '../dist/opencode-plugin.js';
+import * as reports from '../dist/phase-report.js';
 
 const document = [
   '## MDD Outcome', '', 'passed', '',
   '## MDD Summary', '', 'Implemented the boundary check and ran the scoped tests.', '',
   '## MDD Artifact', '', 'Changed src/cli.ts to validate input before dispatch.', '',
 ].join('\n');
+
+test('standalone security parsing reuses the envelope without adding phase fields', () => {
+  assert.equal(typeof reports.parseSecurityReport, 'function');
+  const data = `${document}\n## MDD Data\n\n\`\`\`json\n{"security":{"snapshotID":"one"}}\n\`\`\`\n`;
+  assert.deepEqual(reports.parseSecurityReport(data).security, { snapshotID: 'one' });
+  for (const extra of ['outcome', 'checks', 'risk']) {
+    assert.throws(() => reports.parseSecurityReport(data.replace('"security":', `"${extra}":"failed","security":`)),
+      /exactly.*security/);
+  }
+});
 
 test('a phase report is prose under MDD headings', () => {
   const result = parsePhaseReport(document, 'mdd-explore');

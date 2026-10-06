@@ -77,7 +77,8 @@
             "mdd-tasks": { "$ref": "#/$defs/model" },
             "mdd-apply": { "$ref": "#/$defs/model" },
             "mdd-verify": { "$ref": "#/$defs/model" },
-            "mdd-risk": { "$ref": "#/$defs/model" }
+            "mdd-risk": { "$ref": "#/$defs/model" },
+            "mdd-security": { "$ref": "#/$defs/model" }
           }
         },
         "answers": {

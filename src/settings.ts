@@ -1,4 +1,4 @@
-import type { Answers, Phase } from './policy.js';
+import type { Answers } from './policy.js';
 import { parsePartialAnswers } from './preflight.js';
 import { LocalFiles } from './local-files.js';
 import { objectWithKeys, ValidationError } from './validation.js';
@@ -7,15 +7,14 @@ import { fileURLToPath } from 'node:url';
 
 export const MODEL_ROLES = Object.freeze([
   'orchestrator', 'mdd-explore', 'mdd-plan', 'mdd-propose', 'mdd-spec',
-  'mdd-design', 'mdd-tasks', 'mdd-apply', 'mdd-verify', 'mdd-risk',
+  'mdd-design', 'mdd-tasks', 'mdd-apply', 'mdd-verify', 'mdd-risk', 'mdd-security',
 ] as const);
 /**
- * `mdd-risk` is a configurable actor, not a workflow `Phase`: it assesses complexity and risk
- * after exploration, but does not yet occupy a stop on the route. Keeping it in `ModelRole`
- * rather than `Phase` is what lets it be installed, packaged and modeled like every other actor
+ * `mdd-risk` and `mdd-security` are configurable actors, not workflow phases. Keeping them in `ModelRole`
+ * rather than `Phase` lets them be installed, packaged and modeled like every other actor
  * without being accepted anywhere a `Phase` is required (routing, the ledger, telemetry phases).
  */
-export type ModelRole = 'orchestrator' | 'mdd-risk' | Phase;
+export type ModelRole = typeof MODEL_ROLES[number];
 export type NamedProfile = { models: Partial<Record<ModelRole, string>>; answers: Partial<Answers> };
 export type EngramSettings = { endpoint: string; project?: string } | { mode: 'local'; binary: string; dataDirectory: string };
 export type Settings = {

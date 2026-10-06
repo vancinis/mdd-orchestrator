@@ -2,10 +2,12 @@ import { boundedText } from './phase-runner.js';
 import { acceptance, assertNoTraceSection, phaseFields } from './acceptance.js';
 import { concerns } from './concerns.js';
 import { changed, deliverables, executed } from './phase-evidence.js';
-import { parsePhaseReport, parseRiskReport, reportFormatLines } from './phase-report.js';
+import { parsePhaseReport, parseRiskReport, parseSecurityReport, reportFormatLines } from './phase-report.js';
 import { parseRiskVerdict, riskReportFormatLines, RISK_REPORT_KEYS } from './risk.js';
 import type { RiskVerdict } from './risk.js';
 import type { Phase } from './policy.js';
+import { parseSecurityAssessment, securityReportFormatLines, SECURITY_REPORT_KEYS } from './security.js';
+import type { SecurityAssessment } from './security.js';
 
 /**
  * Lets the actor that wrote a report find out whether MDD can read it, before it stops running.
@@ -124,4 +126,36 @@ export function checkRiskReportForm(text: unknown): ReportCheck {
     ...(passed ? [() => { verdict = parseRiskVerdict(fields.risk); }] : []),
   ]);
   return done(problems, passed ? verdict : undefined);
+}
+
+export type SecurityReportCheck = Omit<ReportCheck, 'risk'> & { security?: SecurityAssessment };
+
+/** Advisory only; no dispatch, evidence authentication, state mutation or delivery authority. */
+export function checkSecurityReportForm(text: unknown): SecurityReportCheck {
+  const resultFormat = securityReportFormatLines();
+  const done = (problems: string[], security?: SecurityAssessment): SecurityReportCheck => ({
+    ok: !problems.length, problems, resultFormat,
+    note: problems.length ? FOUND : 'Security form-only check passed. Runtime snapshot and evidence binding remain required; this is not acceptance, a security guarantee, authorization to fix, or delivery approval.',
+    ...(!problems.length && security ? { security } : {}),
+  });
+  const envelope = collect([() => boundedText(text, 'security report', 20000)]);
+  if (envelope.length) return done(envelope);
+  let fields: Record<string, unknown>;
+  try { fields = parseSecurityReport(text as string); }
+  catch (error) { return done([error instanceof Error ? error.message : 'The security report could not be parsed.']); }
+  let security: SecurityAssessment | undefined;
+  const problems = collect([
+    () => { const extra = Object.keys(fields).filter(key => !SECURITY_REPORT_KEYS.includes(key));
+      if (extra.length) throw new Error(`security report holds unknown key(s): ${extra.join(', ')}. Only the standalone security field is accepted as data.`); },
+    () => boundedText(fields.evidenceSummary, 'summary', 2000),
+    () => boundedText(fields.how, 'how', 2000),
+    () => assertNoTraceSection(boundedText(fields.artifact, 'artifact', 16000)),
+    () => concerns(fields.concerns),
+    () => {
+      security = parseSecurityAssessment(fields.security);
+      const expected = security.status === 'inconclusive' ? 'failed' : 'passed';
+      if (fields.outcome !== expected) throw new Error(`security report outcome must be ${expected} for status ${security.status}; outcome describes inspection, not code safety.`);
+    },
+  ]);
+  return done(problems, security);
 }

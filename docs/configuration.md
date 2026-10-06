@@ -37,7 +37,7 @@ The top-level entries are **Perfiles**, **Modelos**, **Respuestas de preflight**
 
 Option labels are display-only Spanish; the preflight answer tokens stored in
 `mdd.config.json` and exchanged with the native question tool are unchanged. When the
-installed OpenCode catalog is reachable, **Modelos** walks each of the nine roles through
+installed OpenCode catalog is reachable, **Modelos** walks each configurable role through
 **proveedor → modelo → esfuerzo**: pick a provider, pick one of its models, then optionally
 pick a reasoning-effort variant declared for that exact model (`Por defecto del modelo` keeps
 none). Effort is always optional and per-model; models without declared variants skip that
@@ -92,7 +92,7 @@ no Engram setup, and telemetry enabled. Reading never creates a settings file.
 |---|---|
 | `version`, `activeProfile`, `profiles` | Required. Version exactly 1; active name must exist; 1–64 profiles. Unknown keys rejected at every level. |
 | Names | 1–64 ASCII letters/digits/underscores/hyphens, starting alphanumeric; prototype/device names rejected. |
-| Profile `models` | Optional `orchestrator` and all eight exact phase mappings. `provider/model`, nested model paths allowed, an optional trailing `#variant` reasoning-effort suffix, at most 256 characters. No whitespace/traversal. Omitted role inherits native selection, not the orchestrator override. |
+| Profile `models` | Optional `orchestrator`, all eight exact phase mappings, and standalone `mdd-risk`/`mdd-security` actors. `provider/model`, nested model paths allowed, an optional trailing `#variant` reasoning-effort suffix, at most 256 characters. No whitespace/traversal. Omitted role inherits native selection, not the orchestrator override. |
 | Profile `answers` | Optional partial/complete original five-field canonical answers. Missing fields remain missing. |
 | `engram` | Omitted means memory off. `{ endpoint }` opts into an explicit loopback service; `{ mode: 'local', binary, dataDirectory }` opts into a managed installed binary. Legacy `project` is deprecated and ignored with a runtime notice. No secrets or session IDs in settings. |
 | `telemetry` | Optional `{ "enabled": boolean }`, default enabled. No external destination. |
@@ -152,7 +152,7 @@ read-only setup checks. See [installation and prerequisites](setup.md).
 ### Settings (`settings.ts`)
 
 ```typescript
-type ModelRole = 'orchestrator' | Phase;
+type ModelRole = 'orchestrator' | 'mdd-risk' | 'mdd-security' | Phase;
 type NamedProfile = { models: Partial<Record<ModelRole, string>>; answers: Partial<Answers> };
 type Settings = {
   version: 1; activeProfile: string; profiles: Record<string, NamedProfile>;
@@ -172,17 +172,61 @@ function profileName(value: unknown): string;
 function parseModel(value: unknown): string;
 ```
 
-`MODEL_ROLES` is the readonly nine-role list. The native config hook sets agent
+`MODEL_ROLES` is the readonly eleven-role list, shared by the editor and installer. The native config hook sets agent
 models only when `modelFor` returns a string. `undefined` leaves native selection intact.
 Settings parsing detaches data; the startup profile and its nested maps are frozen.
 
 The plugin does not modify the default agent, top-level model, other agents, or permissions.
-At run initialization all nine MDD actors must exist in their expected modes. Resolved
+At run initialization the configured MDD actor roster must exist in its expected modes. Resolved
 agent models and the actual parent assistant model are captured per parent. Subsequent
 inspection rejects changes, missing identities, and disagreement between task metadata
 and any child assistant model. An omitted override preserves any native phase model;
 otherwise OpenCode inherits the actual parent model. There is no task-level model parameter,
 provider API, substitution, or mid-run model switch. Restart after settings changes.
+
+### Standalone security report foundation
+
+Set the optional **mdd-security** model under **Modelos** in `mdd-ai config`, then Save and
+restart OpenCode. An omitted override inherits native selection. This actor is **not a phase**:
+configuration and the packaged deny-all actor do not enable audit dispatch. Authenticated
+on-demand dispatch, immutable snapshot capture and final evidence binding are separate integration
+requirements. No automatic audit, source fixes, phase advancement or delivery approval is added here.
+Corrections require separate user authorization through `mdd-apply`.
+
+The pure API is available from `dist/security.js`, `dist/phase-report.js` and `dist/report-check.js`:
+
+| Export | Contract |
+|---|---|
+| `SECURITY_LAYERS` | `committed`, `index`, `worktree`, `untracked`; all four are required, including empty layers. |
+| `SecurityAssessment`, `parseSecurityAssessment(value)` | Detached bounded structured claims: `{snapshotID,status,coverage,limitations,findings}`. Form validation only. |
+| `SecurityLocation` | `{locationID,layer,side,path,startLine,endLine}`; identifies one runtime snapshot location, including revision and before/after side. |
+| `SecurityFinding` | `{id,severity,title,location,evidence,attackConditions,impact,recommendation}`; severity critical/high/medium/low. |
+| `SecurityCoverage` | `{layer,status,inspected:[locationID],limitations:[text]}`; status complete/partial/unavailable. Runtime manifest supplies coverage and omissions; actor adds inspection gaps. |
+| `parseSecurityReport(text)` | Existing Markdown envelope, with exactly `security` in the MDD Data block; never phase fields. |
+| `checkSecurityReportForm(text)` | `{ok,problems,resultFormat,note,security?}`; returns parsed assessment only if all form checks pass. No I/O or workflow state changes. |
+| `SECURITY_FIELD_SCHEMA`, `securityReportFormatLines()` | Explicit bounded schema and actor report instructions from the same module. |
+
+Reports retain the MDD Outcome/Summary/How/Artifact/Data headings. Outcome `passed` means completed
+inspection, even when findings exist; `failed` means inconclusive. Assessment `findings` requires
+1–32 detailed findings; `no-findings` requires none and **does not certify code secure**.
+`inconclusive` preserves known findings and requires an explicit limitation. Any partial/unavailable
+coverage or reported limitation prevents a complete assessment. Missing coverage or missing finding
+evidence, attack conditions, impact or recommendation is rejected, not silently accepted.
+
+The total report is limited to 20,000 bytes; summary/how to 2,000 each, artifact to 16,000.
+Snapshot/location/finding IDs allow 1–128 ASCII letters, digits, underscores or hyphens. Each layer
+allows at most 256 inspected IDs, globally unique across layers; unavailable layers cannot claim
+inspection. Layer/overall limitations allow 16 entries of 1–1,000 characters each. Findings allow
+300-character titles and 2,000 characters for each detailed text field, all nonempty single-line
+text. Paths are repository-relative forward-slash paths of at most 1,000 characters; line ranges
+are inclusive positive safe integers. Untracked locations have only an after side. Unknown keys,
+duplicate finding IDs and citations outside the reported inspected layer are rejected.
+
+Snapshot IDs and coverage are still **claims** in this foundation. A clean form check neither
+authenticates the snapshot nor verifies that a cited path, side, line or evidence matches its bytes.
+Final dispatch integration must bind every location ID and coverage statement to runtime input;
+different revisions or sides of one path must have distinct location IDs. Do not treat this API as
+an audit result acceptance or as permission to read the live workspace.
 
 ### Preflight (`preflight.ts`)
 
