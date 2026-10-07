@@ -42,7 +42,7 @@ Before this feature, MDD owned one native dispatch per phase. Safe concurrency r
   - Checks: deterministic native-hook integration, forbidden tools/out-of-scope edits, disabled/legacy fallback, full suite, typecheck, build.
   - [x] PW-4E — Enable progress-bound, read-only exploration batches and prove actual native overlap with mutation-denying gates.
   - [x] PW-4A — Enable Apply through formatter-free scoped editing primitives, deny alternate mutation routes, and prove actual native confinement/overlap.
-- [ ] PW-5 — Integrate the latest authorized `origin/main`, preserve both feature sets, verify the merged candidate, and publish normally to remote `main`.
+- [x] PW-5 — Integrate the latest authorized `origin/main`, preserve both feature sets, verify the merged candidate, and publish normally to remote `main`.
   - Route: delegated direct; nine overlapping source/asset/test conflicts and sequential-Apply/Judgment-Day/security integration require a bounded writer.
   - Checks: typecheck, build, full suite, focused integration checks, baseline native probe, seven exploration cases, eight Apply cases, whitespace/scope readback, independent verification, and confirmed normal push identity.
 
@@ -60,7 +60,7 @@ RDD status: off, explicitly selected by the user for this clone; global preferen
 - Branch point / initial review boundary: `57b0857c9374204dd2ddfc745f62b229107a5f10`.
 - Final behavior work-unit footprint: 4,223 authored changed lines, including tests, docs, and earlier recovery updates; generated files excluded. The final passive tracking closeout is included in the running total below. Native safety and real-host proof increased the initial estimate; the user-selected single-branch strategy remained in effect.
 - Delivery strategy remains one branch, not stacked branches. The user subsequently requested direct-main publication instead of a PR; normal push is now explicitly authorized through the captured Git channel. Keep integration on `feat-add-workers`; do not open a PR, force push, change credentials, or install globally.
-- Running authored changed lines: 4,253 across five behavior work-unit commits and this 30-line passive tracking closeout (includes recovery-document updates).
+- Original feature work-unit footprint: 4,253 authored changed lines including its passive tracking closeout. PW-5 merge adds 6,891 changed lines against the feature parent, including incoming main changes; combined history footprint before this final passive delivery record is 11,144, not a feature-only diff size.
 - PW-1 work-unit commit: `2aeb1661224f6f5ac85d35ad79b392e1e8ec5916`, `feat(config): expose default-on independent worker preference`.
 - PW-1 native tier/outcome: medium, `under_budget`; review slice remains pending against the initial boundary. No review receipt or approval is claimed.
 - PW-2 work-unit commit: `892946c96ed9fca6a5f25eb047ad90216a4b15f8`, `feat(workers): select only explicitly independent task batches`.
@@ -71,6 +71,8 @@ RDD status: off, explicitly selected by the user for this clone; global preferen
 - PW-4E native tier/outcome: high, RDD `disabled/unmanaged`; writer checks, independent verifier, actual native exploration proof, and parent spot checks passed. No receipt review ran.
 - PW-4A work-unit commit: `2e28cd246fafeefa4b536fe6c30c845aaf96b5e1`, `feat(workers): enable formatter-free independent Apply`.
 - PW-4A native tier/outcome: medium, RDD `disabled/unmanaged`; writer full/native checks, independent verification and fault recheck, and final parent typecheck/staged-whitespace spot checks passed. No receipt review ran.
+- PW-5 merge commit: `8d659ceb986a2a512121eea1e711933bac3766eb`, `chore(workers): integrate latest main with scoped parallel Apply`; parents are original feature `8bb11ca7f830822bbb4bdec33610ea3b62d7e5a7` and fetched main `e1f3ff6bbd13f4bc8ee484d4661de27150b48542`.
+- PW-5 native tier/outcome: high, RDD `disabled/unmanaged`; writer full/native checks, independent verification and parent spot checks passed, with the known sequential native isolation refusal disclosed. Normal push of this merge and exact remote identity were confirmed.
 - Delivery slice: one branch directly to `main`, containing PW-1 through PW-4 plus the authorized PW-5 integration. No PR is requested; normal publication is now authorized.
 - The approximately 400-line heuristic is advisory: no minification, cosmetic compression, omitted tests, or artificial task splits.
 
@@ -155,9 +157,9 @@ PW-4E is complete and committed: 25 files, 1,495 additions and 66 deletions, inc
 
 ## Outcome and next step
 
-Feature implementation PW-1 through PW-4 is complete; PW-5 integration and publication is newly authorized and pending. Eligible declared-independent exploration and Apply tasks run as at most two native foreground workers; incomplete, dependent, overlapping, unsupported, or unsafe-bootstrap work remains serial. `workers.enabled` defaults on and is configurable through `mdd-ai config` or `mdd-ai workers status|on|off`. Settings are startup-frozen and captured for runs; no hot-reload claim is made.
+Feature implementation PW-1 through PW-4 and PW-5 main integration/publication are complete. Eligible declared-independent exploration and Apply tasks run as at most two native foreground workers; incomplete, dependent, overlapping, unsupported, or unsafe-bootstrap work remains serial. `workers.enabled` defaults on and is configurable through `mdd-ai config` or `mdd-ai workers status|on|off`. Settings are startup-frozen and captured for runs; no hot-reload claim is made.
 
-Ordinary functional verification is complete within the proof limits above. The two skipped tests and correct-project memory resynchronization remain disclosed, not fabricated as passing. No final source check failed. Receipt reviews remain explicitly disabled for this clone, and the historical pending review state was preserved.
+Ordinary functional verification is complete within the proof limits above. The merged suite's three skipped tests, dedicated sequential native isolation refusal, and correct-project memory resynchronization remain disclosed, not fabricated as passing. No final source check failed. Receipt reviews remain explicitly disabled for this clone, and the historical pending review state was preserved.
 
 ### PW-5 initial evidence
 
@@ -186,7 +188,14 @@ Ordinary functional verification is complete within the proof limits above. The 
 - A pre-existing inactive-concurrency paragraph was corrected as a passive documentation follow-up. Structural readback and both whitespace checks passed; no executable bytes or test assertions changed after final independent verification.
 - Native risk assessment is high; the independent gate and parent typecheck/whitespace spot checks passed with RDD still off. Dedicated sequential native smoke remains unavailable due to ancestor configuration, not passed. Two Windows symlink tests and opt-in Engram smoke remain skipped. Native matrices stop at Verify readiness; no live Judgment Day/security or final native Verify execution is claimed.
 
-Next: confirm remote main has not advanced, commit this verified local merge, then perform and confirm the authorized normal `HEAD:main` push. Global installation, PR creation and receipt-review reactivation remain unauthorized.
+### PW-5 confirmed delivery
+
+- Immediately before committing, a fresh authorized fetch confirmed remote main still matched the pinned merge target. Parent typecheck, working/staged whitespace checks and unresolved-index checks passed; merge commit `8d659ceb986a2a512121eea1e711933bac3766eb` contains both histories.
+- Normal `HEAD:refs/heads/main` push succeeded from `e1f3ff6` to `8d659ce`, without force. Authorized remote readback confirmed the exact merge identity at `refs/heads/main`.
+- Source worktree was clean after delivery. This final passive tracking closeout records the observed publication; its own commit is delivered normally without reopening unchanged functional proof.
+- Other worktrees and their checked-out local `main` branch were not altered. No PR, global installation, credential change, real-provider call or receipt-review reactivation occurred.
+
+Next: no implementation or requested source publication remains. Global installation and PR creation remain unauthorized.
 
 ## Recovery mirror
 
