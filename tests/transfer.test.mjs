@@ -25,57 +25,89 @@ const runID = 'run_explicit';
 const userText = `Continue MDD sourceSessionID=${sourceID} runID=${runID} here.`;
 const answers = { certainty: 'very-sure', artifactStore: 'none', mode: 'automatic', summary: 'low' };
 
+/** A validated verdict and its diagnostic artifact reference, shaped as checkpoint.ts expects. */
+function riskVerdict(route) {
+  return { route, complexity: route, reason: `The change is ${route === 'high' ? 'cross-cutting' : 'contained'}.`,
+    evidence: [{ source: 'exploration artifact', finding: 'The CLI boundary is the only touched area.' }],
+    risks: [{ description: 'Exit codes could change.', evidence: 'exploration artifact', mitigation: 'Keep existing exit codes under test.' }] };
+}
+function riskRef(id) {
+  const content = 'Risk assessment artifact.';
+  return { runID: id, phase: 'mdd-risk', recordID: 'risk-record', digest: createHash('sha256').update(content).digest('hex'),
+    bytes: Buffer.byteLength(content), store: 'none' };
+}
+/** Drives a fresh workflow through the mandatory exploration and risk stop every run now starts with. */
+function throughRisk(workflow, route) {
+  workflow.start('mdd-explore');
+  workflow.recordResult({ phase: 'mdd-explore', outcome: 'passed', evidenceSummary: 'The question was explored.' });
+  workflow.startRisk();
+  workflow.recordRiskResult({ outcome: 'passed', evidenceSummary: `Risk is ${route}.`, route });
+}
+
 function checkpoint(root) {
   const request = { answers };
   const workflow = new Workflow(request);
+  throughRisk(workflow, 'low');
   const evidence = { requirements: 'confirmed', plan: 'unearned', implementation: 'unearned', checks: 'unearned' };
+  const content = 'Exploration artifact.';
   const data = { directory: root, worktree: root, userMessageID: 'user-source', requirements: 'Plan a safe change.', context: [],
-    dependencies: [], contexts: [], decisions: [], planned: [], evidence, executedChecks: [], changedFiles: 0,
-    calls: [], usedMessages: [], proposed: [] };
+    dependencies: [{ phase: 'mdd-explore', content, digest: createHash('sha256').update(content).digest('hex') }],
+    contexts: [], decisions: [], planned: [], evidence, executedChecks: [], changedFiles: 0,
+    calls: [], usedMessages: [], proposed: [], risk: { verdict: riskVerdict('low'), ref: riskRef(runID) } };
   const stable = { phase: 'mdd-plan', state: 'ready', mode: 'delegate', attempts: 0, spent: 0, malformed: 0,
     report: { phase: 'mdd-plan', summary: 'Ready to plan.', how: [], status: 'in-progress', evidence },
     changedList: [], concerns: [] };
   const record = { version: 3, parent: sourceID, runID, sequence: 0, request, events: workflow.history(), data, stable,
     dataDigest: sealResumeData(data, runID, sourceID, workflow.history(), stable) };
   new CheckpointStore(root).write(sourceID, record);
+  // A recorded exploration result needs a settled progress marker correlated to this run.
+  new ProgressGuard(root).write(sourceID, { runID, userMessageID: 'user-source', state: 'settled',
+    callID: 'task-risk', attemptID: 'task-risk' });
   return record;
 }
 
 function memoryCheckpoint(root, id, backend) {
   const request = { answers: { ...answers, artifactStore: backend } };
   const workflow = new Workflow(request);
+  throughRisk(workflow, 'low');
   const evidence = { requirements: 'confirmed', plan: 'unearned', implementation: 'unearned', checks: 'unearned' };
+  const content = 'Exploration artifact.';
   const data = { directory: root, worktree: root, userMessageID: 'user-source', requirements: 'Plan a safe change.',
-    memoryProject: 'mdd-test', context: [], dependencies: [], contexts: [], decisions: [], planned: [], evidence,
-    executedChecks: [], changedFiles: 0, calls: [], usedMessages: ['user-source'], proposed: [] };
+    memoryProject: 'mdd-test', context: [],
+    dependencies: [{ phase: 'mdd-explore', content, digest: createHash('sha256').update(content).digest('hex') }],
+    contexts: [], decisions: [], planned: [], evidence,
+    executedChecks: [], changedFiles: 0, calls: [], usedMessages: ['user-source'], proposed: [], risk: { verdict: riskVerdict('low'), ref: riskRef(id) } };
   const stable = { phase: 'mdd-plan', state: 'ready', mode: 'delegate', attempts: 0, spent: 0, malformed: 0,
     report: { phase: 'mdd-plan', summary: 'Ready to plan.', how: [], status: 'in-progress', evidence }, changedList: [], concerns: [] };
   const saved = { version: 3, parent: sourceID, runID: id, sequence: 0, request, events: workflow.history(), data, stable,
     dataDigest: sealResumeData(data, id, sourceID, workflow.history(), stable) };
   new CheckpointStore(root).write(sourceID, saved);
+  new ProgressGuard(root).write(sourceID, { runID: id, userMessageID: 'user-source', state: 'settled',
+    callID: 'task-risk', attemptID: 'task-risk' });
   return saved;
 }
 
 function approvalCheckpoint(root) {
   const request = { answers: { ...answers, mode: 'interactive', summary: 'detailed', complexity: 'very-complex' } };
   const workflow = new Workflow(request);
-  workflow.start('mdd-explore');
-  workflow.recordResult({ phase: 'mdd-explore', outcome: 'passed', evidenceSummary: 'The question was explored.' });
+  throughRisk(workflow, 'high');
   const evidence = { requirements: 'confirmed', plan: 'unearned', implementation: 'unearned', checks: 'unearned' };
   const content = 'Exploration artifact.';
   const data = { directory: root, worktree: root, userMessageID: 'user-source', requirements: 'Plan a safe change.', context: [],
     dependencies: [{ phase: 'mdd-explore', content, digest: createHash('sha256').update(content).digest('hex') }],
     contexts: [], decisions: [], planned: [], evidence, executedChecks: [], changedFiles: 0,
-    calls: ['task-explore'], usedMessages: ['user-source'], proposed: [] };
+    calls: ['task-explore', 'task-risk'], usedMessages: ['user-source'], proposed: [], risk: { verdict: riskVerdict('high'), ref: riskRef(runID) } };
   const stable = { phase: 'mdd-propose', state: 'await-approval', mode: 'delegate', attempts: 0, spent: 0, malformed: 0,
     report: { phase: 'mdd-explore', summary: 'Exploration recorded.', how: [], status: 'in-progress', evidence },
     changedList: [], concerns: [] };
   const record = { version: 3, parent: sourceID, runID, sequence: 0, request, events: workflow.history(), data, stable,
-    attempt: { id: 'task-explore', phase: 'mdd-explore', state: 'settled' },
+    // The risk stop's own attempt is the one that just settled and selected this route; the
+    // earlier exploration attempt is no longer the tail of this history.
+    attempt: { id: 'task-risk', phase: 'mdd-risk', state: 'settled' },
     dataDigest: sealResumeData(data, runID, sourceID, workflow.history(), stable) };
   new CheckpointStore(root).write(sourceID, record);
   new ProgressGuard(root).write(sourceID, { runID, userMessageID: 'user-source', state: 'settled',
-    callID: 'task-explore', attemptID: 'task-explore' });
+    callID: 'task-risk', attemptID: 'task-risk' });
   return record;
 }
 
@@ -89,6 +121,71 @@ function approvedCheckpoint(root) {
     dataDigest: sealResumeData(prior.data, runID, sourceID, workflow.history(), stable) };
   new CheckpointStore(root).write(sourceID, checkpoint);
   return checkpoint;
+}
+
+/** A risk-ready checkpoint: exploration passed, the mandatory risk stop is ready but never run. */
+function riskReadyCheckpoint(root) {
+  const request = { answers };
+  const workflow = new Workflow(request);
+  workflow.start('mdd-explore');
+  workflow.recordResult({ phase: 'mdd-explore', outcome: 'passed', evidenceSummary: 'The question was explored.' });
+  const evidence = { requirements: 'confirmed', plan: 'unearned', implementation: 'unearned', checks: 'unearned' };
+  const content = 'Exploration artifact.';
+  const data = { directory: root, worktree: root, userMessageID: 'user-source', requirements: 'Plan a safe change.', context: [],
+    dependencies: [{ phase: 'mdd-explore', content, digest: createHash('sha256').update(content).digest('hex') }],
+    contexts: [], decisions: [], planned: [], evidence, executedChecks: [], changedFiles: 0, calls: [], usedMessages: [], proposed: [] };
+  const stable = { phase: 'mdd-explore', state: 'risk-ready', mode: 'delegate', attempts: 0, spent: 0, malformed: 0,
+    report: { phase: 'mdd-explore', summary: 'Exploration recorded.', how: [], status: 'in-progress', evidence }, changedList: [], concerns: [] };
+  const record = { version: 3, parent: sourceID, runID, sequence: 0, request, events: workflow.history(), data, stable,
+    dataDigest: sealResumeData(data, runID, sourceID, workflow.history(), stable) };
+  new CheckpointStore(root).write(sourceID, record);
+  new ProgressGuard(root).write(sourceID, { runID, userMessageID: 'user-source', state: 'settled', callID: 'task-explore', attemptID: 'task-explore' });
+  return record;
+}
+
+/** A risk-blocked checkpoint: the risk assessment failed and left the run blocked without a route. */
+function riskBlockedCheckpoint(root) {
+  const request = { answers };
+  const workflow = new Workflow(request);
+  workflow.start('mdd-explore');
+  workflow.recordResult({ phase: 'mdd-explore', outcome: 'passed', evidenceSummary: 'The question was explored.' });
+  workflow.startRisk();
+  workflow.recordRiskResult({ outcome: 'failed', evidenceSummary: 'Risk could not be substantiated.' });
+  const evidence = { requirements: 'confirmed', plan: 'invalidated', implementation: 'invalidated', checks: 'invalidated' };
+  const content = 'Exploration artifact.';
+  const data = { directory: root, worktree: root, userMessageID: 'user-source', requirements: 'Plan a safe change.', context: [],
+    dependencies: [{ phase: 'mdd-explore', content, digest: createHash('sha256').update(content).digest('hex') }],
+    contexts: [], decisions: [], planned: [], evidence, executedChecks: [], changedFiles: 0, calls: [], usedMessages: [], proposed: [] };
+  const stable = { phase: 'mdd-explore', state: 'risk-blocked', mode: 'delegate', attempts: 0, spent: 0, malformed: 0,
+    report: { phase: 'mdd-explore', summary: 'Risk could not be substantiated.', how: [], status: 'failed', evidence },
+    changedList: [], concerns: [], reason: 'mdd-risk reported that the request and exploration findings cannot substantiate a route.' };
+  const record = { version: 3, parent: sourceID, runID, sequence: 0, request, events: workflow.history(), data, stable,
+    dataDigest: sealResumeData(data, runID, sourceID, workflow.history(), stable) };
+  new CheckpointStore(root).write(sourceID, record);
+  new ProgressGuard(root).write(sourceID, { runID, userMessageID: 'user-source', state: 'settled', callID: 'task-risk', attemptID: 'task-risk' });
+  return record;
+}
+
+/** The risk stop's own unconfirmed attempt: never a settled boundary, so transfer must refuse it. */
+function riskPendingCheckpoint(root) {
+  const request = { answers };
+  const workflow = new Workflow(request);
+  workflow.start('mdd-explore');
+  workflow.recordResult({ phase: 'mdd-explore', outcome: 'passed', evidenceSummary: 'The question was explored.' });
+  workflow.startRisk();
+  const evidence = { requirements: 'confirmed', plan: 'unearned', implementation: 'unearned', checks: 'unearned' };
+  const content = 'Exploration artifact.';
+  const data = { directory: root, worktree: root, userMessageID: 'user-source', requirements: 'Plan a safe change.', context: [],
+    dependencies: [{ phase: 'mdd-explore', content, digest: createHash('sha256').update(content).digest('hex') }],
+    contexts: [], decisions: [], planned: [], evidence, executedChecks: [], changedFiles: 0, calls: [], usedMessages: [], proposed: [] };
+  const stable = { phase: 'mdd-explore', state: 'risk-await-result', mode: 'delegate', attempts: 0, spent: 0, malformed: 0,
+    report: { phase: 'mdd-explore', summary: 'Exploration recorded.', how: [], status: 'in-progress', evidence }, changedList: [], concerns: [] };
+  const record = { version: 3, parent: sourceID, runID, sequence: 0, request, events: workflow.history(), data, stable,
+    attempt: { id: 'task-risk', phase: 'mdd-risk', state: 'pending' },
+    dataDigest: sealResumeData(data, runID, sourceID, workflow.history(), stable) };
+  new CheckpointStore(root).write(sourceID, record);
+  new ProgressGuard(root).write(sourceID, { runID, userMessageID: 'user-source', state: 'pending', callID: 'task-risk', attemptID: 'task-risk' });
+  return record;
 }
 
 function host(root, ids = [sourceID, 'ses_target_a', 'ses_target_b'], text = userText) {
@@ -194,6 +291,129 @@ test('transfer publishes a receipt and restores a fresh target without source ca
   const restored = JSON.parse(await restarted.tool.mdd_status.execute({}, context('ses_target_a')));
   assert.equal(restored.state, 'ready');
   assert.equal(restored.transfer.state, 'confirmed');
+  // The low route was selected by mdd-risk on the source; the target's first tail prompt (here
+  // mdd-plan, since 'low' resumes at mdd-plan) must still carry the risk summary, verdict reason
+  // and diagnostic artifact reference, not just the bare route. `task.prompt` is only a dispatch
+  // handle until the native tool call resolves it, so the real text is read the same way other
+  // transfer tests already do: through `tool.execute.before` against the dispatched task args.
+  assert.equal(restored.task.subagent_type, 'mdd-plan');
+  const planTask = structuredClone(restored.task);
+  await restarted['tool.execute.before']({ sessionID: 'ses_target_a', callID: 'task-plan-prompt', tool: 'task' }, { args: planTask });
+  assert.match(planTask.prompt, /Validated mdd-risk assessment that selected this route/);
+  assert.match(planTask.prompt, /"recordID":"risk-record"/);
+  assert.match(planTask.prompt, /"route":"low"/);
+  assert.match(planTask.prompt, /"reason":"The change is contained\."/);
+});
+
+for (const [label, fixture, expectState] of [
+  ['risk-ready', riskReadyCheckpoint, 'ready'], ['risk-blocked', riskBlockedCheckpoint, 'question-ready'],
+]) test(`transfer gives a ${label} risk stop the same fence, receipt and fresh-consent parity as a phase boundary`, async t => {
+  isolateHome(t);
+  const root = mkdtempSync(join(tmpdir(), `mdd-transfer-${label}-`));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  saveGlobalSettings(defaultSettings());
+  fixture(root);
+  const { input, context } = host(root);
+  const source = await plugin(input);
+  const previous = JSON.parse(await source.tool.mdd_status.execute({}, context(sourceID)));
+  assert.equal(previous.state, expectState);
+  assert.equal(previous.stage, 'mdd-risk');
+  // A settled blocked-risk stop reads its own fresh risk-recovery question on the very first
+  // status read (the restart-reissue path, which this status call also exercises); it is a
+  // re-askable native decision, not consent, so it does not fence the transfer below.
+  const sourceQuestion = label === 'risk-blocked' ? new QuestionCheckpointStore(root).read(sourceID) : undefined;
+  if (label === 'risk-blocked') assert.equal(sourceQuestion?.slot.kind, 'risk-recovery');
+  const target = await plugin(input);
+  const result = JSON.parse(await target.tool.mdd_transfer.execute({ sourceSessionID: sourceID, runID, userText }, context('ses_target_a')));
+  assert.equal(result.transfer?.state, 'confirmed', JSON.stringify(result));
+  assert.equal(result.runID, runID);
+  assert.equal(result.stage, 'mdd-risk');
+  assert.equal(result.state, expectState);
+  // The source is fenced the moment the target claims it: no late callback can reach it.
+  await assert.rejects(source['tool.execute.before']({ sessionID: sourceID, callID: 'late-task', tool: 'task' }, { args: previous.task ?? { description: 'old work', subagent_type: 'mdd-risk', prompt: 'old work' } }));
+  const restarted = await plugin(input);
+  const restored = JSON.parse(await restarted.tool.mdd_status.execute({}, context('ses_target_a')));
+  assert.equal(restored.state, expectState);
+  assert.equal(restored.stage, 'mdd-risk');
+  assert.equal(restored.transfer.state, 'confirmed');
+  if (label === 'risk-blocked') {
+    // The source's bound call is durably retired; the target asked a brand new question only
+    // after its own ownership was confirmed, and it never carries the old call or answer.
+    assert.equal(new QuestionCheckpointStore(root).read(sourceID), undefined);
+    const targetQuestion = new QuestionCheckpointStore(root).read('ses_target_a');
+    assert.equal(targetQuestion?.slot.kind, 'risk-recovery');
+    assert.notDeepEqual(targetQuestion?.slot.args, sourceQuestion?.slot.args);
+  }
+});
+
+test('an answered risk-recovery source question transfers to a fresh, unanswered target question; the old answer is never replayed', async t => {
+  isolateHome(t);
+  const root = mkdtempSync(join(tmpdir(), 'mdd-transfer-risk-answered-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  saveGlobalSettings(defaultSettings());
+  riskBlockedCheckpoint(root);
+  const { input, context, histories } = host(root);
+  const source = await plugin(input);
+  const previous = JSON.parse(await source.tool.mdd_status.execute({}, context(sourceID)));
+  assert.equal(previous.state, 'question-ready');
+  const args = previous.question;
+  assert.equal(args.questions[0].options[0].label, 'Reintentar evaluación de riesgo');
+  // A native answer races the window between the native tool recording it and MDD settling the
+  // decision: the question record is briefly `answered` and durable before anything acts on it.
+  // That exact race window is reproduced directly rather than through the synchronous call chain
+  // (which would settle the decision immediately), to exercise transfer against it.
+  const prepared = new QuestionCheckpointStore(root).read(sourceID);
+  assert.equal(prepared.state, 'prepared');
+  const questions = new QuestionCheckpointStore(root);
+  const pending = { ...prepared, state: 'pending', sequence: prepared.sequence + 1,
+    reservation: { runID, stable: 'risk-blocked' }, checkpoint: { sequence: 0, digest: new CheckpointStore(root).read(sourceID).checkpoint.dataDigest },
+    callID: 'call-source-answer' };
+  questions.write(sourceID, pending);
+  const answered = { ...pending, state: 'answered', sequence: pending.sequence + 1, answer: [[args.questions[0].options[0].label]] };
+  questions.write(sourceID, answered);
+  assert.equal(questions.read(sourceID).state, 'answered');
+  // Transfer still proceeds: an answered recovery question is re-askable, not consent, and this
+  // adapter retires it durably as part of the confirmed target claim, never carrying it forward.
+  const target = await plugin(input);
+  const result = JSON.parse(await target.tool.mdd_transfer.execute({ sourceSessionID: sourceID, runID, userText }, context('ses_target_a')));
+  assert.equal(result.transfer?.state, 'confirmed', JSON.stringify(result));
+  assert.equal(new QuestionCheckpointStore(root).read(sourceID), undefined);
+  const targetQuestion = new QuestionCheckpointStore(root).read('ses_target_a');
+  assert.equal(targetQuestion?.slot.kind, 'risk-recovery');
+  // The fresh target question is a brand new, unanswered record: the source's old answer is not
+  // present anywhere on it, and its text differs from the one the source actually answered.
+  assert.equal(targetQuestion.state, 'prepared');
+  assert.equal(targetQuestion.answer, undefined);
+  assert.notDeepEqual(targetQuestion.slot.args, answered.slot.args);
+});
+
+test('an unconfirmed risk attempt refuses transfer; only the settled boundary after explicit release can move', async t => {
+  isolateHome(t);
+  const root = mkdtempSync(join(tmpdir(), 'mdd-transfer-risk-pending-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  saveGlobalSettings(defaultSettings());
+  const saved = riskPendingCheckpoint(root);
+  const { input, context } = host(root);
+  const source = await plugin(input);
+  await source.tool.mdd_status.execute({}, context(sourceID));
+  const target = await plugin(input);
+  const blocked = JSON.parse(await target.tool.mdd_transfer.execute({ sourceSessionID: sourceID, runID, userText }, context('ses_target_a')));
+  assert.equal(blocked.diagnostic, 'pending-unknown');
+  assert.equal(new CheckpointStore(root).read('ses_target_a'), undefined);
+  // Once the attempt is explicitly released, the stop is risk-ready again and transfer proceeds.
+  const workflow = Workflow.replay(saved.request, saved.events);
+  workflow.retry();
+  const evidence = saved.data.evidence;
+  const released = { ...saved, sequence: saved.sequence + 1, events: workflow.history(),
+    stable: { ...saved.stable, state: 'risk-ready', report: { ...saved.stable.report, status: 'in-progress', evidence } }, attempt: undefined,
+    dataDigest: sealResumeData(saved.data, runID, sourceID, workflow.history(), { ...saved.stable, state: 'risk-ready' }) };
+  delete released.attempt;
+  new CheckpointStore(root).write(sourceID, released);
+  new ProgressGuard(root).write(sourceID, { runID, userMessageID: 'user-source', state: 'settled', callID: 'task-risk', attemptID: 'task-risk' });
+  const result = JSON.parse(await target.tool.mdd_transfer.execute({ sourceSessionID: sourceID, runID, userText }, context('ses_target_b')));
+  assert.equal(result.transfer?.state, 'confirmed', JSON.stringify(result));
+  assert.equal(result.state, 'ready');
+  assert.equal(result.stage, 'mdd-risk');
 });
 
 test('explicit transferred-target discard frees a new objective without reviving source', async t => {
@@ -601,7 +821,9 @@ test('transfer publishes progress but requires a new target-native phase approva
   const result = JSON.parse(await target.tool.mdd_transfer.execute({ sourceSessionID: sourceID, runID, userText }, context('ses_target_a')));
   assert.equal(result.transfer?.state, 'confirmed', JSON.stringify(result));
   assert.equal(result.state, 'question-ready');
-  assert.equal(result.question.questions[0].header, 'Aprobación');
+  // The high route's first tail phase, mdd-propose, is still only its suggested route's first
+  // approval: the one native route question (3a) replaces the generic approval here.
+  assert.equal(result.question.questions[0].header, 'Ruta');
   assert.equal(result.task, undefined);
   const marker = new ProgressGuard(root).read('ses_target_a');
   assert.equal(marker.userMessageID, 'user-ses_target_a');
@@ -616,16 +838,29 @@ test('transfer publishes progress but requires a new target-native phase approva
   histories.get('ses_target_a')[1].parts = [{ type: 'tool', tool: 'question', callID: call.callID,
     sessionID: call.sessionID, messageID: 'assistant-ses_target_a', state: { status: 'running', input: structuredClone(fresh.question) } }];
   await restarted['tool.execute.before'](call, { args: fresh.question });
-  const formatted = `"${fresh.question.questions[0].question}"="Continuar"`;
+  const formatted = `"${fresh.question.questions[0].question}"="Continuar con la ruta sugerida"`;
   await restarted['tool.execute.after']({ ...call, args: fresh.question }, {
     title: 'Asked 1 question', output: `User has answered your questions: ${formatted}. You can now continue with the user's answers in mind.`,
-    metadata: { answers: [['Continuar']], truncated: false },
+    metadata: { answers: [['Continuar con la ruta sugerida']], truncated: false },
   });
   const approved = JSON.parse(await restarted.tool.mdd_status.execute({}, context('ses_target_a')));
   assert.equal(approved.state, 'ready');
   assert.equal(approved.task.subagent_type, 'mdd-propose');
   const resumed = await plugin(input);
-  assert.equal(JSON.parse(await resumed.tool.mdd_status.execute({}, context('ses_target_a'))).state, 'ready');
+  const resumedStatus = JSON.parse(await resumed.tool.mdd_status.execute({}, context('ses_target_a')));
+  assert.equal(resumedStatus.state, 'ready');
+  // The high route was selected by mdd-risk on the source and required a fresh target approval
+  // above (the stale source question was rejected, and the target had to answer its own); the
+  // tail prompt dispatched after that fresh approval must still carry the risk summary, verdict
+  // reason and diagnostic artifact reference through the transfer. `task.prompt` is a dispatch
+  // handle until the native tool call resolves it, so resolve it last, the same way other
+  // transfer tests do: through `tool.execute.before` against the dispatched task args.
+  const proposeTask = structuredClone(resumedStatus.task);
+  await resumed['tool.execute.before']({ sessionID: 'ses_target_a', callID: 'task-propose-prompt', tool: 'task' }, { args: proposeTask });
+  assert.match(proposeTask.prompt, /Validated mdd-risk assessment that selected this route/);
+  assert.match(proposeTask.prompt, /"recordID":"risk-record"/);
+  assert.match(proposeTask.prompt, /"route":"high"/);
+  assert.match(proposeTask.prompt, /"reason":"The change is cross-cutting\."/);
 });
 
 test('transfer revokes source-parent terminal approval before target exposure', async t => {
@@ -914,8 +1149,10 @@ test('wrong root, missing/corrupt source, pending child and unresolved approval 
   files.write(sourceID, { version: 1, parent: sourceID, runID, sequence: 0, request: record.request, events: [] });
   assert.equal((await invoke()).diagnostic, 'source-unavailable');
   files.clear(sourceID);
+  // A fresh, eventless v2 record: dependency counts must still agree with zero recorded results.
+  const { risk: _risk, ...emptyData } = { ...record.data, dependencies: [], contexts: [] };
   files.write(sourceID, { version: 2, parent: sourceID, runID, sequence: 0, request: record.request, events: [],
-    data: record.data, dataDigest: sealResumeData(record.data, runID, sourceID, []) });
+    data: emptyData, dataDigest: sealResumeData(emptyData, runID, sourceID, []) });
   assert.equal((await invoke()).diagnostic, 'source-unavailable');
   const path = join(root, '.mdd', `checkpoint-${createHash('sha256').update(sourceID).digest('hex')}.json`);
   writeFileSync(path, '{broken');
@@ -1176,6 +1413,8 @@ test('primitive finish fences late source callbacks without enabling the transfe
   const target = { ...saved, parent: targetID, sequence: 0, data,
     dataDigest: sealResumeData(data, runID, targetID, saved.events, saved.stable) };
   new CheckpointStore(root).write(targetID, target);
+  const sourceMarker = new ProgressGuard(root).read(sourceID);
+  if (sourceMarker) new ProgressGuard(root).write(targetID, { ...sourceMarker, userMessageID: `user-${targetID}` });
   const beforeFinish = await plugin(input);
   const pending = JSON.parse(await beforeFinish.tool.mdd_status.execute({}, context(targetID)));
   assert.equal(pending.state, 'recovery-blocked');

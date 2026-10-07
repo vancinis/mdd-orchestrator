@@ -10,6 +10,10 @@ import { RunOwnershipStore } from '../dist/run-ownership.js';
 import { LocalFiles } from '../dist/local-files.js';
 import { CheckpointStore, sealResumeData } from '../dist/checkpoint.js';
 import { Workflow } from '../dist/workflow.js';
+import { ProgressGuard } from '../dist/progress.js';
+import { QuestionCheckpointStore } from '../dist/question-checkpoint.js';
+import { riskRecoveryEnvelope, routeEnvelope } from '../dist/native-intake.js';
+import { assessTransfer } from '../dist/transfer.js';
 
 const runID = 'run-owned';
 const sourceID = 'ses-source';
@@ -37,29 +41,269 @@ test('worker reservation holds both calls through reverse settlement and rejects
   assert.equal(store.release(runID, sourceID, 'batch-1', owner.epoch).state, 'idle');
 });
 
+/** A validated verdict and its diagnostic artifact reference, shaped as checkpoint.ts expects. */
+function riskVerdict(route) {
+  return { route, complexity: route, reason: 'The change is contained.',
+    evidence: [{ source: 'exploration artifact', finding: 'The CLI boundary is the only touched area.' }],
+    risks: [{ description: 'Exit codes could change.', evidence: 'exploration artifact', mitigation: 'Keep existing exit codes under test.' }] };
+}
+function riskRef(id) {
+  const content = 'Risk assessment artifact.';
+  return { runID: id, phase: 'mdd-risk', recordID: 'risk-record', digest: createHash('sha256').update(content).digest('hex'),
+    bytes: Buffer.byteLength(content), store: 'none' };
+}
+/** Drives a fresh workflow through the mandatory exploration and risk stop every run now starts with. */
+function throughRisk(workflow, route = 'low') {
+  workflow.start('mdd-explore');
+  workflow.recordResult({ phase: 'mdd-explore', outcome: 'passed', evidenceSummary: 'The question was explored.' });
+  workflow.startRisk();
+  workflow.recordRiskResult({ outcome: 'passed', evidenceSummary: `Risk is ${route}.`, route });
+}
+
 function transferSource(directory, parent, id) {
   const request = { answers: { certainty: 'very-sure', artifactStore: 'none', mode: 'automatic', summary: 'low', complexity: 'not-complex' } };
+  const workflow = new Workflow(request);
+  throughRisk(workflow, 'low');
   const evidence = { requirements: 'confirmed', plan: 'unearned', implementation: 'unearned', checks: 'unearned' };
+  const content = 'Exploration artifact.';
   const data = { directory, worktree: directory, userMessageID: `user-${parent}`, requirements: 'Plan a safe change.',
-    context: [], dependencies: [], contexts: [], decisions: [], planned: [], evidence, executedChecks: [], changedFiles: 0,
-    calls: [], usedMessages: [`user-${parent}`], proposed: [] };
+    context: [], dependencies: [{ phase: 'mdd-explore', content, digest: createHash('sha256').update(content).digest('hex') }],
+    contexts: [], decisions: [], planned: [], evidence, executedChecks: [], changedFiles: 0,
+    calls: [], usedMessages: [`user-${parent}`], proposed: [], risk: { verdict: riskVerdict('low'), ref: riskRef(id) } };
   const stable = { phase: 'mdd-plan', state: 'ready', mode: 'delegate', attempts: 0, spent: 0, malformed: 0,
     report: { phase: 'mdd-plan', summary: 'Ready to plan.', how: [], status: 'in-progress', evidence }, changedList: [], concerns: [] };
-  const events = new Workflow(request).history();
+  const events = workflow.history();
   const checkpoint = { version: 3, parent, runID: id, sequence: 0, request, events, data, stable,
     dataDigest: sealResumeData(data, id, parent, events, stable) };
   new CheckpointStore(directory).write(parent, checkpoint);
+  // A recorded exploration result needs a settled progress marker correlated to this run.
+  new ProgressGuard(directory).write(parent, { runID: id, userMessageID: `user-${parent}`, state: 'settled',
+    callID: 'task-risk', attemptID: 'task-risk' });
   const owners = new RunOwnershipStore(directory);
   owners.claimParent(parent, id);
   owners.claim({ runID: id, sessionID: parent, directory, worktree: directory });
   return checkpoint;
 }
 
+/** A settled risk-ready or risk-await-result source, with a marker that is settled either way
+ *  so the ownership guard's own stable.state exclusion is what is being exercised, not a pending
+ *  progress marker that would already refuse transfer on its own. */
+function riskStopSource(directory, parent, id, state) {
+  const request = { answers: { certainty: 'very-sure', artifactStore: 'none', mode: 'automatic', summary: 'low', complexity: 'not-complex' } };
+  const workflow = new Workflow(request);
+  workflow.start('mdd-explore');
+  workflow.recordResult({ phase: 'mdd-explore', outcome: 'passed', evidenceSummary: 'The question was explored.' });
+  if (state === 'risk-await-result') workflow.startRisk();
+  const evidence = { requirements: 'confirmed', plan: 'unearned', implementation: 'unearned', checks: 'unearned' };
+  const content = 'Exploration artifact.';
+  const data = { directory, worktree: directory, userMessageID: `user-${parent}`, requirements: 'Plan a safe change.',
+    context: [], dependencies: [{ phase: 'mdd-explore', content, digest: createHash('sha256').update(content).digest('hex') }],
+    contexts: [], decisions: [], planned: [], evidence, executedChecks: [], changedFiles: 0,
+    calls: [], usedMessages: [`user-${parent}`], proposed: [] };
+  const stable = { phase: 'mdd-explore', state, mode: 'delegate', attempts: 0, spent: 0, malformed: 0,
+    report: { phase: 'mdd-explore', summary: 'Exploration recorded.', how: [], status: 'in-progress', evidence }, changedList: [], concerns: [] };
+  const events = workflow.history();
+  const checkpoint = { version: 3, parent, runID: id, sequence: 0, request, events, data, stable,
+    ...(state === 'risk-await-result' ? { attempt: { id: 'task-risk', phase: 'mdd-risk', state: 'pending' } } : {}),
+    dataDigest: sealResumeData(data, id, parent, events, stable) };
+  new CheckpointStore(directory).write(parent, checkpoint);
+  new ProgressGuard(directory).write(parent, { runID: id, userMessageID: `user-${parent}`, state: 'settled',
+    callID: 'task-risk', attemptID: 'task-risk' });
+  const owners = new RunOwnershipStore(directory);
+  owners.claimParent(parent, id);
+  owners.claim({ runID: id, sessionID: parent, directory, worktree: directory });
+  return checkpoint;
+}
+
+/** A settled risk-blocked source: mdd-risk failed, leaving an unresolved risk-recovery question
+ *  the restart path would reissue fresh. Used to exercise transfer's own safe retirement. */
+function riskBlockedSource(directory, parent, id) {
+  const request = { answers: { certainty: 'very-sure', artifactStore: 'none', mode: 'interactive', summary: 'low', complexity: 'not-complex' } };
+  const workflow = new Workflow(request);
+  workflow.start('mdd-explore');
+  workflow.recordResult({ phase: 'mdd-explore', outcome: 'passed', evidenceSummary: 'The question was explored.' });
+  workflow.startRisk();
+  workflow.recordRiskResult({ outcome: 'failed', evidenceSummary: 'Risk could not be substantiated.' });
+  const evidence = { requirements: 'confirmed', plan: 'invalidated', implementation: 'invalidated', checks: 'invalidated' };
+  const content = 'Exploration artifact.';
+  const data = { directory, worktree: directory, userMessageID: `user-${parent}`, requirements: 'Plan a safe change.',
+    context: [], dependencies: [{ phase: 'mdd-explore', content, digest: createHash('sha256').update(content).digest('hex') }],
+    contexts: [], decisions: [], planned: [], evidence, executedChecks: [], changedFiles: 0, calls: [], usedMessages: [], proposed: [] };
+  const stable = { phase: 'mdd-explore', state: 'risk-blocked', mode: 'delegate', attempts: 0, spent: 0, malformed: 0,
+    report: { phase: 'mdd-explore', summary: 'Risk could not be substantiated.', how: [], status: 'failed', evidence },
+    changedList: [], concerns: [], reason: 'mdd-risk reported that the request and exploration findings cannot substantiate a route.' };
+  const events = workflow.history();
+  const checkpoint = { version: 3, parent, runID: id, sequence: 0, request, events, data, stable,
+    dataDigest: sealResumeData(data, id, parent, events, stable) };
+  new CheckpointStore(directory).write(parent, checkpoint);
+  new ProgressGuard(directory).write(parent, { runID: id, userMessageID: `user-${parent}`, state: 'settled',
+    callID: 'task-risk', attemptID: 'task-risk' });
+  const owners = new RunOwnershipStore(directory);
+  owners.claimParent(parent, id);
+  owners.claim({ runID: id, sessionID: parent, directory, worktree: directory });
+  return checkpoint;
+}
+
+/** Bound to the exact checkpoint above, the shape a real `NativeIntake` would write. */
+function riskRecoveryQuestion(source, state) {
+  const args = riskRecoveryEnvelope(source.runID, source.stable.reason ?? '');
+  return { version: 1, parent: source.parent, sequence: 1, runID: source.runID, requirements: source.data.requirements,
+    userMessageID: source.data.userMessageID, known: {}, reservation: { runID: source.runID, stable: 'risk-blocked' },
+    checkpoint: { sequence: source.sequence, digest: source.dataDigest }, state,
+    slot: { kind: 'risk-recovery', args }, clarifications: [], deferred: [], clarificationAnswers: [],
+    callID: 'call-recovery-live', ...(state === 'answered' ? { answer: [[args.questions[0].options[0].label]] } : {}) };
+}
+
+/** A non-risk question kind (here, a route question) bound to the same checkpoint. */
+function routeQuestion(source, state) {
+  const args = routeEnvelope(source.runID, 'mdd-plan', { route: 'low', complexity: 'low', reason: 'Contained change.' });
+  return { version: 1, parent: source.parent, sequence: 1, runID: source.runID, requirements: source.data.requirements,
+    userMessageID: source.data.userMessageID, known: {}, reservation: { runID: source.runID, stable: 'blocked' },
+    checkpoint: { sequence: source.sequence, digest: source.dataDigest }, state,
+    slot: { kind: 'route', phase: 'mdd-plan', args }, clarifications: [], deferred: [], clarificationAnswers: [],
+    callID: 'call-route-live', ...(state === 'answered' ? { answer: [[args.questions[0].options[0].label]] } : {}) };
+}
+
+for (const state of ['pending', 'answered']) test(
+  `claimTargetForTransfer retires a ${state} risk-recovery source question only after the target claim is confirmed`, t => {
+  const directory = root(t);
+  const source = riskBlockedSource(directory, sourceID, runID);
+  const questions = new QuestionCheckpointStore(directory);
+  questions.write(sourceID, riskRecoveryQuestion(source, state));
+  const owners = new RunOwnershipStore(directory);
+  const target = { sessionID: targetID, directory, worktree: directory };
+  const intent = { operationID: `recovery-${state}`, nativeUserMessageID: `user-${targetID}`, requestDigest: 'a'.repeat(64) };
+  const claim = owners.claimTargetForTransfer(runID, sourceID, target,
+    { sequence: source.sequence, digest: source.dataDigest }, 0, intent);
+  assert.equal(claim.sessionID, targetID);
+  // Retired only once the target claim is itself durably confirmed: the historical call and any
+  // answer it carried can never be mistaken for the target's own fresh recovery question later.
+  assert.equal(questions.read(sourceID), undefined);
+  assert.equal(owners.read(runID).state, 'idle');
+});
+
+test('a non-risk-recovery question kind still fences claimTargetForTransfer even though risk-recovery would not', t => {
+  const directory = root(t);
+  const source = riskBlockedSource(directory, sourceID, runID);
+  const questions = new QuestionCheckpointStore(directory);
+  questions.write(sourceID, routeQuestion(source, 'pending'));
+  const owners = new RunOwnershipStore(directory);
+  const target = { sessionID: targetID, directory, worktree: directory };
+  const intent = { operationID: 'route-fences', nativeUserMessageID: `user-${targetID}`, requestDigest: 'b'.repeat(64) };
+  assert.throws(() => owners.claimTargetForTransfer(runID, sourceID, target,
+    { sequence: source.sequence, digest: source.dataDigest }, 0, intent), /not idle|target is occupied/);
+  // The unresolved non-risk question survives exactly because the claim was refused.
+  assert.equal(questions.read(sourceID)?.state, 'pending');
+  assert.equal(owners.parent(targetID), undefined);
+});
+
+test('a failed target claim write leaves a pending risk-recovery source question intact', t => {
+  const directory = root(t);
+  const source = riskBlockedSource(directory, sourceID, runID);
+  const questions = new QuestionCheckpointStore(directory);
+  questions.write(sourceID, riskRecoveryQuestion(source, 'pending'));
+  const owners = new RunOwnershipStore(directory);
+  // An unrelated run already holds this exact target parent (not retired): the target claim
+  // write below is guaranteed to fail before any source retirement could ever happen.
+  owners.claimParent(targetID, 'unrelated-run');
+  const target = { sessionID: targetID, directory, worktree: directory };
+  const intent = { operationID: 'claim-write-fails', nativeUserMessageID: `user-${targetID}`, requestDigest: 'c'.repeat(64) };
+  assert.throws(() => owners.claimTargetForTransfer(runID, sourceID, target,
+    { sequence: source.sequence, digest: source.dataDigest }, 0, intent), /unconfirmed/);
+  assert.equal(questions.read(sourceID)?.state, 'pending');
+  assert.equal(owners.read(runID).state, 'idle');
+  assert.equal(owners.parent(targetID), 'unrelated-run');
+});
+
+// R2/S4: only a risk-recovery question bound to this exact run and source checkpoint is retirable.
+// A stale, foreign or unbound one fences the claim and the reservation, and survives untouched.
+for (const [name, forge] of [
+  ['foreign run', (q) => ({ ...q, runID: 'run-foreign', reservation: { runID: 'run-foreign', stable: 'risk-blocked' } })],
+  ['stale checkpoint digest', (q) => ({ ...q, checkpoint: { ...q.checkpoint, digest: 'e'.repeat(64) } })],
+  ['mismatched checkpoint sequence', (q) => ({ ...q, checkpoint: { ...q.checkpoint, sequence: q.checkpoint.sequence + 1 } })],
+  ['no checkpoint binding', (q) => { const { checkpoint: _checkpoint, ...rest } = q; return rest; }],
+]) test(`a risk-recovery source question with a ${name} fences the transfer claim and is never retired`, t => {
+  const directory = root(t);
+  const source = riskBlockedSource(directory, sourceID, runID);
+  const questions = new QuestionCheckpointStore(directory);
+  const forged = forge(riskRecoveryQuestion(source, 'pending'));
+  questions.write(sourceID, forged);
+  const owners = new RunOwnershipStore(directory);
+  const target = { sessionID: targetID, directory, worktree: directory };
+  const intent = { operationID: `stale-${name.replaceAll(' ', '-')}`, nativeUserMessageID: `user-${targetID}`, requestDigest: 'e'.repeat(64) };
+  const expected = { sequence: source.sequence, digest: source.dataDigest };
+  assert.throws(() => owners.claimTargetForTransfer(runID, sourceID, target, expected, 0, intent), /not idle|target is occupied/);
+  assert.throws(() => owners.reserveVerifiedTransfer(runID, sourceID, target, expected, 0, intent), /unresolved work or a native question/);
+  assert.deepEqual(questions.read(sourceID), forged);
+  assert.equal(owners.parent(targetID), undefined);
+  assert.equal(owners.read(runID).state, 'idle');
+  const assessed = assessTransfer({ sourceSessionID: sourceID, runID, userText: `sourceSessionID=${sourceID} runID=${runID}` },
+    { sessionID: targetID, agent: 'mdd-orchestrator', directory, worktree: directory },
+    new CheckpointStore(directory), new ProgressGuard(directory), questions);
+  assert.equal(assessed.diagnostic, 'pending-unknown');
+});
+
+test('a risk-recovery source question bound to this exact run and checkpoint does not fence the transfer preflight', t => {
+  const directory = root(t);
+  const source = riskBlockedSource(directory, sourceID, runID);
+  const questions = new QuestionCheckpointStore(directory);
+  questions.write(sourceID, riskRecoveryQuestion(source, 'pending'));
+  const assessed = assessTransfer({ sourceSessionID: sourceID, runID, userText: `sourceSessionID=${sourceID} runID=${runID}` },
+    { sessionID: targetID, agent: 'mdd-orchestrator', directory, worktree: directory },
+    new CheckpointStore(directory), new ProgressGuard(directory), questions);
+  assert.notEqual(assessed.diagnostic, 'pending-unknown');
+});
+
+test('clearIf removes a question record only while it is exactly the one that was read', t => {
+  const directory = root(t);
+  const source = riskBlockedSource(directory, sourceID, runID);
+  const questions = new QuestionCheckpointStore(directory);
+  const pending = riskRecoveryQuestion(source, 'pending');
+  questions.write(sourceID, pending);
+  const answered = { ...riskRecoveryQuestion(source, 'answered'), sequence: 2 };
+  questions.write(sourceID, answered);
+  // A stale expectation (the pending record) never deletes the answered one that replaced it.
+  assert.throws(() => questions.clearIf(sourceID, pending), /changed since it was read/);
+  assert.deepEqual(questions.read(sourceID), answered);
+  questions.clearIf(sourceID, answered);
+  assert.equal(questions.read(sourceID), undefined);
+  // Nothing to clear is a change too: the caller expected a record that is gone.
+  assert.throws(() => questions.clearIf(sourceID, answered), /changed since it was read/);
+});
+
+test('a source answer landing between the confirmed claim and retirement is never discarded', t => {
+  const directory = root(t);
+  const source = riskBlockedSource(directory, sourceID, runID);
+  const questions = new QuestionCheckpointStore(directory);
+  questions.write(sourceID, riskRecoveryQuestion(source, 'pending'));
+  const answered = { ...riskRecoveryQuestion(source, 'answered'), sequence: 2 };
+  // Interleave deterministically: the source's own answer is written after the target claim was
+  // confirmed and immediately before the conditional retirement runs.
+  const original = QuestionCheckpointStore.prototype.clearIf;
+  t.mock.method(QuestionCheckpointStore.prototype, 'clearIf', function (parent, expected) {
+    new QuestionCheckpointStore(directory).write(sourceID, answered);
+    return original.call(this, parent, expected);
+  });
+  const owners = new RunOwnershipStore(directory);
+  const target = { sessionID: targetID, directory, worktree: directory };
+  const intent = { operationID: 'race-answer', nativeUserMessageID: `user-${targetID}`, requestDigest: 'd'.repeat(64) };
+  assert.throws(() => owners.claimTargetForTransfer(runID, sourceID, target,
+    { sequence: source.sequence, digest: source.dataDigest }, 0, intent), /reconcile explicitly/);
+  // The concurrent answer survives intact; the source still owns the run; the confirmed claim
+  // remains only for explicit recovery, and recovery refuses while the answer is unresolved.
+  assert.deepEqual(questions.read(sourceID), answered);
+  assert.equal(owners.read(runID).ownerSessionID, sourceID);
+  assert.equal(owners.read(runID).state, 'idle');
+  assert.equal(owners.parentClaim(targetID)?.transfer?.operationID, 'race-answer');
+});
+
 function publishTarget(directory, source, targetParent) {
   const data = { ...source.data, userMessageID: `user-${targetParent}`, usedMessages: [`user-${targetParent}`], proposed: [] };
   const target = { ...source, parent: targetParent, sequence: 0, data,
     dataDigest: sealResumeData(data, source.runID, targetParent, source.events, source.stable) };
   new CheckpointStore(directory).write(targetParent, target);
+  const sourceMarker = new ProgressGuard(directory).read(source.parent);
+  if (sourceMarker) new ProgressGuard(directory).write(targetParent, { ...sourceMarker, userMessageID: `user-${targetParent}` });
   return target;
 }
 
@@ -111,13 +355,17 @@ test('crash after owner reservation or target checkpoint publication grants neit
   assert.equal(restarted.read(runID).state, 'transferring');
   assert.throws(() => restarted.reserve(runID, sourceID, 'source-after-crash', 1));
   const request = { answers: { certainty: 'very-sure', artifactStore: 'none', mode: 'automatic', summary: 'low', complexity: 'not-complex' } };
+  const workflow = new Workflow(request);
+  throughRisk(workflow, 'low');
   const evidence = { requirements: 'confirmed', plan: 'unearned', implementation: 'unearned', checks: 'unearned' };
+  const content = 'Exploration artifact.';
   const data = { directory, worktree: directory, userMessageID: 'target-user', requirements: 'Continue safely.',
-    context: [], dependencies: [], contexts: [], decisions: [], planned: [], evidence, executedChecks: [], changedFiles: 0,
-    calls: [], usedMessages: [], proposed: [] };
+    context: [], dependencies: [{ phase: 'mdd-explore', content, digest: createHash('sha256').update(content).digest('hex') }],
+    contexts: [], decisions: [], planned: [], evidence, executedChecks: [], changedFiles: 0,
+    calls: [], usedMessages: [], proposed: [], risk: { verdict: riskVerdict('low'), ref: riskRef(runID) } };
   const stable = { phase: 'mdd-plan', state: 'ready', mode: 'delegate', attempts: 0, spent: 0, malformed: 0,
     report: { phase: 'mdd-plan', summary: 'Ready to plan.', how: [], status: 'in-progress', evidence }, changedList: [], concerns: [] };
-  const events = new Workflow(request).history();
+  const events = workflow.history();
   new CheckpointStore(directory).write(targetID, { version: 3, parent: targetID, runID, sequence: 0,
     request, events, data, stable, dataDigest: sealResumeData(data, runID, targetID, events, stable) });
   assert.equal(restarted.read(runID).state, 'transferring');
@@ -233,6 +481,30 @@ test('reset handoff keeps the owner reserved while old callback and transfer are
   assert.throws(() => rival.handoff(runID, sourceID, 'task-old', 'reset-rival', held.epoch, recovery));
   source.release(runID, sourceID, 'reset-new', held.epoch);
   assert.equal(source.read(runID).state, 'idle');
+});
+
+test('verified reservation admits a risk-ready source but refuses an unconfirmed risk-await-result one', t => {
+  const directory = root(t);
+  const ready = riskStopSource(directory, sourceID, runID, 'risk-ready');
+  const owners = new RunOwnershipStore(directory);
+  const target = { sessionID: targetID, directory, worktree: directory };
+  const intent = { operationID: 'risk-stop-transfer', nativeUserMessageID: `user-${targetID}`, requestDigest: 'd'.repeat(64) };
+  const reserved = owners.reserveVerifiedTransfer(runID, sourceID, target,
+    { sequence: ready.sequence, digest: ready.dataDigest }, 0, intent);
+  assert.equal(reserved.state, 'transferring');
+  assert.equal(owners.parent(targetID), runID);
+});
+
+test('reserveVerifiedTransfer refuses an unsettled risk-await-result source even with no pending marker', t => {
+  const otherDirectory = root(t);
+  const pending = riskStopSource(otherDirectory, sourceID, 'run-risk-pending', 'risk-await-result');
+  const owners = new RunOwnershipStore(otherDirectory);
+  const target = { sessionID: targetID, directory: otherDirectory, worktree: otherDirectory };
+  const intent = { operationID: 'risk-stop-pending', nativeUserMessageID: `user-${targetID}`, requestDigest: 'e'.repeat(64) };
+  assert.throws(() => owners.reserveVerifiedTransfer('run-risk-pending', sourceID, target,
+    { sequence: pending.sequence, digest: pending.dataDigest }, 0, intent), /not an idle, unoccupied transfer boundary/);
+  assert.equal(owners.parent(targetID), undefined);
+  assert.equal(owners.read('run-risk-pending').state, 'idle');
 });
 
 test('verified reservation fences both parents until correlated target publication and finish CAS', t => {

@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { createLegacyPlugin as plugin } from '../dist/opencode-plugin.js';
 import { defaultSettings, MODEL_ROLES } from '../dist/settings.js';
 import { saveGlobalSettings } from '../dist/global-settings.js';
-import { memoryServer, installCleanup, isolateHome, answers, traceFixture, reportDocument } from './adapter-fixture.mjs';
+import { memoryServer, installCleanup, isolateHome, answers, traceFixture, reportDocument, riskReport } from './adapter-fixture.mjs';
 import { traceArtifact } from '../dist/acceptance.js';
 import { ManagedMemory } from '../dist/managed-memory.js';
 import { STATUS_BUDGET_BYTES, STATUS_COMPACT_KEEP, STATUS_DROP_ORDER, STATUS_PROTECTED_FIELDS } from '../dist/status-budget.js';
@@ -31,7 +31,7 @@ test('opt-in same-parent restart restores ready Verify from validated local depe
   const status = JSON.parse(await resumed.tool.mdd_status.execute({ detail: 'full' }, f.context));
   assert.equal(status.state, 'ready');
   assert.equal(status.phase, 'mdd-verify');
-  assert.equal(status.workflow.results.length, 2);
+  assert.equal(status.workflow.results.length, 3); // + the exploration every run now starts with
   assert.equal(status.workflow.nextAction.phase, 'mdd-verify');
   assert.equal(status.planned.length, 1);
   assert.equal(status.evidence.implementation, 'confirmed');
@@ -70,11 +70,11 @@ test('opt-in pending child releases only after explicit stopped-child confirmati
   assert.notEqual(released.task.prompt, ready.task.prompt);
 });
 
-// The run behind this test is the one entrecuadras-mobile kept after 57b0857: explored, planned,
-// interrupted in apply, and refused on restart because today's policy no longer explores for its
-// answers. Its replayed "start mdd-explore" failed and the whole checkpoint read as invalid.
+// A risk-routed run (explored, assessed, planned, interrupted in apply) restarts on the tail its
+// replayed verdict selected, whatever its answers would score now. A score-routed legacy route
+// stapled onto that history contradicts it and is refused rather than trusted.
 for (const recorded of [true, false]) {
-  test(`a restart keeps a run today's policy would route differently (${recorded ? 'recorded route' : 'record without route'})`, async t => {
+  test(`a restart keeps a risk-routed run whatever its score says, and refuses a stapled legacy route (${recorded ? 'stapled route' : 'record without route'})`, async t => {
     const f = await fixture(t, { route: 'low-explore', memoryEnabled: false, store: 'none' });
     await f.phase();
     await f.phase();
@@ -82,13 +82,20 @@ for (const recorded of [true, false]) {
     assert.equal(ready.phase, 'mdd-apply');
     const file = join(f.root, '.mdd', `checkpoint-${createHash('sha256').update(f.runtime.sessionID).digest('hex')}.json`);
     const saved = JSON.parse(await readFile(file, 'utf8'));
-    assert.deepEqual(saved.request.route, ['mdd-explore', 'mdd-plan', 'mdd-apply', 'mdd-verify'], 'a new run records its route');
-    // Answers that today's policy routes to plan, apply and verify, without exploration.
+    // A new run records no route: its replayed mdd-risk verdict is what selects the tail.
+    assert.equal(saved.request.route, undefined, 'a new run records no route');
+    // Answers whose diagnostic score would differ change nothing: no score routes the run.
     saved.request.answers.certainty = 'very-sure';
-    if (!recorded) delete saved.request.route;
+    // A score-routed route stapled onto a risk-routed history is a contradiction, never authority.
+    if (recorded) saved.request.route = ['mdd-explore', 'mdd-plan', 'mdd-apply', 'mdd-verify'];
     await writeFile(file, JSON.stringify(saved));
     const resumed = await plugin(f.input);
     const status = JSON.parse(await resumed.tool.mdd_status.execute({ detail: 'full' }, f.context));
+    if (recorded) {
+      assert.equal(status.state, 'recovery-blocked');
+      assert.equal(status.task, undefined);
+      return;
+    }
     assert.equal(status.state, 'ready', status.reason);
     assert.equal(status.runID, ready.runID);
     assert.equal(status.phase, 'mdd-apply');
@@ -258,6 +265,134 @@ test('opt-in pending native approval requires attestation, then re-presents with
   assert.notEqual(recovered.question.questions[0].question, oldArgs.questions[0].question);
   await assert.rejects(resumed['tool.execute.after']({ ...oldCall, args: oldArgs }, answer(oldArgs, oldCall.callID)));
   assert.equal(JSON.parse(await resumed.tool.mdd_status.execute({}, f.context)).workflow.nextAction.kind, 'approve');
+});
+
+// T1/S1: a settled blocked-risk assessment is recovered across a restart: a fresh four-choice
+// envelope is minted from the current replayed action, never from the earlier prepared record's
+// text, and only a fresh call answering it (never the earlier one) can retry or choose a route.
+test('a settled blocked-risk assessment re-presents a fresh recovery question on restart and never accepts the old call', async t => {
+  const f = await fixture(t, { mode: 'interactive', store: 'none', memoryEnabled: false });
+  await f.phase({ only: true });
+  const before = await f.phase({ only: true, outcome: 'failed' });
+  assert.equal(before.workflow.nextAction.kind, 'blocked-risk');
+  const oldArgs = before.question;
+  assert.ok(oldArgs, 'a recovery question is armed');
+  // The restarted process never saw a native call for the old envelope: a fresh plugin instance
+  // over the same durable state is restart, not a crashed-call handoff.
+  const resumed = await plugin(f.input);
+  const status = JSON.parse(await resumed.tool.mdd_status.execute({}, f.context));
+  assert.equal(status.workflow.nextAction.kind, 'blocked-risk');
+  assert.ok(status.question, 'the recovery question is reissued after restart');
+  assert.notEqual(status.question.questions[0].question, oldArgs.questions[0].question);
+  assert.deepEqual(status.question.questions[0].options.map(option => option.label),
+    ['Reintentar evaluación de riesgo', 'Ruta low', 'Ruta high', 'Detener']);
+  // The old, pre-restart envelope can never be answered through the restarted process: it names
+  // no question this process ever issued, so its callback has nothing to resolve.
+  const oldCall = { sessionID: f.runtime.sessionID, callID: 'question-before-restart', tool: 'question' };
+  f.parent[1].parts = [{ type: 'tool', tool: 'question', callID: oldCall.callID, sessionID: f.runtime.sessionID,
+    messageID: f.context.messageID, state: { status: 'running', input: structuredClone(oldArgs) } }];
+  await assert.rejects(resumed['tool.execute.before'](oldCall, { args: oldArgs }), /differ from the pending question/);
+  // Only a fresh call against the newly re-presented envelope resolves the recovery.
+  const freshCall = { sessionID: f.runtime.sessionID, callID: 'question-after-restart', tool: 'question' };
+  f.parent[1].parts = [{ type: 'tool', tool: 'question', callID: freshCall.callID, sessionID: f.runtime.sessionID,
+    messageID: f.context.messageID, state: { status: 'running', input: structuredClone(status.question) } }];
+  await resumed['tool.execute.before'](freshCall, { args: status.question });
+  const formatted = status.question.questions.map(q => `"${q.question}"="Reintentar evaluación de riesgo"`).join(', ');
+  await resumed['tool.execute.after']({ ...freshCall, args: status.question }, { title: 'Asked 1 question',
+    output: `User has answered your questions: ${formatted}. You can now continue with the user's answers in mind.`,
+    metadata: { answers: [['Reintentar evaluación de riesgo']], truncated: false } });
+  const retried = JSON.parse(await resumed.tool.mdd_status.execute({}, f.context));
+  assert.equal(retried.stage, 'mdd-risk');
+  assert.equal(retried.risk, undefined, 'no stale verdict survives the restart-driven retry');
+});
+
+// T1/S2: an unrelated ordinary blocked phase (not blocked-risk) is never offered the risk
+// recovery question on restart, and a settled route choice already on record is never re-asked.
+test('restart never arms risk recovery for an unrelated blocked phase or a settled route decision', async t => {
+  const f = await fixture(t, { mode: 'automatic', store: 'none', memoryEnabled: false, route: 'low' });
+  await f.phase({ only: true });
+  const risked = await f.phase({ only: true });
+  assert.equal(risked.workflow.evaluation.route, 'low');
+  assert.equal(risked.workflow.routeOrigin, 'suggested');
+  const resumedSuggested = await plugin(f.input);
+  const suggestedStatus = JSON.parse(await resumedSuggested.tool.mdd_status.execute({}, f.context));
+  assert.equal(suggestedStatus.question, undefined, 'a settled suggested route is never re-asked as a recovery question');
+  const blocked = await f.phase({ only: true, outcome: 'failed' });
+  assert.equal(blocked.workflow.nextAction.kind, 'blocked');
+  assert.notEqual(blocked.workflow.nextAction.kind, 'blocked-risk');
+  const resumedBlocked = await plugin(f.input);
+  const blockedStatus = JSON.parse(await resumedBlocked.tool.mdd_status.execute({}, f.context));
+  assert.equal(blockedStatus.question, undefined, 'an unrelated ordinary blocked phase arms no recovery question on restart');
+});
+
+// T1/S1 (fail closed): a risk-recovery record bound to this exact checkpoint sequence but with a
+// different digest is a foreign or corrupted binding. Restart refuses to reissue over it.
+test('restart refuses to reissue risk recovery over a record bound to a different checkpoint digest', async t => {
+  const f = await fixture(t, { mode: 'interactive', store: 'none', memoryEnabled: false });
+  await f.phase({ only: true });
+  const before = await f.phase({ only: true, outcome: 'failed' });
+  assert.equal(before.workflow.nextAction.kind, 'blocked-risk');
+  const saved = new CheckpointStore(f.root).read(f.runtime.sessionID).checkpoint;
+  const recorded = new QuestionCheckpointStore(f.root).read(f.runtime.sessionID);
+  assert.equal(recorded.slot.kind, 'risk-recovery');
+  assert.ok(['prepared', 'pending', 'answered'].includes(recorded.state));
+  const name = join(f.root, '.mdd', `question-${createHash('sha256').update(f.runtime.sessionID).digest('hex')}.json`);
+  const forged = { ...recorded, checkpoint: { sequence: saved.sequence, digest: saved.dataDigest === 'f'.repeat(64) ? 'e'.repeat(64) : 'f'.repeat(64) } };
+  await writeFile(name, JSON.stringify(forged));
+  const resumed = await plugin(f.input);
+  const status = JSON.parse(await resumed.tool.mdd_status.execute({}, f.context));
+  assert.equal(status.state, 'recovery-blocked');
+  assert.equal(status.question, undefined);
+  assert.equal(status.task, undefined);
+  // The foreign binding is left exactly as found, never overwritten by a fresh envelope.
+  assert.deepEqual(JSON.parse(await readFile(name, 'utf8')), forged);
+});
+
+// T1/S2: a recovery decision already committed before the restart is restored once from replay,
+// keeps its route attribution, and never re-arms the recovery question.
+for (const [label, expectStage, route] of [['Reintentar evaluación de riesgo', 'mdd-risk', undefined], ['Ruta low', undefined, 'low'], ['Ruta high', undefined, 'high']]) {
+  test(`restart after a committed '${label}' recovery choice restores it once and never re-arms risk recovery`, async t => {
+    const f = await fixture(t, { mode: 'interactive', store: 'none', memoryEnabled: false });
+    await f.phase({ only: true });
+    const blocked = await f.phase({ only: true, outcome: 'failed' });
+    assert.equal(blocked.workflow.nextAction.kind, 'blocked-risk');
+    await f.answer(label);
+    const committed = JSON.parse(await f.hooks.tool.mdd_status.execute({ detail: 'full' }, f.context));
+    assert.notEqual(committed.workflow.nextAction.kind, 'blocked-risk');
+    const resumed = await plugin(f.input);
+    const status = JSON.parse(await resumed.tool.mdd_status.execute({ detail: 'full' }, f.context));
+    assert.notEqual(status.state, 'recovery-blocked');
+    assert.notEqual(status.workflow.nextAction.kind, 'blocked-risk');
+    assert.notEqual(status.question?.questions[0].header, 'Recuperación', 'a spent recovery choice is never asked again');
+    assert.deepEqual(status.workflow.nextAction, committed.workflow.nextAction);
+    assert.equal(status.workflow.results.length, committed.workflow.results.length);
+    if (expectStage) assert.equal(status.stage, expectStage);
+    if (route) {
+      assert.equal(status.workflow.routeOrigin, 'manual');
+      assert.equal(status.workflow.evaluation.route, route);
+      assert.equal(status.risk, undefined, 'a restored manual choice carries no fabricated verdict');
+    }
+  });
+}
+
+test('restart after a committed route override keeps the override origin and the original verdict', async t => {
+  const f = await fixture(t, { mode: 'interactive', store: 'none', memoryEnabled: false, route: 'low' });
+  await f.phase({ only: true });
+  await f.phase({ only: true });
+  const routed = await f.status();
+  assert.equal(routed.question?.questions[0].header, 'Ruta');
+  await f.answer('Forzar la otra ruta');
+  const forced = JSON.parse(await f.hooks.tool.mdd_status.execute({ detail: 'full' }, f.context));
+  assert.equal(forced.workflow.routeOrigin, 'override');
+  const resumed = await plugin(f.input);
+  const status = JSON.parse(await resumed.tool.mdd_status.execute({ detail: 'full' }, f.context));
+  assert.notEqual(status.state, 'recovery-blocked');
+  assert.equal(status.workflow.routeOrigin, 'override');
+  assert.equal(status.workflow.evaluation.route, forced.workflow.evaluation.route);
+  assert.equal(status.risk.route, 'low', 'the original suggested verdict survives the restart');
+  assert.deepEqual(status.workflow.nextAction, forced.workflow.nextAction);
+  assert.notEqual(status.question?.questions[0].header, 'Ruta', 'a spent route choice is never asked again');
+  assert.notEqual(status.question?.questions[0].header, 'Recuperación');
 });
 
 test('transfer projection retains work but carries no source approval into a target', async t => {
@@ -444,7 +579,7 @@ for (const store of ['engram', 'both']) {
     const status = JSON.parse(await resumed.tool.mdd_status.execute({ detail: 'full' }, f.context));
     assert.equal(status.state, 'ready');
     assert.equal(status.phase, 'mdd-verify');
-    assert.equal(status.workflow.results.length, 2);
+    assert.equal(status.workflow.results.length, 3); // + the exploration every run now starts with
     assert.equal(status.task.subagent_type, 'mdd-verify');
   });
 }
@@ -470,7 +605,7 @@ test('opt-in rejected result survives restart as a retry of the same phase', asy
   assert.equal(restored.runID, current.runID);
   assert.equal(restored.phase, 'mdd-plan');
   assert.equal(restored.attempts, 1);
-  assert.equal(restored.workflow.results.length, 0);
+  assert.equal(restored.workflow.results.length, 1); // + the exploration every run now starts with
   assert.equal(restored.task.subagent_type, 'mdd-plan');
 });
 
@@ -491,7 +626,7 @@ test('opt-in malformed completed report restores report-only restatement, not di
   }) }, f.context));
   assert.equal(restated.state, 'ready');
   assert.equal(restated.phase, 'mdd-apply');
-  assert.equal(restated.workflow.results.length, 1);
+  assert.equal(restated.workflow.results.length, 2); // + the exploration every run now starts with
 });
 
 test('opt-in failed Verify restores rework and complete runs close before a fresh objective', async t => {
@@ -506,7 +641,7 @@ test('opt-in failed Verify restores rework and complete runs close before a fres
   assert.equal(corrected.state, 'ready');
   assert.equal(corrected.runID, blocked.runID);
   assert.equal(corrected.phase, 'mdd-apply');
-  assert.equal(corrected.workflow.results.length, 3);
+  assert.equal(corrected.workflow.results.length, 4); // + the exploration every run now starts with
 
   const complete = await fixture(t, { memoryEnabled: false, store: 'none' });
   await complete.phase(); await complete.phase(); await complete.phase();
@@ -590,7 +725,10 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
     const call = { sessionID: runtime.sessionID, callID: `question-${++questionCount}`, tool: 'question' };
     parent[1].parts = [{ type: 'tool', tool: 'question', callID: call.callID, sessionID: runtime.sessionID, messageID: context.messageID, state: { status: 'running', input: structuredClone(args) } }];
     await hooks['tool.execute.before'](call, { args });
-    const labels = { 'Aprobación': 'Continuar', Cambio: 'Confirmar el cambio', Certeza: known.certainty === 'not-sure' ? 'Poco seguro' : known.certainty === 'somewhat-sure' ? 'Algo seguro' : 'Muy seguro', Artefactos: { none: 'Ninguno', openspec: 'OpenSpec', engram: 'Engram', both: 'Ambos' }[store], Modo: mode === 'automatic' ? 'Automático' : 'Interactivo', Resumen: { low: 'Bajo', medium: 'Medio', detailed: 'Detallado' }[known.summary] };
+    // 'Ruta' is the one native route question (3a) that replaces the generic approval at the
+    // suggested route's first tail phase; the default answer here keeps the suggested route,
+    // exactly like the plain 'Continuar' it stands in for.
+    const labels = { 'Aprobación': 'Continuar', Ruta: 'Continuar con la ruta sugerida', Cambio: 'Confirmar el cambio', Certeza: known.certainty === 'not-sure' ? 'Poco seguro' : known.certainty === 'somewhat-sure' ? 'Algo seguro' : 'Muy seguro', Artefactos: { none: 'Ninguno', openspec: 'OpenSpec', engram: 'Engram', both: 'Ambos' }[store], Modo: mode === 'automatic' ? 'Automático' : 'Interactivo', Resumen: { low: 'Bajo', medium: 'Medio', detailed: 'Detallado' }[known.summary] };
     const selections = Array.isArray(selection) ? selection : args.questions.map(q => [typeof selection === 'string' ? selection : labels[q.header]]);
     const formatted = args.questions.map((q, i) => `"${q.question}"="${selections[i].join(', ')}"`).join(', ');
     await hooks['tool.execute.after']({ ...call, args }, { title: `Asked ${args.questions.length} question${args.questions.length > 1 ? 's' : ''}`, output: `User has answered your questions: ${formatted}. You can now continue with the user's answers in mind.`, metadata: { answers: selections, truncated: false } });
@@ -612,11 +750,42 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
   // What the last dispatched actor actually received. The parent only ever sees a handle now, so
   // assertions about prompt content belong here, where the prompt is really delivered.
   let delivered;
+  let hiddenIndex = 0;
+  // The verdict the fixture's risk actor returns: it follows the route the fixture was built for.
+  const riskRoute = route === 'high' ? 'high' : 'low';
+  /**
+   * Every run now starts with exploration and then the mdd-risk stop, and only the validated
+   * verdict selects the route. These tests were written when a low route began at mdd-plan and a
+   * high one went straight from exploration to its tail, so `phase()` drives that prelude itself —
+   * an exploration the low route never asked for, and the risk stop, plus the approval interactive
+   * mode now asks before the first tail phase — and then runs the phase the test meant, so each
+   * call still advances exactly one phase of the route the test was written against.
+   * `{ only: true }` runs exactly the current task, prelude included, for tests about it.
+   */
   async function phase(options = {}) {
-    const current = await status();
+    let current = await status();
+    if (!options.only) {
+      const settle = async () => {
+        let next = await status();
+        if (next.question && next.state === 'question-ready') { await answer(); next = await status(); }
+        return next;
+      };
+      if (route === 'low' && !current.contextual && current.stage === undefined && current.task?.subagent_type === 'mdd-explore' && current.workflow?.results.length === 0) {
+        await step(current, {}, true);
+        current = await settle();
+      }
+      if (current.stage === 'mdd-risk' && current.task) {
+        await step(current, {}, true);
+        current = await settle();
+      }
+    }
+    return step(current, options, false);
+  }
+  async function step(current, options, hidden) {
     const args = current.task;
     assert.ok(args, `Expected task, got ${current.state}`);
-    const phase = current.phase ?? 'mdd-explore';
+    const phase = current.stage ?? current.phase ?? 'mdd-explore';
+    const risk = phase === 'mdd-risk';
     // The parent conversation is handed a dispatch handle, never the prompt itself. That is the
     // contract: the prompt is what fills a coordinator's context window and gets it compacted,
     // and the actor receives it all the same because the hook expands the handle below.
@@ -627,13 +796,22 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
     // A coordinator reading its own collapsed history back may replay the transcript note in
     // place of the handle. The byte count it writes is whatever it remembers, never the real one.
     if (options.replayNote) args.prompt = collapsedPrompt(args.subagent_type, 4242);
-    const callID = `task-${++index}`;
+    const ordinal = hidden ? `prelude-${++hiddenIndex}` : `${++index}`;
+    const callID = `task-${ordinal}`;
     const call = { sessionID: runtime.sessionID, callID, tool: 'task' };
     parent[1].parts = [{ type: 'tool', tool: 'task', callID, state: { status: 'running', input: args } }];
     await hooks['tool.execute.before'](call, { args });
     // Expanded in place by the hook, so from here `args` is exactly what the actor receives.
     assert.ok(args.prompt.length > 1000, `the handle was not expanded for ${phase}`);
-    delivered = args.prompt;
+    if (!hidden) delivered = args.prompt;
+    if (risk) {
+      // The risk actor gets the requirements, the recorded exploration and its own report form.
+      assert.equal(args.subagent_type, current.mode === 'native' ? 'general' : 'mdd-risk');
+      assert.ok(args.prompt.includes('Requirements data: "'), 'requirements missing in mdd-risk');
+      assert.ok(args.prompt.includes('Artifact for mdd-explore'), 'exploration artifact missing in mdd-risk');
+      assert.ok(args.prompt.includes('exactly this key: risk'), 'risk report form missing in mdd-risk');
+      assert.ok(args.prompt.includes('Packaged MDD actor instructions with provenance'), 'MDD instructions missing in mdd-risk');
+    } else {
     // A dependency reaches the phase in full, or as its recorded summary and ref when inlining
     // every artifact would exceed the handoff budget. What it never does is disappear silently.
     const announced = /appear above as their recorded summary and ref/.test(args.prompt);
@@ -678,15 +856,16 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
       assert.ok(args.prompt.includes('do not load a skill by name'), `no-name-lookup guidance missing in ${phase}`);
     }
     if (phase === 'mdd-tasks') assert.ok(!args.prompt.includes('Optional packaged skills for this phase'), 'mdd-tasks must carry no skill hint');
-    const childID = `child-${index}`;
+    }
+    const childID = `child-${ordinal}`;
     parent[1].parts[0].state.metadata = { sessionId: childID, parentSessionId: runtime.sessionID, model };
     sessions.set(childID, { id: childID, parentID: runtime.sessionID, directory: root, projectID: 'project', agent: phase, permission: [{ permission: 'task', pattern: '*', action: 'deny' }] });
     await hooks.event({ event: { type: 'session.created', properties: { info: sessions.get(childID) } } });
-    const child = [{ info: { id: `msg-${index}`, sessionID: childID, role: 'assistant', agent: phase, ...model, path: { cwd: root, root }, time: { completed: 10 }, finish: 'stop', ...(options.spent ?? {}) }, parts: [] }];
+    const child = [{ info: { id: `msg-${ordinal}`, sessionID: childID, role: 'assistant', agent: phase, ...model, path: { cwd: root, root }, time: { completed: 10 }, finish: 'stop', ...(options.spent ?? {}) }, parts: [] }];
     histories.set(childID, child);
     if (options.beforeMismatch) child[0].info.modelID = 'substituted';
     async function tool(name, input, output, execute = async () => {}) {
-      const tc = { sessionID: childID, callID: `${name}-${index}`, tool: name };
+      const tc = { sessionID: childID, callID: `${name}-${ordinal}`, tool: name };
       const part = { type: 'tool', tool: name, callID: tc.callID, sessionID: childID, messageID: child[0].info.id, state: { status: 'running', input: structuredClone(input) } };
       child[0].parts.push(part);
       await hooks['tool.execute.before'](tc, { args: input });
@@ -752,17 +931,42 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
       result.artifact += fill.repeat(Math.floor((16000 - Buffer.byteLength(result.artifact) - Buffer.byteLength(suffix)) / Buffer.byteLength(fill)));
     }
     if (options.mismatch) child[0].info.modelID = 'substituted';
-    const text = options.reportText ?? reportDocument(result);
+    const text = options.reportText ?? (risk ? riskReport(options.riskRoute ?? riskRoute, options.outcome ?? 'passed') : reportDocument(result));
     child[0].parts.push({ type: 'text', sessionID: childID, messageID: child[0].info.id, text });
     const output = { title: 'Native task', metadata: { sessionId: childID, parentSessionId: runtime.sessionID, model }, output: `<task id="${childID}" state="completed">\n<task_result>\n${text}\n</task_result>\n</task>` };
     if (options.badEnvelope) output.output = 'the delegated task did not finish';
     await hooks['tool.execute.after']({ ...call, args }, output);
-    visited.push(phase);
+    if (!risk) visited.push(phase);
     return status();
   }
   if (start) await hooks.tool.mdd_start.execute({ requirements }, context);
   return { root, mainRoot, settings, hooks, status, phase, answer, user, change, input, context, parent, runtime, visited, requirements, memory,
     sessions, histories, delivered: () => delivered, writes: memory.writes, questions: () => questionCount };
+}
+
+/**
+ * Drives the two stops every run starts with — exploration, then the mdd-risk assessment — and
+ * returns the route the validated verdict selected. Before the verdict nothing beyond exploration
+ * is on the route, whatever the preflight score says.
+ */
+async function assessedRoute(f, route) {
+  const tail = route === 'high' ? ['mdd-propose', 'mdd-spec', 'mdd-design', 'mdd-tasks', 'mdd-apply', 'mdd-verify'] : ['mdd-plan', 'mdd-apply', 'mdd-verify'];
+  let current = await f.status();
+  assert.equal(current.task.subagent_type, 'mdd-explore');
+  assert.deepEqual(current.workflow.evaluation.phases, ['mdd-explore']);
+  await f.phase({ only: true });
+  current = await f.status();
+  assert.equal(current.stage, 'mdd-risk');
+  assert.equal(current.phase, 'mdd-explore');
+  assert.equal(current.task.subagent_type, 'mdd-risk');
+  assert.deepEqual(current.workflow.evaluation.phases, ['mdd-explore']);
+  assert.equal(current.question, undefined, 'the risk stop dispatches without an approval of its own');
+  await f.phase({ only: true });
+  current = await f.status();
+  assert.equal(current.stage, undefined);
+  assert.deepEqual(current.workflow.evaluation.phases, ['mdd-explore', ...tail]);
+  if (current.question) await f.answer();
+  return ['mdd-explore', ...tail];
 }
 
 for (const route of ['low', 'high']) for (const store of ['none', 'openspec']) for (const mode of ['automatic', 'interactive']) {
@@ -771,10 +975,10 @@ for (const route of ['low', 'high']) for (const store of ['none', 'openspec']) f
     t.mock.method(ManagedMemory.prototype, 'endpoint', () => { assert.fail('Memory off started a service'); });
     const f = await fixture(t, { route, store, mode, memoryEnabled: false, partial: true });
     await f.answer();
-    const phases = (await f.status()).workflow.evaluation.phases;
-    for (const phase of phases) {
+    const phases = await assessedRoute(f, route);
+    for (const phase of phases.slice(1)) {
       assert.equal((await f.status()).task.subagent_type, phase);
-      await f.phase();
+      await f.phase({ only: true });
       if ((await f.status()).question) await f.answer();
     }
     const status = await f.status();
@@ -873,7 +1077,7 @@ for (const fault of [{ noChecks: true }, { coverageFault: 'missing' }]) {
     assert.ok(after.rejected, 'the refused report is handed back to be corrected');
     assert.equal(after.task, undefined, 'a rejected report authorizes repair, not another execution');
     assert.equal(after.nextAction.tool, 'mdd_phase_result');
-    assert.equal(after.workflow.results.length, 2);
+    assert.equal(after.workflow.results.length, 3); // explore, plan, apply
   });
 }
 
@@ -911,11 +1115,12 @@ for (const route of ['low', 'high']) for (const mode of ['automatic', 'interacti
     const f = await fixture(t, { route, mode, store, partial: mode === 'interactive' });
     const initial = await f.status();
     if (initial.question) await f.answer();
-    const phases = (await f.status()).workflow.evaluation.phases;
-    assert.equal(phases.length, route === 'low' ? 3 : 7);
-    for (const phase of phases) {
+    const phases = await assessedRoute(f, route);
+    assert.equal(phases.length, route === 'low' ? 4 : 7);
+    assert.equal((await f.status()).coverage, 20);
+    for (const phase of phases.slice(1)) {
       assert.equal((await f.status()).task.subagent_type, phase);
-      await f.phase();
+      await f.phase({ only: true });
       const current = await f.status();
       const completed = current.workflow.results.map(result => result.phase);
       const expectedCoverage = completed.includes('mdd-verify') ? 100 : completed.includes('mdd-apply') ? 65 : completed.some(phase => ['mdd-plan', 'mdd-tasks'].includes(phase)) ? 40 : 20;
@@ -931,7 +1136,11 @@ for (const route of ['low', 'high']) for (const mode of ['automatic', 'interacti
     final.evidence.checks = 'invalidated'; final.acceptance.requirements[0].id = 'changed'; final.verification.matched = false;
     assert.equal((await f.status()).coverage, 100); assert.equal((await f.status()).acceptance.requirements[0].id, 'R1');
     const general = f.writes.filter(write => write.type === 'workflow');
-    assert.equal(general.length, phases.length * 2);
+    // Every phase and the risk stop each write one intent and one result.
+    assert.equal(general.length, (phases.length + 1) * 2);
+    // The assessment that selected the route is persisted like a phase artifact, outside history.
+    assert.equal(final.risk.route, route);
+    if (store !== 'none') assert.equal(final.risk.ref.phase, 'mdd-risk');
     assert.ok(general.every(write => !write.content.includes('Artifact for')));
     const events = (await readFile(join(f.root, '.mdd/telemetry.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
     assert.equal(events.filter(event => event.event === 'phase-start').length, phases.length);
@@ -955,7 +1164,7 @@ test('Verify rejects an assessment citing a check it never reported, keeping ear
   await assert.rejects(f.phase({ noChecks: true }), /did not report running/);
   const after = await f.status();
   assert.equal(after.state, 'ready'); assert.equal(after.coverage, 65);
-  assert.equal(after.phase, 'mdd-verify'); assert.equal(after.workflow.results.length, 2);
+  assert.equal(after.phase, 'mdd-verify'); assert.equal(after.workflow.results.length, 3);
   assert.equal(after.task, undefined);
 });
 
@@ -981,7 +1190,8 @@ for (const summary of ['low', 'medium', 'detailed']) {
     for (let current = await f.status(); current.task; current = await f.status()) await f.phase();
     const status = await f.status();
     assert.match(status.report, /Make the requested feature usable/);
-    assert.match(status.report, /^\*\*MDD · low route\*\*\n\n✅ plan  ✅ apply  ✅ verify\n\nSkills: doc, cognitive doc design/m);
+    // The validated mdd-risk verdict that selected this route is named here too (D3/S7).
+    assert.match(status.report, /^\*\*MDD · low route\*\*\n\nEvaluación de riesgo: complejidad low, ruta sugerida low\.\n\n✅ explore  ✅ plan  ✅ apply  ✅ verify\n\nSkills: doc, cognitive doc design/m);
     assert.equal(status.visual.route, 'low');
     assert.deepEqual(status.visual.skills, ['mdd-doc', 'cognitive-doc-design']);
     assert.match(status.report, /los requisitos y el plan coinciden con lo implementado/);
@@ -1054,7 +1264,7 @@ test('a failed verification can send the run back to Apply with its findings, on
   assert.equal(reworked.reset.scope, 'rework'); assert.equal(reworked.phase, 'mdd-apply'); assert.equal(reworked.state, 'ready');
   assert.equal(reworked.rework.after, 'mdd-verify'); assert.equal(reworked.reworkable, undefined);
   // Every recorded result and artifact survives; the failed verification is part of the history.
-  assert.deepEqual(reworked.workflow.results.map(item => `${item.phase}:${item.outcome}`), ['mdd-plan:passed', 'mdd-apply:passed', 'mdd-verify:failed']);
+  assert.deepEqual(reworked.workflow.results.map(item => `${item.phase}:${item.outcome}`), ['mdd-explore:passed', 'mdd-plan:passed', 'mdd-apply:passed', 'mdd-verify:failed']);
   assert.equal(reworked.artifacts.length, blocked.artifacts.length);
   await f.phase();
   assert.match(f.delivered(), /This is a correction pass: mdd-verify reported failure/);
@@ -1147,7 +1357,7 @@ test('confirmed rerun asks every field once despite complete profile and preserv
   assert.equal(preflight.runID, old.runID);
   await f.answer([['Muy seguro'], ['Ninguno'], ['Interactivo'], ['Bajo']]);
   const next = await f.status();
-  assert.notEqual(next.runID, old.runID); assert.equal(next.task.subagent_type, 'mdd-plan');
+  assert.notEqual(next.runID, old.runID); assert.equal(next.task.subagent_type, 'mdd-explore');
   assert.equal(next.previousRuns[0].runID, old.runID);
   assert.deepEqual(next.previousRuns[0].artifacts, old.artifacts);
   assert.deepEqual(next.previousRuns[0].acceptance, old.acceptance);
@@ -1188,7 +1398,7 @@ test('known failed phase permits a confirmed new planned run; unknown native res
   await known.hooks.tool.mdd_contextual_explore.execute({ purpose: 'Inspect the known failure without retrying it.' }, known.context);
   await known.phase(); assert.deepEqual((await known.status()).workflow, failed.workflow);
   known.user('Replan this failed task.'); await known.change(); await known.answer(); await known.answer();
-  assert.equal((await known.status()).state, 'ready'); assert.equal((await known.status()).previousRuns[0].workflow.results[0].outcome, 'failed');
+  assert.equal((await known.status()).state, 'ready'); assert.equal((await known.status()).previousRuns[0].workflow.results.at(-1).outcome, 'failed');
   // A rejected attempt used to mark the run uncertain forever, which then refused every repair
   // path. Releasing it is what keeps replanning, investigation and reset reachable after a failure.
   const unknown = await fixture(t); await assert.rejects(unknown.phase({ badEnvelope: true }));
@@ -1266,7 +1476,8 @@ test('a failed intake can be replaced by a fresh request instead of stranding th
   await f.hooks.tool.mdd_start.execute({ requirements: 'Trabajemos en el issue 389.' }, f.context);
   const started = await f.status();
   assert.equal(started.state, 'ready');
-  assert.equal(started.task.subagent_type, 'mdd-plan');
+  // Every objective starts with exploration; only mdd-risk then selects what follows.
+  assert.equal(started.task.subagent_type, 'mdd-explore');
 });
 
 // Regression: interrupting the coordinator and then writing "continue" made the continuation the
@@ -1284,7 +1495,8 @@ test('an interrupted objective still starts after the user writes a continuation
   await f.hooks.tool.mdd_start.execute({ requirements: objective }, f.context);
   const started = await f.status();
   assert.equal(started.state, 'ready');
-  assert.equal(started.task.subagent_type, 'mdd-plan');
+  // Every objective starts with exploration; only mdd-risk then selects what follows.
+  assert.equal(started.task.subagent_type, 'mdd-explore');
 });
 
 // A ledger that cannot say what a phase cost cannot answer the question it exists for. The child
@@ -1374,7 +1586,8 @@ test('read-only investigation answers without an accepted run and leaves impleme
   await f.hooks.tool.mdd_start.execute({ requirements: f.requirements }, f.context);
   const started = await f.status();
   assert.equal(started.state, 'ready');
-  assert.equal(started.task.subagent_type, 'mdd-plan');
+  // Every objective starts with exploration; only mdd-risk then selects what follows.
+  assert.equal(started.task.subagent_type, 'mdd-explore');
   assert.equal(started.contextual, false);
 });
 test('a replayed transcript note dispatches the standalone investigation it stands for', async t => {
@@ -1437,7 +1650,8 @@ test('a run lost mid-route keeps its plan reachable as read-only data', async t 
   // persisted in Engram, but the index naming them lived only in memory, so nothing was findable.
   const f = await fixture(t, { route: 'low-explore', store: 'engram' });
   const phases = (await f.status()).workflow.evaluation.phases;
-  assert.deepEqual(phases.slice(0, 2), ['mdd-explore', 'mdd-plan']);
+  // Only exploration is on the route until mdd-risk selects the rest; phase() drives that stop.
+  assert.deepEqual(phases, ['mdd-explore']);
   await f.phase(); await f.phase();
   const live = await f.status();
   assert.equal(live.state, 'ready');
@@ -1528,7 +1742,7 @@ test('mdd_reset with scope run frees the conversation and sets the record aside,
   const status = JSON.parse(await restarted.tool.mdd_status.execute({ detail: 'full' }, f.context));
   assert.equal(status.state, 'ready');
   assert.equal(status.memory, 'off');
-  assert.equal(status.workflow.results.length, 1);
+  assert.equal(status.workflow.results.length, 2); // explore, plan
   JSON.parse(await restarted.tool.mdd_reset.execute({ scope: 'run' }, f.context));
   // The live record is gone, so nothing holds the conversation or offers a recovery it cleared.
   assert.ok(!(await names()).some(name => /^run-[a-f0-9]{64}\.json$/.test(name)), 'the live record no longer occupies the conversation');
@@ -1895,8 +2109,8 @@ test('three settled failures select native fallback and the next phase delegates
   assert.equal(handed.brief, undefined);
   assert.equal(handed.task.subagent_type, 'general');
   const done = await f.phase();
-  assert.equal(done.workflow.results.length, 1);
-  assert.equal(done.workflow.results[0].phase, 'mdd-plan');
+  assert.equal(done.workflow.results.length, 2); // explore, then the plan that needed fallback
+  assert.equal(done.workflow.results[1].phase, 'mdd-plan');
   assert.equal(done.evidence.plan, 'confirmed');
   assert.equal(done.task.subagent_type, 'mdd-apply');
   assert.equal(done.mode, 'delegate', 'the next phase starts from delegation again');
@@ -1905,7 +2119,7 @@ test('three settled failures select native fallback and the next phase delegates
   assert.equal(done.attempts, 0, 'the next phase starts with its own count');
   assert.equal(done.attemptsLeft, 3);
   assert.equal(done.runAttempts, 3, 'the run-wide total still records what was spent');
-  assert.equal(JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context)).artifacts.length, 1);
+  assert.equal(JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context)).artifacts.length, 2);
 });
 
 test('an inline report is refused when no phase is waiting for one', async t => {
@@ -1922,7 +2136,8 @@ test('an inline report is refused when no phase is waiting for one', async t => 
   assert.equal(after.state, 'ready');
   assert.equal(after.attempts, 0, 'a malformed report must not spend an attempt');
   assert.equal(after.mode, 'native');
-  assert.equal(after.task.subagent_type, 'general');
+  // Every run starts with exploration, whose native executor is explore.
+  assert.equal(after.task.subagent_type, 'explore');
   assert.equal(after.workflow.results.length, 0);
   assert.equal(after.rejected, undefined);
 });
@@ -1934,14 +2149,15 @@ test('a phase whose report only needs restating is not run again', async t => {
   await assert.rejects(f.phase({ reportText: 'I finished the plan. Everything looks good.' }), /needs the headings/);
   const held = await f.status();
   assert.equal(held.attempts, 0);
-  assert.equal(held.workflow.results.length, 0);
+  assert.equal(held.workflow.results.length, 1); // only the exploration that precedes the plan
   // Restating the same work in the right form records it, without dispatching anything.
   const restated = JSON.parse(await f.hooks.tool.mdd_phase_result.execute({ result: reportDocument({
     outcome: 'passed', evidenceSummary: 'Planned the CLI boundary change.',
     artifact: 'Plan: validate at the CLI boundary; run npm test afterwards.',
     ...traceFixture(join(f.root, 'feature.txt'), 'feature'),
   }) }, f.context));
-  assert.equal(restated.workflow.results[0].phase, ready.phase);
+  assert.equal(ready.phase, 'mdd-explore');
+  assert.equal(restated.workflow.results[1].phase, 'mdd-plan');
   assert.equal(restated.evidence.plan, 'confirmed');
   assert.equal(restated.rejected, undefined, 'a recorded result clears the report it replaced');
 });
@@ -2001,12 +2217,16 @@ test('tracked native children cannot recurse or use MDD tools; unrelated native 
 
 test('uncertain Apply cannot skip interactive approval or automatically retry partial writes', async t => {
   const f = await fixture(t, { mode: 'interactive', memoryEnabled: false });
-  await f.hooks.tool.mdd_phase_result.execute({ result: 'Use native planning.' }, f.context);
+  await f.hooks.tool.mdd_phase_result.execute({ result: 'Use native exploration.' }, f.context);
   await f.phase();
+  // The risk stop dispatches without an approval of its own; the first tail phase then waits for one.
+  await f.phase({ only: true });
   const approval = await f.status();
   assert.equal(approval.state, 'question-ready');
   assert.equal(approval.task, undefined);
   await assert.rejects(f.hooks.tool.mdd_phase_result.execute({ result: 'Skip approval.' }, f.context), /approval|question|not waiting|active/);
+  await f.answer();
+  await f.phase();
   await f.answer();
   await assert.rejects(f.phase({ badEnvelope: true }));
   assert.equal(await readFile(join(f.root, 'feature.txt'), 'utf8'), 'implemented\n');
@@ -2087,7 +2307,7 @@ test('mdd_reset releases a stopped phase and a whole run without a new conversat
   assert.equal(released.attemptsLeft, 3, 'releasing a phase restores its dispatches');
   assert.equal(released.reason, '');
   await f.phase();
-  assert.equal((await f.status()).workflow.results.length, 1);
+  assert.equal((await f.status()).workflow.results.length, 2); // explore, plan
   const cleared = JSON.parse(await f.hooks.tool.mdd_reset.execute({ scope: 'run' }, f.context));
   assert.equal(cleared.reset.scope, 'run');
   assert.equal(cleared.state, 'not-started');
@@ -2096,7 +2316,7 @@ test('mdd_reset releases a stopped phase and a whole run without a new conversat
   assert.match(cleared.reset.preserved.file, /\.mdd\/run-[a-f0-9]{64}\.discarded\.json$/);
   const preserved = JSON.parse(await readFile(join(f.root, cleared.reset.preserved.file), 'utf8'));
   assert.equal(preserved.runID, cleared.reset.preserved.runID);
-  assert.equal(preserved.results.length, 1);
+  assert.equal(preserved.results.length, 2);
   assert.ok(preserved.discardedAt > 0);
   f.user('An entirely different objective.');
   assert.equal(JSON.parse(await f.hooks.tool.mdd_start.execute({ requirements: 'An entirely different objective.' }, f.context)).state, 'ready');
@@ -2219,7 +2439,7 @@ test('a handle that cannot travel falls back to the full prompt instead of block
   const after = await f.status();
   assert.equal(after.state, 'ready');
   assert.equal(after.dispatch, undefined, 'the fallback stops advertising a handle');
-  assert.match(after.task.prompt, /Perform only mdd-plan/);
+  assert.match(after.task.prompt, /Perform only mdd-explore/);
   assert.deepEqual(after.nextAction.args, after.task);
   // And the phase still dispatches, which is the entire point of degrading rather than refusing.
   const output = { args: after.task };
@@ -2282,7 +2502,7 @@ test('a compacted conversation is handed the run back as a card, not left to rec
   assert.equal(after.compacted, 1);
   assert.equal(after.runCard.runID, before.runID);
   assert.equal(after.runCard.objective, f.requirements);
-  assert.deepEqual(after.runCard.completed, ['mdd-plan: passed']);
+  assert.deepEqual(after.runCard.completed, ['mdd-explore: passed', 'mdd-plan: passed']);
   assert.equal(after.runCard.phase, after.phase);
   assert.match(after.runCard.note, /Recorded results must not be repeated/);
   // The card is a description, never a capability: nothing about the run moved.
@@ -2323,7 +2543,7 @@ test('a finished run leaves a row a later review can read, and the retro reads i
   assert.equal(rows.length, 1);
   assert.equal(rows[0].state, 'complete');
   assert.equal(rows[0].phase, 'mdd-verify');
-  assert.deepEqual(rows[0].route, ['mdd-plan', 'mdd-apply', 'mdd-verify']);
+  assert.deepEqual(rows[0].route, ['mdd-explore', 'mdd-plan', 'mdd-apply', 'mdd-verify']);
   assert.equal(rows[0].coverage, 100);
   assert.equal(rows[0].changedFiles, 1);
   assert.deepEqual(rows[0].checks, { total: 1, passed: 1, failed: 0 });

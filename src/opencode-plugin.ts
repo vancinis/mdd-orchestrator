@@ -115,11 +115,13 @@ export const PHASE_AGENTS: readonly string[] = Object.freeze([
   'mdd-explore', 'mdd-plan', 'mdd-propose', 'mdd-spec', 'mdd-design', 'mdd-tasks', 'mdd-apply', 'mdd-verify',
 ]);
 /**
- * The risk actor. It is not one of `PHASE_AGENTS`: nothing dispatches it yet and it occupies no
- * stop on the route, but it shares the phase actors' restricted tool profile and may submit its
- * report through the same form check.
+ * The risk actor. It is not one of `PHASE_AGENTS`: it occupies no stop on the route, but the runner
+ * dispatches it after a passed exploration, it shares the phase actors' restricted tool profile
+ * and it may submit its report through the same form check.
  */
 export const RISK_AGENT = 'mdd-risk';
+/** Every actor the runner dispatches: its settled prompts are collapsed and its tasks titled. */
+const DISPATCHED_AGENTS: readonly string[] = Object.freeze([...PHASE_AGENTS, RISK_AGENT]);
 /** Agents allowed to call `mdd_check_report`: the eight phase actors and the risk actor. */
 export const CHECK_AGENTS: readonly string[] = Object.freeze([...PHASE_AGENTS, RISK_AGENT, SECURITY_AGENT]);
 /** Agents pinned to the restricted tool profile below: the eight phase actors and the risk actor. */
@@ -135,9 +137,8 @@ const PINNED_AGENTS: readonly string[] = Object.freeze([...PHASE_AGENTS, RISK_AG
  * it delegated would run under instructions MDD never composed. `skill` goes because a phase that
  * wants an applicable packaged skill already has its direct path in the prompt; a name lookup
  * against the shared registry can only find something else. The coordinator keeps both: it
- * dispatches phases, and its own work is not a phase. `mdd-risk` gets the same restricted profile
- * even though the coordinator does not dispatch it yet, so later wiring its dispatch adds no new
- * capability here.
+ * dispatches phases, and its own work is not a phase. `mdd-risk` gets the same restricted profile,
+ * so dispatching it adds no capability a phase actor does not already have.
  */
 export function pinPhaseAgents(config: { agent?: Record<string, Record<string, unknown>> }): void {
   config.agent ??= {};
@@ -1469,11 +1470,14 @@ const plugin: Plugin = async input => {
         runner.owner(input.sessionID, input.callID);
         try {
           const previousState = runner.status(input.sessionID).state;
-          await runner.after(input, input.args, output);
-          intake.phaseRecorded(input.sessionID);
+          // A rejected report (malformed, exhausted, or otherwise) may still have settled the
+          // workflow at a state with its own native recovery, such as blocked-risk after an
+          // exhausted mdd-risk fallback; that recovery is armed here too, not only on success.
+          try { await runner.after(input, input.args, output); }
+          finally { try { intake.phaseRecorded(input.sessionID); } catch { /* best effort re-arm; the original outcome still propagates. */ } }
           const current = runner.status(input.sessionID);
           const phase = typeof input.args === 'object' && input.args !== null && 'subagent_type' in input.args &&
-            PHASE_AGENTS.includes(String(input.args.subagent_type)) ? input.args.subagent_type as Phase : undefined;
+            DISPATCHED_AGENTS.includes(String(input.args.subagent_type)) ? input.args.subagent_type as Phase | typeof RISK_AGENT : undefined;
           if (phase) {
             output.title = visualTitle(phase, presentationSettings().ascii);
             const state = current.state;
@@ -1487,7 +1491,7 @@ const plugin: Plugin = async input => {
     // out of every message the coordinator reads afterwards. See src/dispatch-transcript.ts for
     // why both halves are needed, and why only settled dispatches are touched.
     'experimental.chat.messages.transform': async (_input, output) => {
-      try { collapseDispatchPrompts(output.messages, PHASE_AGENTS, (sessionID, callID, args) => runner.ownsNativePrompt(sessionID, callID, args)); }
+      try { collapseDispatchPrompts(output.messages, DISPATCHED_AGENTS, (sessionID, callID, args) => runner.ownsNativePrompt(sessionID, callID, args)); }
       // A transcript optimization that can fail a turn is worse than the tokens it saves.
       catch { /* the untouched messages are still correct, only larger */ }
     },

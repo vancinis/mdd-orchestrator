@@ -54,13 +54,13 @@ test('scripted actor consumes expanded assigned-only handoff and runs exactly on
 });
 
 test('native evidence cannot pass with reused identities, speculative writes or missing Verify', () => {
-  const events = ['mdd-plan', 'mdd-apply', 'mdd-apply', 'mdd-verify'].map((agent, i) =>
+  const events = ['mdd-explore', 'mdd-risk', 'mdd-plan', 'mdd-apply', 'mdd-apply', 'mdd-verify'].map((agent, i) =>
     ({ kind: 'child', agent, sessionID: `child-${i}`, parentID: 'parent', completed: true }));
   const statuses = [{ state: 'ready', phase: 'mdd-apply' }, { state: 'ready', phase: 'mdd-apply' },
     { state: 'ready', phase: 'mdd-verify' }, { state: 'complete' }];
   assert.doesNotThrow(() => checkHostEvidence(events, statuses, 'parent', 'success'));
   assert.throws(() => checkHostEvidence(events.map(e => ({ ...e, sessionID: 'same' })), statuses, 'parent', 'success'));
-  assert.throws(() => checkHostEvidence(events.slice(0, 3), statuses, 'parent', 'success'));
+  assert.throws(() => checkHostEvidence(events.slice(0, 5), statuses, 'parent', 'success'));
   assert.throws(() => checkHostEvidence(events, statuses.map(s => ({ ...s, question: {} })), 'parent', 'success'));
 });
 

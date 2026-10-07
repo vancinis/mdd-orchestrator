@@ -7,9 +7,11 @@ import { applyPlan, completeStep, selectedStep, taskIDs } from './apply-batches.
 import type { ApplyProgress, ApplyStep } from './apply-batches.js';
 
 /**
- * A request may carry `route`: the phases its run was evaluated with when it started. It is not
- * a preflight answer and grants nothing; it only has to be one of the routes the policy can
- * choose, so a persisted run keeps the route it was started on after the routing policy changes.
+ * A request may carry `route`: the phases a run started before the mdd-risk stop existed was
+ * evaluated with. It is not a preflight answer and grants nothing; it only has to be one of the
+ * routes the earlier score-routed policy could choose. Such a legacy run keeps that route to the
+ * end and never enters the risk stop. A run started now records no route: its tail is selected
+ * only by the replayed mdd-risk verdict, override or manual recovery events.
  */
 function recordedRoute(request: unknown): { base: unknown; route?: Phase[] } {
   if (!request || typeof request !== 'object' || Array.isArray(request) || !Object.hasOwn(request, 'route')) return { base: request };
@@ -18,22 +20,59 @@ function recordedRoute(request: unknown): { base: unknown; route?: Phase[] } {
   return { base, route: [...route as Phase[]] };
 }
 
+/**
+ * `execute-risk` / `await-risk-result` / `blocked-risk` model `mdd-risk` as its own typed
+ * execution stop, deliberately apart from the eight `Phase` values: it assesses complexity and
+ * risk and selects the continuation, it does not occupy a stop on the eight-phase route, and its
+ * report is not an ordinary phase report. Before a validated verdict selects a continuation, the
+ * route is undecided: there is exactly one stop beyond exploration, this one, and no low or high
+ * tail is reachable yet.
+ */
+/**
+ * How the active route was selected, once a tail is set: `suggested` and `override` only follow
+ * a passed `mdd-risk` verdict (the verdict itself is always retained; override only changes which
+ * tail runs), while `manual` follows a user recovery choice from `blocked-risk`, which never
+ * carries a `RiskVerdict`. Status and report read this to show provenance honestly.
+ */
+export type RouteOrigin = 'suggested' | 'override' | 'manual';
 export type NextAction =
   | { kind: 'execute' | 'approve' | 'await-result' | 'blocked'; phase: Phase }
+  | { kind: 'execute-risk' | 'await-risk-result' | 'blocked-risk' }
   | { kind: 'finished' };
 export type PhaseResult = { phase: Phase; outcome: 'passed' | 'failed'; evidenceSummary: string;
   applyPlan?: ApplyStep[]; completed?: string[]; batchID?: string };
+/** `mdd-risk`'s own result shape: a route is only ever present on a passed outcome. */
+export type RiskResult = { outcome: 'passed' | 'failed'; evidenceSummary: string; route?: 'low' | 'high' };
 export type WorkflowEvent =
   | { kind: 'start' | 'approve' | 'rework'; phase: Phase }
   | { kind: 'apply-plan'; planned: ApplyStep[] }
-  | { kind: 'retry' }
-  | { kind: 'result'; result: PhaseResult };
+  | { kind: 'retry' | 'risk-start' }
+  | { kind: 'result'; result: PhaseResult }
+  | { kind: 'risk-result'; result: RiskResult }
+  /**
+   * The user forces the other route instead of the one `mdd-risk` suggested, while the first tail
+   * phase of the suggested route is still only awaiting its ordinary approval (`approve`/`execute`
+   * are unchanged: continuing is still just an ordinary `approve` event, never a new kind). The
+   * original `risk-result` event is never replaced; only which tail runs changes.
+   */
+  | { kind: 'route-override' }
+  /**
+   * The user's recovery decision from `blocked-risk`: retry reuses the plain `retry` event. Low
+   * and high are manual choices with no `RiskVerdict` — no `risk-result` event is appended for
+   * them, only this one, naming the manually chosen route.
+   */
+  | { kind: 'risk-recovery'; route: 'low' | 'high' };
 export type WorkflowSnapshot = {
   answers: Answers;
   evaluation: Evaluation;
   nextAction: NextAction;
   results: PhaseResult[];
+  /** Present only once a tail has actually been selected, by any origin. */
+  routeOrigin?: RouteOrigin;
 };
+
+const LOW_TAIL = ['mdd-plan', 'mdd-apply', 'mdd-verify'] as const;
+const HIGH_TAIL = ['mdd-propose', 'mdd-spec', 'mdd-design', 'mdd-tasks', 'mdd-apply', 'mdd-verify'] as const;
 
 export class Workflow {
   readonly #answers: Answers;
@@ -43,23 +82,35 @@ export class Workflow {
   #index = 0;
   #next: NextAction;
   #apply: ApplyProgress | undefined;
+  #routeOrigin?: RouteOrigin;
+  /** A run started on a recorded score-routed route, before the mdd-risk stop existed. */
+  readonly #legacyRoute: boolean;
 
   constructor(request: unknown) {
     const { base, route } = recordedRoute(request);
     const resolved = preflight(base);
     this.#answers = resolved.answers;
     const current = resolved.evaluation;
-    this.#evaluation = !route || isDeepStrictEqual(route, current.phases) ? current : {
+    // A new run's route is provisional at construction: exploration is the one phase every route
+    // starts with, and nothing beyond it is authorized until a validated mdd-risk verdict selects
+    // the low or high continuation. A disagreeing score never substitutes for that. Only a run
+    // that recorded its route before the risk stop existed keeps that route instead.
+    this.#legacyRoute = route !== undefined;
+    this.#evaluation = !route ? current : {
       ...current, route: isDeepStrictEqual(route, [...HIGH_ROUTE]) ? 'high' : 'low', phases: route,
-      reasons: [...current.reasons, `This run keeps the route it started with (${route.join(', ')}); the current routing policy would choose ${current.phases.join(', ')}.`],
+      reasons: [...current.reasons, `This run keeps the route it started with (${route.join(', ')}), recorded before the mdd-risk stop selected routes.`],
     };
     this.#next = { kind: 'execute', phase: this.#evaluation.phases[0]! };
   }
 
-  /** The request to persist for this run: its preflight request plus the route it started on. */
+  /**
+   * The request to persist for this run. A new run records no route beside it: its tail is derived
+   * from the replayed risk verdict, override or manual recovery events. A legacy run keeps the
+   * route it recorded, so it still replays on that route after every restart.
+   */
   static recordedRequest(request: unknown, workflow: Workflow): unknown {
     const { base } = recordedRoute(request);
-    if (!base || typeof base !== 'object' || Array.isArray(base)) return structuredClone(base);
+    if (!workflow.#legacyRoute || !base || typeof base !== 'object' || Array.isArray(base)) return structuredClone(base);
     return { ...structuredClone(base as Record<string, unknown>), route: [...workflow.#evaluation.phases] };
   }
 
@@ -73,6 +124,7 @@ export class Workflow {
       evaluation: this.#evaluation,
       nextAction: this.#next,
       results: this.#results,
+      ...(this.#routeOrigin ? { routeOrigin: this.#routeOrigin } : {}),
     });
   }
 
@@ -80,9 +132,9 @@ export class Workflow {
   static replay(request: unknown, events: readonly WorkflowEvent[]): Workflow {
     try { return Workflow.#replay(request, events); }
     catch (error) {
-      // A record written before runs kept their route is replayed under today's policy, which
-      // may route the same answers differently. Its own history then names the route it ran on,
-      // and it is accepted only when exactly one known route reproduces that history.
+      // A record written before runs kept their route, and before the risk stop, does not replay
+      // as a new run. Its own history then names the route it ran on, and it is accepted only when
+      // exactly one known legacy route reproduces that history.
       if (!request || typeof request !== 'object' || Array.isArray(request) || Object.hasOwn(request, 'route')) throw error;
       const fits = ROUTES.flatMap(route => {
         try { return [Workflow.#replay({ ...request as Record<string, unknown>, route: [...route] }, events)]; }
@@ -97,9 +149,10 @@ export class Workflow {
     if (!Array.isArray(events) || events.length > 512) throw new ValidationError('Invalid workflow history.');
     const workflow = new Workflow(request);
     for (const event of events) {
-      const item = objectWithKeys(event, 'workflow event', ['kind', 'phase', 'result', 'planned']);
+      const item = objectWithKeys(event, 'workflow event', ['kind', 'phase', 'result', 'planned', 'route']);
       if (item.kind === 'retry') {
-        if (Object.keys(item).length !== 1 || !['blocked', 'await-result'].includes(workflow.#next.kind)) throw new ValidationError('Invalid retry event.');
+        if (Object.keys(item).length !== 1 || !['blocked', 'await-result', 'blocked-risk', 'await-risk-result'].includes(workflow.#next.kind))
+          throw new ValidationError('Invalid retry event.');
         workflow.retry();
       } else if (item.kind === 'apply-plan') {
         if (Object.keys(item).length !== 2) throw new ValidationError('Invalid Apply plan event.');
@@ -107,6 +160,18 @@ export class Workflow {
       } else if (item.kind === 'result') {
         if (Object.keys(item).length !== 2) throw new ValidationError('Invalid result event.');
         workflow.recordResult(item.result);
+      } else if (item.kind === 'risk-start') {
+        if (Object.keys(item).length !== 1) throw new ValidationError('Invalid risk-start event.');
+        workflow.startRisk();
+      } else if (item.kind === 'risk-result') {
+        if (Object.keys(item).length !== 2) throw new ValidationError('Invalid risk-result event.');
+        workflow.recordRiskResult(item.result);
+      } else if (item.kind === 'route-override') {
+        if (Object.keys(item).length !== 1) throw new ValidationError('Invalid route-override event.');
+        workflow.overrideRoute();
+      } else if (item.kind === 'risk-recovery') {
+        if (Object.keys(item).length !== 2) throw new ValidationError('Invalid risk-recovery event.');
+        workflow.chooseManualRoute(item.route as 'low' | 'high');
       } else if (item.kind === 'start' || item.kind === 'approve' || item.kind === 'rework') {
         if (Object.keys(item).length !== 2 || typeof item.phase !== 'string') throw new ValidationError('Invalid phase event.');
         workflow[item.kind](item.phase as Phase);
@@ -151,6 +216,9 @@ export class Workflow {
   retry(): void {
     if (this.#next.kind === 'await-result' || this.#next.kind === 'blocked') {
       this.#next = { kind: 'execute', phase: this.#next.phase };
+      this.#events.push({ kind: 'retry' });
+    } else if (this.#next.kind === 'await-risk-result' || this.#next.kind === 'blocked-risk') {
+      this.#next = { kind: 'execute-risk' };
       this.#events.push({ kind: 'retry' });
     }
   }
@@ -213,6 +281,13 @@ export class Workflow {
       this.#next = { kind: 'execute', phase: current };
       return;
     }
+    // Exploration is always the first and, until a route is selected, only phase this run holds.
+    // A passed exploration moves to the risk stop, never straight to a tail phase: no score here
+    // decides the continuation.
+    if (current === 'mdd-explore' && !this.#legacyRoute) {
+      this.#next = { kind: 'execute-risk' };
+      return;
+    }
     const nextPhase = this.#evaluation.phases[this.#index + 1];
     if (nextPhase === undefined) {
       this.#next = { kind: 'finished' };
@@ -223,5 +298,94 @@ export class Workflow {
       kind: this.#answers.mode === 'automatic' ? 'execute' : 'approve',
       phase: nextPhase,
     };
+  }
+
+  /** Begins dispatching mdd-risk. Only reachable once a passed exploration left the route undecided. */
+  startRisk(): void {
+    if (this.#next.kind !== 'execute-risk') throw new ValidationError('mdd-risk can only start from the execute-risk stop.');
+    this.#next = { kind: 'await-risk-result' };
+    this.#events.push({ kind: 'risk-start' });
+  }
+
+  /**
+   * Settles the risk stop and, on a passed outcome, selects the continuation in the same step:
+   * a route is never recorded apart from the verdict that authorized it, and a failed or invalid
+   * assessment leaves the run blocked without ever appending a tail.
+   */
+  recordRiskResult(value: unknown): void {
+    const input = objectWithKeys(value, 'risk result', ['outcome', 'evidenceSummary', 'route']);
+    const { outcome, evidenceSummary, route } = input;
+    if (outcome !== 'passed' && outcome !== 'failed') {
+      throw new ValidationError('risk result.outcome must be passed or failed.');
+    }
+    if (typeof evidenceSummary !== 'string' || evidenceSummary.trim().length === 0) {
+      throw new ValidationError('risk result.evidenceSummary must be a nonempty string.');
+    }
+    if (this.#next.kind !== 'await-risk-result') {
+      throw new ValidationError('A risk result must name the currently running risk assessment.');
+    }
+    if (outcome === 'failed') {
+      if (route !== undefined) throw new ValidationError('risk result.route is only accepted when outcome is passed.');
+      this.#next = { kind: 'blocked-risk' };
+      this.#events.push({ kind: 'risk-result', result: { outcome, evidenceSummary } });
+      return;
+    }
+    if (route !== 'low' && route !== 'high') {
+      throw new ValidationError('A passed risk result requires route low or high.');
+    }
+    this.#events.push({ kind: 'risk-result', result: { outcome, evidenceSummary, route } });
+    // The verdict alone authorizes its own, suggested route: automatic mode proceeds with it
+    // immediately (D2, S4); interactive mode still awaits the ordinary approval of the first
+    // tail phase, exactly as before, which `overrideRoute` may redirect before it is given.
+    this.#applyRoute(route, 'suggested', false);
+  }
+
+  /**
+   * Applies a tail to the evaluation and records how its route was decided. Never discards or
+   * rewrites the original risk verdict; that stays in the `risk-result` event already recorded.
+   * `authorized` skips the ordinary interactive approval for the first tail phase: the suggested
+   * route from a passed verdict still awaits it, but choosing it explicitly (override or a manual
+   * recovery choice) is itself the one native decision that authorizes that phase.
+   */
+  #applyRoute(route: 'low' | 'high', origin: RouteOrigin, authorized: boolean): void {
+    const tail = route === 'high' ? HIGH_TAIL : LOW_TAIL;
+    this.#evaluation.phases = ['mdd-explore', ...tail];
+    this.#evaluation.route = route;
+    this.#routeOrigin = origin;
+    this.#index = 1;
+    this.#next = { kind: authorized || this.#answers.mode === 'automatic' ? 'execute' : 'approve', phase: tail[0] };
+  }
+
+  /**
+   * The user forces the other route while the suggested route's first tail phase is still only
+   * awaiting its ordinary approval. The original `risk-result` verdict stays exactly as recorded;
+   * only which tail runs changes, with `override` provenance instead of `suggested`.
+   */
+  overrideRoute(): void {
+    if (this.#next.kind !== 'approve' || this.#routeOrigin !== 'suggested' || this.#results.length !== 1) {
+      throw new ValidationError('The route can only be overridden before its first tail phase is approved or started.');
+    }
+    const current = this.#evaluation.route;
+    if (current !== 'low' && current !== 'high') throw new ValidationError('No route to override.');
+    this.#applyRoute(current === 'low' ? 'high' : 'low', 'override', true);
+    this.#events.push({ kind: 'route-override' });
+  }
+
+  /**
+   * The user manually selects a route after a blocked (failed or exhausted) risk assessment. This
+   * is never a `RiskVerdict`: no `risk-result` event is appended, only this manual choice, and the
+   * choice itself authorizes the first tail phase in both modes, since there is no automatic
+   * continuation without one.
+   */
+  chooseManualRoute(route: unknown): void {
+    if (this.#next.kind !== 'blocked-risk') throw new ValidationError('A manual route can only be chosen while risk is blocked.');
+    if (route !== 'low' && route !== 'high') throw new ValidationError('A manual route choice must be low or high.');
+    const tail = route === 'high' ? HIGH_TAIL : LOW_TAIL;
+    this.#evaluation.phases = ['mdd-explore', ...tail];
+    this.#evaluation.route = route;
+    this.#routeOrigin = 'manual';
+    this.#index = 1;
+    this.#next = { kind: 'execute', phase: tail[0] };
+    this.#events.push({ kind: 'risk-recovery', route });
   }
 }

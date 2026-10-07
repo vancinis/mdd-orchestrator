@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { PhaseRunner } from '../dist/phase-runner.js';
-import { CheckpointStore } from '../dist/checkpoint.js';
-import { ProgressGuard } from '../dist/progress.js';
 import { reportFormatLines } from '../dist/phase-report.js';
-import { memoryServer, request, result, reportDocument, runtime, call, answers, installCleanup, traceFixture, ARTIFACT_TEXT, SUMMARY_TEXT } from './adapter-fixture.mjs';
+import { memoryServer, request, result, reportDocument, riskReport, runtime, call, answers, installCleanup, traceFixture, ARTIFACT_TEXT, SUMMARY_TEXT } from './adapter-fixture.mjs';
+import { validateCheckpoint, CheckpointStore, CheckpointStorageError } from '../dist/checkpoint.js';
+import { ProgressGuard } from '../dist/progress.js';
+import { statusPayload, STATUS_BUDGET_BYTES } from '../dist/status-budget.js';
 import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -18,6 +19,24 @@ function legacyResult(status, outcome = 'passed') {
   });
 }
 
+/**
+ * Every run starts with exploration, and only a validated mdd-risk verdict selects what follows.
+ * Tests about a later phase drive both stops first, then forget the memory writes they made so the
+ * phase under test is counted from zero, exactly as it used to be when it ran first.
+ */
+async function toPlan(runner, ready, writes, route = 'low') {
+  const exploring = { ...call, callID: 'call_explore' };
+  await runner.after(exploring, await runner.before(exploring, ready.task), result(ready));
+  const assessing = { ...call, callID: 'call_risk' };
+  const risk = runner.status(runtime.sessionID);
+  assert.equal(risk.stage, 'mdd-risk');
+  await runner.after(assessing, await runner.before(assessing, risk.task), riskReport(route));
+  let status = runner.status(runtime.sessionID);
+  if (status.state === 'await-approval') { runner.approveNative(runtime.sessionID, status.workflow.nextAction.phase); status = runner.status(runtime.sessionID); }
+  writes?.splice(0);
+  return status;
+}
+
 async function fixture(t, fault) {
   const memory = await memoryServer(t, fault);
   const inspect = { parent: async () => {}, result: async (_runtime, _call, _phase, output) => output, stopped: async () => true };
@@ -27,7 +46,7 @@ async function fixture(t, fault) {
 
 test('runner accepts and holds scoped plans but still exposes only one serial Apply task', async t => {
   const { runner, endpoint } = await fixture(t);
-  const ready = await runner.start(request(endpoint), runtime);
+  const ready = await toPlan(runner, await runner.start(request(endpoint), runtime));
   const dispatched = await runner.before(call, ready.task);
   const trace = traceFixture();
   const parallel = { complete: true, reads: ['src/shared.ts'], writes: ['src/cli.ts', 'tests/cli.test.mjs'] };
@@ -51,8 +70,8 @@ for (const explicitDependencies of [true, false]) {
     const checkpoint = new CheckpointStore(root); const progress = new ProgressGuard(root);
     const inspect = { parent: async () => {}, result: async (_runtime, _call, _phase, output) => output, stopped: async () => true };
     const runner = new PhaseRunner(inspect, { checkpoint, progress });
-    const ready = await runner.start({ preflight: { answers }, requirements: 'Plan a scoped change.' }, runtime,
-      { requirementsConfirmed: true, userMessageID: 'message-scoped' });
+    const ready = await toPlan(runner, await runner.start({ preflight: { answers }, requirements: 'Plan a scoped change.' }, runtime,
+      { requirementsConfirmed: true, userMessageID: 'message-scoped' }));
     const dispatched = await runner.before(call, ready.task);
     const trace = traceFixture();
     trace.deliverables[0].parallel = { complete: true, reads: [], writes: ['src/cli.ts'] };
@@ -72,10 +91,12 @@ for (const explore of [false, true]) {
   test(`runner contract: bound ${explore ? 'explore' : 'plan'}, immutable state, exact next phase`, async t => {
     const { runner, endpoint, writes } = await fixture(t);
     const input = request(endpoint, explore);
-    const ready = await runner.start(input, runtime);
+    const started = await runner.start(input, runtime);
     input.preflight.answers = { ...answers, mode: 'interactive' };
-    ready.workflow.answers.summary = 'detailed';
+    started.workflow.answers.summary = 'detailed';
     assert.equal(runner.status(runtime.sessionID).workflow.answers.summary, 'low');
+    assert.equal(started.phase, 'mdd-explore');
+    const ready = explore ? started : await toPlan(runner, started, writes);
     assert.equal(ready.phase, explore ? 'mdd-explore' : 'mdd-plan');
     const args = await runner.before(call, ready.task);
     assert.match(args.prompt, /Native callID="call_one"/);
@@ -90,8 +111,10 @@ for (const explore of [false, true]) {
     assert.notEqual(runner.status(runtime.sessionID).artifact.content, 'changed');
     assert.equal(Object.hasOwn(JSON.parse(writes[1].content), 'artifact'), false);
     assert.ok(!writes[1].content.includes(ARTIFACT_TEXT));
-    assert.equal(done.workflow.results.length, 1);
-    assert.equal(done.next.kind, 'execute');
+    assert.equal(done.workflow.results.length, explore ? 1 : 2);
+    // A passed exploration never runs a tail phase directly: it is followed by the risk stop.
+    assert.equal(done.next.kind, explore ? 'execute-risk' : 'execute');
+    if (explore) assert.equal(done.stage, 'mdd-risk');
     assert.equal(writes.length, 2);
     assert.equal(JSON.parse(writes[1].content).storage, 'general-workflow-context-only');
     assert.equal(JSON.parse(writes[0].content).requirements, input.requirements);
@@ -100,10 +123,430 @@ for (const explore of [false, true]) {
   });
 }
 
+// The risk stop: a passed exploration publishes an mdd-risk task carrying the exact requirements,
+// the recorded exploration artifact and the risk report form, while `phase` stays mdd-explore.
+test('risk stage: a passed exploration publishes the mdd-risk task with requirements, artifact and form', async t => {
+  const { runner, endpoint } = await fixture(t);
+  const input = request(endpoint);
+  const ready = await runner.start(input, runtime);
+  await runner.after(call, await runner.before(call, ready.task), result(ready));
+  const risk = runner.status(runtime.sessionID);
+  assert.equal(risk.phase, 'mdd-explore');
+  assert.equal(risk.stage, 'mdd-risk');
+  assert.equal(risk.state, 'ready');
+  assert.equal(risk.next.kind, 'execute-risk');
+  assert.equal(risk.task.subagent_type, 'mdd-risk');
+  assert.deepEqual(risk.workflow.evaluation.phases, ['mdd-explore']);
+  assert.match(risk.resultFormat.join('\n'), /exactly this key: risk/);
+  const dispatched = await runner.before({ ...call, callID: 'call_risk' }, risk.task);
+  assert.equal(dispatched.subagent_type, 'mdd-risk');
+  assert.ok(dispatched.prompt.includes(`Requirements data: ${JSON.stringify(input.requirements)}`));
+  assert.ok(dispatched.prompt.includes(JSON.stringify(ARTIFACT_TEXT)), 'the exploration artifact is handed over');
+  assert.match(dispatched.prompt, /exactly this key: risk/);
+  assert.match(dispatched.prompt, /phase=mdd-risk; runID=/);
+  // before() started the risk stop, not a phase.
+  const running = runner.status(runtime.sessionID);
+  assert.equal(running.state, 'await-result');
+  assert.equal(running.next.kind, 'await-risk-result');
+});
+
+test('risk stage: native fallback re-prepares the same risk prompt for a general executor', async t => {
+  const { runner, endpoint } = await fixture(t);
+  const ready = await runner.start(request(endpoint), runtime);
+  await runner.after(call, await runner.before(call, ready.task), result(ready));
+  for (const callID of ['r1', 'r2', 'r3']) {
+    const status = runner.status(runtime.sessionID);
+    const args = await runner.before({ ...call, callID }, status.task);
+    await runner.nativeError(runtime.sessionID, callID);
+    assert.equal(args.subagent_type, 'mdd-risk');
+  }
+  const fallback = runner.status(runtime.sessionID);
+  assert.equal(fallback.mode, 'native');
+  assert.equal(fallback.stage, 'mdd-risk');
+  assert.equal(fallback.task.subagent_type, 'general');
+  const dispatched = await runner.before({ ...call, callID: 'r4' }, fallback.task);
+  assert.match(dispatched.prompt, /Perform only mdd-risk/);
+  assert.match(dispatched.prompt, /Native fallback/);
+  assert.match(dispatched.prompt, /exactly this key: risk/);
+});
+
+// The validated verdict alone selects the continuation; the diagnostic score never does.
+for (const [label, preflight, route, first] of [
+  ['low verdict continues with mdd-plan', { answers, explore: false }, 'low', 'mdd-plan'],
+  ['high verdict continues with mdd-propose even when the score says low', { answers, explore: false }, 'high', 'mdd-propose'],
+  ['low verdict continues with mdd-plan even when the score says high', { profile: { answers: { ...answers, certainty: 'not-sure', summary: 'detailed' } } }, 'low', 'mdd-plan'],
+]) {
+  test(`risk stage: ${label}`, async t => {
+    const { runner, endpoint, writes } = await fixture(t);
+    const input = { ...request(endpoint), preflight };
+    const ready = await runner.start(input, runtime);
+    const score = ready.workflow.evaluation.route;
+    await runner.after(call, await runner.before(call, ready.task), result(ready));
+    const assessing = { ...call, callID: 'call_risk' };
+    await runner.after(assessing, await runner.before(assessing, runner.status(runtime.sessionID).task), riskReport(route));
+    const next = runner.status(runtime.sessionID);
+    assert.notEqual(score === route && label.includes('even when'), true, 'the fixture really disagrees with the score');
+    assert.equal(next.phase, first);
+    assert.equal(next.stage, undefined);
+    assert.equal(next.state, 'ready');
+    assert.equal(next.task.subagent_type, first);
+    assert.equal(next.workflow.evaluation.route, route);
+    assert.equal(next.risk.route, route);
+    // Only exploration is a phase result; the assessment stays out of the history.
+    assert.deepEqual(next.workflow.results.map(item => item.phase), ['mdd-explore']);
+    assert.deepEqual(next.artifacts.map(item => item.ref.phase), ['mdd-explore']);
+    assert.equal(next.artifact.ref.phase, 'mdd-risk');
+    const evidence = writes.map(write => { try { return JSON.parse(write.content); } catch { return {}; } }).find(item => item.kind === 'risk-evidence');
+    assert.equal(evidence.route, route);
+    assert.equal(evidence.artifactRef.phase, 'mdd-risk');
+    // The selected route's first phase is told what selected it.
+    const dispatched = await runner.before({ ...call, callID: 'call_tail' }, next.task);
+    assert.match(dispatched.prompt, /Validated mdd-risk assessment that selected this route/);
+  });
+}
+
+test('risk stage: interactive mode awaits approval before the first tail phase', async t => {
+  const { runner, endpoint } = await fixture(t);
+  const input = request(endpoint);
+  input.preflight.answers = { ...answers, mode: 'interactive' };
+  const ready = await runner.start(input, runtime);
+  await runner.after(call, await runner.before(call, ready.task), result(ready));
+  // Exploration is never an approval boundary for the risk stop: it dispatches at once.
+  assert.equal(runner.status(runtime.sessionID).stage, 'mdd-risk');
+  assert.equal(runner.status(runtime.sessionID).state, 'ready');
+  const assessing = { ...call, callID: 'call_risk' };
+  await runner.after(assessing, await runner.before(assessing, runner.status(runtime.sessionID).task), riskReport('high'));
+  const waiting = runner.status(runtime.sessionID);
+  assert.equal(waiting.state, 'await-approval');
+  assert.deepEqual(waiting.next, { kind: 'approve', phase: 'mdd-propose' });
+  assert.equal(waiting.task, undefined);
+  runner.approveNative(runtime.sessionID, 'mdd-propose');
+  assert.equal(runner.status(runtime.sessionID).task.subagent_type, 'mdd-propose');
+});
+
+// D3/S7: the status risk projection is bounded, names the suggested route, complexity, reason,
+// clipped risks and routeOrigin, and survives into the rendered report and visual route marker.
+test('risk stage: status exposes a bounded risk projection with routeOrigin, and the report names it', async t => {
+  const { runner, endpoint } = await fixture(t);
+  const input = request(endpoint);
+  input.preflight.answers = { ...answers, mode: 'interactive' };
+  const ready = await runner.start(input, runtime);
+  await runner.after(call, await runner.before(call, ready.task), result(ready));
+  const assessing = { ...call, callID: 'call_risk' };
+  await runner.after(assessing, await runner.before(assessing, runner.status(runtime.sessionID).task), riskReport('low'));
+  const waiting = runner.status(runtime.sessionID);
+  assert.equal(waiting.risk.route, 'low');
+  assert.equal(waiting.risk.complexity, 'low');
+  assert.match(waiting.risk.reason, /contained/);
+  assert.equal(waiting.risk.risks.length, 1);
+  assert.match(waiting.risk.risks[0].description, /Exit codes/);
+  // Attributable evidence is visible both at verdict level and per risk, not only the
+  // description/mitigation prose: a reader can see what grounded route and complexity.
+  assert.equal(waiting.risk.evidence.length, 1);
+  assert.match(waiting.risk.evidence[0].source, /exploration artifact/);
+  assert.match(waiting.risk.evidence[0].finding, /CLI boundary/);
+  assert.match(waiting.risk.risks[0].evidence, /exploration artifact/);
+  assert.equal(waiting.risk.routeOrigin, 'suggested');
+  assert.match(waiting.report, /Evaluación de riesgo: complejidad low, ruta sugerida low\./);
+  assert.equal(waiting.visual.route, 'low');
+  assert.equal(waiting.visual.routeOrigin, 'suggested');
+});
+
+// D4/S7: a large verdict (many risks, long reason/evidence text) still fits the status budget in
+// both compact and full views, and `risk` itself is never shed — only droppable fields such as
+// `report`/`visual`/`acceptance` are candidates under pressure, so the risk projection stays
+// usable instead of silently vanishing with everything else.
+test('risk stage: a large verdict stays bounded and visible in both compact and full status', async t => {
+  const { runner, endpoint } = await fixture(t);
+  const input = request(endpoint);
+  input.preflight.answers = { ...answers, mode: 'interactive' };
+  const ready = await runner.start(input, runtime);
+  await runner.after(call, await runner.before(call, ready.task), result(ready));
+  const assessing = { ...call, callID: 'call_risk' };
+  // Each field respects the risk actor's own per-field cap (reason 2000, source 300, finding
+  // 500, risk description/evidence/mitigation 500) and the whole report's 20000-byte limit, so
+  // this is a verdict the risk actor could legitimately submit: more risks and evidence items
+  // than the status projection keeps (8), which is what actually exercises the cap.
+  const reason = 'x'.repeat(300);
+  const sourceText = 'x'.repeat(80);
+  const findingText = 'x'.repeat(100);
+  const riskText = 'x'.repeat(100);
+  const bigVerdict = riskReport('low', 'passed', { risk: {
+    route: 'low', complexity: 'low', reason,
+    evidence: Array.from({ length: 16 }, (_v, i) => ({ source: `s${i} ${sourceText}`, finding: `f${i} ${findingText}` })),
+    risks: Array.from({ length: 16 }, (_v, i) => ({ description: `d${i} ${riskText}`, evidence: `e${i} ${riskText}`, mitigation: `m${i} ${riskText}` })),
+  } });
+  await runner.after(assessing, await runner.before(assessing, runner.status(runtime.sessionID).task), bigVerdict);
+  const full = runner.status(runtime.sessionID);
+  assert.ok(full.risk, 'full status still carries the risk projection');
+  assert.ok(full.risk.evidence.length <= 8, 'evidence is capped');
+  assert.ok(full.risk.risks.length <= 8, 'risks are capped');
+  for (const item of full.risk.evidence) {
+    assert.ok(Buffer.byteLength(item.source) <= 153);
+    assert.ok(Buffer.byteLength(item.finding) <= 253);
+  }
+  for (const item of full.risk.risks) {
+    assert.ok(Buffer.byteLength(item.description) <= 203);
+    assert.ok(Buffer.byteLength(item.evidence) <= 203);
+    assert.ok(Buffer.byteLength(item.mitigation) <= 203);
+  }
+  const fullText = statusPayload(full, 'full');
+  assert.ok(Buffer.byteLength(fullText) <= STATUS_BUDGET_BYTES, `full payload was ${Buffer.byteLength(fullText)} bytes`);
+  assert.ok(JSON.parse(fullText).risk, 'risk survives full serialization');
+  const compactText = statusPayload(full, 'compact');
+  assert.ok(Buffer.byteLength(compactText) <= STATUS_BUDGET_BYTES, `compact payload was ${Buffer.byteLength(compactText)} bytes`);
+  const compact = JSON.parse(compactText);
+  assert.ok(compact.risk, 'risk is never shed under compact-view pressure');
+  // `next` is protocol (STATUS_PROTECTED_FIELDS) and names the pending approval boundary: a
+  // large risk projection must not crowd out the actionable next step either.
+  assert.deepEqual(compact.next, full.next, 'the actionable next action stays usable alongside the large risk projection');
+});
+
+// D1/S2,S3: forceRoute() calls Workflow.overrideRoute() and prepares the other tail's first
+// phase in one step, retaining the original verdict with `override` provenance (never suggested).
+for (const [from, to] of [['low', 'high'], ['high', 'low']]) {
+  test(`risk stage: forceRoute switches ${from} to ${to} once, preserving the original verdict`, async t => {
+    const { runner, endpoint } = await fixture(t);
+    const input = request(endpoint);
+    input.preflight.answers = { ...answers, mode: 'interactive' };
+    const ready = await runner.start(input, runtime);
+    await runner.after(call, await runner.before(call, ready.task), result(ready));
+    const assessing = { ...call, callID: 'call_risk' };
+    await runner.after(assessing, await runner.before(assessing, runner.status(runtime.sessionID).task), riskReport(from));
+    assert.equal(runner.status(runtime.sessionID).state, 'await-approval');
+    runner.forceRoute(runtime.sessionID);
+    const forced = runner.status(runtime.sessionID);
+    assert.equal(forced.state, 'ready');
+    assert.equal(forced.workflow.evaluation.route, to);
+    assert.equal(forced.workflow.routeOrigin, 'override');
+    // The verdict stays exactly what mdd-risk reported; only which tail runs changed.
+    assert.equal(forced.risk.route, from);
+    assert.equal(forced.risk.routeOrigin, 'override');
+    assert.match(forced.report, new RegExp(`ruta sugerida ${from}.*forzó la ruta ${to}`));
+    // Forcing again is refused: the boundary Workflow.overrideRoute() itself guards is already past.
+    assert.throws(() => runner.forceRoute(runtime.sessionID));
+  });
+}
+
+test('risk stage: a valid failed assessment blocks at blocked-risk without a tail', async t => {
+  const { runner, endpoint } = await fixture(t);
+  const ready = await runner.start(request(endpoint), runtime);
+  await runner.after(call, await runner.before(call, ready.task), result(ready));
+  const assessing = { ...call, callID: 'call_risk' };
+  await runner.after(assessing, await runner.before(assessing, runner.status(runtime.sessionID).task), riskReport('low', 'failed'));
+  const blocked = runner.status(runtime.sessionID);
+  assert.equal(blocked.state, 'blocked');
+  assert.equal(blocked.stage, 'mdd-risk');
+  assert.equal(blocked.next.kind, 'blocked-risk');
+  assert.deepEqual(blocked.workflow.evaluation.phases, ['mdd-explore']);
+  assert.equal(blocked.task, undefined);
+  assert.equal(blocked.rejected, undefined, 'a valid failure is not restated');
+  // A8: the rendered report (and its expanded form) must say the assessment failed, carry the
+  // actual reason, state plainly that no route was selected, and list the four recovery options —
+  // never the generic closure text, and never implying a fabricated RiskVerdict.
+  assert.match(blocked.report, /evaluación de riesgo de mdd-risk falló/);
+  assert.match(blocked.report, /no pudo sustanciar/);
+  assert.match(blocked.report, new RegExp(blocked.reason.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.match(blocked.report, /No se seleccionó ninguna ruta/);
+  assert.match(blocked.report, /Reintentar evaluación de riesgo/);
+  assert.match(blocked.report, /Ruta low/);
+  assert.match(blocked.report, /Ruta high/);
+  assert.match(blocked.report, /Detener/);
+  assert.equal(blocked.risk, undefined, 'a failed assessment never carries a RiskVerdict in status');
+  assert.ok(typeof blocked.expandedReport === 'string' && blocked.expandedReport.length > 0, 'expandedReport is present for blocked-risk');
+  assert.match(blocked.expandedReport, /evaluación de riesgo de mdd-risk falló/);
+  assert.match(blocked.expandedReport, /Reintentar evaluación de riesgo/);
+  // Explicit recovery returns to the risk stop, never to a tail.
+  runner.reset(runtime.sessionID, 'phase');
+  const again = runner.status(runtime.sessionID);
+  assert.equal(again.next.kind, 'execute-risk');
+  assert.equal(again.task.subagent_type, 'mdd-risk');
+});
+
+// S1/A2: retryRisk() wraps Workflow.retry() the same way forceRoute() wraps overrideRoute() —
+// guarded to a settled blocked-risk, preparing and checkpointing a fresh mdd-risk dispatch with
+// no old verdict, and refusing anywhere else (in-flight assessment or an unrelated block).
+test('risk stage: retryRisk() prepares a fresh mdd-risk dispatch from a settled blocked-risk, never elsewhere', async t => {
+  const { runner, endpoint } = await fixture(t);
+  const ready = await runner.start(request(endpoint), runtime);
+  await runner.after(call, await runner.before(call, ready.task), result(ready));
+  assert.throws(() => runner.retryRisk(runtime.sessionID), /No settled blocked-risk/);
+  const assessing = { ...call, callID: 'call_risk' };
+  await runner.after(assessing, await runner.before(assessing, runner.status(runtime.sessionID).task), riskReport('low', 'failed'));
+  assert.equal(runner.status(runtime.sessionID).state, 'blocked');
+  runner.retryRisk(runtime.sessionID);
+  const retried = runner.status(runtime.sessionID);
+  assert.equal(retried.state, 'ready');
+  assert.equal(retried.next.kind, 'execute-risk');
+  assert.equal(retried.task.subagent_type, 'mdd-risk');
+  assert.equal(retried.risk, undefined, 'no old verdict survives a retry');
+  // Already released: a second retry has nothing settled to retry.
+  assert.throws(() => runner.retryRisk(runtime.sessionID), /No settled blocked-risk/);
+});
+
+// S1/A3,A4: chooseManualRoute() wraps Workflow.chooseManualRoute() — guarded the same way,
+// authorizing the chosen tail's first phase with routeOrigin 'manual' and no fabricated verdict.
+for (const [route, firstPhase] of [['low', 'mdd-plan'], ['high', 'mdd-propose']]) {
+  test(`risk stage: chooseManualRoute('${route}') authorizes the ${route} tail from a settled blocked-risk`, async t => {
+    const { runner, endpoint } = await fixture(t);
+    const ready = await runner.start(request(endpoint), runtime);
+    await runner.after(call, await runner.before(call, ready.task), result(ready));
+    assert.throws(() => runner.chooseManualRoute(runtime.sessionID, route), /No settled blocked-risk/);
+    const assessing = { ...call, callID: 'call_risk' };
+    await runner.after(assessing, await runner.before(assessing, runner.status(runtime.sessionID).task), riskReport('low', 'failed'));
+    runner.chooseManualRoute(runtime.sessionID, route);
+    const chosen = runner.status(runtime.sessionID);
+    assert.equal(chosen.state, 'ready');
+    assert.equal(chosen.workflow.evaluation.route, route);
+    assert.equal(chosen.workflow.routeOrigin, 'manual');
+    assert.equal(chosen.task.subagent_type, firstPhase);
+    assert.equal(chosen.risk, undefined, 'a manual choice never carries a fabricated RiskVerdict');
+    assert.match(chosen.report, new RegExp(`eligió manualmente la ruta ${route}`));
+    // Already authorized: a second manual choice has nothing settled left to choose from.
+    assert.throws(() => runner.chooseManualRoute(runtime.sessionID, route), /No settled blocked-risk/);
+  });
+}
+
+// S1/D2: retryRisk() and chooseManualRoute() checkpoint their new dispatch before exposing it,
+// exactly like forceRoute() and approveNative(). When that checkpoint cannot be confirmed (write
+// and the degrade fallback both fail), the run is blocked rather than left exposing a task whose
+// durability is unknown.
+for (const [label, act] of [
+  ['retryRisk()', runner => runner.retryRisk(runtime.sessionID)],
+  ["chooseManualRoute('low')", runner => runner.chooseManualRoute(runtime.sessionID, 'low')],
+  ["chooseManualRoute('high')", runner => runner.chooseManualRoute(runtime.sessionID, 'high')],
+]) {
+  test(`risk stage: ${label} never publishes a task when its checkpoint cannot be confirmed`, async t => {
+    const root = await mkdtemp(join(tmpdir(), 'mdd-risk-checkpoint-fail-'));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const { endpoint, binding } = await memoryServer(t);
+    binding.directory = root;
+    const checkpoint = new CheckpointStore(root);
+    const runner = new PhaseRunner({ parent: async () => {}, result: async (_r, _c, _p, output) => output, stopped: async () => true },
+      { checkpoint });
+    const place = { ...runtime, directory: root, worktree: root };
+    const ready = await runner.start(request(endpoint), place, { requirementsConfirmed: true, userMessageID: 'msg_one' });
+    await runner.after(call, await runner.before(call, ready.task), result(ready));
+    const assessing = { ...call, callID: 'call_risk' };
+    await runner.after(assessing, await runner.before(assessing, runner.status(runtime.sessionID).task), riskReport('low', 'failed'));
+    assert.equal(runner.status(runtime.sessionID).state, 'blocked');
+    // No progress marker is configured, so the degrade fallback cannot mark resumability either;
+    // both the write and the clear it would fall back to are made to fail here.
+    checkpoint.write = () => { throw new CheckpointStorageError('simulated storage fault'); };
+    checkpoint.clear = () => { throw new Error('simulated clear fault'); };
+    assert.throws(() => act(runner), /MDD stopped this run/);
+    const after = runner.status(runtime.sessionID);
+    assert.equal(after.state, 'blocked');
+    assert.equal(after.task, undefined, 'a failed checkpoint never exposes a fresh task');
+  });
+}
+
+for (const [label, malformed] of [
+  ['a report without the risk verdict', riskReport('low').replace(/## MDD Data[\s\S]*$/, '')],
+  ['a verdict whose route and complexity disagree', riskReport('low').replace('"complexity": "low"', '"complexity": "high"')],
+  ['a phase report in place of a risk report', result({ phase: 'mdd-plan' })],
+]) {
+  test(`risk stage: ${label} is restated, never routed, and exhaustion blocks at blocked-risk`, async t => {
+    const { runner, endpoint } = await fixture(t);
+    const ready = await runner.start(request(endpoint), runtime);
+    await runner.after(call, await runner.before(call, ready.task), result(ready));
+    const assessing = { ...call, callID: 'call_risk' };
+    await assert.rejects(runner.after(assessing, await runner.before(assessing, runner.status(runtime.sessionID).task), malformed), /could not read the mdd-risk report/);
+    const rejected = runner.status(runtime.sessionID);
+    assert.equal(rejected.mode, 'inline');
+    assert.equal(rejected.stage, 'mdd-risk');
+    assert.ok(rejected.rejected.reason.length > 0);
+    assert.match(rejected.resultFormat.join('\n'), /exactly this key: risk/);
+    assert.deepEqual(rejected.workflow.evaluation.phases, ['mdd-explore']);
+    for (let attempt = 0; attempt < 3; attempt += 1) await assert.rejects(runner.submit({ result: malformed }, runtime));
+    const blocked = runner.status(runtime.sessionID);
+    assert.equal(blocked.state, 'blocked');
+    assert.equal(blocked.reportRepairExhausted, true);
+    assert.equal(blocked.next.kind, 'blocked-risk');
+    assert.deepEqual(blocked.workflow.evaluation.phases, ['mdd-explore']);
+    // A8: an exhausted fallback settles the same recovery report as a valid failed verdict.
+    assert.match(blocked.report, /evaluación de riesgo de mdd-risk falló/);
+    assert.match(blocked.report, /No se seleccionó ninguna ruta/);
+    assert.match(blocked.report, /Reintentar evaluación de riesgo/);
+    assert.match(blocked.report, /Ruta low/);
+    assert.match(blocked.report, /Ruta high/);
+    assert.match(blocked.report, /Detener/);
+    assert.equal(blocked.risk, undefined, 'exhaustion never carries a fabricated RiskVerdict');
+  });
+}
+
+test('risk stage: a restated report is accepted and routes like a dispatched one', async t => {
+  const { runner, endpoint } = await fixture(t);
+  const ready = await runner.start(request(endpoint), runtime);
+  await runner.after(call, await runner.before(call, ready.task), result(ready));
+  const assessing = { ...call, callID: 'call_risk' };
+  await assert.rejects(runner.after(assessing, await runner.before(assessing, runner.status(runtime.sessionID).task), 'not a report'));
+  await runner.submit({ result: riskReport('high') }, runtime);
+  const next = runner.status(runtime.sessionID);
+  assert.equal(next.phase, 'mdd-propose');
+  assert.equal(next.state, 'ready');
+});
+
+for (const wrong of [
+  text => `## MDD Phase\n\nmdd-plan\n\n${text}`,
+  text => `## MDD Run\n\nwrong\n\n${text}`,
+  text => text.replace('"risk": {', '"callID": "call_other",\n  "risk": {'),
+]) {
+  test(`risk stage: a report bound to another stage, run or call is refused ${wrong.toString().slice(0, 50)}`, async t => {
+    const { runner, endpoint } = await fixture(t);
+    const ready = await runner.start(request(endpoint), runtime);
+    await runner.after(call, await runner.before(call, ready.task), result(ready));
+    const assessing = { ...call, callID: 'call_risk' };
+    await assert.rejects(runner.after(assessing, await runner.before(assessing, runner.status(runtime.sessionID).task), wrong(riskReport('low'))), /different stage, run or call/);
+    const status = runner.status(runtime.sessionID);
+    assert.deepEqual(status.workflow.evaluation.phases, ['mdd-explore']);
+    assert.equal(status.next.kind, 'execute-risk');
+  });
+}
+
+// The risk result is committed before the next task is published, and each risk checkpoint is a
+// state validateCheckpoint accepts: pending, settled by risk-result, and released by a retry.
+test('risk stage: risk attempts are checkpointed pending, released and settled without a confirmed-then-failed stop', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'mdd-risk-checkpoint-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const { endpoint, binding } = await memoryServer(t);
+  binding.directory = root;
+  const checkpoint = new CheckpointStore(root);
+  const runner = new PhaseRunner({ parent: async () => {}, result: async (_r, _c, _p, output) => output, stopped: async () => true },
+    { checkpoint, progress: new ProgressGuard(root) });
+  const place = { ...runtime, directory: root, worktree: root };
+  const ready = await runner.start(request(endpoint), place, { requirementsConfirmed: true, userMessageID: 'msg_one' });
+  await runner.after(call, await runner.before(call, ready.task), result(ready));
+  const first = { ...call, callID: 'call_risk' };
+  await runner.before(first, runner.status(runtime.sessionID).task);
+  let saved = checkpoint.read(runtime.sessionID).checkpoint;
+  assert.deepEqual({ phase: saved.attempt.phase, state: saved.attempt.state }, { phase: 'mdd-risk', state: 'pending' });
+  assert.equal(saved.stable.state, 'risk-await-result');
+  await assert.rejects(runner.after(first, { different: true }, ''), /does not match the current dispatch/);
+  // A mismatched callback changes nothing; the real rejection below releases the attempt.
+  await runner.nativeError(runtime.sessionID, first.callID);
+  saved = checkpoint.read(runtime.sessionID).checkpoint;
+  assert.deepEqual({ phase: saved.attempt.phase, state: saved.attempt.state }, { phase: 'mdd-risk', state: 'released' });
+  assert.equal(saved.events.at(-1).kind, 'retry');
+  validateCheckpoint(saved);
+  const second = { ...call, callID: 'call_risk_two' };
+  await runner.after(second, await runner.before(second, runner.status(runtime.sessionID).task), riskReport('low'));
+  const status = runner.status(runtime.sessionID);
+  assert.equal(status.phase, 'mdd-plan');
+  assert.equal(status.state, 'ready');
+  assert.doesNotMatch(status.reason ?? '', /confirmed but a later transition failed/);
+  saved = checkpoint.read(runtime.sessionID).checkpoint;
+  assert.deepEqual({ phase: saved.attempt.phase, state: saved.attempt.state }, { phase: 'mdd-risk', state: 'settled' });
+  assert.equal(saved.events.at(-1).kind, 'risk-result');
+  assert.equal(saved.events.at(-1).result.route, 'low');
+  assert.equal(saved.data.dependencies.length, 1, 'the assessment is not a phase dependency');
+  validateCheckpoint(saved);
+});
+
 // A schema shown to every phase made mdd-plan report verification, which its own validator rejects.
 test('runner contract: a phase prompt carries only the schema of its own result fields', async t => {
   const { runner, endpoint } = await fixture(t);
-  const ready = await runner.start(request(endpoint), runtime);
+  const ready = await toPlan(runner, await runner.start(request(endpoint), runtime));
   assert.equal(ready.phase, 'mdd-plan');
   // The prompt reaches the actor, not the coordinator, so it is read where it is delivered: what
   // `before` returns is exactly what the dispatched subagent receives.
@@ -125,7 +568,7 @@ test('completed plan presents a distinct causal Cómo grounded in its decision',
   const { runner, endpoint } = await fixture(t);
   const input = request(endpoint);
   input.preflight.answers = { ...answers, mode: 'interactive', summary: 'medium' };
-  const ready = await runner.start(input, runtime);
+  const ready = await toPlan(runner, await runner.start(input, runtime));
   const dispatched = await runner.before(call, ready.task);
   await runner.after(call, dispatched, reportDocument({
     evidenceSummary: 'Planned CLI input validation to make errors actionable.',
@@ -262,11 +705,12 @@ for (const invalid of [
 ]) {
   test(`runner contract: unreadable report costs a restatement, not the phase ${invalid.toString().slice(0, 70)}`, async t => {
     const { runner, endpoint, writes } = await fixture(t);
-    const ready = await runner.start(request(endpoint), runtime);
+    // Driven on mdd-plan, the phase whose report carries a data block for these forms to break.
+    const ready = await toPlan(runner, await runner.start(request(endpoint), runtime), writes);
     const args = await runner.before(call, ready.task);
     await assert.rejects(runner.after(call, args, invalid(result(ready))));
     const status = runner.status(runtime.sessionID);
-    assert.equal(status.workflow.results.length, 0);
+    assert.equal(status.workflow.results.length, 1);
     assert.equal(status.attempts, 0, 'form is not an attempt');
     assert.equal(status.mode, 'inline', 'the report comes back to be restated, not redispatched');
     assert.equal(status.state, 'ready');
@@ -313,8 +757,13 @@ test('runner contract: failed agent phase is saved before recording and blocks',
   const ready = await runner.start(request(endpoint), runtime);
   const args = await runner.before(call, ready.task);
   await runner.after(call, args, result(ready, 'failed'));
-  assert.equal(runner.status(runtime.sessionID).workflow.nextAction.kind, 'blocked');
+  const blocked = runner.status(runtime.sessionID);
+  assert.equal(blocked.workflow.nextAction.kind, 'blocked');
   assert.equal(writes.length, 2);
+  // An unrelated ordinary blocked phase (not blocked-risk) keeps the generic closure text and
+  // never offers the risk-recovery wording or options meant only for a settled blocked-risk.
+  assert.doesNotMatch(blocked.report, /evaluación de riesgo de mdd-risk falló/);
+  assert.equal(blocked.expandedReport, undefined, 'no risk-recovery expandedReport outside blocked-risk');
 });
 
 test('runner contract: missing after remains pending; only the matching native error releases it', async t => {
@@ -375,7 +824,7 @@ for (const store of ['none', 'engram', 'openspec', 'both']) {
     binding.directory = root;
     const input = request(endpoint);
     input.preflight.answers = { ...answers, artifactStore: store };
-    const ready = await runner.start(input, { ...runtime, directory: root, worktree: root });
+    const ready = await toPlan(runner, await runner.start(input, { ...runtime, directory: root, worktree: root }), writes);
     const args = await runner.before(call, ready.task);
     await runner.after(call, args, result(ready));
     const status = runner.status(runtime.sessionID);
@@ -423,10 +872,14 @@ test('runner telemetry uses controlled timestamps/duration and never marks the n
   const runner = new PhaseRunner({ parent: async () => {}, result: async (_r, _c, _p, output) => output }, {
     now: () => clock, telemetry: (_root, event) => { events.push(event); return { ok: true, enabled: true, count: events.length, retentionDays: 30 }; },
   });
-  const ready = await runner.start(request(endpoint), runtime, { requirementsConfirmed: true });
+  const ready = await toPlan(runner, await runner.start(request(endpoint), runtime, { requirementsConfirmed: true }));
+  // The risk stop is not one of the eight phases: it reports nothing into phase-keyed rollups,
+  // so exploration is charged only with its own attempt.
+  assert.deepEqual(events.filter(event => ['phase-start', 'phase-end'].includes(event.event)).map(event => `${event.event}:${event.phase}`),
+    ['phase-start:mdd-explore', 'phase-end:mdd-explore']);
   clock = 110; const args = await runner.before(call, ready.task);
   clock = 125; await runner.after(call, args, result(ready));
-  const ended = events.find(event => event.event === 'phase-end');
+  const ended = events.find(event => event.event === 'phase-end' && event.phase === 'mdd-plan');
   assert.deepEqual({ ...ended, runID: typeof ended.runID },
     { timestamp: 125, event: 'phase-end', phase: 'mdd-plan', route: 'low', outcome: 'passed', duration: 15, attempt: 1, mode: 'delegate', runID: 'string' });
   // Every row of one run carries that run, so a ledger can be read a run at a time.

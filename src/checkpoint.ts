@@ -18,6 +18,10 @@ import type { Concern } from './concerns.js';
 import { validateWorkerState, workerReport } from './worker-state.js';
 import { validateExplorationRecord, type ExplorationRecord, type WorkerState } from './worker-state.js';
 import type { WorkerPolicy } from './settings.js';
+import { parseRiskVerdict } from './risk.js';
+import type { RiskVerdict } from './risk.js';
+import { identity } from './artifacts.js';
+import type { ArtifactIdentity, ArtifactRef } from './artifacts.js';
 
 export const CHECKPOINT_VERSION = 1;
 export const RESUME_CHECKPOINT_VERSION = 2;
@@ -70,18 +74,36 @@ export type ResumeData = {
   rework?: { after: Phase; summary: string };
   workerPolicy?: WorkerPolicy;
   workerState?: WorkerState;
+  /**
+   * Present only once a passed `risk-result` selected a route: the validated verdict and the
+   * diagnostic reference to the persisted mdd-risk artifact, so restore and transfer keep the
+   * same route and summary in later prompts without trusting anything but the replayed event.
+   * Absent for every checkpoint before that point, and for a failed assessment, which selects
+   * no route.
+   */
+  risk?: { verdict: RiskVerdict; ref: ArtifactRef };
 };
 export type ResumeCheckpoint = Omit<Checkpoint, 'version'> & { version: typeof RESUME_CHECKPOINT_VERSION; data: ResumeData; dataDigest: string };
 /** Process state, not a dispatch token or proof of a fresh native approval. */
 export type StableRunnerState = {
-  phase: Phase; state: 'ready' | 'await-approval' | 'await-result' | 'blocked' | 'complete';
+  /**
+   * The risk-* states name the typed mdd-risk execution stop that follows a passed exploration,
+   * before a validated verdict selects a continuation; `phase` stays the phase that produced that
+   * stop (always `mdd-explore` today) rather than widening Phase with a ninth value.
+   */
+  phase: Phase; state: 'ready' | 'await-approval' | 'await-result' | 'blocked' | 'complete'
+    | 'risk-ready' | 'risk-await-result' | 'risk-blocked';
   mode: 'delegate' | 'native' | 'inline'; attempts: number; spent: number; malformed: number;
   report: PhaseReport; changedList: ChangedFile[]; concerns: Concern[];
   delivered?: Delivered; nativeUsed?: true; fallbackExhausted?: true; reportRepairExhausted?: true;
   lastFailure?: string; reason?: string; rejected?: { reason: string; text: string };
 };
+/**
+ * `mdd-risk` names an attempt at the risk stop rather than at a Phase: it is dispatched, settled
+ * and released exactly like a phase attempt, but it is bound to the risk-* workflow events.
+ */
 export type StableCheckpoint = Omit<ResumeCheckpoint, 'version' | 'attempt'> & { version: typeof STABLE_CHECKPOINT_VERSION;
-  stable: StableRunnerState; attempt?: { id: string; phase: Phase; state: 'pending' | 'settled' | 'released' } };
+  stable: StableRunnerState; attempt?: { id: string; phase: Phase | 'mdd-risk'; state: 'pending' | 'settled' | 'released' } };
 export type AnyCheckpoint = Checkpoint | ResumeCheckpoint | StableCheckpoint;
 
 function digest(text: string): string { return createHash('sha256').update(text).digest('hex'); }
@@ -94,8 +116,9 @@ function validateStable(value: unknown, workflow: Workflow, data: ResumeData): S
     'report', 'changedList', 'concerns', 'delivered', 'nativeUsed', 'fallbackExhausted', 'reportRepairExhausted',
     'lastFailure', 'reason', 'rejected']);
   const next = workflow.nextAction();
-  const phase = next.kind === 'finished' ? workflow.snapshot().results.at(-1)?.phase : next.phase;
-  const state = { execute: 'ready', approve: 'await-approval', 'await-result': 'await-result', blocked: 'blocked', finished: 'complete' }[next.kind];
+  const phase = next.kind === 'finished' || !('phase' in next) ? workflow.snapshot().results.at(-1)?.phase : next.phase;
+  const state = { execute: 'ready', approve: 'await-approval', 'await-result': 'await-result', blocked: 'blocked', finished: 'complete',
+    'execute-risk': 'risk-ready', 'await-risk-result': 'risk-await-result', 'blocked-risk': 'risk-blocked' }[next.kind];
   if (item.phase !== phase || item.state !== state || !['delegate', 'native', 'inline'].includes(String(item.mode))) {
     throw new ValidationError('Stable runner state contradicts workflow.');
   }
@@ -153,10 +176,52 @@ function body(value: unknown): void {
   }
 }
 
-function validateData(value: unknown, workflow: Workflow): ResumeData {
+/**
+ * The risk verdict/reference pair is validated structurally and cross-checked against the one
+ * `risk-result` that could ever have passed in this history: route selection happens exactly once,
+ * so a passed event is always the last `risk-result`, and anything that disagrees with it —
+ * a different route, a missing field, or a verdict present with no passed event at all — is a
+ * forgery or a contradiction, not a legacy checkpoint.
+ */
+function validateRisk(value: unknown, workflow: Workflow, runID: string): { verdict: RiskVerdict; ref: ArtifactRef } | undefined {
+  const lastRisk = workflow.history().filter((event): event is { kind: 'risk-result'; result: { outcome: 'passed' | 'failed'; evidenceSummary: string; route?: 'low' | 'high' } } =>
+    event.kind === 'risk-result').at(-1);
+  if (!lastRisk || lastRisk.result.outcome !== 'passed') {
+    if (value !== undefined) throw new ValidationError('Checkpoint risk data is only recorded once a risk assessment passed.');
+    return undefined;
+  }
+  if (value === undefined) throw new ValidationError('Checkpoint omits the risk verdict and artifact reference a passed assessment requires.');
+  const item = objectWithKeys(value, 'checkpoint risk data', ['verdict', 'ref']);
+  let verdict: RiskVerdict;
+  try { verdict = parseRiskVerdict(item.verdict); } catch { throw new ValidationError('Invalid checkpoint risk verdict.'); }
+  if (verdict.route !== lastRisk.result.route) throw new ValidationError('Checkpoint risk verdict contradicts the replayed risk result.');
+  const ref = objectWithKeys(item.ref, 'checkpoint risk artifact reference', ['runID', 'phase', 'domain', 'explorationID', 'recordID', 'digest', 'bytes', 'store', 'path', 'observationID']);
+  if (ref.runID !== runID || ref.phase !== 'mdd-risk' || !identifier(ref.recordID) ||
+      typeof ref.digest !== 'string' || !/^[a-f0-9]{64}$/.test(ref.digest) ||
+      !Number.isSafeInteger(ref.bytes) || (ref.bytes as number) < 0 ||
+      !['engram', 'openspec', 'both', 'none'].includes(ref.store as string)) {
+    throw new ValidationError('Invalid checkpoint risk artifact reference.');
+  }
+  // The domain/explorationID shape is checked with the same rules the artifact store enforces
+  // when it mints a ref, so a forged domain or side identity on a `mdd-risk` reference — which
+  // the store never issues one for — is rejected the same way. `ref.runID` is already checked
+  // for equality above; it is not replayed through the store's slug format here, because a
+  // checkpoint's own runID format is validated once, by `identifier()`, not by the artifact
+  // store's stricter slug.
+  try {
+    identity({ runID: 'risk-reference', phase: ref.phase, domain: ref.domain, explorationID: ref.explorationID } as unknown as ArtifactIdentity);
+  } catch { throw new ValidationError('Invalid checkpoint risk artifact reference.'); }
+  if (ref.path !== undefined && !bounded(ref.path, 4096)) throw new ValidationError('Invalid checkpoint risk artifact reference.');
+  if (ref.observationID !== undefined && (!Number.isSafeInteger(ref.observationID) || (ref.observationID as number) <= 0)) {
+    throw new ValidationError('Invalid checkpoint risk artifact reference.');
+  }
+  return { verdict, ref: structuredClone(item.ref) as ArtifactRef };
+}
+
+function validateData(value: unknown, workflow: Workflow, runID: string): ResumeData {
   const data = objectWithKeys(value, 'checkpoint data', ['directory', 'worktree', 'userMessageID', 'requirements', 'memoryProject', 'context',
     'dependencies', 'contexts', 'acceptance', 'decisions', 'planned', 'evidence', 'verification', 'executedChecks',
-    'changedFiles', 'calls', 'usedMessages', 'proposed', 'rework', 'workerPolicy', 'workerState']);
+    'changedFiles', 'calls', 'usedMessages', 'proposed', 'rework', 'workerPolicy', 'workerState', 'risk']);
   if (![data.directory, data.worktree].every(item => bounded(item, 4096)) || !identifier(data.userMessageID) ||
       !bounded(data.requirements, 12000)) throw new ValidationError('Invalid checkpoint identity or requirements.');
   if (data.memoryProject !== undefined && (typeof data.memoryProject !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(data.memoryProject))) throw new ValidationError('Invalid checkpoint memory project.');
@@ -239,10 +304,11 @@ function validateData(value: unknown, workflow: Workflow): ResumeData {
       // only to a pending/released Apply recovery, never to Verify or a settled ready batch.
       const unpublished = retained.filter(id => !progress.completed.includes(id));
       const next = workflow.nextAction();
-      if (unpublished.length && (!workers.batch && next.kind !== 'execute' || next.kind === 'finished' || next.phase !== 'mdd-apply'))
+      if (unpublished.length && (!workers.batch && next.kind !== 'execute' || !('phase' in next) || next.phase !== 'mdd-apply'))
         throw new ValidationError('Retained worker evidence contradicts completed workflow progress.');
     }
   }
+  validateRisk(data.risk, workflow, runID);
   return structuredClone(value) as ResumeData;
 }
 
@@ -268,15 +334,22 @@ export function validateCheckpoint(value: unknown): { checkpoint: AnyCheckpoint;
         !['pending', 'settled', ...(item.version === STABLE_CHECKPOINT_VERSION ? ['released'] : [])].includes(String(attempt.state))) throw new ValidationError('Invalid checkpoint attempt.');
     const next = workflow.nextAction();
     const results = workflow.snapshot().results;
-    if (attempt.state === 'pending' ? next.kind !== 'await-result' || next.phase !== attempt.phase :
+    const last = workflow.history().at(-1)?.kind;
+    // A risk attempt is bound to the risk stop and its own events, never to a phase result: it is
+    // pending while the assessment runs, settled by the risk-result that selected (or refused) the
+    // continuation, and released by a retry that put the risk stop back on execute-risk.
+    if (attempt.phase === 'mdd-risk') {
+      if (item.version !== STABLE_CHECKPOINT_VERSION || (attempt.state === 'pending' ? next.kind !== 'await-risk-result' :
+        attempt.state === 'released' ? next.kind !== 'execute-risk' || last !== 'retry' : last !== 'risk-result')) throw new ValidationError('Checkpoint attempt contradicts workflow.');
+    } else if (attempt.state === 'pending' ? next.kind !== 'await-result' || next.phase !== attempt.phase :
       attempt.state === 'released' ? next.kind !== 'execute' || next.phase !== attempt.phase || workflow.history().at(-1)?.kind !== 'retry' :
       results.at(-1)?.phase !== attempt.phase || workflow.history().filter(event => event.kind !== 'apply-plan').at(-1)?.kind !== 'result') throw new ValidationError('Checkpoint attempt contradicts workflow.');
-  } else if (workflow.nextAction().kind === 'await-result') throw new ValidationError('Running phase needs an attempt.');
+  } else if (['await-result', 'await-risk-result'].includes(workflow.nextAction().kind)) throw new ValidationError('Running phase needs an attempt.');
   if (item.version !== 1) {
     if (typeof item.dataDigest !== 'string' || !/^[a-f0-9]{64}$/.test(item.dataDigest) ||
         sealResumeData(item.data as ResumeData, item.runID as string, item.parent as string, item.events as WorkflowEvent[],
           item.version === STABLE_CHECKPOINT_VERSION ? item.stable as StableRunnerState : undefined) !== item.dataDigest) throw new ValidationError('Checkpoint data digest mismatch.');
-    const data = validateData(item.data, workflow);
+    const data = validateData(item.data, workflow, item.runID as string);
     if (data.workerState) {
       for (const member of data.workerState.completed) {
         // A sealed report may omit its run identity, but an explicit contradictory identity refuses.

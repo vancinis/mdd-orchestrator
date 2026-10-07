@@ -2,7 +2,8 @@ import type { Phase } from './policy.js';
 import { injectedSkillNames } from './phase-assets.js';
 
 export type VisualStatus = {
-  phase?: Phase; state?: string; workflow?: { evaluation?: { route?: string; phases?: Phase[] }; results?: { phase: Phase; outcome: string }[] };
+  phase?: Phase; state?: string;
+  workflow?: { evaluation?: { route?: string; phases?: Phase[] }; results?: { phase: Phase; outcome: string }[]; routeOrigin?: string };
 };
 
 /** Presentation preferences are opt-in overrides, never workflow inputs. */
@@ -11,7 +12,7 @@ export function presentationSettings(environment: NodeJS.ProcessEnv = process.en
 }
 
 /** Display only: never use these strings to authorize dispatch or infer evidence. */
-export function phaseVisual(status: VisualStatus, ascii = false): { route: string; progress: string; skills: string[] } | undefined {
+export function phaseVisual(status: VisualStatus, ascii = false): { route: string; routeOrigin?: string; progress: string; skills: string[] } | undefined {
   const evaluation = status.workflow?.evaluation;
   if (!evaluation?.phases?.length) return undefined;
   const completed = new Map(status.workflow?.results?.map(result => [result.phase, result.outcome]));
@@ -23,10 +24,14 @@ export function phaseVisual(status: VisualStatus, ascii = false): { route: strin
       phase === status.phase && status.state !== 'complete' ? icons.active : icons.pending;
     return `${icon} ${phase.replace('mdd-', '')}`;
   }).join('  ');
-  return { route: evaluation.route ?? 'unknown', progress, skills: status.phase ? [...injectedSkillNames(status.phase)] : [] };
+  // routeOrigin names whether the risk verdict's suggested route was kept or forced into its
+  // opposite; a manual recovery choice from blocked-risk carries no verdict to be forced against.
+  return { route: evaluation.route ?? 'unknown', ...(status.workflow?.routeOrigin ? { routeOrigin: status.workflow.routeOrigin } : {}),
+    progress, skills: status.phase ? [...injectedSkillNames(status.phase)] : [] };
 }
 
-export function visualTitle(phase: Phase, ascii = false): string {
-  const skills = injectedSkillNames(phase);
+export function visualTitle(phase: Phase | 'mdd-risk', ascii = false): string {
+  // The risk actor is offered no packaged skill.
+  const skills = phase === 'mdd-risk' ? [] : injectedSkillNames(phase);
   return `${ascii ? '[MDD]' : '◆'} ${phase.replace('mdd-', '')}${skills?.length ? ` · ${skills.join(' + ')}` : ''}`;
 }

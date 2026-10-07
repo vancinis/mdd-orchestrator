@@ -10,27 +10,29 @@ const clear = {
   mode: 'automatic',
   summary: 'low',
 };
-const lowPhases = ['mdd-plan', 'mdd-apply', 'mdd-verify'];
-const highPhases = [
-  'mdd-explore', 'mdd-propose', 'mdd-spec', 'mdd-design',
-  'mdd-tasks', 'mdd-apply', 'mdd-verify',
-];
+/**
+ * Every run always starts with exactly one exploration phase; no preflight score authorizes a
+ * route any more — only a validated mdd-risk verdict does, through Workflow.recordRiskResult.
+ * The legacy score and route stay in Evaluation as diagnostics, kept for backward compatibility.
+ */
+const explorePhases = ['mdd-explore'];
 const run = (answers = clear, rest = {}) => evaluate({ answers, ...rest });
 
-test('default policy produces the minimum low route and explanations', () => {
+test('default policy always starts with exploration and keeps the score diagnostic', () => {
   const result = run();
   assert.equal(result.score, 20);
   assert.equal(result.threshold, 50);
   assert.equal(result.route, 'low');
   assert.equal(result.policyVersion, POLICY_VERSION);
-  assert.deepEqual(result.phases, lowPhases);
+  assert.deepEqual(result.phases, explorePhases);
   assert.deepEqual(result.contributions, [
     { field: 'certainty', answer: 'very-sure', points: 10 },
     { field: 'mode', answer: 'automatic', points: 5 },
     { field: 'summary', answer: 'low', points: 5 },
   ]);
-  assert.ok(result.reasons.includes('Score 20 < threshold 50: low route.'));
+  assert.ok(result.reasons.some((reason) => reason.includes('Score 20 < threshold 50')));
   assert.ok(result.reasons.includes('Artifact storage is unscored.'));
+  assert.ok(result.reasons.includes('Every run always starts with exactly one exploration phase before any routing decision.'));
   assert.equal('confidence' in result, false);
   assert.equal('timestamp' in result, false);
 });
@@ -50,7 +52,7 @@ for (const [field, values] of Object.entries(weightCases)) {
   }
 }
 
-test('all 18 scored combinations stay within 20..65 and obey exact phase rules', () => {
+test('all 18 scored combinations stay within 20..65 and always start with exploration alone', () => {
   const scores = [];
   for (const certainty of Object.keys(weightCases.certainty)) {
     for (const mode of Object.keys(weightCases.mode)) {
@@ -58,10 +60,9 @@ test('all 18 scored combinations stay within 20..65 and obey exact phase rules',
         const answers = { ...clear, certainty, mode, summary };
         const result = run(answers);
         scores.push(result.score);
+        // route stays diagnostic: it reflects the legacy score, but it never changes phases.
         assert.equal(result.route, result.score >= 50 ? 'high' : 'low');
-        const explore = certainty !== 'very-sure';
-        assert.deepEqual(result.phases, result.route === 'high'
-          ? highPhases : [...(explore ? ['mdd-explore'] : []), ...lowPhases]);
+        assert.deepEqual(result.phases, explorePhases);
       }
     }
   }
@@ -100,19 +101,18 @@ test('threshold override and zero weights are applied rather than replaced by de
 for (const [field, answer] of [
   ['certainty', 'somewhat-sure'], ['certainty', 'not-sure'],
 ]) {
-  test(`low route requires exploration for ${field}=${answer}`, () => {
+  test(`certainty=${answer} no longer changes which phase runs first`, () => {
     const result = run({ ...clear, [field]: answer }, { config: { threshold: 100 }, explore: false });
-    assert.deepEqual(result.phases, ['mdd-explore', ...lowPhases]);
-    assert.ok(result.reasons.some((reason) => reason.includes(`${field} is ${answer}`)));
+    assert.deepEqual(result.phases, explorePhases);
   });
 }
 
-test('explicit exploration is optional only on otherwise clear low work; high never duplicates it', () => {
-  assert.deepEqual(run(clear, { explore: true }).phases, ['mdd-explore', ...lowPhases]);
-  assert.deepEqual(run(clear, { explore: false }).phases, lowPhases);
+test('legacy explore flag and certainty are accepted but no longer change the first phase', () => {
+  assert.deepEqual(run(clear, { explore: true }).phases, explorePhases);
+  assert.deepEqual(run(clear, { explore: false }).phases, explorePhases);
   const result = run(clear, { config: { threshold: 0 }, explore: true });
-  assert.deepEqual(result.phases, highPhases);
-  assert.equal(result.phases.filter((phase) => phase === 'mdd-explore').length, 1);
+  assert.deepEqual(result.phases, explorePhases);
+  assert.equal(result.route, 'high');
 });
 
 test('complete profiles use identical validation and yield identical results', () => {
@@ -134,12 +134,12 @@ test('repeated evaluation is deterministic and does not mutate input or share de
   defaults.weights.certainty['very-sure'] = 999;
   defaults.threshold = 999;
   const changed = run();
-  changed.phases.push('mdd-explore');
+  changed.phases.push('mdd-apply');
   changed.contributions[0].points = 999;
   changed.reasons.length = 0;
   assert.equal(run().score, 20);
   assert.equal(getDefaultConfig().threshold, 50);
-  assert.deepEqual(run().phases, lowPhases);
+  assert.deepEqual(run().phases, explorePhases);
 });
 
 test('missing and unknown answer fields fail actionably', () => {

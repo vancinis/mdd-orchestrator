@@ -354,7 +354,9 @@ test('assets: mdd-risk ships no permission map, demands grounded evidence and ke
   assert.doesNotMatch(front, /permission|model:|tools:/);
   assert.match(text, /low \(plan\/apply\/verify\)/);
   assert.match(text, /high \(propose\/spec\/design\/tasks\/apply\/verify\)/);
-  assert.match(text, /not yet authoritative/);
+  assert.match(text, /this recommendation is authoritative: it alone selects which route/);
+  assert.match(text, /no preflight score substitutes for it/);
+  assert.doesNotMatch(text, /not yet authoritative/);
   assert.match(text, /inventing a citation/);
   assert.match(text, /"## MDD Outcome", "## MDD Summary"/);
   assert.match(text, /outcome failed/);

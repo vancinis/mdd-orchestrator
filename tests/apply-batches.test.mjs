@@ -9,7 +9,7 @@ import { CheckpointStore, CheckpointStorageError, sealResumeData, validateCheckp
 import { ProgressGuard } from '../dist/progress.js';
 import { EngramHttp } from '../dist/engram-http.js';
 import { applyPlan, completeStep, selectedStep, taskIDs } from '../dist/apply-batches.js';
-import { memoryServer, reportDocument, traceFixture } from './adapter-fixture.mjs';
+import { memoryServer, reportDocument, throughRiskStop, traceFixture } from './adapter-fixture.mjs';
 
 const answers = { certainty: 'very-sure', artifactStore: 'none', mode: 'automatic', summary: 'low' };
 const planned = () => {
@@ -57,6 +57,7 @@ async function fixture(t, { mode = 'automatic', store = 'none', checkpointFault,
   await runner.start({ preflight: { answers: { ...answers, mode, artifactStore: store } }, requirements: 'Implement two dependent deliverables.',
     ...(memory ? { engramEndpoint: memory.endpoint, project: 'mdd-test' } : {}) }, runtime,
     { requirementsConfirmed: true, userMessageID: 'user-batches' });
+  await throughRiskStop(runner, runtime.sessionID);
   await f.finish(planned());
   return f;
 }
@@ -353,8 +354,12 @@ test('explicit rework starts a new epoch without inheriting old completion or lo
   assert.equal(f.runner.prFacts(f.runtime.sessionID).changedFiles, 3);
 });
 
-test('settled legacy histories preserve their route; explicit rework binds a fresh batch plan', () => {
+test('settled legacy histories stay without a batch plan; explicit rework binds a fresh batch plan', () => {
   const workflow = new Workflow({ answers });
+  workflow.start('mdd-explore');
+  workflow.recordResult({ phase: 'mdd-explore', outcome: 'passed', evidenceSummary: 'Legacy settled evidence.' });
+  workflow.startRisk();
+  workflow.recordRiskResult({ outcome: 'passed', evidenceSummary: 'Risk is low.', route: 'low' });
   for (const phase of ['mdd-plan', 'mdd-apply', 'mdd-verify']) {
     workflow.start(phase);
     workflow.recordResult({ phase, outcome: phase === 'mdd-verify' ? 'failed' : 'passed', evidenceSummary: 'Legacy settled evidence.' });

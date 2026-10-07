@@ -5,12 +5,16 @@ import { ArtifactObservationError, EngramHttp } from './engram-http.js';
 import type { Answers, Phase } from './policy.js';
 
 export const ARTIFACT_MAX_BYTES = 16000;
+/**
+ * `mdd-risk` is not a Phase, but its assessment is persisted exactly like a phase artifact so the
+ * evidence that selected the route is kept in the same store as the work it routed.
+ */
 export const PHASE_PATHS = Object.freeze({
   'mdd-explore': 'exploration.md', 'mdd-plan': 'plan.md', 'mdd-propose': 'proposal.md',
   'mdd-spec': 'specs/{domain}/spec.md', 'mdd-design': 'design.md', 'mdd-tasks': 'tasks.md',
-  'mdd-apply': 'apply-progress.md', 'mdd-verify': 'verify-report.md',
-} satisfies Record<Phase, string>);
-export type ArtifactIdentity = { runID: string; phase: Phase; domain?: string; explorationID?: string; batchID?: string };
+  'mdd-apply': 'apply-progress.md', 'mdd-verify': 'verify-report.md', 'mdd-risk': 'risk.md',
+} satisfies Record<Phase | 'mdd-risk', string>);
+export type ArtifactIdentity = { runID: string; phase: Phase | 'mdd-risk'; domain?: string; explorationID?: string; batchID?: string };
 export type ArtifactRef = Readonly<ArtifactIdentity & {
   recordID: string; digest: string; bytes: number; store: Answers['artifactStore'];
   path?: string; observationID?: number;
@@ -29,7 +33,12 @@ function slug(value: unknown): asserts value is string {
   if (typeof value !== 'string' || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(value) ||
       /^(con|prn|aux|nul|com[0-9]|lpt[0-9])$/.test(value)) throw new Error('Invalid artifact slug.');
 }
-function identity(value: ArtifactIdentity): ArtifactIdentity {
+/**
+ * Exported so checkpoint restore can validate a persisted `ArtifactRef`'s identity fields with
+ * the same rules the store enforces when it mints one, instead of duplicating the slug and
+ * domain/explorationID shape here and risking the two drifting apart.
+ */
+export function identity(value: ArtifactIdentity): ArtifactIdentity {
   if (!value || typeof value !== 'object' || Array.isArray(value) ||
       Object.keys(value).some(key => !['runID', 'phase', 'domain', 'explorationID', 'batchID'].includes(key))) {
     throw new Error('Invalid artifact identity.');

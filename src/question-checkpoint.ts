@@ -9,14 +9,18 @@ import type { Answers } from './policy.js';
 
 export const QUESTION_CHECKPOINT_VERSION = 1;
 export const QUESTION_CHECKPOINT_BYTES = 160000;
-type Kind = 'preflight' | 'approval' | 'change' | 'clarification';
+type Kind = 'preflight' | 'approval' | 'change' | 'clarification' | 'route' | 'risk-recovery';
 type Clarification = { question: string; options: { label: string; description: string; recommended?: boolean }[]; deferrable?: boolean };
 export type QuestionRecord = {
   version: 1; parent: string; sequence: number; runID?: string;
   requirements: string; userMessageID?: string; known: Partial<Answers>; context?: { label: string; content: string };
   checkpoint?: { sequence: number; digest: string };
-  /** The run (and its settled state) whose durable writer this issued question holds. */
-  reservation?: { runID: string; stable: 'ready' | 'await-approval' | 'blocked' | 'complete' };
+  /**
+   * The run (and its settled state) whose durable writer this issued question holds. risk-ready
+   * and risk-blocked are the two settled risk-stop boundaries, reserved exactly like a phase's
+   * own ready/blocked; risk-await-result is never a settled reservation boundary.
+   */
+  reservation?: { runID: string; stable: 'ready' | 'await-approval' | 'blocked' | 'complete' | 'risk-ready' | 'risk-blocked' };
   state: 'prepared' | 'pending' | 'answered' | 'cancelled' | 'settled' | 'withdrawn';
   slot: { kind: Kind; phase?: Phase; requirements?: string; args: QuestionEnvelope };
   clarifications: Clarification[]; deferred: Clarification[];
@@ -77,10 +81,10 @@ export function validateQuestionRecord(value: unknown): QuestionRecord {
     const context = objectWithKeys(item.context, 'native question context', ['label', 'content']);
     if (!text(context.label, 200) || !text(context.content, 96000)) throw new ValidationError('Invalid native question context.');
   }
-  if (!['preflight', 'approval', 'change', 'clarification'].includes(String(slot.kind))) throw new ValidationError('Invalid native question kind.');
+  if (!['preflight', 'approval', 'change', 'clarification', 'route', 'risk-recovery'].includes(String(slot.kind))) throw new ValidationError('Invalid native question kind.');
   const args = envelope(slot.args, slot.kind === 'clarification');
   if (slot.phase !== undefined && !PHASES.includes(String(slot.phase))) throw new ValidationError('Invalid question phase.');
-  if ((slot.kind === 'approval' || slot.kind === 'clarification') !== (slot.phase !== undefined) ||
+  if ((slot.kind === 'approval' || slot.kind === 'clarification' || slot.kind === 'route') !== (slot.phase !== undefined) ||
       (slot.kind === 'change') !== (slot.requirements !== undefined) ||
       (slot.requirements !== undefined && !text(slot.requirements, 12000))) throw new ValidationError('Question slot does not match its kind.');
   if ((slot.kind === 'preflight') !== (item.runID === undefined) ||
@@ -88,7 +92,7 @@ export function validateQuestionRecord(value: unknown): QuestionRecord {
   if (item.reservation !== undefined) {
     const reservation = objectWithKeys(item.reservation, 'question reservation', ['runID', 'stable']);
     if (!text(reservation.runID, 256) || (item.runID !== undefined && reservation.runID !== item.runID) ||
-        !['ready', 'await-approval', 'blocked', 'complete'].includes(String(reservation.stable)) ||
+        !['ready', 'await-approval', 'blocked', 'complete', 'risk-ready', 'risk-blocked'].includes(String(reservation.stable)) ||
         ['prepared', 'withdrawn'].includes(String(item.state))) throw new ValidationError('Invalid question reservation.');
   }
   if (item.checkpoint !== undefined) {
@@ -114,6 +118,23 @@ export function validateQuestionRecord(value: unknown): QuestionRecord {
         !['answered', 'deferred'].includes(String(answer.disposition))) throw new ValidationError('Invalid clarification answer.');
   }
   return structuredClone(value) as QuestionRecord;
+}
+
+/** An issued question whose outcome is not settled yet. */
+export function unresolvedQuestion(record: QuestionRecord | undefined): record is QuestionRecord {
+  return !!record && ['prepared', 'pending', 'answered'].includes(record.state);
+}
+
+/**
+ * The only unresolved question a transfer may retire: a risk-recovery question bound to exactly
+ * this run and source checkpoint (run, sequence and digest, and a reservation for the same run when
+ * present). A stale, foreign or unbound record is not provably this run's own and keeps fencing.
+ */
+export function retirableRiskRecovery(record: QuestionRecord | undefined,
+  source: { runID: string; sequence: number; dataDigest: string }): boolean {
+  return unresolvedQuestion(record) && record.slot.kind === 'risk-recovery' && record.runID === source.runID &&
+    record.checkpoint?.sequence === source.sequence && record.checkpoint.digest === source.dataDigest &&
+    (record.reservation === undefined || record.reservation.runID === source.runID);
 }
 
 export class QuestionCheckpointStore {
@@ -174,5 +195,21 @@ export class QuestionCheckpointStore {
   clear(parent: string): void {
     try { this.#files.remove(this.#name(parent)); }
     catch { throw new Error('Native question record cannot be cleared.'); }
+  }
+  /**
+   * Compare-and-delete under the record's own lock: removes the record only while it is still
+   * exactly `expected`. A record answered, re-issued or replaced since `expected` was read is left
+   * untouched and the call fails, so a concurrent outcome is never discarded silently.
+   */
+  clearIf(parent: string, expected: QuestionRecord): void {
+    let changed = false;
+    try {
+      this.#files.update(this.#name(parent), previous => {
+        const current = previous === undefined ? undefined : validateQuestionRecord(JSON.parse(previous));
+        if (!current || current.parent !== parent || !isDeepStrictEqual(current, expected)) { changed = true; return previous; }
+        return undefined;
+      }, QUESTION_CHECKPOINT_BYTES);
+    } catch { throw new Error('Native question record cannot be cleared.'); }
+    if (changed) throw new Error('Native question record changed since it was read; it was not cleared.');
   }
 }

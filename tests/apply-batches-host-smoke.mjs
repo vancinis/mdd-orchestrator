@@ -10,7 +10,7 @@ import { once } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
 import { opencodeBinary } from '../dist/model-catalog.js';
 import { defaultSettings } from '../dist/settings.js';
-import { reportDocument, traceFixture } from './adapter-fixture.mjs';
+import { reportDocument, riskReport, traceFixture } from './adapter-fixture.mjs';
 import { CheckpointStore } from '../dist/checkpoint.js';
 import { PhaseRunner } from '../dist/phase-runner.js';
 import { ProgressGuard } from '../dist/progress.js';
@@ -73,6 +73,9 @@ export class ScriptedProvider {
       throw new Error(`Unexpected coordinator action: ${JSON.stringify(action)}`);
     }
     const base = { evidenceSummary: 'Scripted fixture evidence from the isolated native host.', artifact: 'Checked fixture progress and handoff.' };
+    // Every run opens with exploration and the mdd-risk stop; the low verdict selects plan next.
+    if (agent === 'mdd-explore') return { text: reportDocument(base) };
+    if (agent === 'mdd-risk') return { text: riskReport('low') };
     if (agent === 'mdd-plan') {
       const trace = traceFixture('first.txt', 'first');
       trace.deliverables[0].scenarios = ['S1'];
@@ -106,8 +109,8 @@ export class ScriptedProvider {
 
 export function checkHostEvidence(events, statuses, parent, scenario) {
   const children = events.filter(e => e.kind === 'child');
-  assert.deepEqual(children.map(e => e.agent), scenario === 'success'
-    ? ['mdd-plan', 'mdd-apply', 'mdd-apply', 'mdd-verify'] : ['mdd-plan', 'mdd-apply']);
+  assert.deepEqual(children.map(e => e.agent), ['mdd-explore', 'mdd-risk', ...(scenario === 'success'
+    ? ['mdd-plan', 'mdd-apply', 'mdd-apply', 'mdd-verify'] : ['mdd-plan', 'mdd-apply'])]);
   assert.equal(new Set(children.map(e => e.sessionID)).size, children.length, 'Every native actor must be fresh.');
   assert.ok(children.every(e => e.parentID === parent && e.completed), 'Native parent and completed child identities must be observed.');
   assert.ok(statuses.every(s => !s.question), 'No intermediate human approval in automatic mode.');
@@ -134,7 +137,7 @@ export async function runDeterministicSmoke(root, scenario) {
   { requirementsConfirmed: true, userMessageID: 'scripted-user' });
   const provider = new ScriptedProvider(root, scenario);
   const events = []; const statuses = [];
-  for (let ordinal = 0; ordinal < 5; ordinal++) {
+  for (let ordinal = 0; ordinal < 7; ordinal++) {
     const status = JSON.parse(v2Payload(JSON.stringify(withNextAction(runner.status(runtime.sessionID)))));
     statuses.push(status);
     const next = provider.respond({ agent: runtime.agent, session: runtime.sessionID,

@@ -105,7 +105,51 @@ export function reportDocument(result) {
 
 export const SUMMARY_TEXT = 'Read src/cli.ts; no commands were executed.';
 export const ARTIFACT_TEXT = 'Plan: add validation at the CLI boundary. Later run CLI tests. Risk: preserve existing exit codes.';
+/**
+ * The mdd-risk report in the form the risk actor is asked for. `route` is what selects the
+ * continuation once MDD validates it; complexity must agree with it.
+ */
+export function riskReport(route = 'low', outcome = 'passed', extra = {}) {
+  return reportDocument({
+    outcome,
+    evidenceSummary: `Complexity is ${route}; the ${route} route follows.`,
+    how: `The exploration findings show a ${route === 'high' ? 'cross-cutting' : 'contained'} change, so the ${route} route is grounded in them.`,
+    artifact: `Risk assessment: ${route} complexity. Precaution: preserve existing exit codes.`,
+    ...(outcome === 'passed' ? { risk: { route, complexity: route, reason: `The change is ${route === 'high' ? 'cross-cutting' : 'contained'}.`,
+      evidence: [{ source: 'exploration artifact', finding: 'The CLI boundary is the only touched area.' }],
+      risks: [{ description: 'Exit codes could change.', evidence: 'exploration artifact', mitigation: 'Keep existing exit codes under test.' }] } } : {}),
+    ...extra,
+  });
+}
+/**
+ * A risk verdict that follows the diagnostic preflight route, so fixtures written when the score
+ * still chose the route keep reaching the same continuation through a validated verdict.
+ */
+export function routeOf(status) { return status.workflow?.evaluation?.route === 'high' ? 'high' : 'low'; }
+/**
+ * Drives the two stops every run now opens with — exploration, then the mdd-risk assessment — so a
+ * test about a later phase reaches it through a validated verdict, and approves the first tail
+ * phase when interactive mode holds it. Returns the status of that first tail phase.
+ */
+export async function throughRiskStop(runner, sessionID, route = 'low', { release = false } = {}) {
+  for (const [callID, text] of [
+    ['call_prelude_explore', reportDocument({ evidenceSummary: SUMMARY_TEXT, artifact: ARTIFACT_TEXT })],
+    ['call_prelude_risk', riskReport(route)],
+  ]) {
+    const prelude = { sessionID, callID };
+    await runner.after(prelude, await runner.before(prelude, runner.status(sessionID).task), text);
+    // A runner holding durable ownership keeps each settled reservation until it is released.
+    if (release) runner.releaseSettled(sessionID, callID);
+  }
+  let status = runner.status(sessionID);
+  if (status.state === 'await-approval') {
+    runner.approveNative(sessionID, status.workflow.nextAction.phase);
+    status = runner.status(sessionID);
+  }
+  return status;
+}
 export function result(status, outcome = 'passed') {
+  if (status.stage === 'mdd-risk') return riskReport(routeOf(status), outcome);
   return reportDocument({
     outcome,
     evidenceSummary: SUMMARY_TEXT,

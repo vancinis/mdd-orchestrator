@@ -9,7 +9,7 @@ import { validateWorkerState } from '../dist/worker-state.js';
 import { projectTargetTransfer } from '../dist/transfer.js';
 import { RunOwnershipStore } from '../dist/run-ownership.js';
 import { ProgressGuard } from '../dist/progress.js';
-import { answers, reportDocument, traceFixture, ARTIFACT_TEXT, SUMMARY_TEXT } from './adapter-fixture.mjs';
+import { answers, reportDocument, throughRiskStop, traceFixture, ARTIFACT_TEXT, SUMMARY_TEXT } from './adapter-fixture.mjs';
 
 function deferred() { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; }
 async function fixture(t, extra = {}) {
@@ -21,8 +21,9 @@ async function fixture(t, extra = {}) {
   const inspect = { parent: async () => {}, result: async (_runtime, _call, _phase, output) => output, stopped: async () => true };
   const options = { checkpoint, ownership, progress, workers: { enabled: true }, workerCapability: { confined: true }, ...extra };
   const runner = new PhaseRunner(inspect, options);
-  const ready = await runner.start({ preflight: { answers }, requirements: 'Implement independent tasks.' }, runtime,
+  await runner.start({ preflight: { answers }, requirements: 'Implement independent tasks.' }, runtime,
     { requirementsConfirmed: true, userMessageID: 'user-workers' });
+  const ready = await throughRiskStop(runner, runtime.sessionID, 'low', { release: true });
   const planCall = { sessionID: runtime.sessionID, callID: 'plan' }; const args = await runner.before(planCall, ready.task);
   const trace = traceFixture(); const base = trace.deliverables[0];
   trace.deliverables = ['a', 'b'].map((name, index) => ({ ...base, id: `T${index + 1}`, path: `src/${name}.ts`, dependsOn: [],
@@ -57,21 +58,22 @@ test('both foreground members admit before results; reverse completion retains o
   assert.equal(f.runner.workerAssignment(f.calls[1]), undefined);
   f.runner.releaseSettled(f.runtime.sessionID, 'two');
   assert.equal(f.runner.status(f.runtime.sessionID).phase, 'mdd-apply');
-  assert.equal(f.runner.status(f.runtime.sessionID).workflow.results.length, 1);
+  assert.equal(f.runner.status(f.runtime.sessionID).workflow.results.length, 2);
   assert.equal(f.ownership.read(status.runID).state, 'reserved');
   await assert.rejects(f.runner.after(f.calls[1], dispatched[1], f.text(1)), /match|settled|consumed/);
   await assert.rejects(f.runner.after(f.calls[0], { ...dispatched[0], prompt: 'wrong' }, f.text(0)), /match/);
   await f.runner.after(f.calls[0], dispatched[0], f.text(0));
   const done = f.runner.status(f.runtime.sessionID);
   assert.equal(done.phase, 'mdd-verify');
-  assert.equal(done.workflow.results.length, 3);
+  assert.equal(done.workflow.results.length, 4);
   const results = done.workflow.results.filter(result => result.phase === 'mdd-apply');
   assert.deepEqual(results.map(result => result.completed), [['T1'], ['T2']]);
   assert.equal(new Set(results.map(result => result.batchID)).size, 2);
   const saved = f.checkpoint.read(f.runtime.sessionID).checkpoint;
-  assert.deepEqual(saved.data.dependencies.slice(1).map(item => item.batchID), results.map(result => result.batchID));
-  assert.ok(saved.data.dependencies[1].content.includes('Task 1'));
-  assert.ok(saved.data.dependencies[2].content.includes('Task 2'));
+  // Exploration and plan artifacts precede the two Apply batch artifacts.
+  assert.deepEqual(saved.data.dependencies.slice(2).map(item => item.batchID), results.map(result => result.batchID));
+  assert.ok(saved.data.dependencies[2].content.includes('Task 1'));
+  assert.ok(saved.data.dependencies[3].content.includes('Task 2'));
   assert.equal(f.ownership.read(status.runID).state, 'idle');
 });
 
@@ -113,10 +115,10 @@ test('ordered publication fault retains both reports without publishing a partia
   await assert.rejects(f.runner.after(f.calls[0], args[0], f.text(0)), /publication|checkpoint|unconfirmed/i);
   const blocked = f.runner.status(f.runtime.sessionID);
   assert.equal(blocked.state, 'blocked'); assert.equal(blocked.tasks, undefined); assert.equal(blocked.task, undefined);
-  assert.equal(blocked.workflow.results.length, 1);
+  assert.equal(blocked.workflow.results.length, 2);
   const saved = f.checkpoint.read(f.runtime.sessionID).checkpoint;
   assert.deepEqual(saved.data.workerState.completed.map(member => member.text), [f.text(0), f.text(1)]);
-  assert.equal(saved.events.filter(event => event.kind === 'result').length, 1);
+  assert.equal(saved.events.filter(event => event.kind === 'result').length, 2);
   assert.equal(saved.attempt.id, saved.data.workerState.batch.id);
   assert.throws(() => f.runner.reset(f.runtime.sessionID, 'phase'), /durability|checkpoint|unconfirmed/i);
 });
@@ -165,7 +167,7 @@ test('failed member cannot release a live sibling; explicit retry excludes durab
   assert.throws(() => f.runner.reset(f.runtime.sessionID, 'phase'), /running|pending/);
   await f.runner.after(f.calls[0], dispatched[0], f.text(0));
   assert.deepEqual(f.checkpoint.read(f.runtime.sessionID).checkpoint.data.workerState.completed.map(item => item.taskID), ['T1']);
-  assert.equal(f.runner.status(f.runtime.sessionID).workflow.results.length, 1);
+  assert.equal(f.runner.status(f.runtime.sessionID).workflow.results.length, 2);
   f.runner.reset(f.runtime.sessionID, 'phase');
   assert.equal(f.runner.status(f.runtime.sessionID).tasks.length, 1);
   const next = { sessionID: f.runtime.sessionID, callID: 'retry-two' };
@@ -350,7 +352,7 @@ test('large member artifacts remain durable with distinct bounded artifacts for 
   const done = f.runner.status(f.runtime.sessionID);
   assert.equal(done.phase, 'mdd-verify'); assert.equal(done.artifact.content, 'b'.repeat(15000));
   const saved = f.checkpoint.read(f.runtime.sessionID).checkpoint;
-  assert.deepEqual(saved.data.dependencies.slice(1).map(item => item.content), ['a'.repeat(15000), 'b'.repeat(15000)]);
+  assert.deepEqual(saved.data.dependencies.slice(2).map(item => item.content), ['a'.repeat(15000), 'b'.repeat(15000)]);
   assert.deepEqual(f.checkpoint.read(f.runtime.sessionID).checkpoint.data.workerState.completed.map(member => member.text), texts);
 });
 

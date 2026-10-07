@@ -2,6 +2,7 @@ import type { CheckpointStore, StableCheckpoint } from './checkpoint.js';
 import { sealResumeData, STABLE_CHECKPOINT_VERSION, validateCheckpoint } from './checkpoint.js';
 import type { ProgressGuard } from './progress.js';
 import type { QuestionCheckpointStore } from './question-checkpoint.js';
+import { retirableRiskRecovery, unresolvedQuestion } from './question-checkpoint.js';
 import type { Runtime } from './phase-runner.js';
 import { ValidationError } from './validation.js';
 import { Workflow } from './workflow.js';
@@ -44,8 +45,13 @@ export function assessTransfer(input: { sourceSessionID: string; runID: string; 
         source.checkpoint.data.directory !== target.directory || source.checkpoint.data.worktree !== target.worktree) return unavailable;
     const marker = progress.read(input.sourceSessionID);
     const question = questions.read(input.sourceSessionID);
-    if (marker?.state === 'pending' || source.checkpoint.stable.state === 'await-result' ||
-        (question && ['prepared', 'pending', 'answered'].includes(question.state))) {
+    // A bound risk-recovery question is not a consent fence to cross: it is a re-askable native
+    // decision the restart path already reissues from scratch. Transfer safely retires it and
+    // the target asks a brand new one once ownership is confirmed, so it never blocks the move
+    // the way an outstanding approval, clarification or preflight answer still must. Only one
+    // provably bound to this exact run and source checkpoint qualifies; any other record fences.
+    if (marker?.state === 'pending' || ['await-result', 'risk-await-result'].includes(source.checkpoint.stable.state) ||
+        (unresolvedQuestion(question) && !retirableRiskRecovery(question, source.checkpoint))) {
       return { state: 'transfer-blocked', diagnostic: 'pending-unknown',
         reason: 'The source may have an unresolved task or native question. No transfer occurred.' };
     }
@@ -93,10 +99,17 @@ export function projectTargetTransfer(source: StableCheckpoint, marker: ReturnTy
   const rework = next.kind === 'blocked' && next.phase === 'mdd-verify' && last?.phase === 'mdd-verify' &&
     last.outcome === 'failed' && workflow.snapshot().evaluation.phases.includes('mdd-apply') &&
     text.split(/\s+/).some(token => /^rework[.!?]?$/i.test(token));
-  if ((!['ready', 'await-approval'].includes(source.stable.state) && !(source.stable.state === 'blocked' && rework)) || source.stable.rejected ||
-      source.attempt?.state === 'pending' || (next.kind !== 'execute' && next.kind !== 'approve' && !rework) ||
+  // risk-ready and risk-blocked are eligible for exactly the same projection as ready/blocked: the
+  // risk stop is not a Phase, but it is a stable boundary the existing fence, receipt and
+  // fresh-consent rules already cover without a second transfer mechanism. risk-blocked stays
+  // blocked on the target; it never gets rework's runnable tail, which is mdd-apply-only.
+  if ((!['ready', 'await-approval', 'risk-ready', 'risk-blocked'].includes(source.stable.state) && !(source.stable.state === 'blocked' && rework)) || source.stable.rejected ||
+      source.attempt?.state === 'pending' ||
+      (next.kind !== 'execute' && next.kind !== 'approve' && next.kind !== 'execute-risk' && next.kind !== 'blocked-risk' && !rework) ||
       (next.kind === 'execute' && source.stable.state !== 'ready') ||
       (next.kind === 'approve' && source.stable.state !== 'await-approval') ||
+      (next.kind === 'execute-risk' && source.stable.state !== 'risk-ready') ||
+      (next.kind === 'blocked-risk' && source.stable.state !== 'risk-blocked') ||
       source.parent === target.sessionID || source.data.directory !== target.directory || source.data.worktree !== target.worktree ||
       proof.userMessageID === source.data.userMessageID ||
       (marker && (marker.state !== 'settled' || marker.runID !== source.runID || marker.userMessageID !== source.data.userMessageID ||

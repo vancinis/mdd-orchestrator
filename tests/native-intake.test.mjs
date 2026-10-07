@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { NativeIntake, approvalEnvelope, nativeQuestionAnswers, CLARIFICATION_LABELS, APPROVAL_LABELS, UnselectedAnswer } from '../dist/native-intake.js';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { NativeIntake, approvalEnvelope, routeEnvelope, riskRecoveryEnvelope, nativeQuestionAnswers, CLARIFICATION_LABELS, APPROVAL_LABELS, ROUTE_LABELS, RISK_RECOVERY_LABELS, UnselectedAnswer } from '../dist/native-intake.js';
+import { QuestionCheckpointStore } from '../dist/question-checkpoint.js';
 import { Workflow } from '../dist/workflow.js';
 import { defaultSettings } from '../dist/settings.js';
 import { answers, memoryServer, runtime } from './adapter-fixture.mjs';
@@ -42,7 +46,20 @@ async function fixture(t, known = answers) {
     await gate.afterQuestion(call, args, output(args, selections));
     return { args, call };
   };
-  const pass = () => { const next = workflow.nextAction(); workflow.start(next.phase); workflow.recordResult({ phase: next.phase, outcome: 'passed', evidenceSummary: 'Simulated trusted phase result.' }); gate.phaseRecorded(runtime.sessionID); };
+  // mdd-explore is always first and is immediately followed by the mandatory mdd-risk stop,
+  // never straight to the tail or an interactive review; resolving it transparently here means a
+  // fixture that drives the workflow phase by phase does not need its own copy of the risk gate.
+  // `route` only matters for the one call that passes exploration; every later call ignores it.
+  const pass = (route = 'low') => {
+    const next = workflow.nextAction();
+    workflow.start(next.phase);
+    workflow.recordResult({ phase: next.phase, outcome: 'passed', evidenceSummary: 'Simulated trusted phase result.' });
+    if (workflow.nextAction().kind === 'execute-risk') {
+      workflow.startRisk();
+      workflow.recordRiskResult({ outcome: 'passed', evidenceSummary: `Risk is ${route}.`, route });
+    }
+    gate.phaseRecorded(runtime.sessionID);
+  };
   return { gate, runner, inspect, checks, contributions, settings, start, answer, pass, starts: () => starts, workflow: () => workflow };
 }
 
@@ -80,25 +97,35 @@ for (const known of [{}, { certainty: 'very-sure', artifactStore: 'none', summar
 for (const route of ['low', 'high']) {
   for (const mode of ['automatic', 'interactive']) {
     test(`native gate state contract: full ${route} ${mode} route has exact approval slots`, async t => {
-      // complexity no longer scores a route; reach high through certainty and summary alone.
-      const known = { ...answers, mode, ...(route === 'high' ? { certainty: 'not-sure', summary: 'detailed' } : {}) };
+      // The route is no longer scored from preflight answers; it is only ever selected by the
+      // mandatory mdd-risk stop's passed verdict, driven here through `f.pass(route)`.
+      const known = { ...answers, mode };
       const f = await fixture(t, known);
       await f.start();
-      const phases = f.workflow().snapshot().evaluation.phases;
       assert.equal(f.gate.status(runtime.sessionID).question, undefined);
-      for (let index = 0; index < phases.length; index++) {
+      assert.deepEqual(f.workflow().nextAction(), { kind: 'execute', phase: 'mdd-explore' });
+      f.pass(route);
+      // mdd-risk settled transparently inside pass(); the tail now reflects the selected route.
+      const phases = f.workflow().snapshot().evaluation.phases;
+      assert.equal(phases[0], 'mdd-explore');
+      assert.equal(f.workflow().snapshot().evaluation.route, route);
+      if (mode === 'interactive') {
+        assert.equal(f.gate.status(runtime.sessionID).state, 'review-ready');
+        f.gate.prepareAdvance({ questions: [] }, runtime);
+      }
+      for (let index = 1; index < phases.length; index++) {
+        const status = f.gate.status(runtime.sessionID);
+        if (mode === 'automatic') assert.equal(status.question, undefined);
+        else {
+          assert.deepEqual(status.question, approvalEnvelope('run-contract', phases[index]));
+          await f.answer([['Continuar']]);
+          assert.equal(f.gate.status(runtime.sessionID).question, undefined);
+        }
         assert.deepEqual(f.workflow().nextAction(), { kind: 'execute', phase: phases[index] });
         f.pass();
         if (mode === 'interactive' && index !== phases.length - 1) {
           assert.equal(f.gate.status(runtime.sessionID).state, 'review-ready');
           f.gate.prepareAdvance({ questions: [] }, runtime);
-        }
-        const status = f.gate.status(runtime.sessionID);
-        if (index === phases.length - 1 || mode === 'automatic') assert.equal(status.question, undefined);
-        else {
-          assert.deepEqual(status.question, approvalEnvelope('run-contract', phases[index + 1]));
-          await f.answer([['Continuar']]);
-          assert.equal(f.gate.status(runtime.sessionID).question, undefined);
         }
       }
       assert.equal(f.workflow().nextAction().kind, 'finished');
@@ -247,6 +274,12 @@ test('equal clarifications in concurrent parents retain their own issued identit
     const workflow = workflows.get(parent.sessionID);
     workflow.start(workflow.nextAction().phase);
     workflow.recordResult({ phase: workflow.snapshot().evaluation.phases[0], outcome: 'passed', evidenceSummary: 'Phase completed.' });
+    // mdd-explore is immediately followed by the mandatory mdd-risk stop; resolve it inline so
+    // the interactive review this test exercises is reached the same way phase-runner reaches it.
+    if (workflow.nextAction().kind === 'execute-risk') {
+      workflow.startRisk();
+      workflow.recordRiskResult({ outcome: 'passed', evidenceSummary: 'Risk is low.', route: 'low' });
+    }
     gate.phaseRecorded(parent.sessionID);
     gate.prepareAdvance({ questions: [question] }, parent);
   }
@@ -537,3 +570,477 @@ test('protected intake: native user inspection failure leaves requirements uncon
   assert.equal(f.gate.status(runtime.sessionID).provenance, undefined);
   assert.equal(f.starts(), 0);
 });
+
+/**
+ * A minimal runner parked exactly at the settled risk boundary this fixture exercises: `stage`
+ * is what marks it as the typed mdd-risk stop rather than an ordinary ready/blocked phase, the
+ * same distinction `beforeQuestion` reads off the real PhaseRunner.
+ */
+function riskFixture(t, stable) {
+  const root = mkdtempSync(join(tmpdir(), 'mdd-native-risk-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const store = new QuestionCheckpointStore(root);
+  const settings = defaultSettings();
+  settings.profiles.default.answers = { ...answers };
+  const runID = 'run-risk';
+  let workflow;
+  const runner = {
+    async start(input) { workflow = new Workflow(input.preflight); },
+    status() {
+      if (!workflow) return { state: 'not-started' };
+      // The same public state label the real PhaseRunner reports for each risk-* stable label.
+      const state = { 'risk-ready': 'ready', 'risk-await-result': 'await-result', 'risk-blocked': 'blocked' }[stable];
+      return { runID, state, stage: 'mdd-risk', reportDetail: 'detailed', workflow: workflow.snapshot() };
+    },
+    approveNative() {}, block() {}, assertChangeable() {}, owner() { return undefined; },
+    reserve() { return { runID }; }, release() {},
+  };
+  // Echoes the exact native message ID back, the same way a real adapter inspection would,
+  // so each distinct call (start, then change request) is its own fresh user message.
+  const inspect = { async intake(_runtime, _text, messageID) { return messageID; }, async question() {} };
+  const gate = () => new NativeIntake(runner, inspect, settings, { questions: store,
+    checkpoint: { read: () => ({ checkpoint: { version: 3, runID, sequence: 7, dataDigest: 'b'.repeat(64) } }) } });
+  return { root, store, gate, runID, workflow: () => workflow };
+}
+
+for (const stable of ['risk-ready', 'risk-blocked']) {
+  test(`S11: a native question reserved at ${stable} survives persist and reload bound to the same run and checkpoint`, async t => {
+    const f = riskFixture(t, stable);
+    const intake = f.gate();
+    await intake.start({ requirements: 'Plan a safe change.' }, runtime, 'user-start');
+    const workflow = f.workflow();
+    workflow.start('mdd-explore');
+    workflow.recordResult({ phase: 'mdd-explore', outcome: 'passed', evidenceSummary: 'Explored.' });
+    // risk-ready leaves the stop at `execute-risk`, never started; risk-blocked drives it through
+    // a failed assessment, exactly as workflow.ts settles the two stable labels.
+    if (stable === 'risk-blocked') {
+      workflow.startRisk();
+      workflow.recordRiskResult({ outcome: 'failed', evidenceSummary: 'Too risky to continue.' });
+    }
+    await intake.changeRequest({ kind: 'rerun', userText: 'Please redo the preflight questions.' }, runtime, 'user-change');
+    const args = intake.status(runtime.sessionID).question;
+    assert.ok(args, 'a change-request question must be pending at this settled risk boundary');
+    const call = { sessionID: runtime.sessionID, callID: `change-${stable}` };
+    await intake.beforeQuestion(call, args);
+    const saved = f.store.read(runtime.sessionID);
+    assert.equal(saved.state, 'pending');
+    assert.deepEqual(saved.reservation, { runID: f.runID, stable });
+    assert.deepEqual(saved.checkpoint, { sequence: 7, digest: 'b'.repeat(64) });
+    // A fresh gate instance has no in-memory session; the persisted record still binds the exact
+    // run and settled state, so it reports recovery-blocked instead of silently losing the
+    // pending question or letting a second intake replace it.
+    const reloaded = f.gate();
+    assert.equal(reloaded.status(runtime.sessionID).state, 'recovery-blocked');
+    await assert.rejects(reloaded.start({ requirements: 'Different objective.' }, runtime, 'user-replace'), /unresolved outcome/);
+  });
+}
+
+test('S12: risk-await-result is refused as a reservation through the native writer path', async t => {
+  const f = riskFixture(t, 'risk-await-result');
+  const intake = f.gate();
+  await intake.start({ requirements: 'Plan a safe change.' }, runtime, 'user-start');
+  const workflow = f.workflow();
+  workflow.start('mdd-explore');
+  workflow.recordResult({ phase: 'mdd-explore', outcome: 'passed', evidenceSummary: 'Explored.' });
+  // The risk stop's own attempt is unconfirmed: started, never settled.
+  workflow.startRisk();
+  await intake.changeRequest({ kind: 'rerun', userText: 'Please redo the preflight questions.' }, runtime, 'user-change');
+  const args = intake.status(runtime.sessionID).question;
+  const call = { sessionID: runtime.sessionID, callID: 'change-await-result' };
+  await intake.beforeQuestion(call, args);
+  const saved = f.store.read(runtime.sessionID);
+  assert.equal(saved.state, 'pending');
+  // 'await-result' never maps to a settled label; the native writer path never records a
+  // reservation for it, the same way it never would for an ordinary phase's unconfirmed attempt.
+  assert.equal(saved.reservation, undefined);
+});
+
+/**
+ * 3a: the one native route question offered in place of the generic approval, at the exact
+ * boundary where a passed mdd-risk verdict's suggested route still only awaits its ordinary
+ * approval. `pass(route)` plays mdd-explore and mdd-risk transparently, the same way `fixture`'s
+ * own `pass` does, but also records the verdict `status()` must expose as `risk` for the gate to
+ * recognise this boundary — the plain contract mock above never carries that field, which is why
+ * its own tests above never exercise this path.
+ */
+function routeFixture(t, mode) {
+  let workflow;
+  let riskVerdict;
+  let blocked = false;
+  let forced = 0;
+  const runner = {
+    async start(input) { workflow = new Workflow(input.preflight); },
+    status() {
+      if (!workflow) return { state: 'not-started' };
+      return { runID: 'run-route', state: blocked ? 'blocked' : 'phase-recorded', reportDetail: 'detailed',
+        workflow: workflow.snapshot(), ...(riskVerdict ? { risk: riskVerdict } : {}) };
+    },
+    approveNative(_session, phase) { workflow.approve(phase); },
+    forceRoute() { workflow.overrideRoute(); forced++; },
+    block() { blocked = true; },
+    approvalStopped() {},
+  };
+  const inspect = { async intake() {}, async question() {} };
+  const settings = defaultSettings();
+  settings.profiles.default.answers = { ...answers, mode };
+  const gate = new NativeIntake(runner, inspect, settings);
+  const start = () => gate.start({ requirements: 'Plan a route decision.' }, runtime, 'user-route-start');
+  let ordinal = 0;
+  const answer = async selections => {
+    if (gate.status(runtime.sessionID).state === 'review-ready') gate.prepareAdvance({ questions: [] }, runtime);
+    const args = gate.status(runtime.sessionID).question;
+    const call = { sessionID: runtime.sessionID, callID: `route-question-${++ordinal}` };
+    await gate.beforeQuestion(call, args);
+    await gate.afterQuestion(call, args, output(args, selections));
+    return { args, call };
+  };
+  const pass = route => {
+    const next = workflow.nextAction();
+    workflow.start(next.phase);
+    workflow.recordResult({ phase: next.phase, outcome: 'passed', evidenceSummary: 'Explored for a route decision.' });
+    workflow.startRisk();
+    riskVerdict = { route, complexity: route, reason: `The change is ${route === 'high' ? 'cross-cutting' : 'contained'}.`,
+      evidence: [{ source: 'exploration', finding: 'Scope is bounded to the CLI.' }],
+      risks: [{ description: 'Exit codes could change.', evidence: 'exploration', mitigation: 'Keep tests on exit codes.' }] };
+    workflow.recordRiskResult({ outcome: 'passed', evidenceSummary: `Risk is ${route}.`, route });
+    gate.phaseRecorded(runtime.sessionID);
+  };
+  return { gate, runner, start, answer, pass, forced: () => forced, workflow: () => workflow };
+}
+
+for (const route of ['low', 'high']) {
+  test(`route question (S1): continue authorizes only the suggested ${route} tail and keeps the verdict`, async t => {
+    const f = routeFixture(t, 'interactive');
+    await f.start();
+    f.pass(route);
+    const first = f.workflow().snapshot().evaluation.phases[1];
+    f.gate.prepareAdvance({ questions: [] }, runtime);
+    const pending = f.gate.status(runtime.sessionID).question;
+    const reason = `The change is ${route === 'high' ? 'cross-cutting' : 'contained'}.`;
+    assert.deepEqual(pending, routeEnvelope('run-route', first, { route, complexity: route, reason }));
+    assert.equal(pending.questions[0].header, 'Ruta');
+    assert.deepEqual(pending.questions[0].options.map(option => option.label), [ROUTE_LABELS.continue, ROUTE_LABELS.force, ROUTE_LABELS.stop]);
+    await f.answer([[ROUTE_LABELS.continue]]);
+    assert.deepEqual(f.workflow().nextAction(), { kind: 'execute', phase: first });
+    assert.equal(f.workflow().snapshot().routeOrigin, 'suggested');
+    assert.equal(f.workflow().snapshot().evaluation.route, route);
+    assert.equal(f.forced(), 0);
+    assert.equal(f.gate.status(runtime.sessionID).question, undefined);
+  });
+}
+
+for (const [from, to] of [['low', 'high'], ['high', 'low']]) {
+  test(`route question (S2/S3): force switches ${from} to ${to}, preserving the original verdict`, async t => {
+    const f = routeFixture(t, 'interactive');
+    await f.start();
+    f.pass(from);
+    await f.answer([[ROUTE_LABELS.force]]);
+    const snapshot = f.workflow().snapshot();
+    assert.equal(snapshot.evaluation.route, to);
+    assert.equal(snapshot.routeOrigin, 'override');
+    // The verdict itself is never rewritten by a force: only which tail runs changes.
+    const verdict = f.workflow().history().find(event => event.kind === 'risk-result');
+    assert.equal(verdict.result.route, from);
+    assert.equal(f.forced(), 1);
+    assert.equal(f.gate.status(runtime.sessionID).question, undefined);
+  });
+}
+
+test('route question (S4): stop pauses without authorizing or rejecting either route', async t => {
+  const f = routeFixture(t, 'interactive');
+  await f.start();
+  f.pass('low');
+  await f.answer([[ROUTE_LABELS.stop]]);
+  assert.equal(f.gate.status(runtime.sessionID).reason, 'The user stopped before either route was authorized. No phase was authorized or rejected.');
+  assert.equal(f.workflow().nextAction().kind, 'approve');
+  assert.equal(f.workflow().snapshot().routeOrigin, 'suggested');
+  assert.equal(f.forced(), 0);
+});
+
+test('route question (S5): an answer outside continue/force/stop authorizes nothing and the question is re-armed', async t => {
+  const f = routeFixture(t, 'interactive');
+  await f.start();
+  f.pass('low');
+  await f.answer([['I would rather decide later']]);
+  assert.equal(f.workflow().nextAction().kind, 'approve');
+  assert.equal(f.forced(), 0);
+  const rearmed = f.gate.status(runtime.sessionID).question;
+  assert.equal(rearmed.questions[0].header, 'Ruta');
+  assert.deepEqual(rearmed.questions[0].options.map(option => option.label), [ROUTE_LABELS.continue, ROUTE_LABELS.force, ROUTE_LABELS.stop]);
+});
+
+test('route question (S6): automatic mode asks no route question and keeps the suggested route', async t => {
+  const f = routeFixture(t, 'automatic');
+  await f.start();
+  f.pass('high');
+  assert.equal(f.gate.status(runtime.sessionID).question, undefined);
+  assert.equal(f.workflow().nextAction().kind, 'execute');
+  assert.equal(f.workflow().snapshot().routeOrigin, 'suggested');
+  assert.equal(f.forced(), 0);
+});
+
+// D3/S5: a cancelled route receipt authorizes nothing and leaves the route question re-askable,
+// exactly like a cancelled generic approval — no phase is approved and no force happens.
+test('route question (S5): a cancelled native call authorizes neither continue nor force', async t => {
+  const f = routeFixture(t, 'interactive');
+  await f.start();
+  f.pass('low');
+  f.gate.prepareAdvance({ questions: [] }, runtime);
+  const args = f.gate.status(runtime.sessionID).question;
+  const call = { sessionID: runtime.sessionID, callID: 'route-cancel-1' };
+  await f.gate.beforeQuestion(call, args);
+  f.gate.nativeError(call);
+  assert.equal(f.workflow().nextAction().kind, 'approve');
+  assert.equal(f.workflow().snapshot().routeOrigin, 'suggested');
+  assert.equal(f.forced(), 0);
+  assert.equal(f.gate.status(runtime.sessionID).state, 'stopped');
+});
+
+// D3/S5: once a route call has already answered, that exact callID cannot answer again — the
+// durable record retires it, so a replayed receipt for the same call is refused rather than
+// silently re-authorizing a force or a second continue.
+test('route question (S5): a stale duplicate route result cannot force or approve again', async t => {
+  const f = routeFixture(t, 'interactive');
+  await f.start();
+  f.pass('low');
+  const first = await f.answer([[ROUTE_LABELS.continue]]);
+  assert.equal(f.workflow().nextAction().kind, 'execute');
+  assert.equal(f.forced(), 0);
+  // The same callID/args replayed after the route already settled must not force the other
+  // route or re-approve anything.
+  await assert.rejects(f.gate.afterQuestion(first.call, first.args, output(first.args, [[ROUTE_LABELS.force]])));
+  assert.equal(f.forced(), 0);
+  assert.equal(f.workflow().snapshot().routeOrigin, 'suggested');
+});
+
+/**
+ * S2: the one native recovery question offered exactly once a `blocked-risk` assessment settles
+ * (a valid failed verdict or an exhausted fallback), mapping the four exact labels onto
+ * `PhaseRunner.retryRisk()` / `chooseManualRoute()` / stop. `failRisk()` plays exploration and a
+ * failed mdd-risk assessment transparently, the same way `routeFixture`'s `pass()` plays a
+ * passed one; `retryRisk`/`chooseManualRoute` mutate the workflow directly, exactly like the real
+ * guarded runner operations they stand in for.
+ */
+function riskRecoveryFixture(t, mode, faults = {}) {
+  let workflow;
+  let blocked = false;
+  let retries = 0;
+  let manualRoutes = [];
+  let stops = 0;
+  const runner = {
+    async start(input) { workflow = new Workflow(input.preflight); },
+    status() {
+      if (!workflow) return { state: 'not-started' };
+      return { runID: 'run-recovery', state: blocked ? 'blocked' : 'phase-recorded', reportDetail: 'detailed',
+        ...(blocked ? { reason: 'mdd-risk reported that the request cannot be substantiated on this evidence.' } : {}),
+        workflow: workflow.snapshot() };
+    },
+    approveNative(_session, phase) { workflow.approve(phase); },
+    block() { blocked = true; },
+    approvalStopped() { stops++; },
+    // Stands in for the guarded runner operation's own checkpoint failure: the workflow
+    // transition it would make is never reached, exactly like the real retryRisk()/
+    // chooseManualRoute() throwing before a task is ever exposed.
+    retryRisk() { if (faults.retry) throw new Error('simulated runner checkpoint fault'); workflow.retry(); blocked = false; retries++; },
+    chooseManualRoute(_session, route) {
+      if (faults.route) throw new Error('simulated runner checkpoint fault');
+      workflow.chooseManualRoute(route); blocked = false; manualRoutes.push(route);
+    },
+    // A settled blocked-risk released at phase scope stays exactly where it was: still
+    // blocked-risk, nothing authorized, so the recovery question can be reopened from it.
+    reset() { return { scope: 'phase' }; },
+  };
+  const inspect = { async intake() {}, async question() {} };
+  const settings = defaultSettings();
+  settings.profiles.default.answers = { ...answers, mode };
+  const gate = new NativeIntake(runner, inspect, settings);
+  const start = () => gate.start({ requirements: 'Plan a change risk cannot route.' }, runtime, 'user-recovery-start');
+  let ordinal = 0;
+  const answer = async selections => {
+    const args = gate.status(runtime.sessionID).question;
+    const call = { sessionID: runtime.sessionID, callID: `recovery-question-${++ordinal}` };
+    await gate.beforeQuestion(call, args);
+    await gate.afterQuestion(call, args, output(args, selections));
+    return { args, call };
+  };
+  const failRisk = () => {
+    const next = workflow.nextAction();
+    workflow.start(next.phase);
+    workflow.recordResult({ phase: next.phase, outcome: 'passed', evidenceSummary: 'Explored.' });
+    workflow.startRisk();
+    workflow.recordRiskResult({ outcome: 'failed', evidenceSummary: 'Cannot substantiate a route on this evidence.' });
+    blocked = true;
+    gate.phaseRecorded(runtime.sessionID);
+  };
+  return { gate, start, answer, failRisk, retries: () => retries, manualRoutes: () => manualRoutes, stops: () => stops, workflow: () => workflow };
+}
+
+// A1: the recovery question is armed only once blocked-risk is settled — never while exploration
+// or the assessment itself is still in flight, and never as a side effect of starting the run.
+test('risk recovery (A1): the recovery question is armed only after blocked-risk settles', async t => {
+  const f = riskRecoveryFixture(t, 'interactive');
+  await f.start();
+  assert.equal(f.gate.status(runtime.sessionID).question, undefined);
+  f.failRisk();
+  const pending = f.gate.status(runtime.sessionID).question;
+  assert.deepEqual(pending, riskRecoveryEnvelope('run-recovery', 'mdd-risk reported that the request cannot be substantiated on this evidence.'));
+  assert.deepEqual(pending.questions[0].options.map(option => option.label),
+    [RISK_RECOVERY_LABELS.retry, RISK_RECOVERY_LABELS.low, RISK_RECOVERY_LABELS.high, RISK_RECOVERY_LABELS.stop]);
+});
+
+// A2: Reintentar calls PhaseRunner.retryRisk() exactly once and settles this exact native call.
+test('risk recovery (A2): Reintentar evaluación de riesgo retries exactly once', async t => {
+  const f = riskRecoveryFixture(t, 'interactive');
+  await f.start();
+  f.failRisk();
+  await f.answer([[RISK_RECOVERY_LABELS.retry]]);
+  assert.equal(f.retries(), 1);
+  assert.deepEqual(f.manualRoutes(), []);
+  assert.equal(f.stops(), 0);
+  assert.equal(f.gate.status(runtime.sessionID).question, undefined);
+});
+
+// A3/A4: Ruta low / Ruta high call PhaseRunner.chooseManualRoute() with the exact named route.
+for (const [label, route] of [[RISK_RECOVERY_LABELS.low, 'low'], [RISK_RECOVERY_LABELS.high, 'high']]) {
+  test(`risk recovery: '${label}' chooses the manual ${route} route exactly once`, async t => {
+    const f = riskRecoveryFixture(t, 'interactive');
+    await f.start();
+    f.failRisk();
+    await f.answer([[label]]);
+    assert.deepEqual(f.manualRoutes(), [route]);
+    assert.equal(f.retries(), 0);
+    assert.equal(f.stops(), 0);
+  });
+}
+
+// A5: Detener authorizes neither a retry nor either route; the run stays recoverably blocked-risk.
+test('risk recovery (A5): Detener leaves the run blocked-risk without authorizing anything', async t => {
+  const f = riskRecoveryFixture(t, 'interactive');
+  await f.start();
+  f.failRisk();
+  await f.answer([[RISK_RECOVERY_LABELS.stop]]);
+  assert.equal(f.stops(), 1);
+  assert.equal(f.retries(), 0);
+  assert.deepEqual(f.manualRoutes(), []);
+  assert.equal(f.workflow().nextAction().kind, 'blocked-risk');
+});
+
+// A6: free text, a cancelled call, or a stale duplicate answer for this slot authorizes nothing.
+test('risk recovery (A6): free text authorizes nothing and the same question is re-armed', async t => {
+  const f = riskRecoveryFixture(t, 'interactive');
+  await f.start();
+  f.failRisk();
+  await f.answer([['I need more time to think about this']]);
+  assert.equal(f.retries(), 0);
+  assert.deepEqual(f.manualRoutes(), []);
+  assert.equal(f.stops(), 0);
+  assert.equal(f.workflow().nextAction().kind, 'blocked-risk');
+  const rearmed = f.gate.status(runtime.sessionID).question;
+  assert.deepEqual(rearmed.questions[0].options.map(option => option.label),
+    [RISK_RECOVERY_LABELS.retry, RISK_RECOVERY_LABELS.low, RISK_RECOVERY_LABELS.high, RISK_RECOVERY_LABELS.stop]);
+});
+
+test('risk recovery (A6): a cancelled native call authorizes neither a retry nor a route', async t => {
+  const f = riskRecoveryFixture(t, 'interactive');
+  await f.start();
+  f.failRisk();
+  const args = f.gate.status(runtime.sessionID).question;
+  const call = { sessionID: runtime.sessionID, callID: 'recovery-cancel-1' };
+  await f.gate.beforeQuestion(call, args);
+  f.gate.nativeError(call);
+  assert.equal(f.retries(), 0);
+  assert.deepEqual(f.manualRoutes(), []);
+  assert.equal(f.workflow().nextAction().kind, 'blocked-risk');
+  assert.equal(f.gate.status(runtime.sessionID).state, 'stopped');
+});
+
+// A7: once a call already answered this exact slot, that same callID cannot answer again — a
+// retried/altered or reused receipt for it must not authorize a second retry or route.
+test('risk recovery (A7): a stale duplicate recovery answer cannot retry or choose a route again', async t => {
+  const f = riskRecoveryFixture(t, 'interactive');
+  await f.start();
+  f.failRisk();
+  const first = await f.answer([[RISK_RECOVERY_LABELS.retry]]);
+  assert.equal(f.retries(), 1);
+  await assert.rejects(f.gate.afterQuestion(first.call, first.args, output(first.args, [[RISK_RECOVERY_LABELS.low]])));
+  assert.equal(f.retries(), 1);
+  assert.deepEqual(f.manualRoutes(), []);
+});
+
+// A6: an envelope the coordinator altered before answering is never accepted, exactly like every
+// other native question kind — options and defaults are MDD's to issue, never the caller's to edit.
+test('risk recovery (A6): an envelope altered before answering is refused', async t => {
+  const f = riskRecoveryFixture(t, 'interactive');
+  await f.start();
+  f.failRisk();
+  const args = f.gate.status(runtime.sessionID).question;
+  args.questions[0].options[0].label = 'Forged';
+  const call = { sessionID: runtime.sessionID, callID: 'recovery-altered' };
+  await assert.rejects(f.gate.beforeQuestion(call, args));
+  assert.equal(f.retries(), 0);
+  assert.deepEqual(f.manualRoutes(), []);
+  assert.equal(f.stops(), 0);
+});
+
+// A7: once a free-text answer retires its call and re-arms the same question under a fresh call,
+// the retired call's exact answer must not be replayable even though its wording looks valid.
+test('risk recovery (A7): a retired call cannot replay once a fresh call has issued the question again', async t => {
+  const f = riskRecoveryFixture(t, 'interactive');
+  await f.start();
+  f.failRisk();
+  const first = await f.answer([['I need more time to think about this']]);
+  assert.equal(f.retries(), 0);
+  assert.deepEqual(f.manualRoutes(), []);
+  // A genuinely new call for the re-armed question applies its exact choice exactly once.
+  await f.answer([[RISK_RECOVERY_LABELS.low]]);
+  assert.deepEqual(f.manualRoutes(), ['low']);
+  // The original, now-retired free-text call cannot replay with a selection after the fresh one
+  // has already settled the question it was re-armed into.
+  await assert.rejects(f.gate.afterQuestion(first.call, first.args, output(first.args, [[RISK_RECOVERY_LABELS.high]])));
+  assert.deepEqual(f.manualRoutes(), ['low']);
+  assert.equal(f.retries(), 0);
+});
+
+// A5/A6: a cancelled native call authorizes nothing, but the recovery question is not lost — an
+// explicit phase-scope reset reopens it from the same settled blocked-risk, and a fresh call can
+// still resolve it afterward.
+test('risk recovery: a cancelled recovery call can be reopened by reset and still resolves', async t => {
+  const f = riskRecoveryFixture(t, 'interactive');
+  await f.start();
+  f.failRisk();
+  const args = f.gate.status(runtime.sessionID).question;
+  const call = { sessionID: runtime.sessionID, callID: 'recovery-cancel-reopen' };
+  await f.gate.beforeQuestion(call, args);
+  f.gate.nativeError(call);
+  assert.equal(f.gate.status(runtime.sessionID).state, 'stopped');
+  assert.equal(f.retries(), 0);
+  assert.deepEqual(f.manualRoutes(), []);
+  const reopened = f.gate.reset(runtime, 'phase');
+  assert.notEqual(reopened.question, undefined);
+  assert.deepEqual(reopened.question.questions[0].options.map(option => option.label),
+    [RISK_RECOVERY_LABELS.retry, RISK_RECOVERY_LABELS.low, RISK_RECOVERY_LABELS.high, RISK_RECOVERY_LABELS.stop]);
+  await f.answer([[RISK_RECOVERY_LABELS.retry]]);
+  assert.equal(f.retries(), 1);
+});
+
+// Post-receipt checkpoint failure: the exact native answer is persisted first, so the choice
+// itself is never lost, but if the guarded runner operation it then calls cannot confirm its own
+// checkpoint (simulated here as retryRisk()/chooseManualRoute() throwing), the intake must never
+// mark the run active or expose a task for work the runner itself refused to commit to.
+for (const [label, faults, act] of [
+  [RISK_RECOVERY_LABELS.retry, { retry: true }, f => f.answer([[RISK_RECOVERY_LABELS.retry]])],
+  [RISK_RECOVERY_LABELS.low, { route: true }, f => f.answer([[RISK_RECOVERY_LABELS.low]])],
+]) {
+  test(`risk recovery: a runner checkpoint fault after '${label}' is persisted never marks the run active`, async t => {
+    const f = riskRecoveryFixture(t, 'interactive', faults);
+    await f.start();
+    f.failRisk();
+    await assert.rejects(act(f), /simulated runner checkpoint fault/);
+    const after = f.gate.status(runtime.sessionID);
+    assert.notEqual(after.state, 'active', 'a checkpoint fault must never leave the run marked active');
+    assert.equal(after.task, undefined, 'no task is exposed for an operation the runner refused to commit to');
+    // Nothing the fixture tracks reports a route or retry that the runner itself never confirmed.
+    assert.equal(f.retries(), 0);
+    assert.deepEqual(f.manualRoutes(), []);
+  });
+}

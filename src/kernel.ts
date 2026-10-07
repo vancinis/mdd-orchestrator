@@ -6,6 +6,10 @@ export type Evaluation = {
   policyVersion: string;
   score: number;
   threshold: number;
+  /**
+   * Diagnostic only until a validated `mdd-risk` verdict selects the continuation; see
+   * `Workflow.recordRiskResult`. No preflight score authorizes a route.
+   */
   route: 'low' | 'high';
   phases: Phase[];
   contributions: { field: ScoredField; answer: string; points: number }[];
@@ -13,8 +17,8 @@ export type Evaluation = {
 };
 
 /**
- * Every route the policy can choose, in order. A run records the one it started with, and replay
- * follows that record: a later routing policy must not reshape a run that is already under way.
+ * Every route the earlier score-routed policy could record beside a run's request. A run started
+ * on one of them keeps it (see Workflow); a run started now is routed only by mdd-risk's verdict.
  */
 export const HIGH_ROUTE: readonly Phase[] = Object.freeze(['mdd-explore', 'mdd-propose', 'mdd-spec', 'mdd-design', 'mdd-tasks', 'mdd-apply', 'mdd-verify']);
 export const LOW_ROUTE: readonly Phase[] = Object.freeze(['mdd-plan', 'mdd-apply', 'mdd-verify']);
@@ -48,29 +52,18 @@ export function preflight(value: unknown): { answers: Answers; evaluation: Evalu
     { field: 'summary', answer: answers.summary, points: config.weights.summary[answers.summary] },
   ];
   const score = contributions.reduce((sum, contribution) => sum + contribution.points, 0);
+  // The legacy score is kept as a diagnostic, not a decision: it no longer picks low or high.
+  // Every run always starts with exploration, then a validated mdd-risk verdict is the only thing
+  // that selects the continuation (see Workflow.recordRiskResult). request.explore and
+  // answers.certainty are accepted for backward compatibility with saved profiles but no longer
+  // change which phase runs first.
   const route = score >= config.threshold ? 'high' : 'low';
   const reasons = [
-    `Score ${score} ${route === 'high' ? '>=' : '<'} threshold ${config.threshold}: ${route} route.`,
+    `Score ${score} ${route === 'high' ? '>=' : '<'} threshold ${config.threshold} (diagnostic only; mdd-risk's validated verdict selects the route, not this score).`,
     'Artifact storage is unscored.',
+    'Every run always starts with exactly one exploration phase before any routing decision.',
   ];
-  let phases: Phase[];
-  if (route === 'high') {
-    phases = [...HIGH_ROUTE];
-    reasons.push('High route always includes exactly one exploration phase.');
-  } else {
-    const explorationReasons: string[] = [];
-    if (answers.certainty !== 'very-sure') {
-      explorationReasons.push(`Low-route exploration required: certainty is ${answers.certainty}.`);
-    }
-    if (request.explore === true) explorationReasons.push('Low-route exploration explicitly requested.');
-    phases = [...LOW_ROUTE];
-    if (explorationReasons.length > 0) {
-      phases = [...LOW_EXPLORE_ROUTE];
-      reasons.push(...explorationReasons);
-    } else {
-      reasons.push('Low-route exploration not required: very-sure requirements.');
-    }
-  }
+  const phases: Phase[] = ['mdd-explore'];
   return {
     answers,
     evaluation: { policyVersion: POLICY_VERSION, score, threshold: config.threshold, route, phases, contributions, reasons },

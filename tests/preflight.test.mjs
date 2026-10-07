@@ -34,14 +34,18 @@ test('every partial subset asks all and only missing fields together, preserving
   }
 });
 
-test('complete profile skips questions; submission makes first phase ready even interactively', () => {
+test('complete profile skips questions; submission always makes exploration ready first, even interactively', () => {
   assert.deepEqual(questionEnvelope(answers), { questions: [] });
   const resolved = resolvePreflight(answers, []);
   const workflow = new Workflow({ answers: resolved.answers });
-  assert.deepEqual(workflow.nextAction(), { kind: 'execute', phase: 'mdd-plan' });
-  workflow.start('mdd-plan');
-  workflow.recordResult({ phase: 'mdd-plan', outcome: 'passed', evidenceSummary: 'Fixture plan' });
-  assert.deepEqual(workflow.nextAction(), { kind: 'approve', phase: 'mdd-apply' });
+  assert.deepEqual(workflow.nextAction(), { kind: 'execute', phase: 'mdd-explore' });
+  workflow.start('mdd-explore');
+  workflow.recordResult({ phase: 'mdd-explore', outcome: 'passed', evidenceSummary: 'Fixture exploration' });
+  // No preflight score selects a route; only a validated mdd-risk verdict does.
+  assert.deepEqual(workflow.nextAction(), { kind: 'execute-risk' });
+  workflow.startRisk();
+  workflow.recordRiskResult({ outcome: 'passed', evidenceSummary: 'Fixture risk', route: 'low' });
+  assert.deepEqual(workflow.nextAction(), { kind: 'approve', phase: 'mdd-plan' });
 });
 
 for (const selected of [undefined, null, {}, [], labels.slice(1), [...labels, ['Low']], labels.map(x => x[0]),

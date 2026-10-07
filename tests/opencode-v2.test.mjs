@@ -9,7 +9,7 @@ import { legacyHistory, v2Payload, contentText } from '../dist/opencode-v2.js';
 import { defaultSettings } from '../dist/settings.js';
 import { saveGlobalSettings } from '../dist/global-settings.js';
 import { RunOwnershipStore } from '../dist/run-ownership.js';
-import { isolateHome, answers, reportDocument, traceFixture } from './adapter-fixture.mjs';
+import { isolateHome, answers, reportDocument, riskReport, traceFixture } from './adapter-fixture.mjs';
 
 test('plural task payloads map native arguments without a wrapper or single-member instruction', () => {
   const tasks = ['one', 'two'].map(prompt => ({ description: prompt, subagent_type: 'mdd-apply', prompt }));
@@ -37,7 +37,7 @@ async function fixture(t, completeProfile = true, workersEnabled = true, version
   const sessions = new Map([[sessionID, { id: sessionID, agent: 'mdd-orchestrator', projectID: 'project', location: { directory: root }, time: { created: 1, updated: 1 } }]]);
   const messages = new Map([[sessionID, []]]);
   const tools = new Map(); const toolHooks = new Map(); const sessionHooks = new Map();
-  const agents = ['mdd-orchestrator', 'mdd-plan', 'mdd-apply', 'mdd-verify', 'mdd-security', 'general'].map(id => ({ id, permissions: [], request: {} }));
+  const agents = ['mdd-orchestrator', 'mdd-explore', 'mdd-risk', 'mdd-plan', 'mdd-apply', 'mdd-verify', 'mdd-security', 'general'].map(id => ({ id, permissions: [], request: {} }));
   const queue = []; let wake;
   const ctx = {
     app: { version },
@@ -206,7 +206,7 @@ test('V2 standalone judges hold coordinator controls without losing concurrent d
   await assert.rejects(f.toolHooks.get('execute.before')(f.begin('question', {})), /standalone.*flight/i);
   await assert.rejects(f.toolHooks.get('execute.before')(f.begin('subagent', { agent: 'mdd-jd-fix', description: 'Fix', prompt: 'Authorized correction.' })), /standalone.*flight/i);
   for (const call of calls) await f.toolHooks.get('execute.after')({ ...call, status: 'error', error: {} });
-  assert.equal((await f.call('mdd_start', { requirements: 'Implement a separate change.' })).task.agent, 'mdd-plan');
+  assert.equal((await f.call('mdd_start', { requirements: 'Implement a separate change.' })).task.agent, 'mdd-explore');
 });
 
 test('V2 security cannot bypass an unconfirmed durable workflow claim after restart', async t => {
@@ -293,7 +293,7 @@ test('V2 audit keeps an existing workflow and surfaces incomplete coverage witho
   const f = await auditFixture(t);
   f.user('Implement the requested change.'); await f.call('mdd_start', { requirements: 'Implement the requested change.' });
   const before = await f.call('mdd_status', {});
-  assert.equal(before.task.agent, 'mdd-plan');
+  assert.equal(before.task.agent, 'mdd-explore');
   await writeFile(join(f.root, 'binary.dat'), Buffer.from([0, 1, 2, 3]));
   f.user(f.text); const audit = await dispatchAudit(f); const report = auditReport(audit.snapshot);
   assert.equal(report.security.status, 'inconclusive');
@@ -481,6 +481,9 @@ test('V2 setup registers native tools, model variants and ordered isolation perm
   assert.equal(f.tools.get('mdd_start').options.codemode, false);
   assert.equal(typeof f.tools.get('mdd_start').input.safeParse, 'function');
   assert.deepEqual(f.agents.find(agent => agent.id === 'mdd-plan').model, { providerID: 'openai', id: 'test-model', variant: 'high' });
+  for (const id of ['mdd-explore', 'mdd-risk'])
+    assert.deepEqual(f.agents.find(agent => agent.id === id).permissions.slice(-3).map(rule => [rule.action, rule.effect]),
+      [['subagent', 'deny'], ['skill', 'deny'], ['mdd_check_report', 'allow']]);
   assert.deepEqual(f.agents.find(agent => agent.id === 'mdd-apply').permissions.slice(-4).map(rule => [rule.action, rule.effect]),
     [['subagent', 'deny'], ['skill', 'deny'], ['mdd_check_report', 'allow'], ['mdd_worker_edit', 'allow']]);
   assert.equal(f.tools.get('mdd_worker_edit').options.codemode, false);
@@ -491,6 +494,7 @@ for (const [enabled, version] of [[true, '2.0.22'], [false, '2.0.22'], [true, 'u
   const f = await fixture(t, true, enabled, version);
   f.user('Implement the requested change.');
   await f.call('mdd_start', { requirements: 'Implement the requested change.' });
+  await settleExploreAndRisk(f);
   const ready = await f.call('mdd_status', {});
   const call = f.begin('subagent', ready.task);
   await f.toolHooks.get('execute.before')(call);
@@ -694,12 +698,29 @@ test('V2 grouped native question accepts correlated structured answers, never fo
   assert.equal((await f.call('mdd_status', {})).state, 'ready');
 });
 
+/** Settles exploration and a validated low risk verdict through the real V2 foreground hooks. */
+async function settleExploreAndRisk(f) {
+  for (const phase of ['mdd-explore', 'mdd-risk']) {
+    const ready = await f.call('mdd_status', {});
+    assert.equal(ready.task.agent, phase);
+    const call = f.begin('subagent', ready.task);
+    await f.toolHooks.get('execute.before')(call);
+    const text = phase === 'mdd-risk' ? riskReport('low', 'passed')
+      : reportDocument({ phase, runID: ready.runID, callID: call.id, outcome: 'passed', evidenceSummary: 'Scoped contract evidence.', artifact: `Artifact for ${phase}.` });
+    await f.toolHooks.get('execute.after')({ ...call, status: 'completed', result: {
+      output: { sessionID: `child-${phase}`, status: 'completed', output: text }, content: `<subagent sessionID="child-${phase}" state="completed">\n${text}\n</subagent>`,
+    } });
+  }
+}
+
 test('V2 foreground phase hooks complete plan, Apply and Verify with durable motor state', async t => {
   const f = await fixture(t);
   f.user('Implement the requested change.');
   await f.call('mdd_start', { requirements: 'Implement the requested change.' });
   const trace = traceFixture(join(f.root, 'feature.txt'), 'feature');
-  for (const phase of ['mdd-plan', 'mdd-apply', 'mdd-verify']) {
+  // Every run opens with exploration and the mdd-risk stop; only its validated low verdict
+  // selects the low route's tail, so both precede the plan/apply/verify phases under test.
+  for (const phase of ['mdd-explore', 'mdd-risk', 'mdd-plan', 'mdd-apply', 'mdd-verify']) {
     const ready = await f.call('mdd_status', {});
     assert.equal(ready.task.agent, phase);
     assert.equal(ready.nextAction.tool, 'subagent');
@@ -708,16 +729,21 @@ test('V2 foreground phase hooks complete plan, Apply and Verify with durable mot
     assert.match(call.input.prompt, /Native callID=/);
     assert.equal(call.input.agent, phase);
     assert.equal(call.input.subagent_type, undefined);
-    const result = { phase, runID: ready.runID, callID: call.id, outcome: 'passed', evidenceSummary: 'Scoped contract evidence.', artifact: `Artifact for ${phase}.` };
-    if (phase === 'mdd-plan') Object.assign(result, trace);
-    if (phase === 'mdd-apply') { result.completed = ['feature']; result.changes = [{ path: join(f.root, 'feature.txt'), reason: 'Implement the planned boundary.' }]; result.delivered = { what: 'Requested behavior is implemented.', implies: 'Consumers use the new boundary.' }; }
-    if (phase === 'mdd-verify') {
-      result.checks = [{ command: 'npm test', exit: 0 }];
-      const assessment = { status: 'verified', checks: ['npm test'], assessment: 'Scoped checks support the expected behavior.' };
-      result.verification = { scenarios: ['S1', 'S2'].map(scenarioID => ({ requirementID: 'R1', scenarioID, stepID: 'feature', ...assessment })),
-        steps: [{ stepID: 'feature', ...assessment }], decisions: [{ decisionID: 'D1', ...assessment }], changes: 'Planned change implemented.', limits: [] };
+    let text;
+    if (phase === 'mdd-risk') {
+      text = riskReport('low', 'passed');
+    } else {
+      const result = { phase, runID: ready.runID, callID: call.id, outcome: 'passed', evidenceSummary: 'Scoped contract evidence.', artifact: `Artifact for ${phase}.` };
+      if (phase === 'mdd-plan') Object.assign(result, trace);
+      if (phase === 'mdd-apply') { result.completed = ['feature']; result.changes = [{ path: join(f.root, 'feature.txt'), reason: 'Implement the planned boundary.' }]; result.delivered = { what: 'Requested behavior is implemented.', implies: 'Consumers use the new boundary.' }; }
+      if (phase === 'mdd-verify') {
+        result.checks = [{ command: 'npm test', exit: 0 }];
+        const assessment = { status: 'verified', checks: ['npm test'], assessment: 'Scoped checks support the expected behavior.' };
+        result.verification = { scenarios: ['S1', 'S2'].map(scenarioID => ({ requirementID: 'R1', scenarioID, stepID: 'feature', ...assessment })),
+          steps: [{ stepID: 'feature', ...assessment }], decisions: [{ decisionID: 'D1', ...assessment }], changes: 'Planned change implemented.', limits: [] };
+      }
+      text = reportDocument(result);
     }
-    const text = reportDocument(result);
     await f.toolHooks.get('execute.after')({ ...call, status: 'completed', result: {
       output: { sessionID: `child-${phase}`, status: 'completed', output: text }, content: `<subagent sessionID="child-${phase}" state="completed">\n${text}\n</subagent>`,
     } });
@@ -744,6 +770,7 @@ for (const failed of [false, true]) {
     const f = await fixture(t);
     f.user('Implement two dependent deliverables.');
     await f.call('mdd_start', { requirements: 'Implement two dependent deliverables.' });
+    await settleExploreAndRisk(f);
     const trace = traceFixture(join(f.root, 'first.txt'), 'first');
     trace.deliverables[0].scenarios = ['S1'];
     trace.deliverables.push({ ...trace.deliverables[0], id: 'second', path: join(f.root, 'second.txt'), scenarios: ['S2'], dependsOn: ['first'] });
@@ -781,6 +808,9 @@ for (const failed of [false, true]) {
 test('V2 tracked native fallback children cannot recursively orchestrate', async t => {
   const f = await fixture(t); f.user('Implement the requested change.');
   await f.call('mdd_start', { requirements: 'Implement the requested change.' });
+  // Settle exploration and a validated low risk verdict first, so native selection below falls
+  // on a main tail phase and exercises the `general` fallback, not the `explore` prelude one.
+  await settleExploreAndRisk(f);
   await f.call('mdd_phase_result', { result: 'Select native execution instead of coordinator work.' });
   const ready = await f.call('mdd_status', {});
   assert.equal(ready.mode, 'native');

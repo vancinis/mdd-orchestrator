@@ -24,10 +24,10 @@ export type IntakeInspect = {
   transferLiveness?(runtime: Runtime, sourceSessionID: string, runID: string, requestDigest: string,
     assistantMessageID?: string): Promise<'running' | 'stopped' | 'unknown'>;
 };
-type Runner = Pick<PhaseRunner, 'start' | 'status' | 'approveNative' | 'block'> & Partial<Pick<PhaseRunner, 'approvalStopped' | 'assertChangeable' | 'assertFreshStart' | 'closeForFreshStart' | 'contribute' | 'explore' | 'movedAway' | 'priorGuards' | 'recordConsent' | 'reset' | 'resumable' | 'submit' | 'owner' | 'reserve' | 'release' | 'handoffRecoveredQuestion'>>;
+type Runner = Pick<PhaseRunner, 'start' | 'status' | 'approveNative' | 'block'> & Partial<Pick<PhaseRunner, 'approvalStopped' | 'assertChangeable' | 'assertFreshStart' | 'closeForFreshStart' | 'contribute' | 'explore' | 'movedAway' | 'priorGuards' | 'recordConsent' | 'reset' | 'resumable' | 'submit' | 'owner' | 'reserve' | 'release' | 'handoffRecoveredQuestion' | 'forceRoute' | 'retryRisk' | 'chooseManualRoute'>>;
 /** The run and settled state a native question reserved the durable writer against. */
 type Reservation = NonNullable<QuestionRecord['reservation']>;
-type Slot = { kind: 'preflight' | 'approval' | 'change' | 'clarification'; args: QuestionEnvelope; phase?: Phase; callID?: string; requirements?: string };
+type Slot = { kind: 'preflight' | 'approval' | 'change' | 'clarification' | 'route' | 'risk-recovery'; args: QuestionEnvelope; phase?: Phase; callID?: string; requirements?: string };
 type Clarification = { question: string; options: { label: string; description: string; recommended?: boolean }[]; deferrable?: boolean };
 type Intake = {
   runtime: Runtime; requirements: string;
@@ -54,12 +54,56 @@ type Intake = {
 export const APPROVAL_LABELS = Object.freeze({ proceed: 'Continuar', pause: 'Pausar', detail: 'Obtener un resumen más completo de esta fase' });
 export const CHANGE_LABELS = Object.freeze({ confirm: 'Confirmar el cambio', keep: 'Mantener el plan actual' });
 export const CLARIFICATION_LABELS = Object.freeze({ defer: 'Dejar para más adelante', delegate: 'Que decida el agente' });
+/**
+ * Offered once, exactly at the first interactive approval that follows a passed mdd-risk verdict,
+ * in place of the generic approval question. `continue` authorizes only the suggested route's
+ * first phase (an ordinary `approveNative`); `force` calls `Workflow.overrideRoute()` through
+ * `PhaseRunner.forceRoute()` and authorizes the other tail's first phase instead; `stop` reuses
+ * the existing pause semantics without authorizing or rejecting anything.
+ */
+export const ROUTE_LABELS = Object.freeze({ continue: 'Continuar con la ruta sugerida', force: 'Forzar la otra ruta', stop: 'Detener' });
 const clarificationOptionLabel = (option: Clarification['options'][number]): string => `${option.label}${option.recommended ? ' (Recomendada)' : ''}`;
 
 export function approvalEnvelope(runID: string, phase: Phase, detail = false): QuestionEnvelope {
   return { questions: [{ header: 'Aprobación', question: `¿Continuar con ${phase} en el run MDD ${runID}? Esto autoriza solo esta fase; los pedidos de permiso nativos siguen aplicando.`, multiple: false,
     options: [{ label: APPROVAL_LABELS.proceed, description: 'Autorizar únicamente esta fase.' }, { label: APPROVAL_LABELS.pause, description: 'Pausar sin rechazar la fase ni perder el plan.' },
       ...(detail ? [{ label: APPROVAL_LABELS.detail, description: 'Ver más información antes de tomar una decisión.' }] : [])] }] };
+}
+
+/**
+ * The one native question offered instead of the generic approval, at the exact boundary where
+ * `Workflow.overrideRoute()` itself is still legal: the suggested route's first tail phase awaits
+ * approval and no other tail phase has run yet. `other` is the tail the verdict did not suggest.
+ */
+export function routeEnvelope(runID: string, phase: Phase, risk: { route: 'low' | 'high'; complexity: 'low' | 'high'; reason: string }): QuestionEnvelope {
+  const other = risk.route === 'low' ? 'high' : 'low';
+  return { questions: [{ header: 'Ruta', question: `La evaluación de riesgo del run MDD ${runID} encontró complejidad ${risk.complexity} y sugiere la ruta ${risk.route} (empieza con ${phase}). Razón: ${risk.reason}`, multiple: false,
+    options: [
+      { label: ROUTE_LABELS.continue, description: `Autorizar únicamente ${phase}, el inicio de la ruta ${risk.route} sugerida.` },
+      { label: ROUTE_LABELS.force, description: `Forzar la ruta ${other} en su lugar, conservando esta evaluación de riesgo tal como fue informada.` },
+      { label: ROUTE_LABELS.stop, description: 'Pausar sin autorizar ni descartar ninguna ruta.' },
+    ] }] };
+}
+
+/**
+ * Offered exactly once, only after a `blocked-risk` assessment settles (a valid failed verdict or
+ * an exhausted fallback), never while the assessment is still in flight or for an unrelated block.
+ * `retry` reuses `Workflow.retry()` through `PhaseRunner.retryRisk()` for a fresh `mdd-risk`
+ * dispatch with no old verdict; `low`/`high` call `PhaseRunner.chooseManualRoute()`, which records
+ * `routeOrigin: 'manual'` and never fabricates a `RiskVerdict`; `stop` leaves the run blocked.
+ */
+export const RISK_RECOVERY_LABELS = Object.freeze({
+  retry: 'Reintentar evaluación de riesgo', low: 'Ruta low', high: 'Ruta high', stop: 'Detener',
+});
+
+export function riskRecoveryEnvelope(runID: string, reason: string): QuestionEnvelope {
+  return { questions: [{ header: 'Recuperación', question: `La evaluación de riesgo del run MDD ${runID} no pudo seleccionar una ruta: ${reason}`, multiple: false,
+    options: [
+      { label: RISK_RECOVERY_LABELS.retry, description: 'Descartar este resultado y volver a intentar la evaluación de riesgo desde cero, sin un veredicto previo.' },
+      { label: RISK_RECOVERY_LABELS.low, description: 'Elegir manualmente la ruta low (plan, apply, verify) sin una nueva evaluación de riesgo.' },
+      { label: RISK_RECOVERY_LABELS.high, description: 'Elegir manualmente la ruta high (propose, spec, design, tasks, apply, verify) sin una nueva evaluación de riesgo.' },
+      { label: RISK_RECOVERY_LABELS.stop, description: 'Pausar sin reintentar la evaluación ni elegir ninguna ruta.' },
+    ] }] };
 }
 
 function clarificationEnvelope(item: Clarification): QuestionEnvelope {
@@ -211,11 +255,21 @@ export class NativeIntake {
   }
 
 
-  /** Reissue only the question envelope, never its historical answer or approval. */
+  /**
+   * Reissue only the question envelope, never its historical answer or approval. A settled
+   * `blocked-risk` stop is recovered the same way an ordinary pending approval is: never from the
+   * old record's answer, only from the current replayed action and a freshly minted four-choice
+   * envelope (`riskRecoveryEnvelope`), so a historical `retry`/`low`/`high`/`stop` answer can never
+   * be treated as a fresh decision.
+   */
   recover(runtime: Runtime): void {
     if (this.#sessions.has(runtime.sessionID)) return;
     const status = this.runner.status(runtime.sessionID);
-    if (!('workflow' in status) || status.workflow.nextAction.kind !== 'approve' || status.state !== 'await-approval') return;
+    if (!('workflow' in status)) return;
+    const nextAction = status.workflow.nextAction;
+    const blockedRisk = nextAction.kind === 'blocked-risk' && status.state === 'blocked';
+    if (nextAction.kind !== 'approve' && !blockedRisk) return;
+    if (nextAction.kind === 'approve' && status.state !== 'await-approval') return;
     const checkpoint = this.durable.checkpoint?.read(runtime.sessionID)?.checkpoint;
     if (checkpoint?.version !== STABLE_CHECKPOINT_VERSION || checkpoint.runID !== status.runID ||
         checkpoint.data.directory !== runtime.directory || checkpoint.data.worktree !== runtime.worktree) {
@@ -224,11 +278,22 @@ export class NativeIntake {
     const recorded = this.durable.questions?.read(runtime.sessionID);
     if (recorded && (recorded.runID !== status.runID ||
         (recorded.checkpoint && recorded.checkpoint.sequence > checkpoint.sequence))) throw new Error('The native question belongs to a different or newer run.');
-    if (recorded && !['approval', 'clarification'].includes(recorded.slot.kind) &&
-        !['settled', 'cancelled', 'withdrawn'].includes(recorded.state)) throw new Error('A different native question is unresolved; no approval was reissued.');
-    const phase = status.workflow.nextAction.phase;
-    if (recorded && ['prepared', 'pending', 'answered'].includes(recorded.state) && recorded.slot.phase !== phase) {
-      throw new Error('The native question names another phase; no approval was reissued.');
+    // Same rule the reservation hand-off applies: a record bound to this exact checkpoint sequence
+    // must carry its digest. A mismatch is a foreign or corrupted binding, never something to overwrite.
+    if (recorded?.checkpoint && ['prepared', 'pending', 'answered'].includes(recorded.state) &&
+        recorded.checkpoint.sequence === checkpoint.sequence && recorded.checkpoint.digest !== checkpoint.dataDigest) {
+      throw new Error('The native question is bound to a different checkpoint; nothing was reissued.');
+    }
+    if (blockedRisk) {
+      if (recorded && recorded.slot.kind !== 'risk-recovery' &&
+          !['settled', 'cancelled', 'withdrawn'].includes(recorded.state)) throw new Error('A different native question is unresolved; no risk recovery was reissued.');
+    } else if (nextAction.kind === 'approve') {
+      if (recorded && !['approval', 'clarification', 'route'].includes(recorded.slot.kind) &&
+          !['settled', 'cancelled', 'withdrawn'].includes(recorded.state)) throw new Error('A different native question is unresolved; no approval was reissued.');
+      const phase = nextAction.phase;
+      if (recorded && ['prepared', 'pending', 'answered'].includes(recorded.state) && recorded.slot.phase !== phase) {
+        throw new Error('The native question names another phase; no approval was reissued.');
+      }
     }
     const entry: Intake = {
       runtime: { ...runtime }, requirements: checkpoint.data.requirements, state: 'review-ready',
@@ -239,14 +304,22 @@ export class NativeIntake {
     };
     this.#sessions.set(runtime.sessionID, entry);
     try {
-      if (recorded && ['prepared', 'pending', 'answered'].includes(recorded.state)) {
+      if (blockedRisk) {
+        // Never rehydrate from recorded.slot/answer: mint a brand new envelope every time, exactly
+        // as the first `blocked-risk` arming would, so a stale answered record cannot look like a
+        // fresh decision. Any unresolved prior record is retired by `#slot`'s own `prepared` write.
+        const args = riskRecoveryEnvelope(status.runID, status.reason ?? '');
+        args.questions[0]!.question += ` [MDD re-present ${randomUUID()}]`;
+        this.#slot(entry, { kind: 'risk-recovery', args }, true);
+        entry.notice = 'The earlier native question is not consent. Ask this newly issued question and use only its fresh native answer.';
+        if (recorded && ['prepared', 'pending', 'answered', 'cancelled'].includes(recorded.state)) this.#reissued.add(runtime.sessionID);
+      } else if (recorded && ['prepared', 'pending', 'answered'].includes(recorded.state)) {
         const slot: Slot = structuredClone(recorded.slot);
         slot.args.questions[0]!.question += ` [MDD re-present ${randomUUID()}]`;
         this.#slot(entry, slot, true);
         entry.notice = 'The earlier native question is not consent. Ask this newly issued question and use only its fresh native answer.';
         this.#reissued.add(runtime.sessionID);
-      }
-      if (recorded?.state === 'cancelled') this.#reissued.add(runtime.sessionID);
+      } else if (recorded?.state === 'cancelled') this.#reissued.add(runtime.sessionID);
     } catch (error) { this.#sessions.delete(runtime.sessionID); throw error; }
   }
 
@@ -437,9 +510,16 @@ export class NativeIntake {
     if (!('workflow' in status) || status.workflow.nextAction.kind !== 'approve') throw new Error('No phase is awaiting approval.');
     const phase = status.workflow.nextAction.phase;
     const item = entry.clarifications[0];
-    const args = item ? clarificationEnvelope(item) : approvalEnvelope(status.runID, phase, status.reportDetail !== 'detailed');
+    // The route question replaces the generic approval exactly once: at the suggested route's
+    // first tail phase, while it is still the only recorded phase result and the route has not
+    // already been forced — the same boundary `Workflow.overrideRoute()` itself still accepts.
+    // A deferred clarification still takes precedence, exactly as it does for an ordinary approval.
+    const risking = !item && 'risk' in status && status.risk && status.workflow.routeOrigin === 'suggested' && status.workflow.results.length === 1;
+    const args = item ? clarificationEnvelope(item)
+      : risking ? routeEnvelope(status.runID, phase, status.risk as { route: 'low' | 'high'; complexity: 'low' | 'high'; reason: string })
+      : approvalEnvelope(status.runID, phase, status.reportDetail !== 'detailed');
     if (this.#reissued.delete(entry.runtime.sessionID)) args.questions[0]!.question += ` [MDD re-present ${randomUUID()}]`;
-    this.#slot(entry, { kind: item ? 'clarification' : 'approval', phase, args });
+    this.#slot(entry, { kind: item ? 'clarification' : risking ? 'route' : 'approval', phase, args });
   }
 
   /** The coordinator reports a phase it carried out itself instead of delegating it. */
@@ -447,8 +527,12 @@ export class NativeIntake {
     if (runtime.agent !== 'mdd-orchestrator' || !this.runner.submit) throw new Error('Only the coordinator may report a phase result.');
     const entry = this.#sessions.get(runtime.sessionID);
     if (entry && entry.state !== 'active') throw new Error('A phase cannot be reported before accepted preflight or its exact phase approval.');
-    const status = await this.runner.submit(value, runtime);
-    this.phaseRecorded(runtime.sessionID);
+    let status: unknown;
+    // A rejected restatement (malformed, exhausted, or otherwise) may still have settled the
+    // workflow at a state with its own native recovery, such as blocked-risk after an exhausted
+    // mdd-risk fallback; that recovery is armed here too, not only when the report is accepted.
+    try { status = await this.runner.submit(value, runtime); }
+    finally { try { this.phaseRecorded(runtime.sessionID); } catch { /* best effort re-arm; the original outcome still propagates. */ } }
     return entry ? this.status(runtime.sessionID) : status;
   }
 
@@ -626,9 +710,15 @@ export class NativeIntake {
     if ('contextual' in status && status.contextual) throw new Error('Wait for the contextual exploration before answering the main approval.');
     if (entry.state !== 'question-ready') return this.#fail(entry, new Error('Unexpected, duplicate, or changed native question.'));
     const reserved = this.runner.reserve?.(call.sessionID, call.callID);
-    const held = this.runner.status(call.sessionID).state;
+    const afterReserve = this.runner.status(call.sessionID);
+    const held = afterReserve.state;
+    // The risk stop shares the 'ready'/'blocked' Run states with an ordinary phase; `stage`
+    // is what tells the two apart, so a settled risk boundary is recorded under its own label.
+    const risking = 'stage' in afterReserve && afterReserve.stage === 'mdd-risk';
+    const stable = risking && held === 'ready' ? 'risk-ready' : risking && held === 'blocked' ? 'risk-blocked' : held;
     // Recorded with the question so a restart can prove which run and settled state it holds.
-    if (reserved && ['ready', 'await-approval', 'blocked', 'complete'].includes(held)) entry.reserved = { runID: reserved.runID, stable: held as Reservation['stable'] };
+    if (reserved && ['ready', 'await-approval', 'blocked', 'complete', 'risk-ready', 'risk-blocked'].includes(stable))
+      entry.reserved = { runID: reserved.runID, stable: stable as Reservation['stable'] };
     else delete entry.reserved;
     entry.state = 'accepting';
     try {
@@ -712,6 +802,40 @@ export class NativeIntake {
         if (deferred) entry.deferred.push(item);
         entry.clarifications.shift();
         this.#nextReviewQuestion(entry);
+      } else if (slot.kind === 'route') {
+        const answer = selections[0]![0];
+        if (answer === ROUTE_LABELS.stop) {
+          entry.state = 'paused';
+          entry.reason = 'The user stopped before either route was authorized. No phase was authorized or rejected.';
+          this.runner.approvalStopped?.(call.sessionID);
+        } else if (answer === ROUTE_LABELS.force) {
+          this.runner.forceRoute?.(call.sessionID);
+          entry.state = 'active';
+          delete entry.notice;
+        } else {
+          this.runner.approveNative(call.sessionID, slot.phase!);
+          entry.state = 'active';
+          delete entry.notice;
+        }
+      } else if (slot.kind === 'risk-recovery') {
+        const answer = selections[0]![0];
+        if (answer === RISK_RECOVERY_LABELS.stop) {
+          entry.state = 'paused';
+          entry.reason = 'The user stopped without retrying the risk assessment or choosing a route. The run remains blocked at blocked-risk.';
+          this.runner.approvalStopped?.(call.sessionID);
+        } else if (answer === RISK_RECOVERY_LABELS.retry) {
+          this.runner.retryRisk?.(call.sessionID);
+          entry.state = 'active';
+          delete entry.notice;
+        } else if (answer === RISK_RECOVERY_LABELS.low) {
+          this.runner.chooseManualRoute?.(call.sessionID, 'low');
+          entry.state = 'active';
+          delete entry.notice;
+        } else {
+          this.runner.chooseManualRoute?.(call.sessionID, 'high');
+          entry.state = 'active';
+          delete entry.notice;
+        }
       } else if (selections[0]![0] === APPROVAL_LABELS.pause) {
         entry.state = 'paused';
         entry.reason = 'The user paused before the next phase. No phase was authorized or rejected.';
@@ -757,6 +881,10 @@ export class NativeIntake {
     this.#slot(entry, pending, true);
     entry.notice = slot.kind === 'approval'
       ? 'The user answered in their own words instead of choosing an option, so no phase was approved and nothing was recorded. Read what they actually said and respond to it; when the phase should still go ahead, ask the same approval question again exactly as mdd_status returns it. If their message changes the objective, use mdd_change_request instead.'
+      : slot.kind === 'route'
+      ? 'The user answered in their own words instead of choosing continue, force or stop, so no route decision was made and nothing was recorded. Read what they actually said and respond to it; when a route choice is still needed, ask the same route question again exactly as mdd_status returns it.'
+      : slot.kind === 'risk-recovery'
+      ? 'The user answered in their own words instead of choosing retry, a route, or stop, so no risk recovery decision was made and nothing was recorded. Read what they actually said and respond to it; when a recovery choice is still needed, ask the same risk-recovery question again exactly as mdd_status returns it.'
       : slot.kind === 'clarification'
       ? 'The phase was not approved. Read the user\'s words and respond to them; this clarification remains pending. Ask the same clarification question again exactly as mdd_status returns it.'
       : 'The user answered in their own words instead of choosing an option, so the run has not started and no answer was recorded. Respond to what they said, then ask the same preflight question again exactly as mdd_status returns it.';
@@ -766,8 +894,15 @@ export class NativeIntake {
     const entry = this.#sessions.get(sessionID);
     if (!entry || entry.state !== 'active') return;
     const status = this.runner.status(sessionID);
-    if (!('workflow' in status) || status.state === 'blocked') return;
+    if (!('workflow' in status)) return;
     const next = status.workflow.nextAction;
+    if (status.state === 'blocked') {
+      // Only a settled blocked-risk offers recovery here; an in-flight assessment never reaches
+      // this state, and an unrelated blocked phase keeps its ordinary mdd_reset recovery instead.
+      if (next.kind !== 'blocked-risk') return;
+      this.#slot(entry, { kind: 'risk-recovery', args: riskRecoveryEnvelope(status.runID, status.reason ?? '') });
+      return;
+    }
     if (next.kind === 'approve') {
       const old = entry.slot;
       entry.state = 'review-ready'; delete entry.slot; delete entry.notice;

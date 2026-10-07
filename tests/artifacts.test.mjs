@@ -269,5 +269,7 @@ test('artifacts: bounded isolated storage smoke with all phases and both backend
     const result = await store.save({ runID: 'smoke', phase, ...(phase === 'mdd-spec' ? { domain: 'product' } : {}) }, `${phase}\n${text}`);
     assert.equal(await store.read(result.ref), result.content);
   }
-  assert.equal(writes.length, 8);
+  // The eight phases plus the mdd-risk assessment, which is persisted like a phase artifact.
+  assert.equal(writes.length, Object.keys(PHASE_PATHS).length);
+  assert.equal(writes.length, 9);
 });

@@ -120,6 +120,7 @@ test('contextual exploration on an accepted run leaves the main plan and approva
   const args = await Promise.all(ready.tasks.map((task, index) => f.runner.before(calls[index], task)));
   for (const index of [1, 0]) await f.runner.after(calls[index], args[index], reportDocument({ evidenceSummary: 'Findings', artifact: 'Contextual findings.' }));
   assert.deepEqual(f.runner.status('parent').workflow, initial);
-  assert.equal(f.runner.status('parent').phase, 'mdd-plan');
+  // Every run opens with its own main exploration; a contextual one never consumes or moves it.
+  assert.equal(f.runner.status('parent').phase, 'mdd-explore');
   assert.equal(f.runner.status('parent').contexts.length, 1);
 });

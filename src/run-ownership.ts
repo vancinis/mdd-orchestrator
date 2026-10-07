@@ -5,7 +5,7 @@ import { objectWithKeys, ValidationError } from './validation.js';
 import { CheckpointStore, STABLE_CHECKPOINT_VERSION } from './checkpoint.js';
 import type { StableCheckpoint, StableRunnerState } from './checkpoint.js';
 import { ProgressGuard } from './progress.js';
-import { QuestionCheckpointStore } from './question-checkpoint.js';
+import { QuestionCheckpointStore, retirableRiskRecovery, unresolvedQuestion } from './question-checkpoint.js';
 import { Workflow } from './workflow.js';
 
 export const RUN_OWNER_VERSION = 1;
@@ -414,26 +414,48 @@ export class RunOwnershipStore {
         !text(target.sessionID, 256) || target.sessionID === sourceSessionID) throw new ValidationError('Invalid target transfer request.');
     const source = new CheckpointStore(this.#root).read(sourceSessionID)?.checkpoint;
     const owner = this.read(runID);
+    const sourceQuestion = new QuestionCheckpointStore(this.#root).read(sourceSessionID);
+    // A bound risk-recovery question is re-askable, not consent: it never fences a claim here,
+    // because `claimTargetForTransfer` is the point this adapter actually retires it (see below)
+    // and the target is reissued a fresh one only once its own ownership is confirmed. Every
+    // other outstanding native question kind still fences the move.
+    // Only a risk-recovery question bound to exactly this run and source checkpoint is exempt; a
+    // stale, foreign or unbound one fences the claim like any other unresolved question.
+    const retirable = source?.version === STABLE_CHECKPOINT_VERSION && retirableRiskRecovery(sourceQuestion, source);
+    const sourceQuestionFences = unresolvedQuestion(sourceQuestion) && !retirable;
     if (source?.version !== STABLE_CHECKPOINT_VERSION || source.runID !== runID || source.parent !== sourceSessionID ||
         source.sequence !== expected.sequence || source.dataDigest !== expected.digest || source.data.directory !== target.directory ||
-        source.data.worktree !== target.worktree || source.stable.state === 'await-result' ||
+        source.data.worktree !== target.worktree || ['await-result', 'risk-await-result'].includes(source.stable.state) ||
         !owner || owner.ownerSessionID !== sourceSessionID || owner.state !== 'idle' || owner.epoch !== epoch ||
         this.parent(sourceSessionID) !== runID || new ProgressGuard(this.#root).read(sourceSessionID)?.state === 'pending' ||
-        ['prepared', 'pending', 'answered'].includes(new QuestionCheckpointStore(this.#root).read(sourceSessionID)?.state ?? '') ||
+        sourceQuestionFences ||
         new CheckpointStore(this.#root).read(target.sessionID) || new ProgressGuard(this.#root).read(target.sessionID) ||
         new QuestionCheckpointStore(this.#root).read(target.sessionID) || this.intake(target.sessionID)?.state === 'pending')
       throw new Error('The source is not idle or the target is occupied; no target claim was made.');
     const claim: ParentOwner = { sessionID: target.sessionID, runID,
       transfer: { sourceSessionID, sourceSequence: expected.sequence, sourceDigest: expected.digest, ownerEpoch: epoch, ...intent } };
+    let confirmed: ParentOwner;
     try {
       this.#files.updateStrict(this.#parentName(target.sessionID), previous => {
         const old = previous === undefined ? undefined : parseParent(JSON.parse(previous), target.sessionID);
         if (old && !old.retired) throw new Error('Target already has a parent claim.');
         return JSON.stringify(claim);
       }, LIMIT);
-      if (!isDeepStrictEqual(this.parentClaim(target.sessionID), claim)) throw new Error('Target claim readback differs.');
-      return claim;
+      const readBack = this.parentClaim(target.sessionID);
+      if (!readBack || !isDeepStrictEqual(readBack, claim)) throw new Error('Target claim readback differs.');
+      confirmed = readBack;
     } catch { throw new Error('Target claim is unconfirmed; inspect the parent owner before any retry.'); }
+    // Retired only now, after the target claim is durably written and read back: a failed claim
+    // above leaves the source question intact, and no concurrent source answer taken before this
+    // point can ever be mistaken for the target's own fresh recovery question later. The claim
+    // already correlates this retirement to the exact same run/checkpoint/operation via `intent`.
+    // The delete is compare-and-set against the record inspected above: a source answer or
+    // re-issue that landed in between is never discarded; the claim then stays for explicit recovery.
+    if (retirable && sourceQuestion) {
+      try { new QuestionCheckpointStore(this.#root).clearIf(sourceSessionID, sourceQuestion); }
+      catch { throw new Error('The target claim is confirmed but the source native question could not be retired; reconcile explicitly before any retry.'); }
+    }
+    return confirmed;
   }
 
   /** Explicit recovery of a claim with no target publication. Never adopts a target or replays a phase. */
@@ -532,14 +554,17 @@ export class RunOwnershipStore {
     const source = checkpoints.read(sourceSessionID)?.checkpoint;
     if (source?.version !== STABLE_CHECKPOINT_VERSION || source.runID !== runID || source.parent !== sourceSessionID ||
         source.sequence !== expected.sequence || source.dataDigest !== expected.digest || source.data.directory !== target.directory ||
-        source.data.worktree !== target.worktree || source.stable.state === 'await-result' ||
+        source.data.worktree !== target.worktree || ['await-result', 'risk-await-result'].includes(source.stable.state) ||
         this.parent(sourceSessionID) !== runID || this.parent(target.sessionID) !== undefined ||
         checkpoints.read(target.sessionID) || progress.read(target.sessionID) || questions.read(target.sessionID) ||
         this.intake(target.sessionID)?.state === 'pending') throw new Error('Source or target is not an idle, unoccupied transfer boundary.');
     const marker = progress.read(sourceSessionID);
     const question = questions.read(sourceSessionID);
+    // A bound risk-recovery question is re-askable, not consent: it is safely retired by the
+    // claim below and reissued fresh on the target once ownership is confirmed, exactly like a
+    // restart would. Every other kind of outstanding native question still fences the move.
     if (marker?.state === 'pending' || (marker && (marker.runID !== runID || marker.userMessageID !== source.data.userMessageID)) ||
-        (question && ['prepared', 'pending', 'answered'].includes(question.state)))
+        (unresolvedQuestion(question) && !retirableRiskRecovery(question, source)))
       throw new Error('Source has unresolved work or a native question.');
     this.claimTargetForTransfer(runID, sourceSessionID, target, expected, epoch, intent);
     // A failed source CAS leaves the target claimed and blocked; source may still be runnable.
