@@ -135,7 +135,12 @@ export function parseRiskReport(text: string): Record<string, unknown> {
   return parseReportSections(text, true);
 }
 
-function parseReportSections(text: string, hasFields: boolean): Record<string, unknown> {
+/** Standalone security data cannot overwrite the shared envelope or masquerade as phase data. */
+export function parseSecurityReport(text: string): Record<string, unknown> {
+  return parseReportSections(text, true, 'security');
+}
+
+function parseReportSections(text: string, hasFields: boolean, standaloneField?: string): Record<string, unknown> {
   const parts = sections(text);
   if (!parts) {
     const json = jsonDocument(text);
@@ -157,6 +162,9 @@ function parseReportSections(text: string, hasFields: boolean): Record<string, u
   const data = parts.has('data') ? structured(parts.get('data')!, 'data') : undefined;
   if (data !== undefined) {
     if (!data || typeof data !== 'object' || Array.isArray(data)) throw new MalformedReport('The data section must hold one JSON object whose keys are this phase\'s fields.');
+    if (standaloneField && (Object.keys(data).length !== 1 || !Object.hasOwn(data, standaloneField))) {
+      throw new MalformedReport(`The data section must hold exactly the standalone field ${standaloneField}.`);
+    }
     for (const [key, value] of Object.entries(data)) result[key] = value;
   }
   return result;

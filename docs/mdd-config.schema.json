@@ -84,7 +84,11 @@
             "mdd-tasks": { "$ref": "#/$defs/model" },
             "mdd-apply": { "$ref": "#/$defs/model" },
             "mdd-verify": { "$ref": "#/$defs/model" },
-            "mdd-risk": { "$ref": "#/$defs/model" }
+            "mdd-risk": { "$ref": "#/$defs/model" },
+            "mdd-security": { "$ref": "#/$defs/model" },
+            "mdd-jd-judge-a": { "$ref": "#/$defs/model" },
+            "mdd-jd-judge-b": { "$ref": "#/$defs/model" },
+            "mdd-jd-fix": { "$ref": "#/$defs/model" }
           }
         },
         "answers": {

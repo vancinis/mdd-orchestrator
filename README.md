@@ -45,6 +45,25 @@ memory or unrelated agents. See [setup and installer safety](docs/setup.md). No 
 default-agent change or publication is implied. Advanced `mdd-ai config` and read-only
 `mdd-ai doctor` remain optional controls.
 
+## Standalone Judgment Day
+
+In `mdd-orchestrator`, request: **"Run judgment-day on the complete committed change from
+<base commit> to <target commit>, including its tests and relevant dependencies."**
+`judgment day` and `judment-day` are also accepted explicit request spellings; ordinary review
+and completed Verify do not trigger it. The packaged `mdd-judgment-day` skill coordinates two
+blind foreground judges without adding a workflow phase or requiring RDD.
+
+Use existing **`mdd-ai config` → Modelos** for `mdd-jd-judge-a`, `mdd-jd-judge-b` and `mdd-jd-fix`,
+save and restart OpenCode. Existing consent-driven setup/update installs the skill and reference;
+see [setup](docs/setup.md) and [Judgment Day configuration](docs/configuration.md#standalone-judgment-day-model-roles).
+
+Dirty/untracked target material needs separately authorized committed snapshotting; it is never
+quietly excluded. Judges inspect committed Git objects only, with no live reads, shell or tests.
+Malformed, partial or unavailable inspection cannot produce APPROVED. Confirmed introduced severe
+defects require explicit bounded correction consent, permit at most two rounds and respect active
+workflow ownership. Functional verification is separate; no verdict grants receipt or delivery
+authority. Model-backed native-host smoke remains unverified.
+
 ## Run the proof (development)
 
 Use Node.js **24.6+ within 24.x, or 26.4+ within 26.x** and npm. From this directory, run these commands individually in PowerShell; continue only when the preceding command succeeds:

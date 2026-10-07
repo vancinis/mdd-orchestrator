@@ -52,8 +52,20 @@ test('next action: a ready delegated phase carries the exact dispatchable task',
   assert.notEqual(action.args, task, 'the action must not alias the status object');
 });
 
+// "Te interrumpí, continúa" used to end in scope run, a fresh preflight and a second exploration
+// and plan for work that was already recorded. An interrupted attempt keeps its run.
 test('next action: recovery states point at the narrower reset first', () => {
-  assert.deepEqual(nextAction({ state: 'recovery-blocked' }).args, { scope: 'run' });
+  const unknown = nextAction({ state: 'recovery-blocked' });
+  assert.equal(unknown.tool, 'mdd_reset');
+  assert.equal(unknown.args, undefined, 'the user\'s confirmation has to be composed, never invented');
+  assert.match(unknown.why, /scope phase and userText/);
+  assert.match(unknown.why, /no new preflight/);
+  const stopped = nextAction({ state: 'recovery-blocked', liveness: { verdict: 'stopped' } });
+  assert.deepEqual(stopped.args, { scope: 'phase' });
+  assert.match(stopped.why, /completed phases are not repeated/);
+  const running = nextAction({ state: 'recovery-blocked', liveness: { verdict: 'running' } });
+  assert.equal(running.tool, 'mdd_status');
+  for (const action of [unknown, stopped, running]) assert.notDeepEqual(action.args, { scope: 'run' });
   assert.deepEqual(nextAction({ state: 'blocked', recoverable: true }).args, { scope: 'phase' });
   assert.match(nextAction({ state: 'blocked' }).why, /before scope run/);
 });

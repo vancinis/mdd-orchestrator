@@ -63,14 +63,71 @@ Run the single [setup wizard](setup.md): `npm run setup` from trusted source, or
    In interactive mode, a passed phase exposes an exact native Proceed/Stop question for
    the next phase. Approval prepares only that phase's task. Automatic mode returns the next
    exact executable task without an approval question. Repeat through final Verify. A rejected
-   attempt is not the end: the phase becomes ready again, so run it once more or carry it out
-    through the tracked native fallback. Neither mode suppresses native edit/shell permission requests.
+    read-only attempt may become ready again. An uncertain Apply writer never retries automatically.
+    Neither mode suppresses native edit/shell permission requests.
 
 The MDD tools are registered for their plugin location but belong to `mdd-orchestrator`. Every
 other agent has them disabled in configuration and refused at execution, so an unrelated
 agent neither sees nor mutates MDD state.
 
 ### V2 host boundary and limits
+
+### Sequential Apply batches
+
+Apply implements **one dependency-ordered planned deliverable per fresh foreground actor**.
+After a successful batch, read `mdd_status` and dispatch its next exact task automatically:
+nonfinal success remains in Apply; only the final deliverable advances to Verify. In interactive
+mode, entering Apply and then Verify retains the ordinary phase approvals; successful batches
+within the approved Apply phase need no additional approval. Native edit/shell consent still applies.
+
+- A successful report must name `completed=[assignedStepID]`. Empty, duplicate, unknown,
+  already completed or unassigned IDs earn no progress. Failed/partial work earns none.
+- Completion is replayed from workflow events, not inferred from artifact prose. Confirmed
+  checkpoints precede exposure of the next writer. Settled legacy histories remain readable;
+  a newly authorized legacy Apply binds its held plan before dispatch. Explicit rework starts
+  a new completion epoch and keeps prior changes as evidence, never as new completion authority.
+  A legacy record whose file list was truncated remains readable but cannot dispatch new Apply
+  work: inspect the full diff and start a fresh run instead of inventing missing evidence.
+- Each batch attempt stores an immutable `apply/<batchID>/apply-progress.md` artifact under
+  its run. Checkpoints correlate that identity with its result and retain the full changed-file
+  union. Final Verify receives the full plan and all recorded changed files, not only the last batch.
+- Failed, interrupted, unknown-termination or ambiguous artifact/checkpoint writes stop continuation.
+  Inspect partial changes and request explicit recovery; never automatically retry substantive work.
+  Malformed completed reports may still be restated without starting a writer.
+
+Plan and Tasks split large requests into **1–32 bounded coherent deliverables**, ordered by
+dependencies. Each must fit a fresh Apply actor with scoped files, its own checks and a handoff;
+keep tests/docs with the behavior, not separate file-type slices. Size by implementation and
+context risk, not an arbitrary line cap. If one deliverable still cannot be bounded, report that
+unresolved limit honestly rather than dropping scope or stretching the contract.
+
+Apply finishes only its assignment, preserves filesystem progress and reports actual checks,
+skips and dependency assumptions for the next actor. A large total diff alone is not a stopping
+condition. Genuine missing decisions, failed checks, environment failures or uncertain writes
+block explicitly; the worker never silently expands scope or invents task IDs. There is no
+changed-line controller: an enormous individual assignment, context/provider limits or an external
+interruption can still stop an actor. Final Verify always assesses the **full plan**.
+
+#### Reproduce the batch execution evidence
+
+After building, run `node tests/apply-batches-host-smoke.mjs`. It requires no credentials, ambient
+session/service, network provider or additional installs. It uses private HOME/config/data/temp
+directories and checks for ancestor configuration before launching anything. It never probes or
+reuses a user-running host. It starts only its own loopback host/provider when safe admission and
+the installed V2 2.0.22 executable are available; otherwise it reports `unavailable`, not PASS.
+
+| Evidence | What it establishes | What it does not establish |
+|---|---|---|
+| Deterministic transport smoke | Real motor, durable checkpoints, checked files/commands, exact next actions and safe failed/malformed completion fences; host inspection and child identities are test doubles. | Native host behavior or model quality. |
+| Native-host branch | When exercised, real foreground child identities, automatic Plan → Apply → Apply → Verify, preserved files and no second writer after failed/ambiguous completion, with a local scripted model and fixture-only workload tool. | External paid-model execution, arbitrary workloads or interactive permission/UI behavior. |
+
+In the T2 verification environment, an ancestor `.opencode` directory prevented safe native-host
+admission. The native execution branch remains unverified; deterministic PASS must not be read
+as native-host PASS. Failed and malformed completion scenarios are distinct from ambiguous
+artifact/checkpoint transport writes, which the motor regressions cover separately. Paid-model
+end-to-end execution remains pending.
+
+### V2 translation boundary
 
 `src/opencode-v2.ts` translates V2 records and native `subagent`/`question` results into the
 existing motor protocol. The sections below retain internal `task`/`subagent_type` names where
@@ -121,16 +178,17 @@ Legacy status still exposes singular `task` and `nextAction.args`. The V2 adapte
 | Selection | Complete dependency and read/write declarations; at most two independent ready tasks. Snapshot validation is not an edit fence. |
 | Admission | One parent/run reservation for the entire batch; serialized per-run admission and CAS member updates. |
 | Result | Exact call and expanded arguments bind the existing sealed Apply report to its assigned task. Changed paths must fit declared writes; `checks=[]`. Actor reports are claims, not independent verification. |
-| Completion | Persist each successful member before settlement. Aggregate in held-plan order only after all required tasks succeed; emit one Apply phase result. |
+| Completion | Persist each exact successful member report before settlement. After every sibling settles successfully, publish one single-task Apply result per member in held-plan order, with distinct artifact identities, in one durable transition. |
 | Failure | Retain successful member reports; block malformed, missing, transport, unknown-liveness, and durability outcomes. Never automatically replay completed tasks. |
 | Recovery | Inspect every pending member before release. One running sibling fences the whole batch; explicit recovery retries only unfinished tasks. |
 | Restart/transfer | Pending batches never resume or transfer automatically. Settled task evidence travels as checkpoint data; live handles never do. |
 
 Version 3 checkpoints accept optional `workerPolicy` and `workerState` data without changing the
 legacy format. Missing captured policy keeps old checkpoints serial, even on a capable host.
-If a host loses confinement capability after partial completion, restoration refuses whole-phase
-replay. Complete member reports remain in the checkpoint even when the aggregate artifact uses
-size-bounded summaries and digests. Explicit Verify rework starts a new implementation pass.
+Unpublished successful evidence requires confined recovery; it never authorizes replay or advancement
+past an uncertain sibling. Published progress permits ordinary single-step serial fallback if later
+work is unsafe for concurrency. Complete member reports remain in the checkpoint alongside distinct
+Apply artifacts. Explicit Verify rework starts a new implementation pass.
 Read-only investigations use the same plural status surfaces and member/owner CAS model, with
 separate durable exploration records so contextual work cannot advance or overwrite the main plan.
 
@@ -248,7 +306,7 @@ does not establish native editing confinement, arbitrary-script sandboxing or Ap
 Run `node tests/opencode-v2-workers-host-smoke.mjs --apply-workers` for the actual production Apply
 matrix: main, failure, progress-loss, disabled, dependent, overlap, missing-metadata and implicit
 instruction-write fallback. A two-live-child barrier and reversed edits/completion prove overlap,
-own-file edits and one held-plan-order aggregate. Out-of-scope reads/writes and multi-file requests,
+own-file edits and held-plan-order single-task results. Out-of-scope reads/writes and multi-file requests,
 generic editors, shell, execution, custom/MCP/control tools and recursion refuse before target mutation.
 The MCP fixture uses the same test-owned loopback listener/token, with a real native initialize/catalog
 handshake; its mutation endpoint is never called. No ambient MCP server or credential is contacted.
@@ -276,7 +334,7 @@ Legacy investigation remains singular and never invents unrelated splits.
 If a capable adapter emits plural `tasks`/`nextAction.calls`, submit all exact objects in one
 grouped native foreground tool-call message in provider order. Never use a Code Mode
 `Promise.all` wrapper (`subagent` is `codemode:false`) or background dispatch. A singular
-surface remains one call. Wait for all outcomes before the one aggregate and sequential next
+surface remains one call. Wait for all outcomes before ordered durable publication and the sequential next
 phase; successful members cannot be replayed to recover an uncertain sibling.
 Separately authorized repositories remain read-only targets without moving the child workspace,
 and still require native `external_directory` permission. No remote probe/access is authorized.
@@ -326,6 +384,23 @@ dependencies, data or security — it stops and offers a normal run with the use
 never does this while a phase task is in flight or an MDD question is pending, and its reply is a
 few Spanish lines naming `file:line`, before and after. Native edit permissions still apply, and
 because no run is recorded there is no coverage, ledger row or `mdd_pr_body` evidence for it.
+
+### Complete Spanish clarification conversations
+
+The coordinator always converses in Spanish, including question text, option labels and
+descriptions embedded in `mdd_prepare_advance` or native question arguments. Protocol keys,
+technical artifacts and phase reports remain English; native user text is preserved verbatim.
+
+Clarification questions, option labels/descriptions and free-text answers have no individual
+prose byte ceilings. The adapter carries the complete question and answer in context content
+under the stable `Clarification` label, including deferred answers and their unresolved status.
+Durable question records and reconstructed phase prompts preserve those strings without truncation.
+Clarification answers do not authorize a phase: approval is still a separate native interaction.
+
+Nonempty string validation, choice counts, unique/reserved labels, exact native output matching
+and parent/call correlation still apply. Aggregate safety bounds also remain: the question record
+is at most 160000 bytes, and the combined phase handoff at most 96000 bytes. Oversized payloads
+fail explicitly rather than being shortened or treated as a reason to silently re-ask.
 
 ### Bootstrap the actual parent
 
@@ -463,6 +538,45 @@ errors, changed/stale/duplicate callbacks, or a task before consent block the in
 records refusal without fabricating a failed phase result. A missed after hook remains
 pending; no automated recovery is attempted. Unrelated sessions remain unaffected.
 
+## On-demand security audit
+
+Ask the coordinator **“security audit”**, **“Run mdd-security”**, **“revisión de seguridad”**,
+**“lanza el agente de seguridad”**, or **“usa mdd-security”**. This optional actor runs only on
+an authenticated explicit latest native-user request. Creating, configuring, explaining, quoting,
+or negating a request does not launch it. No workflow, automatic verification, review or delivery
+step launches it. Choose the `mdd-security` model in `mdd-ai config`; an unset override preserves
+native inheritance. Settings are frozen at plugin startup, so restart after configuration changes.
+
+Consent recognition uses a closed whole-message grammar, not a keyword or an extracted clause.
+For example, **“Quiero que hagamos una revisión de seguridad”** and **“Please run a security audit
+of my changes”** are requests. A feature title, documented command, quoted prompt, negation or
+composite description is not. Unknown complex wording requires a clear standalone restatement,
+such as **“Run mdd-security”**; the adapter never removes quoted data to manufacture permission.
+An exact non-negating lead-in, “No hay errores conocidos,” is supported, not arbitrary context.
+
+The coordinator calls `mdd_security({ userText, baseRef? })`, passing the user's exact text.
+The tool returns one single-use foreground task. Never add a model, background execution,
+child-session reuse or other arguments. Another pending actor, native question or control transfer
+blocks admission; the audit never clears those interactions to run. Restart invalidates its pending
+authorization. The main workflow and its approval/evidence state remain unchanged.
+
+| Boundary | What the audit actually receives |
+|---|---|
+| Implementation scope | Every committed change since the baseline, plus staged, unstaged and nonignored untracked changes; layers remain separate even when later changes cancel earlier ones. |
+| Baseline | A unique verified local merge-base with an established default target. An inferred baseline equal to HEAD refuses. If unclear, select the actual implementation baseline and request `Run mdd-security baseRef=<ref>`; the tool argument must match that user-supplied token. It must resolve locally to an ancestor of HEAD. No remote fetch or invented HEAD-only scope. |
+| Input bounds | Frozen adapter-owned changed ranges and nearby context, up to 24,000 snapshot bytes and 38,000 composed prompt bytes, with inventory/file/read/time ceilings. Oversized or race-detected input refuses visibly, never silently audits a subset. |
+| Runtime tools | Only the pure standalone `mdd_check_report` form checker. Native provenance checks run before context/tool actor and workspace exits; known audit children and descendants remain fenced after completion or identity/location changes. Insufficient identity refuses, rather than exposing tools. Shell, live file reads/writes, network/MCP, delegation, skills, questions and coordination are prohibited. Packaged actor/documentation instructions arrive by value. |
+| Coverage gaps | Ignored files, binary/link/submodule source and unrelated dependencies are outside supplied coverage; only touched ranges and nearby context are available. Secret redaction is heuristic. Report coverage and limitations explicitly. |
+
+The returned report includes the full artifact and structured severity, location, source evidence,
+attack conditions, impact and recommendation. Final native-child, snapshot, coverage and literal
+changed-line evidence checks are independent of the actor's form checker. Rejected reports are
+not echoed; errors do not expose captured source or credentials. Status distinguishes `findings`,
+`no-findings` and `inconclusive`; no findings never certifies the implementation secure. Refusal,
+invalid results and incomplete coverage end only this audit, without retries or workflow resets.
+Findings are advisory: the coordinator presents them and waits for **separate user authorization
+for corrections through `mdd-apply`**. Nothing grants fix, commit, publication or delivery authority.
+
 ## Safety and storage boundaries
 
 | Boundary | Behavior |
@@ -473,11 +587,11 @@ pending; no automated recovery is attempted. Unrelated sessions remain unaffecte
 | Models | Configured per role through the startup profile and applied to the agent config. Runtime model identity is not policed. |
 | Consent | Complete startup profile or exact correlated native preflight answers; later interactive Proceed/Stop applies only to the currently waiting phase. No repeat preflight or implicit approval. An answer that names nothing on offer selects nothing: the user wrote their own words, or a host reordered the result, and MDD cannot tell those apart. Neither is consent, so the receipt is recorded as cancelled and the same question stays open to be asked again. A question MDD did not compose is the coordinator's own and touches no MDD state, except while an MDD question is pending, when it is the only question that may run. |
 | Persistence | HTTP only to a literal IPv4 loopback origin, no credentials/path/query/redirects, no retries. Each HTTP/SDK read has a maximum five-second timeout. HTTP responses are bounded to 128 KiB. |
-| Failure | Infrastructure failures do not fabricate failed phase results. A rejected dispatch, result, capability or persistence ends that attempt: the phase returns to `ready`, the attempt counter increases, and the run stops being uncertain, so delegating again, taking the phase over directly, replanning or resetting all stay available. A failure below `DELEGATION_ATTEMPTS` (3) keeps `mode: "delegate"` and rewrites the phase task to carry what went wrong, so each retry is a different attempt rather than the same one; the third sets `mode: "inline"` and hands that phase to the coordinator, because retrying forever against one failure is not resilience and handing it over immediately spends the context that delegation exists to protect. `attempts` and the threshold are per phase: reaching the next phase restores the full count, and `attemptsLeft` reports it. A failed read-only investigation leaves the main plan's task, mode and attempts untouched. A missing after-hook leaves `await-result` until a matching native error releases it. `mdd_status` never grants approval or dispatches by itself. |
+| Failure | Infrastructure failures never fabricate phase results. Read-only phases may retry with failure context, then use one tracked native fallback after `DELEGATION_ATTEMPTS` (3). Apply is different: uncertain writes, failed native results or interrupted actors block with pending recovery protection, never automatic redispatch. Unknown child termination remains `await-result`. A malformed completed report permits only bounded report restatement, not substantive work. A reported phase failure blocks until explicit recovery. `mdd_status` never grants approval or dispatches by itself. |
 | Recovery | No MDD state is terminal. `mdd_reset` releases the current attempt (`scope: phase`) or forgets the run for this conversation (`scope: run`), clearing the local progress marker. Scope `phase` also covers work waiting on a person rather than on an actor: a run stopped at an approval returns to `await-approval` with that question re-armed, and an intake stopped before any run re-opens its pending question. Neither prepares a phase nobody authorized. When Verify reports failure, status names `reworkable: "mdd-apply"` and `scope: rework` sends the run back to Apply to correct what it found, instead of re-checking the unchanged implementation or filing a material change. It needs `userText`, the user's exact latest message choosing the correction; the failed verification becomes Apply's newest dependency artifact, earlier changes are kept, and Verify follows through the route's ordinary approval. Recorded artifacts, memory and `previousRuns` are never deleted by a reset, and `scope: run` sets the preserved record aside under a discarded name rather than destroying it. |
 | Handoff budget | Each phase prompt carries the artifacts it depends on. A seven-phase route holding 16,000-byte artifacts outgrows what a dispatched task can be delivered at, and the phases that paid for it were the last ones. Artifacts are therefore inlined newest-first while the prompt stays within 38000 bytes, the size that still fits inside the 46000-byte payload budget with the rest of the status; older ones travel as their own recorded `evidenceSummary` plus the ref that identifies the complete text in the artifact store. Shedding is ordered and announced in the prompt, and `mdd_status` reports it as `handoff`. Contextual findings are not compacted: they accumulate by the user's own choice, and `PHASE_CONTEXT_MAX_BYTES` (96000) remains the absolute bound that fails explicitly rather than cutting anything. |
 | Payload budget | Every MDD tool serializes through `statusPayload`, bounded to 46000 bytes so the host cannot truncate a result and make the exact `task`/`question` uncopyable. Artifact history is reported as refs only (content lives in the artifact store and is already injected into the next phase prompt), and `brief` accompanies only `mode: "inline"`. Over budget, fields are dropped in the fixed order `priorRun, previousRuns, contexts, contextualReport, providedContext, artifacts, artifactAttempts, artifact, concerns, report, planned, decisions, acceptance, verification, workflow` and listed in `omitted`; `task`, `brief`, `question`, `state`, `phase`, `next`, `mode`, `reason`, `runID`, `sessionID`, `runtime`, `questionReceipts`, `recovery`/`pendingStart`, `notice`, `provenance`, `reset`, `evidence`, `coverage` and `recoverable` are never dropped. A task too large to fit is reported in `budget.problem`, never cut. |
-| Next phase | Automatic success prepares only the next phase. Interactive success waits for exact native approval. Only final corroborated Verify returns `complete`. |
+| Next phase | Successful nonfinal Apply batches prepare the next assigned Apply task after durable completion. Final Apply advances to Verify through ordinary automatic/interactive semantics. Only final corroborated Verify returns `complete`. |
 | Other sessions | Unrelated tasks outside MDD are untouched. `mdd-*` native tasks are rejected unless they exactly match a registered parent run or an issued read-only investigation. |
 
 With optional memory enabled, each phase writes two project-scoped Engram observations using type `workflow`, no topic-key upsert:
@@ -677,9 +791,13 @@ Verify also requires `verification: { scenarios, steps, decisions, changes, limi
 
 ### Optional task footprints: eligibility only
 
-**Concurrency is not active yet.** Plan/Tasks may record optional footprints for future
-bounded workers; the runner still exposes one sequential phase task. This metadata grants
-neither tool permissions nor file ownership, and eligibility is not an edit-boundary fence.
+**Bounded concurrency is active and defaults on.** On capable hosts, at most two confined
+independent exploration or Apply workers run with complete scopes and dependency declarations.
+Unknown, incomplete or unsafe work remains serial. Apply workers publish strict single-task
+results in held-plan order only after all siblings settle successfully; Verify remains singular.
+Plan/Tasks footprints describe eligibility, not authority: this metadata grants neither tool
+permissions nor file ownership, and eligibility is not an edit-boundary fence. See the
+[bounded worker authority contract](#bounded-worker-authority-internal-host-capability).
 
 ```json
 {
@@ -934,12 +1052,26 @@ their own latest message (`mdd_reset` with `userText`), and a question or coordi
 died holding the run's writer is released the same way. A complete run closes itself when the
 user starts a new objective in that conversation; its record is set aside, not deleted.
 
-A checkpoint write that keeps failing (a scanner holding the file, a full disk) is retried and
-then **degrades** the run instead of stopping it: the progress marker records `resumable: false`,
-the stale checkpoint is withdrawn, and the live run carries on with the marker as its
-duplicate-dispatch guard. The next successful write makes it resumable again. Only a conflicting
-writer — another process that advanced the same run — still fails closed, because continuing
-could duplicate work.
+Releasing an interrupted attempt keeps the run. `nextAction` for `recovery-blocked` is
+`mdd_reset` with `scope: 'phase'` — with the user's `userText` unless OpenCode already reports
+the subagent `stopped`, and no reset at all while it reports it `running` — so "it was
+interrupted, continue" readies the interrupted phase again with every completed phase kept and no
+new preflight. `scope: 'run'` is the fallback only when MDD refuses the phase reset because the
+run cannot be restored.
+
+A run keeps the route it started with. The checkpoint's request records the evaluated phases
+(`request.route`), and replay follows them rather than re-evaluating the answers under the current
+routing policy, which may route the same answers differently (complexity stopped scoring, for
+example). A recorded route must be one the policy can choose. A checkpoint written before routes
+were recorded is replayed under the current policy and, when its history does not fit that
+route, on the one known route its history fits; when more than one fits, it stays unreadable.
+
+Outside Apply boundaries, a checkpoint storage fault may be retried and degrade to data-only:
+the progress marker records `resumable: false` and the stale checkpoint is withdrawn. Transitions
+within or into Apply instead write a pending transition fence before attempting the checkpoint.
+An unknown checkpoint outcome blocks without retry or degradation to a live writer; the fence
+prevents restart from reissuing an older ready task. A confirmed result checkpoint is required
+before the next batch is exposed. Conflicting writers always fail closed.
 
 **When the checkpoint cannot be used, the run is data only.** After dying mid-`mdd-apply` with no
 usable checkpoint MDD does not know what reached the working tree, so restoring a controller would

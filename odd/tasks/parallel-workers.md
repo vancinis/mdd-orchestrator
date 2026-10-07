@@ -13,7 +13,8 @@ Before this feature, MDD owned one native dispatch per phase. Safe concurrency r
 - Complete explicit read/write scopes and dependency declarations; unknown or conflicting scopes fall back to sequential execution.
 - Read-only investigation may reference separately authorized repositories without moving the child's workspace or granting remote access.
 - The user selected bounded parallelism: scoped native edits may overlap in time; shell commands, tests, and builds remain sequential.
-- One implementing writer in this workspace. No isolated worktrees, publishing, global installation, push, PR creation, or merge.
+- One implementing writer in this workspace. No isolated worktrees, global installation, or PR creation. Original implementation did not authorize publication; the subsequent explicit authorization below now permits local integration and normal direct-main push.
+- Authorized delivery target: `https://github.com/vancinis/mdd-orchestrator.git`, `origin/main`, using the existing configured Git authentication only. Fetch, local integration, verification, and normal push are authorized; force push and credential changes are not.
 
 ## Constraints and acceptance
 
@@ -41,6 +42,9 @@ Before this feature, MDD owned one native dispatch per phase. Safe concurrency r
   - Checks: deterministic native-hook integration, forbidden tools/out-of-scope edits, disabled/legacy fallback, full suite, typecheck, build.
   - [x] PW-4E — Enable progress-bound, read-only exploration batches and prove actual native overlap with mutation-denying gates.
   - [x] PW-4A — Enable Apply through formatter-free scoped editing primitives, deny alternate mutation routes, and prove actual native confinement/overlap.
+- [ ] PW-5 — Integrate the latest authorized `origin/main`, preserve both feature sets, verify the merged candidate, and publish normally to remote `main`.
+  - Route: delegated direct; nine overlapping source/asset/test conflicts and sequential-Apply/Judgment-Day/security integration require a bounded writer.
+  - Checks: typecheck, build, full suite, focused integration checks, baseline native probe, seven exploration cases, eight Apply cases, whitespace/scope readback, independent verification, and confirmed normal push identity.
 
 ## Verification policy
 
@@ -55,7 +59,7 @@ RDD status: off, explicitly selected by the user for this clone; global preferen
 - Existing feature branch: `feat-add-workers`.
 - Branch point / initial review boundary: `57b0857c9374204dd2ddfc745f62b229107a5f10`.
 - Final behavior work-unit footprint: 4,223 authored changed lines, including tests, docs, and earlier recovery updates; generated files excluded. The final passive tracking closeout is included in the running total below. Native safety and real-host proof increased the initial estimate; the user-selected single-branch strategy remained in effect.
-- Delivery strategy: `single-pr`, explicitly selected by the user: one branch against `main`. Keep all coherent local work-unit commits on `feat-add-workers`; do not create stacked branches, publish, push, or open a PR.
+- Delivery strategy remains one branch, not stacked branches. The user subsequently requested direct-main publication instead of a PR; normal push is now explicitly authorized through the captured Git channel. Keep integration on `feat-add-workers`; do not open a PR, force push, change credentials, or install globally.
 - Running authored changed lines: 4,253 across five behavior work-unit commits and this 30-line passive tracking closeout (includes recovery-document updates).
 - PW-1 work-unit commit: `2aeb1661224f6f5ac85d35ad79b392e1e8ec5916`, `feat(config): expose default-on independent worker preference`.
 - PW-1 native tier/outcome: medium, `under_budget`; review slice remains pending against the initial boundary. No review receipt or approval is claimed.
@@ -67,7 +71,7 @@ RDD status: off, explicitly selected by the user for this clone; global preferen
 - PW-4E native tier/outcome: high, RDD `disabled/unmanaged`; writer checks, independent verifier, actual native exploration proof, and parent spot checks passed. No receipt review ran.
 - PW-4A work-unit commit: `2e28cd246fafeefa4b536fe6c30c845aaf96b5e1`, `feat(workers): enable formatter-free independent Apply`.
 - PW-4A native tier/outcome: medium, RDD `disabled/unmanaged`; writer full/native checks, independent verification and fault recheck, and final parent typecheck/staged-whitespace spot checks passed. No receipt review ran.
-- Delivery slice: one eventual branch/PR against `main`, contains PW-1 through PW-4, with PW-4 split into exploration and Apply work units. No publication authorized.
+- Delivery slice: one branch directly to `main`, containing PW-1 through PW-4 plus the authorized PW-5 integration. No PR is requested; normal publication is now authorized.
 - The approximately 400-line heuristic is advisory: no minification, cosmetic compression, omitted tests, or artificial task splits.
 
 ## Progress and next step
@@ -151,11 +155,38 @@ PW-4E is complete and committed: 25 files, 1,495 additions and 66 deletions, inc
 
 ## Outcome and next step
 
-All implementation tasks are complete. Eligible declared-independent exploration and Apply tasks run as at most two native foreground workers; incomplete, dependent, overlapping, unsupported, or unsafe-bootstrap work remains serial. `workers.enabled` defaults on and is configurable through `mdd-ai config` or `mdd-ai workers status|on|off`. Settings are startup-frozen and captured for runs; no hot-reload claim is made.
+Feature implementation PW-1 through PW-4 is complete; PW-5 integration and publication is newly authorized and pending. Eligible declared-independent exploration and Apply tasks run as at most two native foreground workers; incomplete, dependent, overlapping, unsupported, or unsafe-bootstrap work remains serial. `workers.enabled` defaults on and is configurable through `mdd-ai config` or `mdd-ai workers status|on|off`. Settings are startup-frozen and captured for runs; no hot-reload claim is made.
 
 Ordinary functional verification is complete within the proof limits above. The two skipped tests and correct-project memory resynchronization remain disclosed, not fabricated as passing. No final source check failed. Receipt reviews remain explicitly disabled for this clone, and the historical pending review state was preserved.
 
-Next: the user decides whether to publish or install globally. Neither push, PR creation, merge, nor global installation was performed or authorized.
+### PW-5 initial evidence
+
+- User authorized fetch, local integration and normal direct-main push via the existing configured Git authentication after the interrupted confirmation was re-presented. No remote action preceded that confirmation.
+- Starting feature HEAD: `8bb11ca7f830822bbb4bdec33610ea3b62d7e5a7`, clean worktree. Fetched remote main: `e1f3ff6bbd13f4bc8ee484d4661de27150b48542`; six feature commits versus 24 incoming main commits.
+- The initial Git-object-only preview found nine conflicts: two packaged agents, configuration docs, three source adapters/runner files, and three integration/asset test files. These were subsequently resolved in the local integration below.
+- Preserve incoming sequential Apply, native Judgment Day and standalone security changes. Keep receipt reviews off for this clone, and do not touch other worktrees or the historical pending review authority.
+
+### PW-5 local integration proof
+
+- The pinned main merge is present without a commit; all nine textual conflicts are resolved and the index has no unmerged entries. Fourteen manual integration paths preserve ordered singleton Apply results, exact worker reports, durable progress and native standalone security/Judgment Day boundaries. Coordinator prompt fits its 16,000-byte bound.
+- Typecheck/build and both whitespace checks passed. Actual pinned-host baseline, seven exploration cases and eight Apply cases passed. The dedicated sequential smoke remains unavailable because ancestor host configuration prevents isolation; three deterministic scenarios passed, not native proof.
+- Focused tests: 483 passed, three failed. Full suite: 1,558 passed, three failed, three skipped (two Windows symlink cases and opt-in installed Engram smoke). No final overall GREEN or publication is claimed.
+- One callback-ordering defect must preserve the durable Apply refusal before reading unavailable exploration storage. Two remaining assertion mismatches concern coordinator line wrapping and main's newest-first changed-file ordering; preserve behavior and update only justified expectations.
+- One bounded correction is authorized for the runner and those exact tests, followed by complete writer proof and independent verification. The sequential host refusal is preserved unless fixture isolation can be safely established without ambient configuration or credentials.
+
+- Follow-up correction evidence: callback refusal and both assertion mismatches are fixed. Status still consults missing exploration storage and masks the retained Apply block; complete the same phase-specific guard in status. Latest focused/full results were 485/1,560 passed with two failures and three full-suite skips.
+- The subsequent exploration matrix completed two cases, then refused the delayed case with `service_starting`; remaining four were unrun. One explicit complete-matrix rerun is authorized after the status correction, not a claim that the interrupted run passed. Apply's eight native cases still passed.
+
+### PW-5 final pre-publication proof
+
+- Phase-specific callback and status guards are corrected; actual main/contextual exploration retains its storage and ownership failures. Held Apply no longer reads unrelated exploration storage. Justified whitespace and newest-first evidence assertions preserve their original semantic checks.
+- Final writer checks: typecheck/build, 487 focused tests, and full suite 1,562 passed, zero failed, three skipped. Baseline native probe, all seven exploration cases and all eight Apply cases passed after the final correction. The earlier interrupted matrix remains failed historical evidence, not a passing attempt.
+- Independent verifier repeated typecheck/build, all 487 focused tests, the baseline and both full native matrices successfully. Three additional contextual-above-held-Apply probes passed, including retained failure and missing exploration storage. No introduced blocker was established.
+- Pinned main's strict workflow, Apply batch selection, Judgment Day and standalone security implementations remain unchanged where no conflict required adaptation. Worker reports publish ordered singleton Apply results with distinct batch/artifact identities only after all siblings settle; successful work is not replayed.
+- A pre-existing inactive-concurrency paragraph was corrected as a passive documentation follow-up. Structural readback and both whitespace checks passed; no executable bytes or test assertions changed after final independent verification.
+- Native risk assessment is high; the independent gate and parent typecheck/whitespace spot checks passed with RDD still off. Dedicated sequential native smoke remains unavailable due to ancestor configuration, not passed. Two Windows symlink tests and opt-in Engram smoke remain skipped. Native matrices stop at Verify readiness; no live Judgment Day/security or final native Verify execution is claimed.
+
+Next: confirm remote main has not advanced, commit this verified local merge, then perform and confirm the authorized normal `HEAD:main` push. Global installation, PR creation and receipt-review reactivation remain unauthorized.
 
 ## Recovery mirror
 

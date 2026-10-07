@@ -9,9 +9,12 @@ import { loadGlobalSettings } from './global-settings.js';
 import { collapsedPrompt, COLLAPSE_MIN_BYTES } from './dispatch-transcript.js';
 import { DISPATCH_HANDLE_PREFIX } from './phase-runner.js';
 import { WorkerFence, type WorkerHost } from './worker-fence.js';
+import { SECURITY_AGENT, SECURITY_RUNTIME_GUARD } from './security-audit.js';
+import type { SecurityRuntimeHooks } from './security-audit.js';
+import { JD_INSPECT, isJudge, isJudgmentActor } from './judgment-day.js';
 
 const COORDINATOR = 'mdd-orchestrator';
-/** Every actor with a configurable model: the eight workflow phases plus `mdd-risk`. */
+/** Configurable actors include standalone roles, independently of phase permission policy. */
 const MODEL_AGENTS = MODEL_ROLES.filter(role => role !== 'orchestrator');
 /**
  * Actors pinned to the phase-actor tool profile: dispatch nothing further, read no skill by
@@ -185,6 +188,16 @@ export async function setupV2(ctx: Plugin.Context, createMotor: LegacyPlugin): P
   // Unproven host versions keep Apply serial; the packaged dependency is exactly 2.0.22.
   if (ctx.app.version === '2.0.22') workerHost.applyEditing = true;
   const hooks = await createMotor(input);
+  const securityGuard = (hooks as SecurityRuntimeHooks)[SECURITY_RUNTIME_GUARD];
+  const enforceSecurity = async (sessionID: string, name: string, args: unknown, agent: string): Promise<boolean> => {
+    if (!securityGuard) {
+      if (agent === SECURITY_AGENT) throw new Error('Security runtime provenance guard is unavailable.');
+      return false;
+    }
+    const bound = await securityGuard(sessionID, name, args, agent);
+    if (bound && agent !== SECURITY_AGENT) throw new Error('Security native actor attribution differs.');
+    return bound;
+  };
   const profile = freezeProfile(loadGlobalSettings());
   const agentPolicy: Parameters<typeof ctx.agent.transform>[0] = editor => {
     for (const agent of editor.list()) editor.update(String(agent.id), draft => {
@@ -192,11 +205,16 @@ export async function setupV2(ctx: Plugin.Context, createMotor: LegacyPlugin): P
       const role = id === COORDINATOR ? 'orchestrator' : MODEL_AGENTS.includes(id as typeof MODEL_AGENTS[number]) ? id as typeof MODEL_AGENTS[number] : undefined;
       const selected = role ? modelFor(profile, role) : undefined;
       if (selected) draft.model = Model.Ref.parse(selected);
-      if (id !== COORDINATOR) draft.permissions.push({ action: 'mdd_*', resource: '*', effect: 'deny' });
+      if (id === SECURITY_AGENT) draft.permissions.push(
+        { action: '*', resource: '*', effect: 'deny' },
+        { action: 'mdd_check_report', resource: '*', effect: 'allow' });
+      if (id !== COORDINATOR && id !== SECURITY_AGENT) draft.permissions.push({ action: 'mdd_*', resource: '*', effect: 'deny' });
       if (PINNED_AGENTS.includes(id as typeof PINNED_AGENTS[number])) draft.permissions.push(
         { action: 'subagent', resource: '*', effect: 'deny' }, { action: 'skill', resource: '*', effect: 'deny' },
         { action: 'mdd_check_report', resource: '*', effect: 'allow' });
       if (id === 'mdd-apply') draft.permissions.push({ action: 'mdd_worker_edit', resource: '*', effect: 'allow' });
+      if (isJudge(id)) draft.permissions.push(
+        { action: '*', resource: '*', effect: 'deny' }, { action: JD_INSPECT, resource: '*', effect: 'allow' });
     });
   };
   let agentRegistration = await ctx.agent.transform(agentPolicy);
@@ -211,6 +229,7 @@ export async function setupV2(ctx: Plugin.Context, createMotor: LegacyPlugin): P
     for (const [name, definition] of Object.entries(hooks.tool ?? {})) editor.add({
       name, description: definition.description, input: z.object(definition.args), options: { codemode: false },
       async execute(args, context) {
+        await enforceSecurity(context.sessionID, name, args, context.agent);
         await settleAgentPolicy();
         const session = await ctx.session.get({ sessionID: context.sessionID }, { signal: context.signal });
         await workerHost.fence.guard(session, name, args, !!session.parentID && !!workerHost.protectedParent?.(session.parentID));
@@ -222,11 +241,21 @@ export async function setupV2(ctx: Plugin.Context, createMotor: LegacyPlugin): P
     });
   });
   await ctx.tool.hook('execute.before', async event => {
-    const call = { sessionID: event.sessionID, messageID: event.messageID, callID: event.id, tool: event.tool === 'subagent' ? 'task' : event.tool };
+    const call = { sessionID: event.sessionID, messageID: event.messageID, callID: event.id, tool: event.tool === 'subagent' ? 'task' : event.tool, agent: event.agent };
+    await enforceSecurity(event.sessionID, call.tool, event.input, event.agent);
+    await settleAgentPolicy();
     const session = await ctx.session.get({ sessionID: event.sessionID });
     await workerHost.fence.guard(session, event.tool, event.input,
       !!session.parentID && !!workerHost.protectedParent?.(session.parentID));
-    if (session.location.directory !== directory || session.projectID !== ctx.location.project.id) return;
+    if (session.location.directory !== directory || session.projectID !== ctx.location.project.id) {
+      if (event.agent === SECURITY_AGENT || session.agent === SECURITY_AGENT) throw new Error('Security session left its bound workspace.');
+      if (isJudgmentActor(event.agent) || (event.tool === 'subagent' && isJudgmentActor(object(event.input).agent)))
+        throw new Error('Standalone Judgment Day workspace differs from its plugin location.');
+      return;
+    }
+    if (event.agent === SECURITY_AGENT || session.agent === SECURITY_AGENT) {
+      if (event.agent !== SECURITY_AGENT || session.agent !== SECURITY_AGENT) throw new Error('Security native actor attribution differs.');
+    }
     if (session.parentID) await hooks.event?.({ event: { type: 'session.created', properties: { info: session } } } as never);
     if (event.tool === 'subagent' && event.agent === COORDINATOR) {
       const args = taskInput(event.input);
@@ -247,6 +276,7 @@ export async function setupV2(ctx: Plugin.Context, createMotor: LegacyPlugin): P
     }
     if (event.tool === 'subagent' && event.agent !== COORDINATOR) return;
     const readWorker = event.tool === 'subagent' && workerHost.assignment?.(event.sessionID, event.id);
+    const audit = event.tool === 'subagent' && object(event.input).agent === SECURITY_AGENT;
     if (readWorker) {
       try {
         const native = object(event.result.output);
@@ -267,15 +297,19 @@ export async function setupV2(ctx: Plugin.Context, createMotor: LegacyPlugin): P
         return;
       }
     }
+    let result: ObjectValue;
+    try { result = legacyResult(event.tool, event.input, event.result); }
+    catch (error) { if (!audit) throw error; result = {}; }
     try {
       await hooks['tool.execute.after']?.({ ...call, args: event.tool === 'subagent' ? taskInput(event.input) : event.input },
-        legacyResult(event.tool, event.input, event.result) as never);
+        result as never);
     } catch (error) {
       if (!readWorker) throw error;
       // WorkerState retains the blocked/uncertain outcome and reservation. Native settlement
       // itself must not hang because admission or durable aggregation refused its report.
       workerHost.fence.settle(event.id);
     }
+    if (audit || result.title === 'MDD security assessment') event.result = { content: String(result.output), output: { status: 'completed', output: String(result.output) } };
   });
   const stream = (async () => {
     try {
@@ -306,6 +340,15 @@ export async function setupV2(ctx: Plugin.Context, createMotor: LegacyPlugin): P
   })();
   // V2 supplies model messages, not durable parts. Only settled tool calls with matching results are collapsed.
   await ctx.session.hook('context', async event => {
+    if (!event.sessionID && event.agent === SECURITY_AGENT) throw new Error('Security context has no native session identity.');
+    if (event.sessionID && await enforceSecurity(event.sessionID, 'mdd_check_report', { phase: SECURITY_AGENT, result: '' }, event.agent)) {
+      event.tools = Object.fromEntries(Object.entries(event.tools).filter(([name]) => name === 'mdd_check_report'));
+      return;
+    }
+    if (isJudge(event.agent)) {
+      for (const name of Object.keys(event.tools)) if (name !== JD_INSPECT) delete event.tools[name];
+      return;
+    }
     if (event.agent !== COORDINATOR) {
       const session = await ctx.session.get({ sessionID: event.sessionID });
       if (workerHost.fence.assignment(session)?.phase !== 'mdd-apply') delete event.tools.mdd_worker_edit;

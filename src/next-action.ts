@@ -99,9 +99,18 @@ export function nextAction(status: unknown): NextAction | undefined {
   const verdict = typeof liveness?.verdict === 'string' ? liveness.verdict : undefined;
   const attest = 'If the user says the subagent is stopped or was interrupted, call mdd_reset with userText set to their exact latest message; MDD stops it through OpenCode when it can and releases it.';
 
+  // An interrupted attempt is released with scope phase: it restores the run, keeps every phase
+  // already recorded and readies the interrupted one again. Scope run threw all of that away,
+  // which is how "it was interrupted, continue" used to end in a fresh preflight and a second
+  // exploration and plan. It stays the fallback only for a run that cannot be restored.
+  const keep = 'Scope phase keeps the run: completed phases are not repeated and no new preflight is asked. Inspect partial changes before the phase runs again. Only if MDD refuses scope phase because the run cannot be restored, scope run discards it (its evidence is preserved) and a new objective needs a new start.';
   if (state === 'recovery-blocked') {
-    return { tool: 'mdd_reset', args: { scope: 'run' },
-      why: `A previous attempt here never reported an outcome, so it is not resumed automatically. Releasing it frees this conversation; the evidence it produced is preserved and is never deleted by a reset. ${verdict === 'stopped' ? 'OpenCode confirms its subagent stopped, so this reset releases it.' : verdict === 'running' ? 'OpenCode still reports its subagent busy: wait for it or stop it in OpenCode first.' : attest}` };
+    if (verdict === 'running') return { tool: 'mdd_status',
+      why: 'A previous attempt here never reported an outcome and OpenCode still reports its subagent busy. Wait for it or stop it in OpenCode, then read mdd_status again. Never reset or start new work while it runs.' };
+    if (verdict === 'stopped') return { tool: 'mdd_reset', args: { scope: 'phase' },
+      why: `A previous attempt here never reported an outcome, and OpenCode confirms its subagent stopped. ${keep}` };
+    return { tool: 'mdd_reset',
+      why: `A previous attempt here never reported an outcome, so it is not resumed automatically. When the user says it was interrupted or stopped (for example "te interrumpí, continúa"), call mdd_reset with scope phase and userText set to their exact latest message; MDD stops it through OpenCode when it can and releases it. ${keep}` };
   }
 
   if (state === 'await-result' && verdict === 'stopped') {

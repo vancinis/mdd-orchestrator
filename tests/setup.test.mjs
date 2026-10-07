@@ -64,6 +64,18 @@ test('init installs only owned assets, preserves user files and is byte-idempote
   const installed = snapshot(root); const second = initProject(root);
   assert.equal(second.created, 0); assert.equal(second.unchanged, first.created); assert.deepEqual(snapshot(root), installed);
 });
+test('regression: clarification installed coordinator retains Spanish tool prose and English artifact boundary', t => {
+  const root = fixture(t);
+  initProject(root);
+  const installed = fs.readFileSync(join(root, 'agents/mdd-orchestrator.md'), 'utf8');
+  assert.equal(installed, fs.readFileSync('assets/opencode/agents/mdd-orchestrator.md', 'utf8'));
+  assert.match(installed, /User-visible question text, option labels and descriptions must be Spanish/);
+  assert.match(installed, /including inside mdd_prepare_advance and native question tool arguments/);
+  assert.match(installed, /Technical artifacts, phase task prompts, phase reports and protocol keys remain English/);
+  const actor = fs.readFileSync(join(root, 'agents/mdd-plan.md'), 'utf8');
+  assert.match(actor, /Write your report in English/);
+});
+
 test('TUI registration merges existing config and preserves attention and plugin options', t => {
   const root = fixture(t);
   const original = { theme: { name: 'smoke' }, attention: { sound: true, notifications: false }, plugins: ['other', { package: 'local.tsx', options: { flag: true } }] };
@@ -155,6 +167,55 @@ test('init refuses a conflicting owned file before creating other assets', t => 
   fs.writeFileSync(path, 'existing user content'); const before = snapshot(root);
   assert.throws(() => initProject(root), /refuses to overwrite/); assert.deepEqual(snapshot(root), before);
 });
+
+test('init installs all namespaced Judgment Day actors byte-for-byte and preserves foreign actors', t => {
+  const root = fixture(t);
+  fs.mkdirSync(join(root, 'agents'));
+  fs.writeFileSync(join(root, 'agents/jd-judge-a.md'), 'foreign judge');
+  initProject(root);
+  for (const role of ['mdd-jd-judge-a', 'mdd-jd-judge-b', 'mdd-jd-fix']) {
+    assert.ok(MDD_ASSETS.includes(`assets/opencode/agents/${role}.md`), role);
+    assert.equal(fs.readFileSync(join(root, `agents/${role}.md`), 'utf8'),
+      fs.readFileSync(`assets/opencode/agents/${role}.md`, 'utf8'));
+  }
+  assert.equal(fs.readFileSync(join(root, 'agents/jd-judge-a.md'), 'utf8'), 'foreign judge');
+  assert.equal(initProject(root).created, 0);
+});
+
+test('init refuses foreign content at each namespaced Judgment Day destination without partial writes', t => {
+  for (const role of ['mdd-jd-judge-a', 'mdd-jd-judge-b', 'mdd-jd-fix']) {
+    const root = fixture(t);
+    fs.mkdirSync(join(root, 'agents'));
+    fs.writeFileSync(join(root, `agents/${role}.md`), 'foreign content');
+    const before = snapshot(root);
+    assert.throws(() => initProject(root), /refuses to overwrite/);
+    assert.deepEqual(snapshot(root), before);
+  }
+});
+
+test('init installs the complete Judgment Day skill/reference pair and keeps unrelated shared skills', t => {
+  const root = fixture(t);
+  fs.mkdirSync(join(root, 'skills/judgment-day'), { recursive: true });
+  fs.writeFileSync(join(root, 'skills/judgment-day/SKILL.md'), 'foreign standalone skill');
+  initProject(root);
+  for (const file of ['SKILL.md', 'references/prompts-and-formats.md']) {
+    const source = `assets/opencode/skills/mdd-judgment-day/${file}`;
+    assert.ok(MDD_ASSETS.includes(source));
+    assert.equal(fs.readFileSync(join(root, `skills/mdd-judgment-day/${file}`), 'utf8'), fs.readFileSync(source, 'utf8'));
+  }
+  const before = snapshot(root);
+  assert.equal(initProject(root).created, 0); assert.deepEqual(snapshot(root), before);
+  assert.equal(fs.readFileSync(join(root, 'skills/judgment-day/SKILL.md'), 'utf8'), 'foreign standalone skill');
+});
+
+for (const file of ['SKILL.md', 'references/prompts-and-formats.md']) {
+  test(`init preserves foreign Judgment Day ${file} before any partial installation`, t => {
+    const root = fixture(t); const path = join(root, `skills/mdd-judgment-day/${file}`);
+    fs.mkdirSync(join(path, '..'), { recursive: true }); fs.writeFileSync(path, 'foreign content');
+    const before = snapshot(root);
+    assert.throws(() => initProject(root), /refuses to overwrite/); assert.deepEqual(snapshot(root), before);
+  });
+}
 test('init refuses linked target directories without writing outside the target', t => {
   const root = fixture(t); const outside = fixture(t, false);
   fs.symlinkSync(outside, join(root, 'agents'), process.platform === 'win32' ? 'junction' : 'dir');

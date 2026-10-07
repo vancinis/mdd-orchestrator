@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { defaultSettings, parseSettings, loadSettings, saveSettings, freezeProfile, modelFor, MODEL_ROLES } from '../dist/settings.js';
 import { LocalFiles } from '../dist/local-files.js';
+import { runConfigUI } from '../dist/config-ui.js';
 
 function fixture(t) {
   const root = fs.mkdtempSync(join(tmpdir(), 'mdd-settings-'));
@@ -41,6 +42,33 @@ test('versioned settings round trip, active profile, all roles, nested model pat
   assert.throws(() => modelFor(frozen, '__proto__'));
   assert.deepEqual(fs.readdirSync(root), ['mdd.config.json']);
   if (process.platform !== 'win32') assert.equal(fs.statSync(join(root, 'mdd.config.json')).mode & 0o777, 0o600);
+});
+
+test('Judgment Day roles round trip model variants independently and inherit when omitted', t => {
+  const root = fixture(t);
+  const roles = ['mdd-jd-judge-a', 'mdd-jd-judge-b', 'mdd-jd-fix'];
+  for (const role of roles) assert.ok(MODEL_ROLES.includes(role), role);
+  const settings = defaultSettings();
+  settings.profiles.default.models = {
+    orchestrator: 'provider/parent#low',
+    'mdd-jd-judge-a': 'provider/team/judge#high',
+    'mdd-jd-judge-b': 'other/judge#medium',
+    'mdd-jd-fix': 'provider/fix',
+  };
+  saveSettings(root, settings);
+  assert.deepEqual(loadSettings(root), settings);
+  const profile = freezeProfile(loadSettings(root));
+  for (const role of roles) {
+    assert.equal(modelFor(profile, role), settings.profiles.default.models[role]);
+    assert.equal(modelFor(freezeProfile(defaultSettings()), role), undefined);
+    const inherited = defaultSettings();
+    inherited.profiles.default.models.orchestrator = 'provider/parent#low';
+    assert.equal(modelFor(freezeProfile(inherited), role), undefined);
+    const invalid = structuredClone(settings);
+    invalid.profiles.default.models[role] = 'provider/../model';
+    assert.throws(() => parseSettings(invalid));
+  }
+  assert.throws(() => parseSettings({ ...settings, profiles: { default: { models: { 'jd-judge-a': 'p/m' } } } }));
 });
 
 const invalid = [
@@ -185,4 +213,22 @@ test('documented JSON schema matches supported roles/tokens and the guide exampl
   assert.equal(schema.properties.workers.properties.enabled.type, 'boolean');
   assert.equal(schema.properties.workers.properties.enabled.default, true);
   assert.deepEqual(example.workers, { enabled: true });
+});
+
+test('security model is optional, configurable and exposed by the derived editor roster', async t => {
+  assert.ok(MODEL_ROLES.includes('mdd-security'));
+  assert.equal(modelFor(freezeProfile(defaultSettings()), 'mdd-security'), undefined);
+  const root = fixture(t);
+  const previous = process.env.XDG_CONFIG_HOME;
+  process.env.XDG_CONFIG_HOME = root;
+  t.after(() => { process.env.XDG_CONFIG_HOME = previous; });
+  const owned = join(root, 'opencode/mdd');
+  fs.mkdirSync(owned, { recursive: true });
+  const answers = ['2', ...MODEL_ROLES.map(role => role === 'mdd-security' ? 'provider/security#high' : ''), '6'];
+  let output = '';
+  await runConfigUI(root, { isTTY: true, read: async () => answers.shift(), write: text => { output += text; } },
+    { models: () => ({ status: 'unavailable', reason: 'Offline deterministic test.' }),
+      variants: () => { throw new Error('Offline tests never query variants.'); } });
+  assert.match(output, /mdd-security/);
+  assert.equal(loadSettings(owned).profiles.default.models['mdd-security'], 'provider/security#high');
 });

@@ -126,12 +126,22 @@ const provider = http.createServer(async (req, res) => {
         assert.equal(ready.tasks?.length, 2, JSON.stringify(ready));
         calls = ready.tasks.map(task => ({ name: 'subagent', arguments: task }));
       }
+    } else if (applyWorkers && serialApply && role === 'mdd-orchestrator' && step === 5) {
+      calls = [{ name: 'mdd_status', arguments: {} }];
+    } else if (applyWorkers && serialApply && role === 'mdd-orchestrator' && step === 6) {
+      const output = input.messages.filter(message => message.role === 'tool').at(-1)?.content;
+      const ready = JSON.parse(typeof output === 'string' ? output : output.map(part => part.text).join(''));
+      assert.equal(ready.tasks, undefined); assert.equal(ready.task.agent, 'mdd-apply');
+      calls = [{ name: 'subagent', arguments: ready.task }];
     } else if (applyWorkers && role === 'mdd-plan') {
       text = reportDocument({ phase: 'mdd-plan', evidenceSummary: 'Two bounded independent Apply tasks.', artifact: 'Implement only the two explicit boundaries.', ...applyTrace });
     } else if (applyWorkers && role === 'mdd-apply') {
       const material = input.messages.map(message => typeof message.content === 'string' ? message.content : JSON.stringify(message.content)).join('\n');
       const assigned = material.split('Assigned worker task: ').at(-1);
-      const item = serialApply || assigned.match(/"id":"([^"]+)"/)?.[1] === 'T1' ? 'a' : 'b';
+      const taskID = serialApply ? material.match(/Applicable deliverables:.*?"id":"([^"]+)"/)?.[1]
+        : assigned.match(/"id":"([^"]+)"/)?.[1];
+      assert.ok(['T1', 'T2'].includes(taskID), 'The native child receives exactly its selected task.');
+      const item = taskID === 'T1' ? 'a' : 'b';
       const ownEdit = { operations: [{ path: `${item}.txt`, kind: 'replace', expected: `OWN_${item.toUpperCase()}_READ_SENTINEL`, content: `EDITED_${item.toUpperCase()}` }] };
       if (nativeCase === 'failure' && item === 'a') ownEdit.operations[0].expected = 'wrong precondition';
       if (step === 0) {
@@ -164,6 +174,7 @@ const provider = http.createServer(async (req, res) => {
       } else {
         const failed = ['failure', 'progress-loss'].includes(nativeCase) && item === 'a';
         text = reportDocument({ phase: 'mdd-apply', outcome: failed ? 'failed' : 'passed', evidenceSummary: `Apply ${item} outcome.`,
+          completed: failed ? [] : [taskID],
           artifact: `Bounded Apply ${item} evidence.`, changes: failed ? [] : [`${item}.txt`],
           ...(failed ? { noChangeReason: 'The scoped operation was refused.' } : {}), checks: [] });
       }
@@ -407,8 +418,8 @@ export default { id: 'mdd.worker-boundary-probe', async setup(ctx) {
     if (fs.existsSync(evidence)) records = fs.readFileSync(evidence, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse);
     if (workersProbe) {
       const settled = records.filter(item => item.boundary === 'durable-native-outcome' && item.data.sessionID === session.id &&
-        item.data.id.startsWith(applyWorkers ? 'fixture-mdd-orchestrator-4-' : 'fixture-mdd-orchestrator-2-'));
-      if (settled.length === (nativeCase === 'disabled' || serialApply ? 1 : 2)) break;
+        (applyWorkers ? /^fixture-mdd-orchestrator-(4|6)-/.test(item.data.id) : item.data.id.startsWith('fixture-mdd-orchestrator-2-')));
+      if (settled.length === (!applyWorkers && nativeCase === 'disabled' ? 1 : 2)) break;
       await delay(100); continue;
     }
     const child = records.find(item => item.boundary === 'before-read');
@@ -420,9 +431,9 @@ export default { id: 'mdd.worker-boundary-probe', async setup(ctx) {
   assert.ifError(fixtureError);
   if (applyWorkers) {
     const settled = records.filter(item => item.boundary === 'durable-native-outcome' && item.data.sessionID === session.id &&
-      item.data.id.startsWith('fixture-mdd-orchestrator-4-'));
-    assert.equal(settled.length, serialApply ? 1 : 2, `Apply did not settle: ${JSON.stringify(requests.map(({session,step}) => ({session,step})))} ${stdout} ${stderr}`);
-    assert.equal(live.size, serialApply ? 1 : 2);
+      /^fixture-mdd-orchestrator-(4|6)-/.test(item.data.id));
+    assert.equal(settled.length, 2, `Apply did not settle: ${JSON.stringify(requests.map(({session,step}) => ({session,step})))} ${stdout} ${stderr}`);
+    assert.equal(live.size, 2);
     const parts = (await Promise.all([...live.values()].map(async id => ({ id, data: (await api(`/api/session/${id}/context`)).data }))))
       .flatMap(({ id, data }) => data.filter(message => message.type === 'assistant').flatMap(message =>
         message.content.filter(part => part.type === 'tool').map(part => ({ sessionID: id, tool: part.name, ...part.state }))));
@@ -434,6 +445,9 @@ export default { id: 'mdd.worker-boundary-probe', async setup(ctx) {
     if (serialApply) {
       assert.equal(parts.find(part => part.tool === 'edit').status, 'completed');
       assert.equal(fs.readFileSync(scopedFile('a'), 'utf8'), 'EDITED_A');
+      assert.equal(fs.readFileSync(scopedFile('b'), 'utf8'), 'EDITED_B');
+      const secondProgress = records.find(item => item.boundary === 'progress' && item.data.id === 'fixture-mdd-orchestrator-6-0');
+      assert.ok(records.indexOf(settled[0]) < records.indexOf(secondProgress), 'The second serial child starts only after the first settles.');
       assert.equal(fs.existsSync(formatterMarker), true, 'Ordinary serial native editing retains its formatter behavior.');
       assert.equal(checkpoint.stable.phase, 'mdd-verify');
     } else {
@@ -469,16 +483,19 @@ export default { id: 'mdd.worker-boundary-probe', async setup(ctx) {
         assert.deepEqual(checkpoint.data.workerState.completed.map(member => member.taskID), ['T2']);
       } else {
         assert.equal(checkpoint.stable.phase, 'mdd-verify');
-        const aggregate = checkpoint.events.filter(event => event.kind === 'result' && event.result.phase === 'mdd-apply');
-        assert.equal(aggregate.length, 1);
+        const results = checkpoint.events.filter(event => event.kind === 'result' && event.result.phase === 'mdd-apply').map(event => event.result);
+        assert.equal(results.length, 2);
+        assert.deepEqual(results.map(result => result.completed), [['T1'], ['T2']]);
+        assert.equal(new Set(results.map(result => result.batchID)).size, 2);
         assert.deepEqual(checkpoint.stable.changedList.map(file => file.path), ['a.txt', 'b.txt']);
         assert.deepEqual(checkpoint.data.executedChecks, []);
-        const artifact = checkpoint.data.dependencies.find(item => item.phase === 'mdd-apply').content;
-        assert.ok(artifact.indexOf('## T1') >= 0 && artifact.indexOf('## T1') < artifact.indexOf('## T2'));
+        const artifacts = checkpoint.data.dependencies.filter(item => item.phase === 'mdd-apply');
+        assert.deepEqual(artifacts.map(item => item.batchID), results.map(result => result.batchID));
+        assert.deepEqual(artifacts.map(item => item.content), ['Bounded Apply a evidence.', 'Bounded Apply b evidence.']);
       }
     }
     console.log(JSON.stringify({ host: version.stdout.trim(), productionPlugin: 'active', nativeCase, liveNativeChildren: live.size,
-      completionOrder: settled.map(item => item.data.id), productionConcurrency: serialApply ? 'SERIAL FALLBACK' : 'ACTUAL FOREGROUND APPLY CHILDREN',
+      completionOrder: settled.map(item => item.data.id), productionConcurrency: serialApply ? 'SEQUENTIAL SINGLE-STEP ACTORS' : 'ACTUAL FOREGROUND APPLY CHILDREN',
       confinement: serialApply ? 'singular ordinary native edit and formatter completed; worker confinement not exercised'
         : 'formatter-free own-file edits; scope/multi-file/native edit/shell/execution/custom/MCP/control/recursion attacks refused',
       formatter: serialApply ? 'ordinary serial formatter preserved' : 'marker absent' }));

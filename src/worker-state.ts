@@ -217,6 +217,9 @@ export function workerReport(text: string, task: Deliverable, callID: string, ru
       typeof result.artifact !== 'string' || !result.artifact.trim() || Buffer.byteLength(result.artifact) > 16000)
     throw new Error('Worker report does not match its exact assigned dispatch.');
   const files = changed(result.changes, result.noChangeReason);
+  if (result.outcome === 'passed' ? !Array.isArray(result.completed) || result.completed.length !== 1 || result.completed[0] !== task.id
+      : result.completed !== undefined && (!Array.isArray(result.completed) || result.completed.length !== 0))
+    throw new Error('Worker completion must name exactly its assigned task on success, and none on failure.');
   if (task.parallel?.complete === true && files.paths.some(path => !task.parallel!.writes?.includes(path)))
     throw new Error('Worker report changes exceed the assigned write scope.');
   // Workers never earn independently executed checks, and commands cannot overlap a sibling.
@@ -224,10 +227,11 @@ export function workerReport(text: string, task: Deliverable, callID: string, ru
   return { result, files };
 }
 
-export function validateWorkerState(value: unknown, planned: readonly Deliverable[], calls: readonly string[]): WorkerState {
+export function validateWorkerState(value: unknown, planned: readonly Deliverable[], calls: readonly string[], completed: readonly string[] = []): WorkerState {
   const item = objectWithKeys(value, 'worker state', ['completed', 'batch']);
   if (!Array.isArray(item.completed) || item.completed.length > planned.length) throw new Error('Invalid completed worker evidence.');
-  const done = new Set<string>(); const seenCalls = new Set<string>();
+  const retained = (item.completed as WorkerState['completed']).map(member => member?.taskID);
+  const done = new Set(completed.filter(id => !retained.includes(id))); const seenCalls = new Set<string>();
   let ordinal = -1;
   for (const entry of item.completed) {
     const member = objectWithKeys(entry, 'completed worker', ['taskID', 'callID', 'text']);

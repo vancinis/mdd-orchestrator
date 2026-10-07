@@ -27,13 +27,16 @@ async function fixture(t, extra = {}) {
   const trace = traceFixture(); const base = trace.deliverables[0];
   trace.deliverables = ['a', 'b'].map((name, index) => ({ ...base, id: `T${index + 1}`, path: `src/${name}.ts`, dependsOn: [],
     parallel: { complete: true, reads: [], writes: [`src/${name}.ts`] } }));
-  if (extra.third) trace.deliverables.push({ ...base, id: 'T3', path: 'src/a.ts', dependsOn: ['T1', 'T2'],
+  if (extra.third || extra.unsafeThird) trace.deliverables.push({ ...base, id: 'T3', path: 'src/a.ts', dependsOn: ['T1', 'T2'],
     parallel: { complete: true, reads: [], writes: ['src/a.ts'] } });
+  if (extra.unsafeThird) delete trace.deliverables.at(-1).parallel;
+  if (extra.serialFirst) trace.deliverables.unshift({ ...base, id: 'T0', path: 'src/a.ts', dependsOn: [] });
   await runner.after(planCall, args, reportDocument({ evidenceSummary: SUMMARY_TEXT, artifact: ARTIFACT_TEXT, ...trace }));
   runner.releaseSettled(runtime.sessionID, 'plan');
   const calls = ['one', 'two'].map(callID => ({ sessionID: runtime.sessionID, callID }));
   const text = (index, outcome = 'passed') => reportDocument({ outcome, evidenceSummary: `Finished task ${index + 1}.`,
-    artifact: `Task ${index + 1} implementation evidence.`, changes: [`src/${index ? 'b' : 'a'}.ts`], checks: [] });
+    artifact: `Task ${index + 1} implementation evidence.`, completed: outcome === 'passed' ? [`T${index + 1}`] : [],
+    changes: [`src/${index ? 'b' : 'a'}.ts`], checks: [] });
   return { root, runtime, checkpoint, ownership, progress, inspect, options, runner, calls, text };
 }
 
@@ -61,9 +64,97 @@ test('both foreground members admit before results; reverse completion retains o
   await f.runner.after(f.calls[0], dispatched[0], f.text(0));
   const done = f.runner.status(f.runtime.sessionID);
   assert.equal(done.phase, 'mdd-verify');
-  assert.equal(done.workflow.results.length, 2);
-  assert.ok(done.artifact.content.indexOf('Task 1') < done.artifact.content.indexOf('Task 2'));
+  assert.equal(done.workflow.results.length, 3);
+  const results = done.workflow.results.filter(result => result.phase === 'mdd-apply');
+  assert.deepEqual(results.map(result => result.completed), [['T1'], ['T2']]);
+  assert.equal(new Set(results.map(result => result.batchID)).size, 2);
+  const saved = f.checkpoint.read(f.runtime.sessionID).checkpoint;
+  assert.deepEqual(saved.data.dependencies.slice(1).map(item => item.batchID), results.map(result => result.batchID));
+  assert.ok(saved.data.dependencies[1].content.includes('Task 1'));
+  assert.ok(saved.data.dependencies[2].content.includes('Task 2'));
   assert.equal(f.ownership.read(status.runID).state, 'idle');
+});
+
+test('each parallel prompt assigns only its own held deliverable without contradictory context', async t => {
+  const f = await fixture(t); const ready = f.runner.status(f.runtime.sessionID);
+  for (const [index, task] of ready.tasks.entries()) {
+    const args = await f.runner.before(f.calls[index], task);
+    const applicable = JSON.parse(args.prompt.match(/^Applicable deliverables: (.+)$/m)[1]);
+    assert.deepEqual(applicable.map(step => step.id), [`T${index + 1}`]);
+    assert.match(args.prompt, new RegExp(`completed=\\["T${index + 1}"\\]`));
+  }
+});
+
+test('serial fallback selects exactly one step and preserves the full plan as context', async t => {
+  const f = await fixture(t, { workers: { enabled: false } });
+  const first = f.runner.status(f.runtime.sessionID);
+  const args = await f.runner.before(f.calls[0], first.task);
+  assert.deepEqual(JSON.parse(args.prompt.match(/^Applicable deliverables: (.+)$/m)[1]).map(step => step.id), ['T1']);
+  await f.runner.after(f.calls[0], args, f.text(0));
+  f.runner.releaseSettled(f.runtime.sessionID, f.calls[0].callID);
+  const next = f.runner.status(f.runtime.sessionID);
+  assert.equal(next.phase, 'mdd-apply'); assert.equal(next.tasks, undefined);
+  const second = await f.runner.before(f.calls[1], next.task);
+  assert.deepEqual(JSON.parse(second.prompt.match(/^Applicable deliverables: (.+)$/m)[1]).map(step => step.id), ['T2']);
+  await f.runner.after(f.calls[1], second, f.text(1));
+  assert.equal(f.runner.status(f.runtime.sessionID).phase, 'mdd-verify');
+});
+
+test('ordered publication fault retains both reports without publishing a partial workflow prefix', async t => {
+  const f = await fixture(t); const ready = f.runner.status(f.runtime.sessionID);
+  const args = await Promise.all(ready.tasks.map((task, index) => f.runner.before(f.calls[index], task)));
+  await f.runner.after(f.calls[1], args[1], f.text(1));
+  const write = f.checkpoint.write.bind(f.checkpoint);
+  f.checkpoint.write = (parent, checkpoint, ...rest) => {
+    if (checkpoint.events.some(event => event.kind === 'result' && event.result.phase === 'mdd-apply'))
+      throw new CheckpointStorageError('Injected final publication refusal.');
+    return write(parent, checkpoint, ...rest);
+  };
+  await assert.rejects(f.runner.after(f.calls[0], args[0], f.text(0)), /publication|checkpoint|unconfirmed/i);
+  const blocked = f.runner.status(f.runtime.sessionID);
+  assert.equal(blocked.state, 'blocked'); assert.equal(blocked.tasks, undefined); assert.equal(blocked.task, undefined);
+  assert.equal(blocked.workflow.results.length, 1);
+  const saved = f.checkpoint.read(f.runtime.sessionID).checkpoint;
+  assert.deepEqual(saved.data.workerState.completed.map(member => member.text), [f.text(0), f.text(1)]);
+  assert.equal(saved.events.filter(event => event.kind === 'result').length, 1);
+  assert.equal(saved.attempt.id, saved.data.workerState.batch.id);
+  assert.throws(() => f.runner.reset(f.runtime.sessionID, 'phase'), /durability|checkpoint|unconfirmed/i);
+});
+
+test('mixed ordinary serial and scoped parallel progress keeps strict plan order and the full file union', async t => {
+  const f = await fixture(t, { serialFirst: true, unsafeThird: true });
+  const call = { sessionID: f.runtime.sessionID, callID: 'serial-first' };
+  const first = await f.runner.before(call, f.runner.status(f.runtime.sessionID).task);
+  await f.runner.after(call, first, reportDocument({ completed: ['T0'], evidenceSummary: 'First serial step.', artifact: 'First evidence.',
+    changes: ['src/a.ts'], checks: [] }));
+  f.runner.releaseSettled(f.runtime.sessionID, call.callID);
+  const ready = f.runner.status(f.runtime.sessionID); assert.equal(ready.tasks.length, 2);
+  const args = await Promise.all(ready.tasks.map((task, index) => f.runner.before(f.calls[index], task)));
+  await f.runner.after(f.calls[1], args[1], f.text(1));
+  await f.runner.after(f.calls[0], args[0], f.text(0));
+  const next = f.runner.status(f.runtime.sessionID); assert.equal(next.tasks, undefined); assert.equal(next.phase, 'mdd-apply');
+  const last = { sessionID: f.runtime.sessionID, callID: 'serial-last' };
+  const third = await f.runner.before(last, next.task);
+  assert.deepEqual(JSON.parse(third.prompt.match(/^Applicable deliverables: (.+)$/m)[1]).map(step => step.id), ['T3']);
+  await f.runner.after(last, third, reportDocument({ completed: ['T3'], evidenceSummary: 'Last serial step.', artifact: 'Last evidence.',
+    changes: ['src/a.ts'], checks: [] }));
+  const saved = f.checkpoint.read(f.runtime.sessionID).checkpoint;
+  assert.equal(saved.stable.phase, 'mdd-verify');
+  assert.deepEqual(saved.events.filter(event => event.kind === 'result' && event.result.phase === 'mdd-apply').map(event => event.result.completed),
+    [['T0'], ['T1'], ['T2'], ['T3']]);
+  // Main retains the newest reported files first, without dropping the earlier file union.
+  assert.deepEqual(saved.stable.changedList.map(file => file.path), ['src/b.ts', 'src/a.ts']);
+  assert.equal(saved.data.changedFiles, 2);
+});
+
+test('checkpoint refuses published worker evidence whose native call differs from its result artifact', async t => {
+  const f = await fixture(t); const ready = f.runner.status(f.runtime.sessionID);
+  const args = await Promise.all(ready.tasks.map((task, index) => f.runner.before(f.calls[index], task)));
+  await f.runner.after(f.calls[1], args[1], f.text(1)); await f.runner.after(f.calls[0], args[0], f.text(0));
+  const corrupt = f.checkpoint.read(f.runtime.sessionID).checkpoint;
+  corrupt.data.workerState.completed[0].callID = 'plan';
+  corrupt.dataDigest = sealResumeData(corrupt.data, corrupt.runID, corrupt.parent, corrupt.events, corrupt.stable);
+  assert.throws(() => validateCheckpoint(corrupt), /identity|workflow result/);
 });
 
 test('failed member cannot release a live sibling; explicit retry excludes durable successes', async t => {
@@ -108,19 +199,21 @@ test('settled batches persist before the next dependent task and survive restart
   const args = await Promise.all(ready.tasks.map((task, index) => f.runner.before(f.calls[index], task)));
   await Promise.all([f.runner.after(f.calls[1], args[1], f.text(1)), f.runner.after(f.calls[0], args[0], f.text(0))]);
   const saved = f.checkpoint.read(f.runtime.sessionID).checkpoint;
-  assert.equal(saved.stable.phase, 'mdd-apply'); assert.equal(saved.attempt.state, 'released');
+  assert.equal(saved.stable.phase, 'mdd-apply'); assert.equal(saved.attempt.state, 'settled');
   assert.deepEqual(saved.data.workerState.completed.map(member => member.taskID), ['T1', 'T2']);
   assert.equal(f.ownership.read(ready.runID).state, 'idle');
   const unsupported = new PhaseRunner(f.inspect, { ...f.options, workerCapability: undefined });
-  assert.equal((await unsupported.restore(f.runtime)).restored, false);
-  assert.equal(unsupported.status(f.runtime.sessionID).task, undefined);
+  assert.equal((await unsupported.restore(f.runtime)).restored, true);
+  const serial = unsupported.status(f.runtime.sessionID);
+  assert.equal(serial.tasks, undefined); assert.equal(serial.task.subagent_type, 'mdd-apply');
   const restored = new PhaseRunner(f.inspect, f.options);
   assert.deepEqual(await restored.restore(f.runtime), { restored: true });
   const next = restored.status(f.runtime.sessionID); assert.equal(next.tasks.length, 1);
   const third = { sessionID: f.runtime.sessionID, callID: 'third' };
   const dispatched = await restored.before(third, next.tasks[0]);
   assert.match(dispatched.prompt, /Assigned worker task:.*T3/);
-  await restored.after(third, dispatched, f.text(0));
+  await restored.after(third, dispatched, reportDocument({ completed: ['T3'], evidenceSummary: 'Finished dependent task.',
+    artifact: 'Dependent implementation evidence.', changes: ['src/a.ts'], checks: [] }));
   assert.equal(restored.status(f.runtime.sessionID).phase, 'mdd-verify');
 });
 
@@ -248,14 +341,16 @@ test('checkpoint rejects duplicate task/call evidence and contradictory worker a
   assert.throws(() => validateWorkerState({ completed: [{ taskID: 'T1', callID: 'invented', text: f.text(0) }] }, saved.data.planned, saved.data.calls));
 });
 
-test('large member artifacts remain durable while phase aggregation stays bounded', async t => {
+test('large member artifacts remain durable with distinct bounded artifacts for every result', async t => {
   const f = await fixture(t); const ready = f.runner.status(f.runtime.sessionID);
   const args = await Promise.all(ready.tasks.map((task, index) => f.runner.before(f.calls[index], task)));
-  const texts = ['a', 'b'].map(name => reportDocument({ evidenceSummary: `Finished ${name}.`, artifact: name.repeat(15000), changes: [`src/${name}.ts`], checks: [] }));
+  const texts = ['a', 'b'].map((name, index) => reportDocument({ completed: [`T${index + 1}`], evidenceSummary: `Finished ${name}.`, artifact: name.repeat(15000), changes: [`src/${name}.ts`], checks: [] }));
   await f.runner.after(f.calls[1], args[1], texts[1]);
   await f.runner.after(f.calls[0], args[0], texts[0]);
   const done = f.runner.status(f.runtime.sessionID);
-  assert.equal(done.phase, 'mdd-verify'); assert.match(done.artifact.content, /artifact sha256=/);
+  assert.equal(done.phase, 'mdd-verify'); assert.equal(done.artifact.content, 'b'.repeat(15000));
+  const saved = f.checkpoint.read(f.runtime.sessionID).checkpoint;
+  assert.deepEqual(saved.data.dependencies.slice(1).map(item => item.content), ['a'.repeat(15000), 'b'.repeat(15000)]);
   assert.deepEqual(f.checkpoint.read(f.runtime.sessionID).checkpoint.data.workerState.completed.map(member => member.text), texts);
 });
 

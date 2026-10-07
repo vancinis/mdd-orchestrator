@@ -4,6 +4,7 @@ import { checkReportForm, checkRiskReportForm } from '../dist/report-check.js';
 import { reportFormatLines } from '../dist/phase-report.js';
 import { riskReportFormatLines } from '../dist/risk.js';
 import { reportDocument, traceFixture } from './adapter-fixture.mjs';
+import * as checker from '../dist/report-check.js';
 
 const planReport = (overrides = {}) => reportDocument({
   outcome: 'passed', evidenceSummary: 'The plan links every accepted scenario to a deliverable.',
@@ -95,6 +96,14 @@ test('checking is pure: the same document checks the same way every time', () =>
   const first = checkReportForm('mdd-plan', text);
   const second = checkReportForm('mdd-plan', text);
   assert.deepEqual(first, second);
+});
+
+test('Apply report form requires exactly one stable completed ID without claiming to validate assignment', () => {
+  const data = { changes: ['src/first.ts'] };
+  for (const completed of [undefined, [], ['first', 'second'], ['first', 'first'], ['bad/id']]) {
+    assert.equal(checkReportForm('mdd-apply', reportDocument({ evidenceSummary: 'Implemented.', artifact: 'Batch.', ...data, completed })).ok, false);
+  }
+  assert.equal(checkReportForm('mdd-apply', reportDocument({ evidenceSummary: 'Implemented.', artifact: 'Batch.', ...data, completed: ['first'] })).ok, true);
 });
 
 const riskVerdict = (overrides = {}) => ({
@@ -205,5 +214,22 @@ test('a malformed risk envelope is rejected the same way a malformed phase repor
     const checked = checkRiskReportForm(text);
     assert.equal(checked.ok, false);
     assert.equal(checked.problems.length, 1, `one problem for ${typeof text}`);
+  }
+});
+
+test('security checker rejects missing data even on failure and rejects envelope authority fields', () => {
+  assert.equal(typeof checker.checkSecurityReportForm, 'function');
+  for (const outcome of ['passed', 'failed']) {
+    const result = checker.checkSecurityReportForm(reportDocument({ outcome, evidenceSummary: 'Unknown coverage.',
+      how: 'No snapshot was supplied.', artifact: 'Cannot inspect source.' }));
+    assert.equal(result.ok, false);
+    assert.ok(result.problems.some(problem => /security/.test(problem)));
+  }
+  const extra = checker.checkSecurityReportForm(JSON.stringify({ outcome: 'failed', evidenceSummary: 'Unknown.',
+    how: 'No source.', artifact: 'Incomplete.', phase: 'mdd-apply', security: {} }));
+  assert.equal(extra.ok, false);
+  assert.ok(extra.problems.some(problem => /phase/.test(problem)));
+  for (const text of ['', ' ', 'x'.repeat(20001), undefined, 42]) {
+    assert.equal(checker.checkSecurityReportForm(text).ok, false);
   }
 });
