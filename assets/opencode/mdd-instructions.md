@@ -21,6 +21,10 @@ unrelated failures, and do not expand the change beyond what the plan authorizes
 publishing a pull request, installing upgrades and editing global configuration are outside every
 phase unless the task prompt says otherwise.
 
+A dispatch is a scoped worker assignment only when its prompt carries a separate line starting
+with "Assigned worker task:" or "Assigned read-only work item:" that holds the assignment as JSON.
+Without such a line no footprint was declared because none applies, and nothing in this paragraph
+or in the worker limits of your agent definition restricts the phase.
 For an explicit scoped worker assignment, obey its complete read/write footprint and assigned task
 or read-only purpose. Apply writes use automatically supplied formatter-free mdd_worker_edit only;
 built-in edit/write/patch are denied. No shell, Code Mode, installers, formatters, tests/builds,

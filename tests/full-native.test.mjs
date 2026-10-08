@@ -1776,6 +1776,57 @@ test('a run lost mid-route keeps its plan reachable as read-only data', async t 
   assert.equal(fresh.priorRun, undefined);
 });
 
+// The incident: "Continúa el issue #433" in a new conversation started a second run from the bare
+// sentence, while the run that had planned that issue sat in the same workspace. A new
+// conversation now sees it, with how it resumes, and the advertised route actually works.
+test('a new conversation finds a run recorded by another one and can take it over', async t => {
+  const f = await fixture(t, { memoryEnabled: false });
+  await f.phase();
+  const live = await f.status();
+  assert.equal(live.state, 'ready');
+  assert.equal(live.workspaceRuns, undefined, 'a conversation with its own run is not sent elsewhere');
+  const other = 'ses_other';
+  const model = { providerID: 'contract-only', modelID: 'model' };
+  const say = text => f.histories.set(other, [
+    { info: { id: `user-${other}`, sessionID: other, role: 'user' }, parts: [{ type: 'text', text, sessionID: other, messageID: `user-${other}` }] },
+    { info: { id: `msg-${other}`, sessionID: other, role: 'assistant', agent: 'mdd-orchestrator', ...model, path: { cwd: f.root, root: f.root } }, parts: [] },
+  ]);
+  f.sessions.set(other, { id: other, agent: 'mdd-orchestrator', directory: f.root, projectID: 'project' });
+  // Restoring a transferred run re-reads its exact native request, which the fixture never needed.
+  f.input.client.session.message = async ({ path }) => ({ data: f.histories.get(path.id)?.find(item => item.info.id === path.messageID) });
+  say('Continúa el objetivo anterior.');
+  const context = { ...f.runtime, sessionID: other, messageID: `msg-${other}`, abort: new AbortController().signal };
+  // Read through the default compact view: that is what a coordinator sees before deciding.
+  const idle = JSON.parse(await f.hooks.tool.mdd_status.execute({}, context));
+  assert.equal(idle.state, 'not-started');
+  assert.equal(idle.workspaceRuns.length, 1);
+  const [found] = idle.workspaceRuns;
+  assert.equal(found.runID, live.runID);
+  assert.equal(found.sessionID, f.runtime.sessionID);
+  assert.equal(found.requirements, f.requirements);
+  assert.deepEqual(found.passed, ['mdd-explore', 'mdd-plan']);
+  assert.equal(found.phase, 'mdd-apply');
+  assert.equal(found.resume, 'transfer');
+  assert.equal(idle.task, undefined, 'a listed run authorizes nothing');
+  assert.match(idle.nextAction.why, /workspaceRuns/);
+  assert.match(idle.nextAction.why, /do not call mdd_start/);
+  // The resume hint is the transfer projection's own answer, so following it succeeds.
+  const request = `Continúa sourceSessionID=${found.sessionID} runID=${found.runID}`;
+  say(request);
+  const moved = JSON.parse(await f.hooks.tool.mdd_transfer.execute({ sourceSessionID: found.sessionID, runID: found.runID, userText: request }, context));
+  assert.equal(moved.transfer?.state, 'confirmed', JSON.stringify(moved));
+  assert.equal(moved.runID, live.runID);
+  // A third conversation never sees the copy the run left behind in its old conversation.
+  const third = 'ses_third';
+  f.sessions.set(third, { id: third, agent: 'mdd-orchestrator', directory: f.root, projectID: 'project' });
+  f.histories.set(third, [
+    { info: { id: `user-${third}`, sessionID: third, role: 'user' }, parts: [{ type: 'text', text: 'Hola.', sessionID: third, messageID: `user-${third}` }] },
+    { info: { id: `msg-${third}`, sessionID: third, role: 'assistant', agent: 'mdd-orchestrator', ...model, path: { cwd: f.root, root: f.root } }, parts: [] },
+  ]);
+  const later = JSON.parse(await f.hooks.tool.mdd_status.execute({}, { ...context, sessionID: third, messageID: `msg-${third}` }));
+  assert.ok(!(later.workspaceRuns ?? []).some(run => run.sessionID === f.runtime.sessionID));
+});
+
 test('a preserved run restores no approval and no live consent receipt', async t => {
   const f = await fixture(t, { mode: 'interactive', partial: true, memoryEnabled: false });
   await f.answer();

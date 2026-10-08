@@ -132,9 +132,13 @@ export function nextAction(status: unknown): NextAction | undefined {
       why: 'Work is in flight. Wait for its outcome and read mdd_status again; never redispatch a task that has not reported, and never infer an answer from prose.' };
   }
 
+  // "Continúa el issue #433" reached mdd_start as a new objective because this was the whole
+  // answer: start with the user's text. The run that had already planned that issue was recorded
+  // in this workspace all along; recalling it is the step that has to come first.
   if (state === 'not-started' || state === 'recoverable') {
+    const recorded = Array.isArray(value.workspaceRuns) && value.workspaceRuns.length > 0;
     return { tool: 'mdd_start',
-      why: 'No run is active here. For an implementation request, call mdd_start once with requirements equal to the exact latest native user text. For an information-only question, answer directly or use mdd_contextual_explore instead: that route needs no run.' };
+      why: `No run is active here. Before starting anything, recall where the project stands: ${recorded ? 'workspaceRuns lists earlier runs recorded in this workspace; compare the request with them, and also ' : ''}search project memory when memory tools are available (recent project context, plus the request's own terms such as issue numbers or feature names). If the request continues recorded work, it is not a new objective: do not call mdd_start. Tell the user where that run stopped and how it resumes${recorded ? ' (its resume field: transfer only after the user\'s own message names sourceSessionID=<id> runID=<id>; source-conversation means it continues in its own conversation)' : ''}, and let them choose. For a new implementation request, call mdd_start once with requirements equal to the exact latest native user text, handing what you found over as context. For an information-only question, answer directly or use mdd_contextual_explore instead: that route needs no run.` };
   }
 
   return undefined;

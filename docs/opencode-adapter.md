@@ -624,7 +624,7 @@ for corrections through `mdd-apply`**. Nothing grants fix, commit, publication o
 | Failure | Infrastructure failures never fabricate phase results. Read-only phases may retry with failure context, then use one tracked native fallback after `DELEGATION_ATTEMPTS` (3). Apply is different: uncertain writes, failed native results or interrupted actors block with pending recovery protection, never automatic redispatch. Unknown child termination remains `await-result`. A malformed completed report permits only bounded report restatement, not substantive work. A reported phase failure blocks until explicit recovery. `mdd_status` never grants approval or dispatches by itself. |
 | Recovery | No MDD state is terminal. `mdd_reset` releases the current attempt (`scope: phase`) or forgets the run for this conversation (`scope: run`), clearing the local progress marker. Scope `phase` also covers work waiting on a person rather than on an actor: a run stopped at an approval returns to `await-approval` with that question re-armed, and an intake stopped before any run re-opens its pending question. Neither prepares a phase nobody authorized. When Verify reports failure, status names `reworkable: "mdd-apply"` and `scope: rework` sends the run back to Apply to correct what it found, instead of re-checking the unchanged implementation or filing a material change. It needs `userText`, the user's exact latest message choosing the correction; the failed verification becomes Apply's newest dependency artifact, earlier changes are kept, and Verify follows through the route's ordinary approval. Recorded artifacts, memory and `previousRuns` are never deleted by a reset, and `scope: run` sets the preserved record aside under a discarded name rather than destroying it. |
 | Handoff budget | Each phase prompt carries the artifacts it depends on. A seven-phase route holding large artifacts outgrows what a dispatched task can be delivered at, and the phases that paid for it were the last ones. Artifacts are therefore inlined newest-first while the prompt stays within 38000 bytes, the size that still fits inside the 46000-byte payload budget with the rest of the status; older ones travel as their own recorded `evidenceSummary` plus the ref that identifies the complete text in the artifact store. Shedding is ordered and announced in the prompt, and `mdd_status` reports it as `handoff`. Contextual findings are not compacted: they accumulate by the user's own choice, and `PHASE_CONTEXT_MAX_BYTES` (96000) remains the absolute bound that fails explicitly rather than cutting anything. |
-| Payload budget | Every MDD tool serializes through `statusPayload`, bounded to 46000 bytes so the host cannot truncate a result and make the exact `task`/`question` uncopyable. Artifact history is reported as refs only (content lives in the artifact store and is already injected into the next phase prompt), and `brief` accompanies only `mode: "inline"`. Over budget, fields are dropped in the fixed order `priorRun, previousRuns, contexts, contextualReport, providedContext, artifacts, artifactAttempts, artifact, concerns, report, planned, decisions, acceptance, verification, workflow` and listed in `omitted`; `task`, `brief`, `question`, `state`, `phase`, `next`, `mode`, `reason`, `runID`, `sessionID`, `runtime`, `questionReceipts`, `recovery`/`pendingStart`, `notice`, `provenance`, `reset`, `evidence`, `coverage` and `recoverable` are never dropped. A task too large to fit is reported in `budget.problem`, never cut. |
+| Payload budget | Every MDD tool serializes through `statusPayload`, bounded to 46000 bytes so the host cannot truncate a result and make the exact `task`/`question` uncopyable. Artifact history is reported as refs only (content lives in the artifact store and is already injected into the next phase prompt), and `brief` accompanies only `mode: "inline"`. Over budget, fields are dropped in the fixed order `priorRun, previousRuns, workspaceRuns, contexts, contextualReport, providedContext, artifacts, artifactAttempts, artifact, concerns, report, planned, decisions, acceptance, verification, workflow` and listed in `omitted`; `task`, `brief`, `question`, `state`, `phase`, `next`, `mode`, `reason`, `runID`, `sessionID`, `runtime`, `questionReceipts`, `recovery`/`pendingStart`, `notice`, `provenance`, `reset`, `evidence`, `coverage` and `recoverable` are never dropped. A task too large to fit is reported in `budget.problem`, never cut. |
 | Next phase | Successful nonfinal Apply batches prepare the next assigned Apply task after durable completion. Final Apply advances to Verify through ordinary automatic/interactive semantics. Only final corroborated Verify returns `complete`. |
 | Other sessions | Unrelated tasks outside MDD are untouched. `mdd-*` native tasks are rejected unless they exactly match a registered parent run or an issued read-only investigation. |
 
@@ -1129,6 +1129,28 @@ new native user text — which still requires a fresh preflight — or `mdd_rese
 which discards the record.
 
 ### Continuing a run in a new conversation
+
+**Finding it first.** With no run active, `mdd_status` adds `workspaceRuns`: up to six runs other
+conversations recorded in this workspace, newest first, read from their `.mdd/run-*.json` records.
+Each row is `capability: 'data-only'` and names `runID`, `sessionID`, the clipped `requirements`
+and `goal`, the labels of the context it was given, the phases that passed, the last result, its
+record `file`, and `resume`:
+
+| `resume` | Meaning |
+|---|---|
+| `transfer` | Settled where a transfer projects and its owner is idle: this conversation can take it over once the user's own message names `sourceSessionID=<id> runID=<id>`. |
+| `transfer-rework` | The same after a failed verification; that message must also say `rework`. |
+| `source-conversation` | It goes on only where it lives (for example `mdd_reset` scope phase there for a blocked phase), or its evidence seeds a new run started with new consent. |
+| `finished` | It completed; new work is a new objective. |
+
+The hint is the transfer projection's own answer, not a copy of its rules, so `transfer` is a
+promise `mdd_transfer` keeps. Left out: this conversation's own record (that is `priorRun`),
+records with no phase result or investigation, set-aside (`.discarded.json`) records, and a run
+that moved, whose old copy is not where it lives. The rows authorize nothing; a conversation with
+its own run never reads them. The coordinator reads them, together with project memory when
+memory tools are available, before `mdd_start`: a request that continues recorded work is not a
+new objective. This exists because "Continúa el issue #433" once started a second run from that
+bare sentence while the run that had already planned the issue sat blocked one file away.
 
 A run belongs to the conversation that owns it, but it can be moved:
 

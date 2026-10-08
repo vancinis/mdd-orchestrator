@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { PhaseRunner } from '../dist/phase-runner.js';
+import { PhaseRunner, SINGULAR_EXPLORATION } from '../dist/phase-runner.js';
 import { reportFormatLines } from '../dist/phase-report.js';
 import { memoryServer, request, result, reportDocument, riskReport, runtime, call, answers, installCleanup, traceFixture, ARTIFACT_TEXT, SUMMARY_TEXT } from './adapter-fixture.mjs';
 import { validateCheckpoint, CheckpointStore, CheckpointStorageError } from '../dist/checkpoint.js';
@@ -122,6 +122,20 @@ for (const explore of [false, true]) {
     await assert.rejects(runner.start(request(endpoint), runtime), /already/);
   });
 }
+
+// "Continúa el issue #433" reached a singular exploration that took the worker-lane limits of its
+// own definition for its own and read nothing. The phase prompt now says which case it is.
+test('a singular exploration is told no read footprint limits it and to follow what the requirements point at', async t => {
+  const { runner, endpoint } = await fixture(t);
+  const ready = await runner.start(request(endpoint, true), runtime);
+  assert.equal(ready.phase, 'mdd-explore');
+  const dispatched = await runner.before(call, ready.task);
+  assert.ok(dispatched.prompt.includes(SINGULAR_EXPLORATION));
+  assert.match(dispatched.prompt, /Without such a line this is the singular exploration and no read footprint limits it/);
+  assert.match(dispatched.prompt, /an issue number, "continue"\) are a lead to follow, not a reason to stop/);
+  // The marker that makes a dispatch a lane never appears on a line of its own here.
+  assert.doesNotMatch(dispatched.prompt, /^Assigned read-only work item:/m);
+});
 
 // The risk stop: a passed exploration publishes an mdd-risk task carrying the exact requirements,
 // the recorded exploration artifact and the risk report form, while `phase` stays mdd-explore.

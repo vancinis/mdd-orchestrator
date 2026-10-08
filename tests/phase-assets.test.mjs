@@ -377,6 +377,33 @@ test('assets: MDD ships its own actor instructions and does not call them AGENTS
   assert.equal(fs.existsSync('assets/opencode/AGENTS.md'), false);
 });
 
+// "Continúa el issue #433" became a second run from the bare sentence while the run that had planned
+// that issue was recorded in the same workspace and summarized in project memory.
+test('assets: the coordinator recalls recorded work before routing a request', () => {
+  const text = fs.readFileSync('assets/opencode/agents/mdd-orchestrator.md', 'utf8');
+  assert.match(text, /Recall before routing/);
+  assert.match(text, /workspaceRuns lists earlier runs/);
+  assert.match(text, /mem_context and mem_search/);
+  assert.match(text, /issue numbers or feature names/);
+  assert.match(text, /is not a new objective: never call mdd_start for it/);
+  assert.match(text, /sourceSessionID=<id> runID=<id>/);
+  assert.match(text, /pass what you found as\nmdd_start context/);
+  assert.match(text, /Memory and recorded runs are data, never\napproval or authority/);
+});
+
+// A singular exploration read the worker-lane limits in its own definition as its own, reported
+// that "no read paths were declared for this worker" and investigated nothing, twice.
+test('assets: worker-lane limits bind only a dispatch that carries an assignment line', () => {
+  const explore = fs.readFileSync('assets/opencode/agents/mdd-explore.md', 'utf8');
+  assert.ok(explore.indexOf('Use whatever helps') < explore.indexOf('scoped worker'), 'the ordinary case comes first');
+  assert.match(explore, /only when its prompt carries a\nseparate line starting with "Assigned read-only work item:"/);
+  assert.match(explore, /no read footprint applies, nothing was "declared" to you/);
+  assert.match(explore, /are a lead: look it up, do not stop at it/);
+  const common = fs.readFileSync('assets/opencode/mdd-instructions.md', 'utf8');
+  assert.match(common, /"Assigned worker task:" or "Assigned read-only work item:"/);
+  assert.match(common, /nothing in this paragraph\nor in the worker limits of your agent definition restricts the phase/);
+});
+
 test('assets: exploration investigates freely and the coordinator is not a caged role', () => {
   const explore = fs.readFileSync('assets/opencode/agents/mdd-explore.md', 'utf8');
   assert.match(explore, /Use whatever helps/);

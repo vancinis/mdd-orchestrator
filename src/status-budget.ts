@@ -47,7 +47,7 @@ export const STATUS_PROTECTED_FIELDS: readonly string[] = Object.freeze([
  * the next phase prompt already carries the dependency artifacts it needs.
  */
 export const STATUS_DROP_ORDER: readonly string[] = Object.freeze([
-  'priorRun', 'previousRuns', 'contexts', 'contextualReport', 'providedContext', 'artifacts', 'artifactAttempts', 'artifact',
+  'priorRun', 'previousRuns', 'workspaceRuns', 'contexts', 'contextualReport', 'providedContext', 'artifacts', 'artifactAttempts', 'artifact',
   'concerns', 'expandedReport', 'report', 'visual', 'planned', 'decisions', 'acceptance', 'verification',
   // A rejected report is the work itself, waiting to be restated. It sheds late, because dropping
   // it turns a free restatement into re-running the phase that produced it.
@@ -75,11 +75,15 @@ export const STATUS_DROP_ORDER: readonly string[] = Object.freeze([
  * sends the coordinator to read it. Shedding it by default would answer a recovery with a
  * pointer to evidence the same payload had just withheld.
  *
+ * `workspaceRuns` is kept for the same reason. It appears only while no run is active, it is
+ * bounded on its own (a handful of clipped rows), and it is exactly what the coordinator has to
+ * read before deciding whether a request is new work or the continuation of a recorded run.
+ *
  * Everything else in the drop order is reference material that a later phase re-reports, that
  * the artifact store still holds, or that detail="full" returns.
  */
 export const STATUS_COMPACT_KEEP: readonly string[] = Object.freeze([
-  'rejected', 'report', 'visual', 'providedContext', 'artifacts', 'handoff', 'workflow', 'priorRun',
+  'rejected', 'report', 'visual', 'providedContext', 'artifacts', 'handoff', 'workflow', 'priorRun', 'workspaceRuns',
 ]);
 
 /**

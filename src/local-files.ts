@@ -248,6 +248,27 @@ export class LocalFiles {
   }
 
   /**
+   * The live run records of every conversation in this workspace, newest first. It is the only
+   * listing this class offers, and it yields only names `read` already accepts: the same fixed
+   * pattern, never a discarded copy, never a link. Listing therefore reaches nothing a known
+   * conversation ID did not already reach; it only removes the need to know that ID in advance.
+   */
+  runRecords(): { name: `.mdd/run-${string}.json`; modified: number }[] {
+    directory(this.#root);
+    const parent = join(this.#root, '.mdd');
+    if (!fs.lstatSync(parent, { throwIfNoEntry: false })) return [];
+    directory(parent);
+    const records: { name: `.mdd/run-${string}.json`; modified: number }[] = [];
+    for (const entry of fs.readdirSync(parent)) {
+      if (!/^run-[a-f0-9]{64}\.json$/.test(entry)) continue;
+      const stat = fs.lstatSync(join(parent, entry), { throwIfNoEntry: false });
+      if (!stat?.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) continue;
+      records.push({ name: `.mdd/${entry}` as `.mdd/run-${string}.json`, modified: stat.mtimeMs });
+    }
+    return records.sort((a, b) => b.modified - a.modified || a.name.localeCompare(b.name));
+  }
+
+  /**
    * Ownership reads return the last committed bytes. A writer's lock does not hide them: its
    * replacement is an atomic rename, so a reader sees either the old or the new record, never a
    * torn one. Every ownership decision is still made under the writer lock by updateStrict.

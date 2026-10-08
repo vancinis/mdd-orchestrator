@@ -28,6 +28,7 @@ import type { StatusView } from './status-budget.js';
 import { phaseName } from './phase-assets.js';
 import { recordLessonQuietly } from './lessons.js';
 import { recordRunQuietly } from './run-ledger.js';
+import { workspaceRuns } from './workspace-runs.js';
 import { withNextAction } from './next-action.js';
 import { collapseDispatchPrompts } from './dispatch-transcript.js';
 import { checkReportForm, checkRiskReportForm, checkSecurityReportForm } from './report-check.js';
@@ -757,6 +758,7 @@ const plugin: Plugin = async input => {
   // blocking live work; the progress marker remains the duplicate-dispatch guard either way.
   const checkpoint = new CheckpointStore(dataRoot);
   const ownership = new RunOwnershipStore(dataRoot);
+  const dossier = new RunDossierStore(dataRoot);
   const runner = new PhaseRunner(inspector, {
     workers: profile.workers,
     ...(workerHost ? { workerCapability: { phase: 'mdd-explore' as const, readOnly: true as const,
@@ -766,7 +768,7 @@ const plugin: Plugin = async input => {
     // than dying with it. Within a session the two are the same checkout, so nothing else shifts.
     telemetry: (_directory, value, now) => recordTelemetry(dataRoot, value, now),
     progress: new ProgressGuard(dataRoot),
-    dossier: new RunDossierStore(dataRoot),
+    dossier,
     checkpoint, ownership,
     lessons: (_directory, value, now) => recordLessonQuietly(dataRoot, value, now),
     ledger: (_directory, value, now) => recordRunQuietly(dataRoot, value, now),
@@ -1151,7 +1153,7 @@ const plugin: Plugin = async input => {
         },
       }),
       mdd_start: tool({
-        description: 'Start implementation with exact latest native user text, or exact pendingStart requirements proven by legacy setup-only history. Never pass continuation/status text as a new objective, and never use it to commit, push or open the PR of a recorded run: that delivery is not a new objective and needs no preflight. Never use it for a precise, small edit of any kind that the user spelled out: make that edit directly, asking only when it cannot be located unambiguously. Optional Engram memory bootstraps the actual native parent only when enabled.',
+        description: 'Start implementation with exact latest native user text, or exact pendingStart requirements proven by legacy setup-only history. Never pass continuation/status text as a new objective: first read mdd_status workspaceRuns and project memory, and when the request continues recorded work, tell the user how that run resumes instead of starting. Never use it to commit, push or open the PR of a recorded run: that delivery is not a new objective and needs no preflight. Never use it for a precise, small edit of any kind that the user spelled out: make that edit directly, asking only when it cannot be located unambiguously. Optional Engram memory bootstraps the actual native parent only when enabled.',
         args: {
           requirements: tool.schema.string().min(1).describe('Exact latest native user text or authenticated pendingStart requirements, without rewriting. Never substitute continuation text for a pending objective.'),
           context: tool.schema.object({ label: tool.schema.string().min(1), content: tool.schema.string().min(1) }).optional()
@@ -1192,7 +1194,7 @@ const plugin: Plugin = async input => {
         },
       }),
       mdd_status: tool({
-        description: 'Read this actual parent session MDD state; never retries, resets, or approves a phase. Returns the compact view: the state machine, the next call, the task to dispatch, the report form, and any rejected report waiting to be restated. Pass detail="full" only when you actually have to inspect the held acceptance map, decisions, plan, concerns, artifacts or run history — a full snapshot is re-read on every later turn of this conversation.',
+        description: 'Read this actual parent session MDD state; never retries, resets, or approves a phase. Returns the compact view: the state machine, the next call, the task to dispatch, the report form, and any rejected report waiting to be restated. With no run here, workspaceRuns lists earlier runs recorded by other conversations in this workspace and how each resumes: read it before mdd_start. Pass detail="full" only when you actually have to inspect the held acceptance map, decisions, plan, concerns, artifacts or run history — a full snapshot is re-read on every later turn of this conversation.',
         args: { detail: tool.schema.enum(['compact', 'full']).optional().describe('compact (default) returns protocol fields and what the next call needs; full adds the held workflow snapshot, acceptance, decisions, plan, concerns, artifacts and previous runs.') },
         async execute(args, context) {
           enter(context, 'mdd_status');
@@ -1243,8 +1245,16 @@ const plugin: Plugin = async input => {
             try { const seen = await runner.probe(context.sessionID, context); if (seen) liveness = { liveness: seen }; }
             catch { /* Status never fails because a probe did. */ }
           }
+          // With no run here, the question worth answering before any start is whether this
+          // workspace already holds the work being asked for. Only an idle conversation pays for
+          // the listing; a live run never re-reads other conversations' records on every turn.
+          let recorded = {};
+          if (['not-started', 'recoverable'].includes(String(status.state)) && !live) {
+            const runs = workspaceRuns(context, { dossier, checkpoint, progress: new ProgressGuard(dataRoot), ownership });
+            if (runs.length) recorded = { workspaceRuns: runs };
+          }
           return reply({
-            ...status, ...recovery, ...liveness,
+            ...status, ...recovery, ...liveness, ...recorded,
             ...(() => { const receipt = runner.owner(context.sessionID)?.receipt;
               return receipt ? { transfer: { state: 'confirmed', sourceSessionID: receipt.sourceSessionID, operationID: receipt.operationID } } : ambiguousTransfer(context.sessionID); })(),
             runtime: { sessionID: context.sessionID, directory: context.directory, worktree: context.worktree, agent: context.agent },

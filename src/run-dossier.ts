@@ -161,6 +161,23 @@ export class RunDossierStore {
     }
   }
 
+  /**
+   * The newest live records across every conversation of this workspace, at most `limit` files.
+   * A conversation only ever read its own record, so a new conversation asked to "continue issue
+   * #433" saw nothing at all while the run that had already planned it sat one file away. Damaged
+   * or foreign files are skipped without quoting them, exactly as `read` refuses to.
+   */
+  recent(limit: number): { file: string; dossier: RunDossier }[] {
+    const found: { file: string; dossier: RunDossier }[] = [];
+    for (const { name } of this.#files.runRecords().slice(0, Math.max(0, limit))) {
+      try {
+        const text = this.#files.read(name, DOSSIER_MAX_BYTES);
+        if (text !== undefined) found.push({ file: name, dossier: parse(JSON.parse(text)) });
+      } catch { /* Another conversation's unreadable record is not this conversation's problem. */ }
+    }
+    return found;
+  }
+
   /** Explicit discard. Preserved evidence never keeps a conversation occupied once the user clears it. */
   clear(parent: string): void { this.#files.remove(this.#name(parent)); }
 
