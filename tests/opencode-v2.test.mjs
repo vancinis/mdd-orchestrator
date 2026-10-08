@@ -490,7 +490,7 @@ test('V2 setup registers native tools, model variants and ordered isolation perm
   assert.equal(f.agents.find(agent => agent.id === 'general').permissions.at(-1).effect, 'deny');
 });
 
-for (const [enabled, version] of [[true, '2.0.22'], [false, '2.0.22'], [true, 'unproven']]) test(`production V2 captures bounded Apply capability and preference (workers=${enabled}, host=${version})`, async t => {
+for (const [enabled, version] of [[true, '2.0.22'], [false, '2.0.22'], [true, '2.0.24']]) test(`production V2 captures bounded Apply capability and preference (workers=${enabled}, host=${version})`, async t => {
   const f = await fixture(t, true, enabled, version);
   f.user('Implement the requested change.');
   await f.call('mdd_start', { requirements: 'Implement the requested change.' });
@@ -508,8 +508,8 @@ for (const [enabled, version] of [[true, '2.0.22'], [false, '2.0.22'], [true, 'u
     content: `<subagent sessionID="plan-child" state="completed">\n${text}\n</subagent>`,
   } });
   const apply = await f.call('mdd_status', {});
-  if (enabled && version === '2.0.22') {
-    assert.equal(apply.tasks?.length, 2, 'Registered formatter-free editor enables the two independent Apply members.');
+  if (enabled) {
+    assert.equal(apply.tasks?.length, 2, `Registered formatter-free editor enables the two independent Apply members on host ${version}.`);
     assert.equal(apply.task, undefined);
     assert.ok(f.tools.has('mdd_worker_edit'));
     for (const task of apply.tasks) await f.toolHooks.get('execute.before')(f.begin('subagent', task));

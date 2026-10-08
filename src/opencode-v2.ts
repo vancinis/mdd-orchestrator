@@ -184,9 +184,10 @@ export async function setupV2(ctx: Plugin.Context, createMotor: LegacyPlugin): P
       return { content: JSON.stringify(await workerHost.fence.edit(session, args, context.signal)) };
     },
   }));
-  // Bootstrap instruction/config behavior is part of the attestation, not just tool syntax.
-  // Unproven host versions keep Apply serial; the packaged dependency is exactly 2.0.22.
-  if (ctx.app.version === '2.0.22') workerHost.applyEditing = true;
+  // setupV2 only runs through the V2 plugin contract, so the host is already V2; no exact-version
+  // pin, which would silently drop Apply to serial on every host update. The worker fence and
+  // native progress binding remain the enforcement boundary and fail closed on their own.
+  workerHost.applyEditing = true;
   const hooks = await createMotor(input);
   const securityGuard = (hooks as SecurityRuntimeHooks)[SECURITY_RUNTIME_GUARD];
   const enforceSecurity = async (sessionID: string, name: string, args: unknown, agent: string): Promise<boolean> => {

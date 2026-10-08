@@ -163,8 +163,9 @@ end-to-end execution or interactive permission/UI behavior.
 **Production supports read-only exploration and formatter-free bounded Apply batches.** The captured
 `workers.enabled` preference alone never authorizes concurrent writes. Production supplies
 `workerCapability: { phase: 'mdd-explore', readOnly: true, applyEditing: true }` only after registering
-the scoped native editing primitive on pinned 2.0.22. Other host versions omit `applyEditing` and keep
-Apply serial. The old `{ confined: true }` constructor field remains synthetic-only; production never
+the scoped native editing primitive on the V2 host. There is no exact host-version pin: the V2
+entrypoint already implies a V2 host, and the fence still fails closed without native progress
+binding. The old `{ confined: true }` constructor field remains synthetic-only; production never
 enables that unfenced legacy role. Missing durable stores or incomplete scopes also keep dispatch serial.
 Capabilities are internal host attestations, never tool arguments or actor-controlled flags.
 `runner.workerAssignment({ sessionID, callID })` returns a detached assigned task/scope only for

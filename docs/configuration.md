@@ -120,7 +120,7 @@ startup snapshot does not change when the settings file changes.
 
 Existing version-1 files without `workers` remain valid and default to enabled in memory;
 reads never rewrite legacy files. An explicit save materializes the effective preference.
-**Production OpenCode 2.0.22 supports bounded independent exploration and Apply workers.**
+**Production OpenCode V2 supports bounded independent exploration and Apply workers.**
 The default-on preference permits at most two explicitly declared independent exploration items,
 both for `mdd_start.exploration.workItems` (when the route begins with exploration) and
 `mdd_contextual_explore.workItems`. It never invents a split or adds an exploration phase.
@@ -141,8 +141,8 @@ no additional human workflow step. It supports bounded UTF-8 create, exact repla
 within declared writes. Generic native editing, patches and all alternate execution routes are denied.
 Runtime/config/instruction writes, aliases and unproven effects stay serial. Bootstrap file/env
 substitutions, instruction declarations, overlapping local config paths, opaque JSONC and project-local
-plugin effects also stay serial; the adapter does not guess their dependency footprint. Unproven host versions
-also stay serial; the scoped editor capability is attested only on pinned 2.0.22. A refused operation
+plugin effects also stay serial; the adapter does not guess their dependency footprint. The scoped editor
+capability is attested on any V2 host, without an exact version pin. A refused operation
 reports its blocker and retained work rather than switching editors or replaying a sibling.
 
 The internal capable-host contract caps each phase batch at **two** independent foreground
