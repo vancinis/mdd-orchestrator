@@ -3,7 +3,6 @@ import { changed, executed } from './phase-evidence.js';
 import type { Deliverable } from './phase-evidence.js';
 import { parsePhaseReport } from './phase-report.js';
 import { scopesConflict } from './worker-batch.js';
-import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { explorationItems, type ExplorationWorkItem } from './worker-batch.js';
 import type { CheckpointStore } from './checkpoint.js';
@@ -29,12 +28,12 @@ export type ExplorationRecord = {
 };
 
 export function explorationReport(text: string, callID?: string) {
-  if (!text.trim() || Buffer.byteLength(text) > 20000) throw new Error('Invalid exploration worker report size.');
+  if (!text.trim()) throw new Error('Invalid exploration worker report size.');
   const result = parsePhaseReport(text, 'mdd-explore');
   if (result.phase !== undefined && result.phase !== 'mdd-explore' || result.callID !== undefined && result.callID !== callID ||
       !['passed', 'failed'].includes(String(result.outcome)) || typeof result.evidenceSummary !== 'string' ||
-      !result.evidenceSummary.trim() || Buffer.byteLength(result.evidenceSummary) > 2000 ||
-      typeof result.artifact !== 'string' || !result.artifact.trim() || Buffer.byteLength(result.artifact) > 16000 ||
+      !result.evidenceSummary.trim() ||
+      typeof result.artifact !== 'string' || !result.artifact.trim() ||
       /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(result.artifact + result.evidenceSummary) ||
       /## Acceptance and plan links/.test(result.artifact) || executed(result.checks).length ||
       result.changes !== undefined && (!Array.isArray(result.changes) || result.changes.length))
@@ -187,9 +186,7 @@ export class ExplorationWorkers {
       const member = record.workerState.completed.find(member => member.taskID === item.id)!;
       return { item, report: explorationReport(member.text, member.callID) };
     });
-    const full = parts.map(({ item, report }) => `## ${item.purpose}\n\n${report.artifact}`).join('\n\n');
-    const artifact = Buffer.byteLength(full) <= 16000 ? full : parts.map(({ item, report }) =>
-      `## ${item.purpose}\n\n${report.evidenceSummary}\n\nComplete member evidence is retained in the exploration checkpoint.`).join('\n\n');
+    const artifact = parts.map(({ item, report }) => `## ${item.purpose}\n\n${report.artifact}`).join('\n\n');
     record.aggregate = JSON.stringify({ outcome: 'passed', evidenceSummary: 'Completed both independent read-only investigations.', artifact,
       concerns: parts.flatMap(({ report }) => Array.isArray(report.concerns) ? report.concerns : []).slice(0, 8) });
     record.state = 'aggregating'; this.persist();
@@ -208,13 +205,13 @@ function id(value: unknown): value is string {
 
 /** Bind the existing sealed report to the task assigned by the adapter, never by actor claims. */
 export function workerReport(text: string, task: Deliverable, callID: string, runID?: string) {
-  if (!text.trim() || Buffer.byteLength(text) > 20000) throw new Error('Invalid worker report size.');
+  if (!text.trim()) throw new Error('Invalid worker report size.');
   const result = parsePhaseReport(text, 'mdd-apply');
   if ((result.phase !== undefined && result.phase !== 'mdd-apply') ||
       (runID !== undefined && result.runID !== undefined && result.runID !== runID) ||
       (result.callID !== undefined && result.callID !== callID) || !['passed', 'failed'].includes(String(result.outcome)) ||
-      typeof result.evidenceSummary !== 'string' || !result.evidenceSummary.trim() || result.evidenceSummary.length > 2000 ||
-      typeof result.artifact !== 'string' || !result.artifact.trim() || Buffer.byteLength(result.artifact) > 16000)
+      typeof result.evidenceSummary !== 'string' || !result.evidenceSummary.trim() ||
+      typeof result.artifact !== 'string' || !result.artifact.trim())
     throw new Error('Worker report does not match its exact assigned dispatch.');
   const files = changed(result.changes, result.noChangeReason);
   if (result.outcome === 'passed' ? !Array.isArray(result.completed) || result.completed.length !== 1 || result.completed[0] !== task.id
@@ -281,9 +278,7 @@ export function aggregateWorkerReports(state: WorkerState, planned: readonly Del
     if (!member) throw new Error('Cannot aggregate an incomplete worker phase.');
     return { task, ...workerReport(member.text, task, member.callID) };
   });
-  const full = ordered.map(({ task, result }) => `## ${task.id}\n\n${result.artifact}`).join('\n\n');
-  const artifact = Buffer.byteLength(full) <= 16000 ? full : ordered.map(({ task, result }) =>
-    `## ${task.id}\n\n${String(result.evidenceSummary).slice(0, 200)}\n\nComplete member evidence is retained in the checkpoint; artifact sha256=${createHash('sha256').update(String(result.artifact)).digest('hex')}.`).join('\n\n');
+  const artifact = ordered.map(({ task, result }) => `## ${task.id}\n\n${result.artifact}`).join('\n\n');
   return JSON.stringify({ outcome: 'passed', evidenceSummary: 'Completed all assigned implementation tasks.', artifact,
     changes: ordered.flatMap(({ files }) => files.files), checks: [],
     ...(ordered.every(({ files }) => !files.paths.length) ? { noChangeReason: 'Every assigned task reported that no change was needed.' } : {}) });

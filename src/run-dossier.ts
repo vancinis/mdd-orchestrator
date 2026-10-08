@@ -27,7 +27,7 @@ import type { PhaseResult } from './workflow.js';
 export const DOSSIER_VERSION = 1;
 
 /**
- * Generous enough for a full seven-phase route holding every 16000-byte artifact plus contextual
+ * Generous enough for a full seven-phase route with typical artifacts plus contextual
  * explorations and plan data, with headroom. Over-budget writes are not an error the run can see:
  * the store sheds artifact bodies first, since refs still identify what was produced.
  */

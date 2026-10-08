@@ -93,7 +93,7 @@ export class EngramHttp {
     this.#timeout = timeout;
   }
 
-  async #request(path: string, status: number, body?: unknown, list = false): Promise<Record<string, unknown>> {
+  async #request(path: string, status: number, body?: unknown, list = false, maxResponse = 131072): Promise<Record<string, unknown>> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.#timeout);
     try {
@@ -117,7 +117,7 @@ export class EngramHttp {
         const { done, value } = await reader.read();
         if (done) break;
         size += value.byteLength;
-        if (size > 131072) throw new Error('Response exceeds 128 KiB.');
+        if (size > maxResponse) throw new Error('Response exceeds 128 KiB.');
         chunks.push(value);
       }
       const data: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'));
@@ -206,7 +206,7 @@ export class EngramHttp {
   }
 
   async saveArtifact(title: string, content: string): Promise<number> {
-    if (!title.startsWith('MDD artifact v1:') || Buffer.byteLength(content) > 100000) {
+    if (!title.startsWith('MDD artifact v1:')) {
       throw new Error('Invalid artifact observation.');
     }
     await this.checkBinding();
@@ -269,11 +269,11 @@ export class EngramHttp {
       throw new Error('Invalid artifact observation reference.');
     }
     await this.checkBinding();
-    const value = await this.#request(`/observations/${id}`, 200);
+    // Artifacts have no size limit, so their readback is not held to the generic response cap.
+    const value = await this.#request(`/observations/${id}`, 200, undefined, false, Infinity);
     if (value.id !== id || value.deleted_at != null || value.session_id !== this.#binding.id ||
         value.project !== this.#binding.project || value.scope !== 'project' ||
-        value.type !== 'mdd-artifact' || value.title !== title || typeof value.content !== 'string' ||
-        Buffer.byteLength(value.content) > 100000) throw new Error('Artifact observation binding mismatch.');
+        value.type !== 'mdd-artifact' || value.title !== title || typeof value.content !== 'string') throw new Error('Artifact observation binding mismatch.');
     return value.content;
   }
 }

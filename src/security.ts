@@ -125,11 +125,11 @@ export const SECURITY_FIELD_SCHEMA = [
 
 export function securityReportFormatLines(): string[] {
   return [
-    'Report this standalone audit in English as Markdown using these exact headings, each once. Total report at most 20000 bytes.',
+    'Report this standalone audit in English as Markdown using these exact headings, each once.',
     '"## MDD Outcome" holding passed for a complete assessment (including findings), failed for inconclusive. This is inspection completion, never code safety or delivery approval.',
-    '"## MDD Summary" holding 1–2000 bytes: result and important coverage limitations. A no-findings result is not a claim that code is secure.',
-    '"## MDD How" holding 1–2000 bytes: concrete source-grounded inspection method and limits.',
-    '"## MDD Artifact" holding 1–16000 bytes: detailed findings, attack conditions, impact, recommended remediation and limitations for the orchestrator. Do not reuse MDD headings inside it.',
+    '"## MDD Summary" holding the result and important coverage limitations. A no-findings result is not a claim that code is secure.',
+    '"## MDD How" holding the concrete source-grounded inspection method and limits.',
+    '"## MDD Artifact" holding detailed findings, attack conditions, impact, recommended remediation and limitations for the orchestrator. Do not reuse MDD headings inside it.',
     `"## MDD Data" holding one fenced JSON block with exactly the standalone field security. ${SECURITY_FIELD_SCHEMA}`,
     'Never fix source, authorize mdd-apply, advance phases or approve delivery. This form check does not authenticate scope or evidence; final runtime snapshot binding is still required.',
   ];

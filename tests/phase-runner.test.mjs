@@ -699,7 +699,6 @@ for (const invalid of [
   () => '## MDD Outcome\n\npassed\n\n## MDD Summary\n\nDone.\n',
   text => text.replace('\npassed\n', '\nunknown\n'),
   text => text.replace(/## MDD Summary\n\n[^\n]+/, '## MDD Summary\n\n'),
-  text => text.replace(/(## MDD Artifact\n\n)[^\n]+/, `$1${'x'.repeat(16001)}`),
   text => text.replace('```json', '```json\nnot json'),
   text => `${text}\n## MDD Summary\n\nsecond one\n`,
 ]) {

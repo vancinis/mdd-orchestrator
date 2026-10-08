@@ -26,7 +26,7 @@ export function packagedSkillPath(name: PackagedSkillName): string {
   if (digest === 'absent') throw new Error(`The packaged ${name} skill is missing. Restore the MDD installation.`);
   const content = fs.readFileSync(path, 'utf8');
   const front = /^---\r?\n([\s\S]*?)\r?\n---\r?\n/.exec(content);
-  if (Buffer.byteLength(content) > 16000 || !front || !front[1]!.split(/\r?\n/).includes(`name: ${name}`)) {
+  if (!front || !front[1]!.split(/\r?\n/).includes(`name: ${name}`)) {
     throw new Error(`Invalid local ${name} skill.`);
   }
   return path;
@@ -61,7 +61,7 @@ export function mddInstructions(): PackagedSkill {
   const digest = fileDigest(path);
   if (digest === 'absent') throw new Error('The packaged MDD actor instructions are missing. Restore the MDD installation.');
   const content = fs.readFileSync(path, 'utf8');
-  if (Buffer.byteLength(content) > 16000 || !content.startsWith('# MDD actor instructions')) {
+  if (!content.startsWith('# MDD actor instructions')) {
     throw new Error('Invalid packaged MDD actor instructions.');
   }
   return { path, digest, content };

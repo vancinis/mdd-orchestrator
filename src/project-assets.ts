@@ -30,18 +30,23 @@ export const MDD_ASSETS = Object.freeze([
  */
 export const MDD_PACKAGED_ASSETS = Object.freeze([...MDD_ASSETS, 'assets/opencode/mdd-instructions.md',
   'assets/opencode/skills/cognitive-doc-design/SKILL.md', 'assets/opencode/skills/cognitive-doc-design/NOTICE']);
-export function assetText(root: string, name: string, max = 16000): { path: string; content: string; digest: string } {
+/** `max` is optional: without it the asset is read whole, with no size limit. */
+export function assetText(root: string, name: string, max?: number): { path: string; content: string; digest: string } {
   const path = scopedPath(root, name);
   const fd = fs.openSync(path, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
   try {
     const info = fs.fstatSync(fd);
     if (!info.isFile() || info.nlink !== 1) throw new Error(`Asset is not a safe regular file: ${name}.`);
-    if (info.size > max) throw new Error(`Asset exceeds its size limit: ${name} (${info.size} bytes; maximum ${max}).`);
-    const buffer = Buffer.alloc(max + 1);
-    let size = 0;
-    while (size < buffer.length) { const count = fs.readSync(fd, buffer, size, buffer.length - size, null); if (!count) break; size += count; }
-    if (size > max) throw new Error(`Asset exceeds its size limit: ${name} (maximum ${max} bytes).`);
-    const bytes = buffer.subarray(0, size);
+    let bytes: Buffer;
+    if (max === undefined) bytes = fs.readFileSync(fd);
+    else {
+      if (info.size > max) throw new Error(`Asset exceeds its size limit: ${name} (${info.size} bytes; maximum ${max}).`);
+      const buffer = Buffer.alloc(max + 1);
+      let size = 0;
+      while (size < buffer.length) { const count = fs.readSync(fd, buffer, size, buffer.length - size, null); if (!count) break; size += count; }
+      if (size > max) throw new Error(`Asset exceeds its size limit: ${name} (maximum ${max} bytes).`);
+      bytes = buffer.subarray(0, size);
+    }
     return { path: name, content: new TextDecoder('utf-8', { fatal: true }).decode(bytes), digest: createHash('sha256').update(bytes).digest('hex') };
   } finally { fs.closeSync(fd); }
 }

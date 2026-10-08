@@ -78,8 +78,8 @@ export function evidenceCoverage(value: Evidence): number {
 }
 
 function text(value: unknown): string {
-  if (typeof value !== 'string' || !value.trim() || value.length > 8000 || /[\x00-\x08\x0b-\x1f\x7f]/.test(value)) {
-    throw new ValidationError('Report text must be nonempty, bounded, and free of terminal control characters.');
+  if (typeof value !== 'string' || !value.trim() || /[\x00-\x08\x0b-\x1f\x7f]/.test(value)) {
+    throw new ValidationError('Report text must be nonempty and free of terminal control characters.');
   }
   return value.trim();
 }

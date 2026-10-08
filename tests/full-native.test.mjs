@@ -1883,7 +1883,8 @@ test('decoded concerns are still validated strictly', async t => {
   await assert.rejects(f.hooks.tool.mdd_change_request.execute({ ...base, concerns: JSON.stringify(nine) }, f.context), /at most eight/);
   await assert.rejects(f.hooks.tool.mdd_change_request.execute({ ...base, concerns: JSON.stringify([{ category: 'style', evidence: 'x', impact: 'y' }]) }, f.context), /Unknown material-change category/);
   await assert.rejects(f.hooks.tool.mdd_change_request.execute({ ...base, concerns: '"just text"' }, f.context), /must decode to an array/);
-  await assert.rejects(f.hooks.tool.mdd_change_request.execute({ ...base, concerns: `[${'"x",'.repeat(4000)}"x"]` }, f.context), /exceeds 16000 bytes/);
+  // Concerns text has no transport size limit; a large payload is still validated by content.
+  await assert.rejects(f.hooks.tool.mdd_change_request.execute({ ...base, concerns: `[${'"x",'.repeat(4000)}"x"]` }, f.context), /at most eight/);
 });
 test('mdd_change_request rejects a concerns string that is not valid JSON, without recording anything', async t => {
   const f = await fixture(t); const before = await f.status();

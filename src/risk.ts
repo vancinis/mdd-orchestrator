@@ -80,9 +80,9 @@ export function riskReportFormatLines(): string[] {
   return [
     'Report this assessment as a short markdown document, not as a JSON object. Use these exact headings, each once:',
     '"## MDD Outcome" holding exactly passed or failed. Use failed when the request and exploration findings cannot substantiate a grounded route; do not invent evidence or risk to avoid it.',
-    '"## MDD Summary" holding 1–2000 bytes of plain prose a person reads first: the complexity judgment and the recommended route, in one short paragraph.',
+    '"## MDD Summary" holding plain prose a person reads first: the complexity judgment and the recommended route, in one short paragraph.',
     '"## MDD How" holding a distinct, source-grounded explanation of why this route follows from the request and the exploration findings. If the cause is uncertain, state that explicitly.',
-    '"## MDD Artifact" holding 1–16000 bytes of the actual assessment in ordinary markdown: concrete risks, precautions and mitigations where evidenced, or an explicit statement that none was evidenced. Headings inside it must not reuse an "MDD ..." name.',
+    '"## MDD Artifact" holding the actual assessment in ordinary markdown: concrete risks, precautions and mitigations where evidenced, or an explicit statement that none was evidenced. Headings inside it must not reuse an "MDD ..." name.',
     `"## MDD Data" holding ONE fenced json block with exactly this key: risk. ${RISK_FIELD_SCHEMA}`,
     'Optional "## MDD Concerns" holding a fenced json array of at most eight {category,evidence,impact} entries, category objective/integrations/sensitive-data/permissions.',
     'Write nothing outside these headings. Prose around them is ignored, but anything you need MDD to record belongs under a heading.',

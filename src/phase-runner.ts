@@ -433,6 +433,19 @@ export function intentEnvelope(base: Record<string, unknown>, context: readonly 
     context: context.map(item => ({ label: item.label, bytes: Buffer.byteLength(item.content), sha256: createHash('sha256').update(item.content).digest('hex') })) };
 }
 
+/**
+ * Fits a result receipt into `EngramHttp.save`'s 40000-byte limit. The evidence summary has no size
+ * limit, so when it would make the receipt too large it degrades to its byte count and digest; the
+ * complete summary stays in the workflow record and checkpoint, so nothing is lost there.
+ */
+export function receiptWithSummary(receipt: Record<string, unknown> & { evidenceSummary: string }): string {
+  const whole = JSON.stringify(receipt);
+  if (Buffer.byteLength(whole) <= 40000) return whole;
+  const { evidenceSummary, ...rest } = receipt;
+  return JSON.stringify({ ...rest, evidenceSummaryOmitted: true as const, evidenceSummaryBytes: Buffer.byteLength(evidenceSummary),
+    evidenceSummarySha256: createHash('sha256').update(evidenceSummary).digest('hex') });
+}
+
 export class PhaseRunner {
   readonly #operation = new AsyncLocalStorage<{ sessionID: string; callID: string }>();
   readonly #runs = new Map<string, Run>();
@@ -1770,7 +1783,7 @@ export class PhaseRunner {
       const solo = this.#solo.get(runtime.sessionID);
       if (!solo?.rejected || solo.state !== 'ready') throw new ValidationError('No rejected investigation report is waiting to be restated. Read mdd_status.');
       const input = objectWithKeys(value, 'phase submission', ['result']);
-      const text = boundedText(input.result, 'investigation report', 20000);
+      const text = nonemptyText(input.result, 'investigation report');
       solo.state = 'persisting-result';
       try { this.#soloRecord(solo, text, { sessionID: runtime.sessionID, callID: solo.callID! }); }
       catch (error) { this.#soloFail(solo, error, text); }
@@ -1846,7 +1859,7 @@ export class PhaseRunner {
    */
   #readReport(run: Run, text: string, callID?: string) {
     try {
-      boundedText(text, 'phase report', 20000);
+      nonemptyText(text, 'phase report');
       const { fields: result, ignored } = phaseFields(run.phase, parsePhaseReport(text, run.phase));
       // Binding is checked when the actor states it and never demanded. The dispatch this answers
       // was already matched by call ID and by exact task arguments, and the inline route is the
@@ -1861,9 +1874,9 @@ export class PhaseRunner {
       const outcome: 'passed' | 'failed' = result.outcome;
       return {
         result, ignored, outcome,
-        evidenceSummary: boundedText(result.evidenceSummary, 'summary', 2000),
-        how: result.how === undefined ? undefined : boundedText(result.how, 'how', 2000),
-        artifact: assertNoTraceSection(boundedText(result.artifact, 'artifact', 16000)),
+        evidenceSummary: nonemptyText(result.evidenceSummary, 'summary'),
+        how: result.how === undefined ? undefined : nonemptyText(result.how, 'how'),
+        artifact: assertNoTraceSection(nonemptyText(result.artifact, 'artifact')),
         advisory: concerns(result.concerns),
       };
     } catch (error) { throw asMalformed(error); }
@@ -1932,14 +1945,7 @@ export class PhaseRunner {
           if (run.phase === 'mdd-apply' && (result.changes !== undefined || result.noChangeReason !== undefined)) applied = changed(result.changes, result.noChangeReason);
           nextEvidence = invalidateEvidence(nextEvidence, this.#affected(run.phase));
         }
-        let linked = traceArtifact(run.phase, artifact, accepted, choices, planned, run.verification);
-        if (publication && Buffer.byteLength(linked) > 16000) {
-          // The complete sealed member report remains lossless in workerState. Its artifact
-          // gets a bounded summary/ref only when canonical plan links would exceed the limit.
-          artifact = `${evidenceSummary}\n\nComplete member evidence is retained in the checkpoint; artifact sha256=${createHash('sha256').update(artifact).digest('hex')}.`;
-          linked = traceArtifact(run.phase, artifact, accepted, choices, planned, run.verification);
-        }
-        artifact = boundedText(linked, 'artifact with acceptance links', 16000);
+        artifact = nonemptyText(traceArtifact(run.phase, artifact, accepted, choices, planned, run.verification), 'artifact with acceptance links');
       } catch (error) { throw asMalformed(error); }
       // The report a person will read is built and rendered before anything is persisted, so a
       // phase whose summary cannot be presented fails here rather than after it was recorded.
@@ -1952,7 +1958,7 @@ export class PhaseRunner {
       if (run.state !== 'persisting-result') throw new Error('Result became uncertain during artifact persistence.');
       if (await run.artifacts.read(run.artifact.ref) !== artifact) throw new Error('Artifact readback differs from phase output.');
       if (run.state !== 'persisting-result') throw new Error('Result became uncertain during artifact readback.');
-      await run.memory?.save(`MDD result ${run.id}`, JSON.stringify({
+      await run.memory?.save(`MDD result ${run.id}`, receiptWithSummary({
         kind: 'agent-evidence', phase: run.phase, runID: run.id, ...(callID ? { callID } : { restatedBy: 'coordinator', executor: run.executor ?? run.args.subagent_type }),
         outcome: result.outcome, evidenceSummary, artifactRef: run.artifact.ref,
         ...(completed ? { completed } : {}),
@@ -2083,7 +2089,7 @@ export class PhaseRunner {
     if (run.state !== 'persisting-result') throw new Error('Result became uncertain during artifact persistence.');
     if (await run.artifacts.read(saved.ref) !== artifact) throw new Error('Artifact readback differs from the mdd-risk report.');
     if (run.state !== 'persisting-result') throw new Error('Result became uncertain during artifact readback.');
-    await run.memory?.save(`MDD risk ${run.id}`, JSON.stringify({
+    await run.memory?.save(`MDD risk ${run.id}`, receiptWithSummary({
       kind: 'risk-evidence', stage: RISK_ACTOR, runID: run.id,
       ...(callID ? { callID } : { restatedBy: 'coordinator', executor: run.executor ?? run.args.subagent_type }),
       outcome, evidenceSummary, ...(verdict ? { route: verdict.route, complexity: verdict.complexity } : {}),
@@ -2571,7 +2577,7 @@ export class PhaseRunner {
     if (run.state !== 'persisting-result') throw new Error('Contextual result became uncertain.');
     const artifact = await run.artifacts.save({ runID: run.id, phase: 'mdd-explore', explorationID: side.id }, content);
     if (await run.artifacts.read(artifact.ref) !== content || run.state !== 'persisting-result') throw new Error('Contextual artifact could not be confirmed.');
-    await run.memory?.save(`MDD context ${run.id}`, JSON.stringify({ kind: 'context-result', runID: run.id, phase: 'mdd-explore', explorationID: side.id, callID: run.callID, outcome, evidenceSummary: summary, artifactRef: artifact.ref, concerns: advisory, independentVerification: false }));
+    await run.memory?.save(`MDD context ${run.id}`, receiptWithSummary({ kind: 'context-result', runID: run.id, phase: 'mdd-explore', explorationID: side.id, callID: run.callID, outcome, evidenceSummary: summary, artifactRef: artifact.ref, concerns: advisory, independentVerification: false }));
     if (run.state !== 'persisting-result') throw new Error('Contextual result persistence became uncertain.');
     run.contexts.push({ explorationID: side.id, outcome, artifact, summary, concerns: advisory });
     run.contextReport = `Summary\nContextual exploration ${outcome === 'passed' ? 'completed' : 'did not complete'}. ${summary} Main workflow and approvals unchanged.\n`;
@@ -2674,7 +2680,7 @@ export class PhaseRunner {
   }
 
   #soloRecord(solo: Solo, text: string, call: TaskCall): void {
-      boundedText(text, 'investigation report', 20000);
+      nonemptyText(text, 'investigation report');
       const result = parsePhaseReport(text, 'mdd-explore');
       // Stated binding is checked, never required: this result already matched the exact task and
       // call ID that dispatched it, so demanding the actor repeat them only lost finished work.
@@ -2682,8 +2688,8 @@ export class PhaseRunner {
           (result.callID !== undefined && result.callID !== call.callID) ||
           (result.outcome !== 'passed' && result.outcome !== 'failed')) throw new Error('The investigation report names a different investigation than the one it answers, or states no outcome.');
       const outcome: 'passed' | 'failed' = result.outcome;
-      const summary = boundedText(result.evidenceSummary, 'evidenceSummary', 2000);
-      const findings = assertNoTraceSection(boundedText(result.artifact, 'artifact', 16000));
+      const summary = nonemptyText(result.evidenceSummary, 'evidenceSummary');
+      const findings = assertNoTraceSection(nonemptyText(result.artifact, 'artifact'));
       if (CONTROL_CHARACTERS.test(summary) || CONTROL_CHARACTERS.test(findings)) throw new Error('Investigation text contains terminal control characters.');
       const advisory = concerns(result.concerns);
       if (solo.state !== 'persisting-result') throw new Error('Investigation result became uncertain.');
@@ -2727,7 +2733,7 @@ export class PhaseRunner {
       'Keep user-facing summaries simple; evidenceSummary must avoid internal call IDs or routing details. The artifact carries the readable findings shown to the user.',
       'Use whatever tools and commands answer the question: reading, searching, running commands, fetching documentation. Native permission requests still apply and are the real boundary. This is an investigation, so do not change the project to answer it.',
       'Report in English — summary and artifact — whatever language the question was asked in. The coordinator translates your findings for the user; reproduce quoted material exactly as it is.',
-      'Return exactly one JSON object, no fences: phase, runID, callID, outcome (passed or failed), evidenceSummary (1–2000 bytes), artifact (1–16000 bytes). Never emit confidence percentages.',
+      'Return exactly one JSON object, no fences: phase, runID, callID, outcome (passed or failed), evidenceSummary (nonempty), artifact (nonempty). Never emit confidence percentages.',
       `phase=mdd-explore; runID=${solo.id}. Native callID is appended by the hook.`,
       `Investigation purpose data: ${JSON.stringify(solo.purpose)}`,
       skillHint(PHASE_SKILLS['mdd-explore'])!,
@@ -3477,7 +3483,7 @@ export class PhaseRunner {
       [...instructions, closing, ...data(handoff, compacted)].join('\n').replaceAll('@', '\\u0040');
     /**
      * Every phase used to receive every earlier artifact in full. A seven-phase route holding
-     * 16,000-byte artifacts outgrows this budget, so the phases that died were the last ones,
+     * large artifacts outgrows this budget, so the phases that died were the last ones,
      * after all the work that produced them. Recent artifacts stay whole, because the next phase
      * builds directly on them; older ones fall back to their own recorded summary and the ref
      * that still identifies the complete text. Shedding is ordered, oldest first, and announced

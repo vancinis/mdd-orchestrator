@@ -71,7 +71,8 @@ test('replacing settled exploration archives every complete member report', asyn
   for (const index of [1, 0]) await f.runner.after(calls[index], args[index], reportDocument({
     evidenceSummary: `Findings ${index}`, artifact: `Complete evidence ${index}: ${'x'.repeat(9000)}` }));
   const old = f.checkpoint.readExploration('parent');
-  assert.match(old.aggregate, /Complete member evidence is retained/);
+  // No size limit: the aggregate carries both complete member artifacts verbatim.
+  for (const index of [0, 1]) assert.ok(JSON.parse(old.aggregate).artifact.includes(`Complete evidence ${index}: ${'x'.repeat(9000)}`));
   await f.runner.explore({ purpose: 'Another investigation', workItems: f.items }, f.runtime);
   const hash = createHash('sha256').update(`exploration-result:${old.id}`).digest('hex');
   const archived = JSON.parse(readFileSync(join(f.root, '.mdd', `checkpoint-${hash}.json`), 'utf8'));

@@ -4,7 +4,6 @@ import { dirname, join, parse, relative, resolve, sep } from 'node:path';
 import { ArtifactObservationError, EngramHttp } from './engram-http.js';
 import type { Answers, Phase } from './policy.js';
 
-export const ARTIFACT_MAX_BYTES = 16000;
 /**
  * `mdd-risk` is not a Phase, but its assessment is persisted exactly like a phase artifact so the
  * evidence that selected the route is kept in the same store as the work it routed.
@@ -58,8 +57,8 @@ export function identity(value: ArtifactIdentity): ArtifactIdentity {
   return { ...value };
 }
 function contentCheck(content: string): void {
-  if (typeof content !== 'string' || !content.trim() || Buffer.byteLength(content) > ARTIFACT_MAX_BYTES ||
-      Buffer.from(content).toString('utf8') !== content) throw new Error('Artifact must be nonempty valid UTF-8, at most 16,000 bytes.');
+  if (typeof content !== 'string' || !content.trim() ||
+      Buffer.from(content).toString('utf8') !== content) throw new Error('Artifact must be nonempty valid UTF-8.');
 }
 function digest(content: string): string { return createHash('sha256').update(content).digest('hex'); }
 function artifactPath(value: ArtifactIdentity): string {
@@ -89,18 +88,12 @@ function readFile(path: string): string {
   const fd = fs.openSync(path, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
   try {
     const stat = fs.fstatSync(fd);
-    if (!stat.isFile() || stat.nlink !== 1 || stat.size > ARTIFACT_MAX_BYTES ||
+    if (!stat.isFile() || stat.nlink !== 1 ||
         stat.ino !== before.ino || stat.dev !== before.dev) throw new Error('Unsafe artifact file.');
-    const buffer = Buffer.alloc(ARTIFACT_MAX_BYTES + 1);
-    let size = 0;
-    while (size < buffer.length) {
-      const count = fs.readSync(fd, buffer, size, buffer.length - size, null);
-      if (!count) break;
-      size += count;
-    }
-    const content = buffer.subarray(0, size).toString('utf8');
+    const bytes = fs.readFileSync(fd);
+    const content = bytes.toString('utf8');
     contentCheck(content);
-    if (!buffer.subarray(0, size).equals(Buffer.from(content))) throw new Error('Invalid artifact encoding.');
+    if (!bytes.equals(Buffer.from(content))) throw new Error('Invalid artifact encoding.');
     return content;
   } finally { fs.closeSync(fd); }
 }

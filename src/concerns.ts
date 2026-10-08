@@ -3,8 +3,6 @@ import { shortText } from './acceptance.js';
 
 export const CHANGE_CATEGORIES = ['objective', 'integrations', 'sensitive-data', 'permissions'] as const;
 export type Concern = { category: typeof CHANGE_CATEGORIES[number]; evidence: string; impact: string };
-/** Largest serialized concerns payload the change-request transport decodes. */
-export const CONCERNS_TRANSPORT_MAX_BYTES = 16000;
 
 /**
  * Tool bridges do not always deliver the concerns argument as the array the schema declares: some
@@ -17,7 +15,6 @@ export function decodeConcerns(value: unknown): Concern[] {
   if (typeof decoded === 'string') {
     const text = decoded.trim();
     if (!text) return [];
-    if (Buffer.byteLength(text, 'utf8') > CONCERNS_TRANSPORT_MAX_BYTES) throw new Error(`concerns text exceeds ${CONCERNS_TRANSPORT_MAX_BYTES} bytes; nothing was recorded.`);
     try { decoded = JSON.parse(text); }
     catch { throw new Error('concerns was sent as a string but is not valid JSON; nothing was recorded.'); }
   }

@@ -69,7 +69,6 @@ test('assets: coordinator follows durable same-phase success without speculative
   assert.match(text, /no per-batch approval/);
   assert.match(text, /Never dispatch speculatively/);
   assert.match(text, /Verify checks the full plan after the final batch/);
-  assert.ok(Buffer.byteLength(text) <= 16000);
 });
 
 // Phase capability is the user's native decision, not MDD's. No packaged phase may ship its own
@@ -137,7 +136,6 @@ test('security actor is packaged with deny-all permissions and no standalone dis
   assert.match(text, /no-findings.*not.*secure/i);
   assert.match(text, /separate user authorization.*mdd-apply/);
   assert.match(text, /Write your report in English/);
-  assert.ok(Buffer.byteLength(text) <= 16000);
 });
 
 test('Judgment Day model roles and installation do not expand phase or report-check membership', () => {
@@ -184,7 +182,6 @@ test('Judgment Day judges share a neutral standalone JSON contract and allow onl
     const example = JSON.parse(text.match(/```json\n([\s\S]*?)\n```/)[1]);
     assert.deepEqual(Object.keys(example), ['findings', 'evidence']);
     assert.deepEqual(Object.keys(example.findings[0]), ['location', 'severity', 'claim', 'evidence_class', 'causal_disposition', 'proof_refs']);
-    assert.ok(Buffer.byteLength(text) < 16000);
     bodies.push(text.split('---').slice(2).join('---'));
   }
   assert.equal(bodies[0], bodies[1], 'blind judges receive identical criteria and output contracts');
@@ -221,13 +218,11 @@ test('Judgment Day routing is explicit, namespaced and precedes generic phase ro
   assert.match(text, /no mdd_start or automatic review after Verify/);
   assert.match(text, /instead of phase\/status routing/);
   assert.match(text, /exceptions to phase-only dispatch/);
-  assert.ok(Buffer.byteLength(text) <= 16000);
 });
 
 test('Judgment Day protocol is self-contained and preserves snapshot, blindness, causality and authorization gates', () => {
   const skill = jdText(); const reference = jdReference();
   assert.ok(MDD_ASSETS.includes(jdSkillPath)); assert.ok(MDD_ASSETS.includes(jdReferencePath));
-  assert.ok(Buffer.byteLength(reference) <= 16000, 'the complete installed reference retains the asset size cap');
   assert.match(skill, /\[.*\]\(references\/prompts-and-formats\.md\)/);
   assert.ok(Buffer.byteLength(skill) < 6000, 'keep the protocol detail in its local reference');
   for (const text of [skill, reference]) {
@@ -373,7 +368,6 @@ test('assets: MDD ships its own actor instructions and does not call them AGENTS
   assert.match(text, /Do not load a skill by name/);
   assert.match(text, /## Language/);
   assert.match(text, /Write everything you report in English/);
-  assert.ok(Buffer.byteLength(text) < 16000);
   // Named AGENTS.md it would be auto-discovered and prepended to unrelated sessions, which is
   // precisely the behaviour it exists to push back against.
   assert.equal(fs.existsSync('assets/opencode/AGENTS.md'), false);
@@ -452,7 +446,6 @@ test('assets: the coordinator recovers an unanswered approval instead of losing 
   assert.match(text, /ask it yourself with the native question tool while no MDD question is pending/);
   assert.match(text, /While one is pending, it is the only question/);
   assert.match(text, /scope phase retries settled work or reopens the existing approval/);
-  assert.ok(Buffer.byteLength(text) <= 16000, 'the coordinator must fit the installer asset limit');
   assert.match(text, /the same phase goes out again and its task\n\s+already carries what went wrong/);
 });
 
@@ -488,7 +481,6 @@ test('assets: the coordinator delivers a recorded run without a new run or prefl
   assert.match(text, /never\ncall mdd_start or mdd_change_request for it, and never repeat preflight/);
   assert.match(text, /The user's explicit\nrequest is that decision: do only the actions it names/);
   assert.match(text, /a fresh implementation task uses mdd_start normally/);
-  assert.ok(Buffer.byteLength(text) <= 16000, 'the coordinator must fit the installer asset limit');
   const skill = fs.readFileSync('assets/opencode/skills/mdd-pr-body/SKILL.md', 'utf8');
   assert.match(skill, /A user request naming them is that authority/);
 });
@@ -507,7 +499,6 @@ test('assets: the coordinator makes a precise small edit directly, without prefl
   assert.match(text, /If it proves larger[\s\S]*offer an MDD run with their text/);
   assert.match(text, /Not while a phase task is in flight or an MDD question is\npending/);
   assert.match(text, /For any other implementation request, call mdd_start once/);
-  assert.ok(Buffer.byteLength(text) <= 16000, 'the coordinator must fit the installer asset limit');
 });
 
 // An interrupted subagent locked a conversation for good: the user knew it stopped, OpenCode had
@@ -518,7 +509,6 @@ test('assets: the coordinator releases an interrupted subagent on the user\'s ow
   assert.match(text, /call\nmdd_reset once with userText equal to their exact latest message/);
   assert.match(text, /releases it unless OpenCode reports it busy/);
   assert.doesNotMatch(text, /refuses while termination remains unknown/);
-  assert.ok(Buffer.byteLength(text) <= 16000, 'the coordinator must fit the installer asset limit');
 });
 
 test('assets: mdd-doc shapes prose only and never widens a read-only phase', () => {

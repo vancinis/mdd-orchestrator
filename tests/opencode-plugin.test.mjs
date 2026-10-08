@@ -418,10 +418,14 @@ test('plugin contract: a phase actor may check its own report, and nobody else m
   assert.deepEqual(clean.problems, []);
   assert.match(clean.note, /not an acceptance/);
 
+  // A summary has no size limit; only an empty one is a problem of form.
+  const large = JSON.parse(await hooks.tool.mdd_check_report.execute(
+    { phase: 'mdd-explore', result: report.replace(SUMMARY_TEXT, 'x'.repeat(50000)) }, actor));
+  assert.equal(large.ok, true);
   const broken = JSON.parse(await hooks.tool.mdd_check_report.execute(
-    { phase: 'mdd-explore', result: report.replace(SUMMARY_TEXT, 'x'.repeat(2100)) }, actor));
+    { phase: 'mdd-explore', result: report.replace(SUMMARY_TEXT, '') }, actor));
   assert.equal(broken.ok, false);
-  assert.ok(broken.problems.some(problem => /summary must be nonempty text/.test(problem)));
+  assert.ok(broken.problems.some(problem => /summary/i.test(problem)));
 
   // Checking spends nothing and starts nothing: the run is exactly where it was.
   assert.equal(JSON.parse(await hooks.tool.mdd_status.execute({}, context)).state, 'not-started');

@@ -187,9 +187,9 @@ export function reportFormatLines(phase: Phase): string[] {
   return [
     'Report this phase as a short markdown document, not as a JSON object. Use these exact headings, each once:',
     '"## MDD Outcome" holding exactly passed or failed.',
-    '"## MDD Summary" holding 1–2000 bytes of plain prose a person reads first: what you did and what it means. No call IDs, routing details or confidence percentages.',
+    '"## MDD Summary" holding plain prose a person reads first: what you did and what it means. No call IDs, routing details or confidence percentages.',
     '"## MDD How" holding a distinct, source-grounded explanation of the concrete decision or change, why it was chosen, and how it advances the user objective. Do not repeat the summary, list commands or invent a reason; if the cause is unknown, state that explicitly.',
-    `"## MDD Artifact" holding 1–16000 bytes of the actual deliverable of this phase, in ordinary markdown. ${fields.length ? 'MDD appends its own links section to this text and holds the total to the same 16,000 bytes, so leave room rather than filling the budget exactly. ' : ''}Headings inside it must not reuse an "MDD ..." name.`,
+    `"## MDD Artifact" holding the actual deliverable of this phase, in ordinary markdown. ${fields.length ? 'MDD appends its own links section to this text. ' : ''}Headings inside it must not reuse an "MDD ..." name.`,
     ...(fields.length
       ? [`"## MDD Data" holding ONE fenced json block with exactly these keys: ${fields.join(', ')}. No other key is accepted.`,
          ...fields.map(field => `  ${FIELD_SCHEMA[field]!}`)]

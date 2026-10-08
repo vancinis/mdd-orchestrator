@@ -3,7 +3,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { ArtifactStore, ArtifactWriteError, ARTIFACT_MAX_BYTES, PHASE_PATHS } from '../dist/artifacts.js';
+import { ArtifactStore, ArtifactWriteError, PHASE_PATHS } from '../dist/artifacts.js';
+/** Well past the former 16,000-byte artifact limit, which no longer exists. */
+const LARGE_BYTES = 200000;
 import { EngramHttp } from '../dist/engram-http.js';
 import { memoryServer } from './adapter-fixture.mjs';
 
@@ -115,14 +117,16 @@ for (const bad of [
   });
 }
 
-test('artifacts: bound content size, encoding and constructor validation', async t => {
+test('artifacts: unbounded content size, encoding and constructor validation', async t => {
   const root = fixture(t);
   const store = new ArtifactStore(root, 'openspec');
-  for (const value of ['', ' \n', undefined, '\ud800', 'é'.repeat(ARTIFACT_MAX_BYTES / 2 + 1)]) {
+  for (const value of ['', ' \n', undefined, '\ud800']) {
     await assert.rejects(store.save(key, value));
   }
   assert.deepEqual(fs.readdirSync(root), []);
-  assert.equal((await store.save(key, 'x'.repeat(ARTIFACT_MAX_BYTES))).ref.bytes, ARTIFACT_MAX_BYTES);
+  const large = await store.save(key, 'é'.repeat(LARGE_BYTES / 2));
+  assert.equal(large.ref.bytes, LARGE_BYTES);
+  assert.equal(await store.read(large.ref), large.content);
   assert.throws(() => new ArtifactStore(root, 'other'));
   assert.throws(() => new ArtifactStore(root, 'engram'));
   assert.throws(() => new ArtifactStore(root, 'both'));
@@ -219,7 +223,7 @@ test('artifacts: rejects linked directories including root ancestors', async t =
   assert.deepEqual(fs.readdirSync(path.join(outside, 'nested')), []);
 });
 
-test('artifacts: rejects hardlinks, nonregular files and oversized disk reads', async t => {
+test('artifacts: rejects hardlinks, nonregular files and replaced disk content', async t => {
   const root = fixture(t);
   const store = new ArtifactStore(root, 'openspec');
   const saved = await store.save(key, text);
@@ -228,8 +232,8 @@ test('artifacts: rejects hardlinks, nonregular files and oversized disk reads', 
   await assert.rejects(store.read(saved.ref), /Unsafe/);
   await assert.rejects(store.save(key, text));
   fs.unlinkSync(path.join(root, 'hardlink'));
-  fs.writeFileSync(target, 'x'.repeat(ARTIFACT_MAX_BYTES + 1));
-  await assert.rejects(store.read(saved.ref), /Unsafe/);
+  fs.writeFileSync(target, 'x'.repeat(LARGE_BYTES + 1));
+  await assert.rejects(store.read(saved.ref), /mismatch/);
   fs.unlinkSync(target);
   fs.mkdirSync(target);
   await assert.rejects(store.save(key, text));
@@ -252,11 +256,12 @@ test('artifacts: rejects a symlink artifact file without modifying its target', 
   assert.equal(fs.readFileSync(original, 'utf8'), text);
 });
 
-test('artifacts: maximum escaped content roundtrips through bounded HTTP envelopes', async t => {
+test('artifacts: large escaped content roundtrips through Engram beyond the generic response cap', async t => {
   const root = fixture(t);
   const { client } = await memory(t, root);
   const store = new ArtifactStore(root, 'engram', client);
-  const content = 'x' + '\u0000'.repeat(ARTIFACT_MAX_BYTES - 1);
+  // JSON escapes each NUL as six bytes, so the readback response is far above 128 KiB.
+  const content = 'x' + '\u0000'.repeat(LARGE_BYTES - 1);
   const saved = await store.save(key, content);
   assert.equal(await store.read(saved.ref), content);
 });

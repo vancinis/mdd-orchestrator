@@ -552,7 +552,7 @@ export type BoundSecurityReportCheck = { ok: boolean; problems: string[]; securi
 export function checkBoundSecurityReport(snapshot: SecuritySnapshot, report: unknown): BoundSecurityReportCheck {
   try {
     assertRuntime(snapshot);
-    if (typeof report !== 'string' || Buffer.byteLength(report) > 20000) throw new Error('Bound security report byte limit exceeded.');
+    if (typeof report !== 'string') throw new Error('Bound security report must be text.');
     if (hasCredentials(report)) throw new Error('Credential-like report content was rejected without echoing its values.');
     const form = checkSecurityReportForm(report);
     if (!form.ok || !form.security) throw new Error('Security report form is invalid; use the standalone form checker on sanitized content.');

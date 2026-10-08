@@ -1,4 +1,4 @@
-import { boundedText } from './phase-runner.js';
+import { boundedText, nonemptyText } from './phase-runner.js';
 import { acceptance, assertNoTraceSection, phaseFields } from './acceptance.js';
 import { concerns } from './concerns.js';
 import { changed, deliverables, executed } from './phase-evidence.js';
@@ -59,7 +59,7 @@ export function checkReportForm(phase: Phase, text: unknown): ReportCheck {
 
   // The envelope first, and alone: nothing below can be read out of a document that has none, so
   // reporting those failures too would only bury the one that has to be fixed first.
-  const envelope = collect([() => boundedText(text, 'phase report', 20000)]);
+  const envelope = collect([() => nonemptyText(text, 'phase report')]);
   if (envelope.length) return done(envelope);
 
   let fields: Record<string, unknown>;
@@ -70,8 +70,8 @@ export function checkReportForm(phase: Phase, text: unknown): ReportCheck {
   const passed = outcome === 'passed';
   return done(collect([
     () => { if (outcome !== 'passed' && outcome !== 'failed') throw new Error('The phase report must state outcome passed or failed.'); },
-    () => boundedText(fields.evidenceSummary, 'summary', 2000),
-    () => assertNoTraceSection(boundedText(fields.artifact, 'artifact', 16000)),
+    () => nonemptyText(fields.evidenceSummary, 'summary'),
+    () => assertNoTraceSection(nonemptyText(fields.artifact, 'artifact')),
     () => concerns(fields.concerns),
     // Phase-specific shape. Only what a document can answer on its own: `decisions` and
     // `verification` are left to the run, because both are checked against IDs it holds.
@@ -103,7 +103,7 @@ export function checkRiskReportForm(text: unknown): ReportCheck {
   const done = (problems: string[], risk?: RiskVerdict): ReportCheck =>
     ({ ok: !problems.length, problems, resultFormat, note: problems.length ? FOUND : CLEAN, ...(risk ? { risk } : {}) });
 
-  const envelope = collect([() => boundedText(text, 'risk report', 20000)]);
+  const envelope = collect([() => nonemptyText(text, 'risk report')]);
   if (envelope.length) return done(envelope);
 
   let fields: Record<string, unknown>;
@@ -116,12 +116,12 @@ export function checkRiskReportForm(text: unknown): ReportCheck {
   let verdict: RiskVerdict | undefined;
   const problems = collect([
     () => { if (outcome !== 'passed' && outcome !== 'failed') throw new Error('The risk report must state outcome passed or failed.'); },
-    () => boundedText(fields.evidenceSummary, 'summary', 2000),
+    () => nonemptyText(fields.evidenceSummary, 'summary'),
     // Required on every report, passed or failed: the actor's own format instructions list
     // "## MDD How" unconditionally, and a failure that gives no reason is as unreadable as one
     // that is missing the required explanation of a passing assessment.
-    () => boundedText(fields.how, 'how', 2000),
-    () => assertNoTraceSection(boundedText(fields.artifact, 'artifact', 16000)),
+    () => nonemptyText(fields.how, 'how'),
+    () => assertNoTraceSection(nonemptyText(fields.artifact, 'artifact')),
     () => concerns(fields.concerns),
     () => { if (extraKeys.length) throw new Error(`risk report data holds unknown key(s): ${extraKeys.join(', ')}. Only "risk" is accepted.`); },
     // A failed outcome is uncertainty reported honestly; it is not required to carry a verdict
@@ -141,7 +141,7 @@ export function checkSecurityReportForm(text: unknown): SecurityReportCheck {
     note: problems.length ? FOUND : 'Security form-only check passed. Runtime snapshot and evidence binding remain required; this is not acceptance, a security guarantee, authorization to fix, or delivery approval.',
     ...(!problems.length && security ? { security } : {}),
   });
-  const envelope = collect([() => boundedText(text, 'security report', 20000)]);
+  const envelope = collect([() => nonemptyText(text, 'security report')]);
   if (envelope.length) return done(envelope);
   let fields: Record<string, unknown>;
   try { fields = parseSecurityReport(text as string); }
@@ -150,9 +150,9 @@ export function checkSecurityReportForm(text: unknown): SecurityReportCheck {
   const problems = collect([
     () => { const extra = Object.keys(fields).filter(key => !SECURITY_REPORT_KEYS.includes(key));
       if (extra.length) throw new Error(`security report holds unknown key(s): ${extra.join(', ')}. Only the standalone security field is accepted as data.`); },
-    () => boundedText(fields.evidenceSummary, 'summary', 2000),
-    () => boundedText(fields.how, 'how', 2000),
-    () => assertNoTraceSection(boundedText(fields.artifact, 'artifact', 16000)),
+    () => nonemptyText(fields.evidenceSummary, 'summary'),
+    () => nonemptyText(fields.how, 'how'),
+    () => assertNoTraceSection(nonemptyText(fields.artifact, 'artifact')),
     () => concerns(fields.concerns),
     () => {
       security = parseSecurityAssessment(fields.security);

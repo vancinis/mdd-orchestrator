@@ -27,7 +27,6 @@ export class TranslationError extends Error {
   constructor(message: string) { super(message); this.name = 'TranslationError'; }
 }
 
-const MAX_TRANSLATION = 2000;
 /** Below this a sentence is too short for length or vocabulary statistics to mean anything. */
 const SHORT = 40;
 const MIN_RATIO = 0.5;
@@ -70,7 +69,6 @@ export function translationDigest(runID: string, entries: readonly Translatable[
 
 function problem(entry: Translatable, text: string): string | undefined {
   if (!text.trim()) return 'quedó vacía';
-  if (text.length > MAX_TRANSLATION) return `supera los ${MAX_TRANSLATION} caracteres`;
   if (/[\x00-\x1f\x7f]/.test(text)) return 'trae caracteres de control';
   const source = facts(entry.source);
   const translated = facts(text);

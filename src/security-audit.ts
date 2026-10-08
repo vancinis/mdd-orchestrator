@@ -45,7 +45,7 @@ export function securityAuditRequest(text: string): boolean {
 
 function instructions(): string {
   const actor = fs.readFileSync(fileURLToPath(new URL('../assets/opencode/agents/mdd-security.md', import.meta.url)), 'utf8');
-  if (Buffer.byteLength(actor) > 16000 || !actor.startsWith('---')) throw new Error('Invalid packaged security actor.');
+  if (!actor.startsWith('---')) throw new Error('Invalid packaged security actor.');
   const byValue = (name: string, content: string) => `Packaged ${name} (sha256=${createHash('sha256').update(content).digest('hex')}):\n${content}`;
   return [byValue(SECURITY_AGENT, actor), byValue('MDD actor instructions', mddInstructions().content),
     ...(['mdd-doc', 'cognitive-doc-design'] as const).map(name => byValue(name, fs.readFileSync(packagedSkillPath(name), 'utf8'))),

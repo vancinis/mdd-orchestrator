@@ -358,7 +358,7 @@ inspection, even when findings exist; `failed` means inconclusive. Assessment `f
 coverage or reported limitation prevents a complete assessment. Missing coverage or missing finding
 evidence, attack conditions, impact or recommendation is rejected, not silently accepted.
 
-The total report is limited to 20,000 bytes; summary/how to 2,000 each, artifact to 16,000.
+Summary, how, the artifact and the total report have no size limit.
 Snapshot/location/finding IDs allow 1–128 ASCII letters, digits, underscores or hyphens. Each layer
 allows at most 256 inspected IDs, globally unique across layers; unavailable layers cannot claim
 inspection. Layer/overall limitations allow 16 entries of 1–1,000 characters each. Findings allow

@@ -28,7 +28,7 @@ export const RESUME_CHECKPOINT_VERSION = 2;
 export const STABLE_CHECKPOINT_VERSION = 3;
 /**
  * A sanity ceiling, not a working budget. A checkpoint holds every recorded artifact of the run
- * (16 KB each before JSON escaping, which can multiply control characters sixfold) plus the
+ * (unbounded each, and JSON escaping can multiply control characters sixfold) plus the
  * coordinator context; a long reworked route must fit or the run silently stops being resumable.
  */
 export const CHECKPOINT_MAX_BYTES = 16 * 1024 * 1024;
@@ -171,7 +171,7 @@ function list(value: unknown, max: number, subject: string): unknown[] {
 }
 function body(value: unknown): void {
   const item = objectWithKeys(value, 'checkpoint dependency', ['content', 'digest']);
-  if (!bounded(item.content, 16000) || typeof item.digest !== 'string' || digest(item.content) !== item.digest) {
+  if (typeof item.content !== 'string' || !item.content.length || typeof item.digest !== 'string' || digest(item.content) !== item.digest) {
     throw new ValidationError('Missing or corrupt checkpoint dependency bytes.');
   }
 }
@@ -240,7 +240,7 @@ function validateData(value: unknown, workflow: Workflow, runID: string): Resume
   }
   for (const entry of list(data.contexts, 256, 'contextual findings')) {
     const item = objectWithKeys(entry, 'checkpoint finding', ['explorationID', 'outcome', 'summary', 'concerns', 'content', 'digest']);
-    if (!identifier(item.explorationID) || !['passed', 'failed'].includes(String(item.outcome)) || !bounded(item.summary, 8000)) throw new ValidationError('Invalid checkpoint finding.');
+    if (!identifier(item.explorationID) || !['passed', 'failed'].includes(String(item.outcome)) || typeof item.summary !== 'string' || !item.summary.length) throw new ValidationError('Invalid checkpoint finding.');
     concerns(item.concerns);
     body({ content: item.content, digest: item.digest });
   }
@@ -282,7 +282,7 @@ function validateData(value: unknown, workflow: Workflow, runID: string): Resume
   if (new Set(proposals).size !== proposals.length || proposals.some(item => !bounded(item, 65536))) throw new ValidationError('Invalid checkpoint replay guards.');
   if (data.rework !== undefined) {
     const item = objectWithKeys(data.rework, 'checkpoint rework', ['after', 'summary']);
-    if (item.after !== 'mdd-verify' || !bounded(item.summary, 8000)) throw new ValidationError('Invalid checkpoint rework.');
+    if (item.after !== 'mdd-verify' || typeof item.summary !== 'string' || !item.summary.length) throw new ValidationError('Invalid checkpoint rework.');
   }
   if (data.workerPolicy !== undefined) {
     const policy = objectWithKeys(data.workerPolicy, 'captured worker policy', ['enabled']);

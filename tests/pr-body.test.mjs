@@ -242,6 +242,14 @@ test('a translation that loses, invents or skips a recorded fact is refused with
   assert.throws(() => checkTranslations(entries, [{ key: 'c', text: 'Sobra.' }]), /"c" no es una de las claves pedidas.*falta "a".*falta "b"/s);
 });
 
+test('a translation has no size limit of its own', () => {
+  // Far past the former 2000-character cap; only its proportion to the source is still checked.
+  const entries = [{ key: 'a', label: 'A', source: 'Rejects the order when the total is missing. '.repeat(100) }];
+  const text = 'Rechaza la orden cuando falta el total. '.repeat(100);
+  assert.ok(text.length > 2000);
+  assert.equal(checkTranslations(entries, [{ key: 'a', text }]).get('a'), text.trim());
+});
+
 test('a translation that is really a rewrite or a summary is refused', t => {
   const entries = [{ key: 'a', label: 'A', source: 'Rejects the order when the total is missing, which is the case the requirement describes.' }];
   assert.throws(() => checkTranslations(entries, [{ key: 'a', text: 'La rechaza.' }]), /demasiado corta/);

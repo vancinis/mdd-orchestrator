@@ -4,7 +4,7 @@ import { Plugin as V2Plugin } from '@opencode/plugin';
 import { setupV2 } from './opencode-v2.js';
 import { isDeepStrictEqual } from 'node:util';
 import { createHash, randomUUID } from 'node:crypto';
-import { boundedText, movedMessage, PhaseRunner } from './phase-runner.js';
+import { boundedText, movedMessage, nonemptyText, PhaseRunner } from './phase-runner.js';
 import type { Inspect, Liveness, Runtime } from './phase-runner.js';
 import { freezeProfile, setupDiagnostic } from './settings.js';
 import { loadGlobalSettings } from './global-settings.js';
@@ -663,7 +663,7 @@ export function createInspector(input: PluginInput, timeout = 5000, now: () => n
       const envelope = typeof output.output === 'string' ? output.output : '';
       const match = TASK_ENVELOPE.exec(envelope.trim());
       if (!match) throw new Error('The delegated phase did not return a completed task result.');
-      return boundedText(match[1], 'delegated phase result', 20000);
+      return nonemptyText(match[1], 'delegated phase result');
     },
     async stopped(runtime, call, returned) {
       return (await liveness(runtime, call, returned)).verdict === 'stopped';
@@ -1063,7 +1063,7 @@ const plugin: Plugin = async input => {
           userText: tool.schema.string().min(1),
           notes: tool.schema.object({ environmentVariables: tool.schema.string().optional(), followUps: tool.schema.string().optional(), deployment: tool.schema.string().optional() }).optional(),
           digest: tool.schema.string().min(1).optional().describe('The digest the first call returned. Required with translations, and it binds them to the evidence they were made from.'),
-          translations: tool.schema.array(tool.schema.object({ key: tool.schema.string().min(1), text: tool.schema.string().min(1).max(2000) })).max(128).optional()
+          translations: tool.schema.array(tool.schema.object({ key: tool.schema.string().min(1), text: tool.schema.string().min(1) })).max(128).optional()
             .describe('One Spanish translation per key returned by the first call. Translate only: keep numbers, paths, identifiers and commands exactly, add no fact and drop none.'),
         },
         async execute(args, context) {

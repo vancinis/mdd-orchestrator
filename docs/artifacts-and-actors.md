@@ -24,8 +24,9 @@ const artifactText = await store.read(saved.ref);
 | `ArtifactResult` | Readonly `{ ref: ArtifactRef; content: string }` |
 | `ArtifactRef` | Readonly identity plus `recordID: string`, `digest: string`, `bytes: number`, `store`, optional `path: string`, `observationID: number` |
 | `ArtifactWriteError` | `attempts: readonly ArtifactAttempt[]`; each has `backend`, `status: 'confirmed' \| 'unknown'`, diagnostic `ref` |
-| `ARTIFACT_MAX_BYTES` | 16,000 UTF-8 bytes, no truncation |
 | `PHASE_PATHS` | Frozen exact phase-to-path mapping below |
+
+Artifact content must be nonempty valid UTF-8. It has no size limit and is never truncated.
 
 Supply the already session/project/directory-bound `EngramHttp` for `engram` or `both`.
 Construction checks its directory against the artifact root; it neither registers nor

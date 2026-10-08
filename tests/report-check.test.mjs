@@ -20,35 +20,21 @@ test('a readable report checks clean, and says a clean check is not an acceptanc
   assert.deepEqual(checked.resultFormat, reportFormatLines('mdd-plan'));
 });
 
-test('an oversized summary and an oversized artifact are reported together, not one per try', () => {
-  // The exact loop this exists to end: on the observed run each of these cost a full round trip.
-  // Both overshoot their own limit while the document stays inside the 20,000-byte envelope, so
-  // the two field problems are what there is to report.
+test('summary, how, artifact and the report have no size limit', () => {
+  // None of these is bounded, so a large report is never a problem of form.
   const document = reportDocument({
-    outcome: 'passed', evidenceSummary: 'x'.repeat(2100), artifact: 'y'.repeat(16100),
+    outcome: 'passed', evidenceSummary: 'x'.repeat(50000), how: 'h'.repeat(50000), artifact: 'y'.repeat(100000),
   });
-  assert.ok(Buffer.byteLength(document) < 20000, 'the envelope must not be the problem here');
+  assert.ok(Buffer.byteLength(document) > 200000);
   const checked = checkReportForm('mdd-explore', document);
-  assert.equal(checked.ok, false);
-  assert.equal(checked.problems.length, 2);
-  assert.ok(checked.problems.some(problem => /summary must be nonempty text of at most 2000 bytes/.test(problem)));
-  assert.ok(checked.problems.some(problem => /artifact must be nonempty text of at most 16000 bytes/.test(problem)));
-  assert.match(checked.note, /not in the work it describes/);
+  assert.deepEqual(checked.problems, []);
+  assert.equal(checked.ok, true);
 });
 
-test('a document over the envelope reports that alone, even when fields are wrong too', () => {
-  // Nothing inside can be trusted to be read out of a document MDD will refuse whole, and piling
-  // field complaints on top would bury the one that has to be fixed first.
-  const checked = checkReportForm('mdd-plan', planReport({
-    evidenceSummary: 'x'.repeat(2500), artifact: 'y'.repeat(16500),
-  }));
-  assert.deepEqual(checked.problems, ['phase report must be nonempty text of at most 20000 bytes.']);
-});
-
-test('the wording matches what the real validation would say, so a fix transfers', () => {
-  // A report MDD rejects must be rejected here in the same words, or checking it teaches nothing.
-  const checked = checkReportForm('mdd-plan', planReport({ evidenceSummary: 'x'.repeat(2500) }));
-  assert.deepEqual(checked.problems, ['summary must be nonempty text of at most 2000 bytes.']);
+test('a large plan report passes the form check', () => {
+  const checked = checkReportForm('mdd-plan', planReport({ evidenceSummary: 'x'.repeat(10000), artifact: 'y'.repeat(50000) }));
+  assert.deepEqual(checked.problems, []);
+  assert.equal(checked.ok, true);
 });
 
 test('a document with no envelope reports that alone, because nothing below it can be read', () => {
