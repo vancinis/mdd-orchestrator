@@ -156,6 +156,13 @@ not phase approval. Nonempty/type validation, choice counts, distinct/reserved l
 answer matching and parent/call ownership checks remain unchanged. Aggregate storage and transport
 safety limits remain explicit; no truncation or automatic re-asking substitutes for an answer.
 
+All pending clarifications are asked together in one native interaction. Each may name a short
+topic, say why it matters, allow several choices, or offer no choices for an open-ended answer;
+delegation to the agent and free text are always available. They come from three places: doubts
+the coordinator passes to `mdd_start` (asked with preflight), decisions a phase reports under
+`## MDD Questions` (asked at the next boundary, in automatic mode too), and the coordinator's own
+questions before a ready phase is dispatched. Answers are context, never approval.
+
 ## 4. Runnable proof and verification boundaries
 
 The [README](../README.md) provides working PowerShell commands and exit codes. `examples/answers.json` and `examples/profile.json` are equivalent complete sources. `examples/config.json` demonstrates the equality boundary. The CLI reads UTF-8 JSON files, accepts a leading BOM, validates input, and prints a decision. It never executes the returned phases or creates artifact folders.
@@ -171,13 +178,14 @@ MDD means **my-driven-development**. The finished product is OpenCode-first; eve
 ### Grouped preflight and lifecycle
 
 Native intake now uses one grouped preflight after verified native requirements and before
-routing; a complete frozen profile bypasses it. Missing fields alone are asked in original
-order, with no guessing. Native before/after question metadata authorizes first execution;
+routing; a complete frozen profile bypasses it unless the coordinator has doubts about the
+request. Missing fields alone are asked in original order, with no guessing, followed by an
+optional free-form note. Native before/after question metadata authorizes first execution;
 subsequent interactive Proceed/Stop receipts authorize only the waiting phase. Automatic mode
 does not ask phase approval questions. Complete native contract tests cover low/high routes,
 all artifact stores and exact approval slots through Apply/Verify. Answers are reused. Explicit
 reruns and material changes use the same native gate: confirmation, then one fresh grouped
-five-field preflight. Rejection preserves the current plan. In-flight/uncertain work cannot
+preflight. Rejection preserves the current plan. In-flight/uncertain work cannot
 be reset. Ordinary implementation choices and automatic progression add no change questions.
 
 Stable explicit inputs and versioned routing are implemented here. Any future automated complexity classifier must not be confused with deterministic scoring; classifier evidence/reconciliation and non-linear transitions still need design. Deterministic routing does not imply deterministic model output or statistical certainty.

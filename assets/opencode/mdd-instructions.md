@@ -54,6 +54,12 @@ Answer in the markdown form the task prompt specifies. The summary is prose a pe
 first; the artifact is the deliverable itself. Structured data appears only where the prompt
 asks for it, in one fenced block.
 
+When the work needs a decision only the user can make, do not guess it: state it under
+`## MDD Questions` as the task prompt describes, with why it matters and concrete choices. Ask
+only what the request, the repository and the earlier artifacts cannot answer, and never ask for
+approval. The coordinator puts the questions to the user and the answers reach the next phase. If
+this phase cannot be completed safely without an answer, report outcome `failed` with the question.
+
 For any scoped worker, return the report directly: `mdd_check_report` and all custom/MDD tools
 except Apply's scoped editor are denied. The adapter checks the report at the exact parent callback.
 Otherwise, before you return it, call `mdd_check_report` once with your phase and the exact report you

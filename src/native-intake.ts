@@ -14,7 +14,8 @@ import { objectWithKeys } from './validation.js';
 import { concerns } from './concerns.js';
 import { STABLE_CHECKPOINT_VERSION } from './checkpoint.js';
 import type { CheckpointStore } from './checkpoint.js';
-import type { QuestionCheckpointStore, QuestionRecord } from './question-checkpoint.js';
+import { CLARIFICATION_ANSWERS_MAX, CLARIFICATIONS_MAX } from './question-checkpoint.js';
+import type { Clarification, QuestionCheckpointStore, QuestionRecord } from './question-checkpoint.js';
 import type { RunOwnershipStore } from './run-ownership.js';
 
 export type IntakeInspect = {
@@ -24,11 +25,11 @@ export type IntakeInspect = {
   transferLiveness?(runtime: Runtime, sourceSessionID: string, runID: string, requestDigest: string,
     assistantMessageID?: string): Promise<'running' | 'stopped' | 'unknown'>;
 };
-type Runner = Pick<PhaseRunner, 'start' | 'status' | 'approveNative' | 'block'> & Partial<Pick<PhaseRunner, 'approvalStopped' | 'assertChangeable' | 'assertFreshStart' | 'closeForFreshStart' | 'contribute' | 'explore' | 'movedAway' | 'priorGuards' | 'recordConsent' | 'reset' | 'resumable' | 'submit' | 'owner' | 'reserve' | 'release' | 'handoffRecoveredQuestion' | 'forceRoute' | 'retryRisk' | 'chooseManualRoute'>>;
+type Runner = Pick<PhaseRunner, 'start' | 'status' | 'approveNative' | 'block'> & Partial<Pick<PhaseRunner, 'approvalStopped' | 'assertChangeable' | 'assertFreshStart' | 'closeForFreshStart' | 'contribute' | 'explore' | 'movedAway' | 'priorGuards' | 'recordConsent' | 'reset' | 'resumable' | 'submit' | 'owner' | 'reserve' | 'release' | 'handoffRecoveredQuestion' | 'forceRoute' | 'retryRisk' | 'chooseManualRoute' | 'openQuestions' | 'takeOpenQuestions'>>;
 /** The run and settled state a native question reserved the durable writer against. */
 type Reservation = NonNullable<QuestionRecord['reservation']>;
-type Slot = { kind: 'preflight' | 'approval' | 'change' | 'clarification' | 'route' | 'risk-recovery'; args: QuestionEnvelope; phase?: Phase; callID?: string; requirements?: string };
-type Clarification = { question: string; options: { label: string; description: string; recommended?: boolean }[]; deferrable?: boolean };
+/** `fields` counts a preflight envelope's leading field questions; the rest are its clarifications. */
+type Slot = { kind: 'preflight' | 'approval' | 'change' | 'clarification' | 'route' | 'risk-recovery'; args: QuestionEnvelope; phase?: Phase; callID?: string; requirements?: string; fields?: number };
 type Intake = {
   runtime: Runtime; requirements: string;
   intakeToken?: string;
@@ -53,7 +54,22 @@ type Intake = {
  */
 export const APPROVAL_LABELS = Object.freeze({ proceed: 'Continuar', pause: 'Pausar', detail: 'Obtener un resumen más completo de esta fase' });
 export const CHANGE_LABELS = Object.freeze({ confirm: 'Confirmar el cambio', keep: 'Mantener el plan actual' });
-export const CLARIFICATION_LABELS = Object.freeze({ defer: 'Dejar para más adelante', delegate: 'Que decida el agente' });
+export const CLARIFICATION_LABELS = Object.freeze({ defer: 'Dejar para más adelante', delegate: 'Que decida el agente', nothing: 'Nada que agregar' });
+/** Shown under a clarification so the user sees what depends on the answer before giving it. */
+export const CLARIFICATION_WHY_PREFIX = 'Por qué importa: ';
+/** A clarification header is the short topic the native question shows above it. */
+const CLARIFICATION_HEADER_MAX = 30;
+/**
+ * Offered with every preflight that is actually asked: before any phase runs, the user can add
+ * whatever the request left out, in their own words. A complete profile still starts straight
+ * away; only genuine doubts from the coordinator stop it.
+ */
+export const PREFLIGHT_NOTE: Clarification = Object.freeze({
+  header: 'Notas',
+  question: '¿Hay algo más que el agente deba saber antes de empezar (dudas, restricciones, preferencias)? Escribilo con tu propia respuesta.',
+  options: [{ label: CLARIFICATION_LABELS.nothing, description: 'Seguir solo con el pedido original.', recommended: false }],
+  deferrable: false, note: true,
+}) as Clarification;
 /**
  * Offered once, exactly at the first interactive approval that follows a passed mdd-risk verdict,
  * in place of the generic approval question. `continue` authorizes only the suggested route's
@@ -106,11 +122,51 @@ export function riskRecoveryEnvelope(runID: string, reason: string): QuestionEnv
     ] }] };
 }
 
-function clarificationEnvelope(item: Clarification): QuestionEnvelope {
-  return { questions: [{ header: 'Detalle', question: item.question, multiple: false,
+function clarificationPrompt(item: Clarification): QuestionEnvelope['questions'][number] {
+  return { header: item.header ?? 'Detalle', question: item.why ? `${item.question}\n${CLARIFICATION_WHY_PREFIX}${item.why}` : item.question,
+    multiple: item.multiple === true,
     options: [...item.options.map(option => ({ label: clarificationOptionLabel(option), description: option.description })),
-      ...(item.deferrable ? [{ label: CLARIFICATION_LABELS.defer, description: 'Resolver esto en una fase posterior; no se considera decidido.' }] : []),
-      { label: CLARIFICATION_LABELS.delegate, description: 'Delegar esta decisión al agente de la próxima fase.' }] }] };
+      // The note asks for the user's own words; delegating or deferring it would mean nothing.
+      ...(item.note ? [] : [
+        ...(item.deferrable ? [{ label: CLARIFICATION_LABELS.defer, description: 'Resolver esto en una fase posterior; no se considera decidido.' }] : []),
+        { label: CLARIFICATION_LABELS.delegate, description: 'Delegar esta decisión al agente de la próxima fase.' }])] };
+}
+
+/**
+ * Every pending clarification goes out in one native interaction, the way preflight does. Asking
+ * them one at a time made the user answer, wait, and answer again for questions that were all
+ * known at once.
+ */
+function clarificationEnvelope(items: readonly Clarification[]): QuestionEnvelope {
+  return { questions: items.map(clarificationPrompt) };
+}
+
+/**
+ * The coordinator's questions, from mdd_prepare_advance or from mdd_start. User-visible prose has
+ * no individual ceiling; the counts are bounded and the rendered labels must stay unambiguous.
+ */
+function parseClarifications(value: unknown): Clarification[] {
+  if (!Array.isArray(value) || value.length > 8) throw new Error('Provide up to eight clarification questions, or an empty array when none remain.');
+  return value.map(raw => {
+    const item = objectWithKeys(raw, 'clarification', ['question', 'header', 'why', 'options', 'multiple', 'deferrable']);
+    const question = nonemptyText(item.question, 'clarification question');
+    if (!Array.isArray(item.options) || item.options.length > 6 ||
+        (['multiple', 'deferrable'] as const).some(key => item[key] !== undefined && typeof item[key] !== 'boolean')) {
+      throw new Error('Clarifications take zero to six options (none for an open-ended answer) and boolean multiple and deferrable flags.');
+    }
+    const header = item.header === undefined ? undefined : nonemptyText(item.header, 'clarification header').trim();
+    if (header !== undefined && [...header].length > CLARIFICATION_HEADER_MAX) throw new Error(`A clarification header is a short topic of at most ${CLARIFICATION_HEADER_MAX} characters; put the detail in why.`);
+    const why = item.why === undefined ? undefined : nonemptyText(item.why, 'clarification why');
+    const options = item.options.map(rawOption => {
+      const option = objectWithKeys(rawOption, 'clarification option', ['label', 'description', 'recommended']);
+      if (option.recommended !== undefined && typeof option.recommended !== 'boolean') throw new Error('recommended must be boolean.');
+      return { label: nonemptyText(option.label, 'option label'), description: nonemptyText(option.description, 'option description'), recommended: option.recommended === true };
+    });
+    const labels = options.map(clarificationOptionLabel);
+    if (new Set([...labels, CLARIFICATION_LABELS.defer, CLARIFICATION_LABELS.delegate]).size !== labels.length + 2) throw new Error('Clarification option labels must be unique and not reserved.');
+    return { question, ...(header ? { header } : {}), ...(why ? { why } : {}), options,
+      ...(item.multiple === true ? { multiple: true } : {}), deferrable: item.deferrable === true };
+  });
 }
 
 /**
@@ -125,7 +181,12 @@ export class UnselectedAnswer extends Error {
   }
 }
 
-export function nativeQuestionAnswers(args: QuestionEnvelope, raw: unknown): string[][] {
+/**
+ * Reads what the user chose. Questions from `openFrom` on are clarifications: they may be left
+ * unanswered, answered in the user's own words, or answered with several choices when they allow
+ * it. Every earlier question maps to an exact token and takes exactly one listed label.
+ */
+export function nativeQuestionAnswers(args: QuestionEnvelope, raw: unknown, openFrom = args.questions.length): string[][] {
   const result = objectWithKeys(raw, 'native question output', ['title', 'output', 'metadata', 'attachments']);
   const metadata = objectWithKeys(result.metadata, 'native question metadata', ['answers', 'truncated']);
   if (metadata.truncated !== false || (result.attachments !== undefined && (!Array.isArray(result.attachments) || result.attachments.length))) {
@@ -133,21 +194,23 @@ export function nativeQuestionAnswers(args: QuestionEnvelope, raw: unknown): str
   }
   const answers = metadata.answers;
   if (!Array.isArray(answers) || answers.length !== args.questions.length) throw new Error('Native question answer count mismatch.');
-  const selections = args.questions.map((_question, index) => {
+  const given = args.questions.map((question, index) => {
     const selected: unknown = answers[index];
-    if (!Array.isArray(selected) || selected.length !== 1 || typeof selected[0] !== 'string') throw new Error('Invalid native question answer label.');
-    return [selected[0]];
+    if (!Array.isArray(selected) || selected.some(entry => typeof entry !== 'string')) throw new Error('Invalid native question answer label.');
+    if (index >= openFrom ? !question.multiple && selected.length > 1 : selected.length !== 1) throw new Error('Invalid native question answer label.');
+    return selected as string[];
   });
-  const formatted = args.questions.map((q, i) => `"${q.question}"="${selections[i]!.join(', ')}"`).join(', ');
+  // The host writes an empty answer as "Unanswered"; anything else would be a rewritten result.
+  const formatted = args.questions.map((q, i) => `"${q.question}"="${given[i]!.length ? given[i]!.join(', ') : 'Unanswered'}"`).join(', ');
   if (result.title !== `Asked ${args.questions.length} question${args.questions.length > 1 ? 's' : ''}` ||
       result.output !== `User has answered your questions: ${formatted}. You can now continue with the user's answers in mind.`) {
     throw new Error('Native question output does not match its answer metadata.');
   }
   // Only an envelope that agrees with itself can have its labels read as what the user chose, so
   // an unlisted one is their own words here, rather than a result that was rewritten on the way.
-  const unlisted = args.questions.findIndex((question, index) => !question.options.some(option => option.label === selections[index]![0]));
-  if (unlisted >= 0) throw new UnselectedAnswer(selections[unlisted]![0]!);
-  return selections;
+  const unlisted = args.questions.findIndex((question, index) => index < openFrom && !question.options.some(option => option.label === given[index]![0]));
+  if (unlisted >= 0) throw new UnselectedAnswer(given[unlisted]![0]!);
+  return given.map((selected, index) => index < openFrom ? [selected[0]!] : selected.filter(entry => entry.trim()));
 }
 
 export class NativeIntake {
@@ -268,14 +331,29 @@ export class NativeIntake {
     if (!('workflow' in status)) return;
     const nextAction = status.workflow.nextAction;
     const blockedRisk = nextAction.kind === 'blocked-risk' && status.state === 'blocked';
-    if (nextAction.kind !== 'approve' && !blockedRisk) return;
+    const boundary = nextAction.kind === 'execute' && status.state === 'ready';
+    if (nextAction.kind !== 'approve' && !blockedRisk && !boundary) return;
     if (nextAction.kind === 'approve' && status.state !== 'await-approval') return;
+    let reported = false;
+    if (boundary) {
+      // A ready phase has no approval to ask again. Only a clarification interrupted before it
+      // was dispatched, or questions its predecessor reported that nobody asked yet, hold it back.
+      const held = this.durable.questions?.read(runtime.sessionID);
+      const interrupted = held?.runID === status.runID && ['prepared', 'pending', 'answered'].includes(held.state);
+      // Any other unresolved question here is not this boundary's to reissue; status reports it.
+      if (interrupted && held.slot.kind !== 'clarification') return;
+      reported = !!this.runner.openQuestions?.(runtime.sessionID);
+      if (!interrupted && !reported) return;
+    }
     const checkpoint = this.durable.checkpoint?.read(runtime.sessionID)?.checkpoint;
     if (checkpoint?.version !== STABLE_CHECKPOINT_VERSION || checkpoint.runID !== status.runID ||
         checkpoint.data.directory !== runtime.directory || checkpoint.data.worktree !== runtime.worktree) {
       throw new Error('The native question cannot be bound to a validated same-parent checkpoint.');
     }
-    const recorded = this.durable.questions?.read(runtime.sessionID);
+    let recorded = this.durable.questions?.read(runtime.sessionID);
+    // At a ready boundary, a settled record of an earlier run, or of the preflight that started
+    // this one, answers nothing and must not keep the run from asking its own questions.
+    if (boundary && recorded && recorded.runID !== status.runID && ['settled', 'cancelled', 'withdrawn'].includes(recorded.state)) recorded = undefined;
     if (recorded && (recorded.runID !== status.runID ||
         (recorded.checkpoint && recorded.checkpoint.sequence > checkpoint.sequence))) throw new Error('The native question belongs to a different or newer run.');
     // Same rule the reservation hand-off applies: a record bound to this exact checkpoint sequence
@@ -287,7 +365,7 @@ export class NativeIntake {
     if (blockedRisk) {
       if (recorded && recorded.slot.kind !== 'risk-recovery' &&
           !['settled', 'cancelled', 'withdrawn'].includes(recorded.state)) throw new Error('A different native question is unresolved; no risk recovery was reissued.');
-    } else if (nextAction.kind === 'approve') {
+    } else if (nextAction.kind === 'approve' || nextAction.kind === 'execute') {
       if (recorded && !['approval', 'clarification', 'route'].includes(recorded.slot.kind) &&
           !['settled', 'cancelled', 'withdrawn'].includes(recorded.state)) throw new Error('A different native question is unresolved; no approval was reissued.');
       const phase = nextAction.phase;
@@ -319,7 +397,10 @@ export class NativeIntake {
         this.#slot(entry, slot, true);
         entry.notice = 'The earlier native question is not consent. Ask this newly issued question and use only its fresh native answer.';
         this.#reissued.add(runtime.sessionID);
-      } else if (recorded?.state === 'cancelled') this.#reissued.add(runtime.sessionID);
+      } else {
+        if (recorded?.state === 'cancelled') this.#reissued.add(runtime.sessionID);
+        if (reported) entry.notice = 'The phase reported open questions (openQuestions) that were not asked yet. Present them translated into Spanish with mdd_prepare_advance before the next phase is dispatched.';
+      }
     } catch (error) { this.#sessions.delete(runtime.sessionID); throw error; }
   }
 
@@ -338,10 +419,12 @@ export class NativeIntake {
         (state === 'not-started' && ['blocked', 'stopped'].includes(previous.state));
       if (!replaceable) throw new Error('This parent already has an MDD intake; use mdd_status or request a confirmed change.');
     }
-    const input = objectWithKeys(value, 'start', ['requirements', 'context', 'exploration']);
+    const input = objectWithKeys(value, 'start', ['requirements', 'context', 'exploration', 'questions']);
     const exploration = input.exploration === undefined ? undefined : objectWithKeys(input.exploration, 'exploration', ['workItems']);
     if (exploration && (!Array.isArray(exploration.workItems) || exploration.workItems.length > 2)) throw new Error('Invalid exploration work items.');
     const requirements = boundedText(input.requirements, 'requirements', 12000);
+    // Doubts about the request itself, asked together with preflight rather than after it.
+    const startup = input.questions === undefined ? [] : parseClarifications(input.questions);
     // Validated at intake so bad context fails here, not later when the first phase is prepared.
     // Only the pair is held: the runner attributes provenance itself when the run is created.
     const context = input.context === undefined ? undefined : (({ label, content }) => ({ label, content }))(runContext(input.context));
@@ -385,12 +468,9 @@ export class NativeIntake {
       if (entry.state !== 'starting') throw new Error('Intake became uncertain during initialization.');
       if (previous?.intakeToken && ['blocked', 'stopped'].includes(previous.state))
         this.durable.ownership?.retireIntake(runtime.sessionID, previous.intakeToken);
-      const args = questionEnvelope(entry.known, !!engram);
-      if (args.questions.length) {
-        const id = randomUUID();
-        for (const q of args.questions) q.question += ` [MDD intake ${id}]`;
-        this.#slot(entry, { kind: 'preflight', args });
-      } else await this.#startRunner(entry, [], 'startup-profile');
+      const slot = this.#preflightSlot(entry, startup, 'intake');
+      if (slot) this.#slot(entry, slot);
+      else await this.#startRunner(entry, [], 'startup-profile');
       return this.status(runtime.sessionID);
     } catch (error) {
       if (previous) { this.#sessions.set(runtime.sessionID, previous); throw error; }
@@ -429,7 +509,7 @@ export class NativeIntake {
       if (entry.state !== 'accepting') throw new Error('Change validation was interrupted.');
       entry.proposed.add(proposal); entry.usedMessages.add(userID); entry.userMessageID = userID; entry.restore = saved;
       this.#recordConsent(entry);
-      const question = `${input.kind === 'rerun' ? '¿Volver a hacer las cinco preguntas de preflight para un run planificado nuevo?' : '¿Confirmás este cambio material de alcance y un run planificado nuevo?'} Los artefactos y la memoria actuales se conservan. Requisitos propuestos: ${requirements}${advisory.length ? ` Evidencia advertida: ${JSON.stringify(advisory)}` : ''} [MDD change ${randomUUID()}]`;
+      const question = `${input.kind === 'rerun' ? '¿Volver a hacer las preguntas de preflight para un run planificado nuevo?' : '¿Confirmás este cambio material de alcance y un run planificado nuevo?'} Los artefactos y la memoria actuales se conservan. Requisitos propuestos: ${requirements}${advisory.length ? ` Evidencia advertida: ${JSON.stringify(advisory)}` : ''} [MDD change ${randomUUID()}]`;
       this.#slot(entry, { kind: 'change', requirements, args: { questions: [{ header: 'Cambio', question, multiple: false, options: [{ label: CHANGE_LABELS.confirm, description: 'Responder el preflight una vez y arrancar un run planificado nuevo.' }, { label: CHANGE_LABELS.keep, description: 'No cambiar el run actual, sus respuestas ni su aprobación.' }] }] } });
       return this.status(runtime.sessionID);
     } catch (error) { entry.state = saved.state; throw error; }
@@ -459,33 +539,33 @@ export class NativeIntake {
     return this.status(runtime.sessionID);
   }
 
-  /** Review must finish before the native phase approval is ever offered. */
+  /**
+   * Review must finish before the native phase approval is ever offered. The same call stops a
+   * ready phase before it is dispatched — the boundary automatic mode has instead of an approval —
+   * so a decision only the user can make is asked in either mode, all questions at once.
+   */
   prepareAdvance(value: unknown, runtime: Runtime): unknown {
     if (runtime.agent !== 'mdd-orchestrator') throw new Error('Only the coordinator may prepare phase advancement.');
     const entry = this.#sessions.get(runtime.sessionID);
-    if (!entry || !['review-ready', 'paused'].includes(entry.state)) throw new Error('Phase review is not ready; no approval was changed.');
     const status = this.runner.status(runtime.sessionID);
-    if (!('workflow' in status) || status.workflow.nextAction.kind !== 'approve') throw new Error('No phase is awaiting approval.');
+    const next = 'workflow' in status ? status.workflow.nextAction : undefined;
+    // A ready phase nobody dispatched yet may still wait for an answer; one in flight may not.
+    const beforeDispatch = entry?.state === 'active' && next?.kind === 'execute' && status.state === 'ready' &&
+      !('contextual' in status && status.contextual);
+    if (!entry || (!['review-ready', 'paused'].includes(entry.state) && !beforeDispatch)) throw new Error('Phase review is not ready; no approval was changed.');
+    if (!next || (next.kind !== 'approve' && next.kind !== 'execute')) throw new Error('No phase is awaiting approval or dispatch.');
     const input = objectWithKeys(value, 'advance preparation', ['questions']);
-    if (!Array.isArray(input.questions) || input.questions.length > 8) throw new Error('Provide up to eight clarification questions, or an empty array when none remain.');
-    const questions: Clarification[] = input.questions.map(raw => {
-      const item = objectWithKeys(raw, 'clarification', ['question', 'options', 'deferrable']);
-      const question = nonemptyText(item.question, 'clarification question');
-      if (!Array.isArray(item.options) || !item.options.length || item.options.length > 6 || (item.deferrable !== undefined && typeof item.deferrable !== 'boolean')) throw new Error('Clarifications require one to six options and a boolean deferrable flag.');
-      const options = item.options.map(rawOption => {
-        const option = objectWithKeys(rawOption, 'clarification option', ['label', 'description', 'recommended']);
-        if (option.recommended !== undefined && typeof option.recommended !== 'boolean') throw new Error('recommended must be boolean.');
-        return { label: nonemptyText(option.label, 'option label'), description: nonemptyText(option.description, 'option description'), recommended: option.recommended === true };
-      });
-      const labels = options.map(clarificationOptionLabel);
-      if (new Set([...labels, CLARIFICATION_LABELS.defer, CLARIFICATION_LABELS.delegate]).size !== labels.length + 2) throw new Error('Clarification option labels must be unique and not reserved.');
-      return { question, options, deferrable: item.deferrable === true };
-    });
-    if (questions.length) {
-      // A question explicitly re-offered by the coordinator replaces its pending copy.
-      const named = new Set(questions.map(item => item.question));
-      entry.clarifications = [...entry.clarifications.filter(item => !named.has(item.question)), ...questions];
+    const questions = parseClarifications(input.questions);
+    if (beforeDispatch && !questions.length) return this.status(runtime.sessionID);
+    // A question explicitly re-offered by the coordinator replaces its pending copy.
+    const named = new Set(questions.map(item => item.question));
+    const pending = [...entry.clarifications.filter(item => !named.has(item.question)), ...questions];
+    if (pending.length + entry.deferred.length > CLARIFICATIONS_MAX) {
+      throw new Error(`At most ${CLARIFICATIONS_MAX} clarifications can be pending at once and ${entry.clarifications.length + entry.deferred.length} already are. Submit fewer new questions; nothing was changed.`);
     }
+    // The phase's own questions are being asked now, translated, or were found already answered.
+    this.runner.takeOpenQuestions?.(runtime.sessionID);
+    entry.clarifications = pending;
     delete entry.reason;
     this.#nextReviewQuestion(entry);
     return this.status(runtime.sessionID);
@@ -507,19 +587,28 @@ export class NativeIntake {
 
   #nextReviewQuestion(entry: Intake): void {
     const status = this.runner.status(entry.runtime.sessionID);
-    if (!('workflow' in status) || status.workflow.nextAction.kind !== 'approve') throw new Error('No phase is awaiting approval.');
-    const phase = status.workflow.nextAction.phase;
-    const item = entry.clarifications[0];
+    const next = 'workflow' in status ? status.workflow.nextAction : undefined;
+    if (!('workflow' in status) || !next || (next.kind !== 'approve' && next.kind !== 'execute')) throw new Error('No phase is awaiting approval or dispatch.');
+    const phase = next.phase;
+    const pending = entry.clarifications.length > 0;
+    if (!pending && next.kind === 'execute') {
+      // Nothing left to ask and no approval to give: the ready phase, whose prompt now carries
+      // every answer, goes out as it is. The settled question stays as the slot of record.
+      this.#reissued.delete(entry.runtime.sessionID);
+      entry.state = 'active';
+      entry.notice = 'The clarifications are recorded and travel to the next phase. Dispatch the ready task exactly as mdd_status returns it; no approval is needed.';
+      return;
+    }
     // The route question replaces the generic approval exactly once: at the suggested route's
     // first tail phase, while it is still the only recorded phase result and the route has not
     // already been forced — the same boundary `Workflow.overrideRoute()` itself still accepts.
-    // A deferred clarification still takes precedence, exactly as it does for an ordinary approval.
-    const risking = !item && 'risk' in status && status.risk && status.workflow.routeOrigin === 'suggested' && status.workflow.results.length === 1;
-    const args = item ? clarificationEnvelope(item)
+    // Pending clarifications still take precedence, exactly as they do for an ordinary approval.
+    const risking = !pending && 'risk' in status && status.risk && status.workflow.routeOrigin === 'suggested' && status.workflow.results.length === 1;
+    const args = pending ? clarificationEnvelope(entry.clarifications)
       : risking ? routeEnvelope(status.runID, phase, status.risk as { route: 'low' | 'high'; complexity: 'low' | 'high'; reason: string })
       : approvalEnvelope(status.runID, phase, status.reportDetail !== 'detailed');
     if (this.#reissued.delete(entry.runtime.sessionID)) args.questions[0]!.question += ` [MDD re-present ${randomUUID()}]`;
-    this.#slot(entry, { kind: item ? 'clarification' : risking ? 'route' : 'approval', phase, args });
+    this.#slot(entry, { kind: pending ? 'clarification' : risking ? 'route' : 'approval', phase, args });
   }
 
   /** The coordinator reports a phase it carried out itself instead of delegating it. */
@@ -769,12 +858,13 @@ export class NativeIntake {
       await this.inspect.question(entry.runtime, call, slot.args);
       this.runner.owner?.(call.sessionID, call.callID);
       if (entry.state !== 'accepting') throw new Error('Question became uncertain during result inspection.');
-      let selections: string[][];
-      try { selections = nativeQuestionAnswers(slot.args, output); }
-      catch (error) {
-        if (!(error instanceof UnselectedAnswer) || slot.kind !== 'clarification') throw error;
-        selections = [[nonemptyText(error.text, 'free-text clarification')]];
+      // Clarifications accept the user's own words, several choices or none at all; a token
+      // question (a preflight field, approval, route or change) still needs one listed label.
+      const openFrom = slot.kind === 'clarification' ? 0 : slot.kind === 'preflight' ? slot.fields ?? slot.args.questions.length : slot.args.questions.length;
+      if (slot.args.questions.length - openFrom !== (slot.kind === 'clarification' || slot.kind === 'preflight' ? entry.clarifications.length : 0)) {
+        throw new Error('The pending clarifications no longer match the issued question.');
       }
+      const selections = nativeQuestionAnswers(slot.args, output, openFrom);
       // A native callback is evidence of an answer, not replayable consent. Persist its exact
       // selections before any approval or plan transition; an incomplete write blocks the route.
       this.#persistQuestion(entry, 'answered', selections);
@@ -785,22 +875,18 @@ export class NativeIntake {
           // longer trustworthy data. A plain preflight rerun keeps the same objective and its context.
           if (slot.requirements!.trim() !== entry.requirements.trim()) delete entry.context;
           entry.requirements = slot.requirements!; entry.known = {}; entry.replacing = true;
-          const args = questionEnvelope({}, !!this.#settings.engram);
-          for (const question of args.questions) question.question += ` [MDD re-preflight ${randomUUID()}]`;
-          this.#slot(entry, { kind: 'preflight', args });
+          this.#slot(entry, this.#preflightSlot(entry, [], 're-preflight')!);
         }
-      } else if (slot.kind === 'preflight') await this.#startRunner(entry, selections, 'native-question');
-      else if (slot.kind === 'clarification') {
-        const item = entry.clarifications[0]!;
-        const answer = selections[0]![0]!;
-        const deferred = answer === CLARIFICATION_LABELS.defer;
-        // Keep prose in content, not the bounded label. A deferral remains unresolved context.
-        this.runner.contribute?.({ label: 'Clarification', content: `Question: ${item.question}\nAnswer: ${answer}${deferred
-          ? '\nDeferred by the user; unresolved. Do not assume a choice. Continue only with work safe without this decision.'
-          : ''}` }, entry.runtime);
-        entry.clarificationAnswers.push({ question: item.question, answer, phase: slot.phase!, disposition: deferred ? 'deferred' : 'answered' });
-        if (deferred) entry.deferred.push(item);
-        entry.clarifications.shift();
+      } else if (slot.kind === 'preflight') {
+        const fields = openFrom;
+        const startup = entry.clarifications;
+        await this.#startRunner(entry, selections.slice(0, fields), fields ? 'native-question' : 'startup-profile');
+        // The run exists now, so the answers ride with its first phase like any later clarification.
+        if (startup.length) this.#settleClarifications(entry, startup, selections.slice(fields), this.#boundaryPhase(entry));
+        entry.clarifications = [];
+      } else if (slot.kind === 'clarification') {
+        this.#settleClarifications(entry, entry.clarifications, selections, slot.phase!);
+        entry.clarifications = [];
         this.#nextReviewQuestion(entry);
       } else if (slot.kind === 'route') {
         const answer = selections[0]![0];
@@ -903,13 +989,19 @@ export class NativeIntake {
       this.#slot(entry, { kind: 'risk-recovery', args: riskRecoveryEnvelope(status.runID, status.reason ?? '') });
       return;
     }
-    if (next.kind === 'approve') {
+    // Automatic mode asks no approval, but a decision the phase could not make on the user's
+    // behalf still has to reach them before the next phase builds on a guess.
+    const reported = !!this.runner.openQuestions?.(sessionID);
+    const asking = next.kind === 'execute' && reported;
+    if (next.kind === 'approve' || asking) {
       const old = entry.slot;
       entry.state = 'review-ready'; delete entry.slot; delete entry.notice;
       // Only a completed subsequent phase makes deferred questions eligible again. Never re-offer
       // them at the approval immediately following the original deferral.
       entry.clarifications = entry.deferred;
       entry.deferred = [];
+      if (reported) entry.notice = `The phase reported open questions (openQuestions). Present the phase, translate each question into Spanish and submit them with mdd_prepare_advance, together with any of your own, ${asking
+        ? 'before the next phase is dispatched. Automatic mode needs no approval afterwards.' : 'before the approval is offered.'}`;
       if (old?.callID) this.#persistQuestion(entry, 'settled', undefined, old);
     }
   }
@@ -1074,6 +1166,61 @@ export class NativeIntake {
         ? { retiredCalls: [...(old?.retiredCalls ?? []), ...(state === 'prepared' && old?.callID && !old.retiredCalls?.includes(old.callID) ? [old.callID] : [])] } : {}),
     };
     this.durable.questions.write(parent, record);
+  }
+
+  /**
+   * The grouped preflight interaction: the missing fields, then the coordinator's doubts about the
+   * request, then the free-form note. The note only rides on a preflight that is asked anyway, so a
+   * complete profile still starts at once unless there are genuine doubts. Undefined: nothing to ask.
+   */
+  #preflightSlot(entry: Intake, startup: Clarification[], tag: 'intake' | 're-preflight'): Slot | undefined {
+    const fields = questionEnvelope(entry.known, !!this.#settings.engram);
+    entry.clarifications = [...startup, ...(fields.questions.length ? [structuredClone(PREFLIGHT_NOTE)] : [])];
+    if (!fields.questions.length && !entry.clarifications.length) return undefined;
+    const args: QuestionEnvelope = { questions: [...fields.questions, ...clarificationEnvelope(entry.clarifications).questions] };
+    const id = randomUUID();
+    for (const question of args.questions) question.question += tag === 'intake' ? ` [MDD intake ${id}]` : ` [MDD re-preflight ${randomUUID()}]`;
+    return { kind: 'preflight', fields: fields.questions.length, args };
+  }
+
+  /** The phase the pending interaction belongs to: the one awaiting approval or dispatch. */
+  #boundaryPhase(entry: Intake): Phase {
+    const status = this.runner.status(entry.runtime.sessionID);
+    const next = 'workflow' in status ? status.workflow.nextAction : undefined;
+    if (next && 'phase' in next && next.phase) return next.phase;
+    if (entry.slot?.phase) return entry.slot.phase;
+    throw new Error('Clarification answers have no phase to travel to.');
+  }
+
+  /**
+   * Hands every answer of one grouped interaction to the next phase as a single context entry,
+   * then records them. Deferred and unanswered questions stay unresolved and come back at a later
+   * boundary; a deferral picked together with real choices is not a deferral, the choices are.
+   */
+  #settleClarifications(entry: Intake, items: readonly Clarification[], selections: string[][], phase: Phase): void {
+    if (items.length !== selections.length) throw new Error('Clarification answers do not match the pending questions.');
+    const parts: string[] = [];
+    const answers: Intake['clarificationAnswers'] = [];
+    const deferrals: Clarification[] = [];
+    items.forEach((item, index) => {
+      const chosen = selections[index]!;
+      const lone = chosen.length === 1 ? chosen[0] : undefined;
+      // Nothing to add is an answer in itself: the request stands as written.
+      if (item.note && (!chosen.length || lone === CLARIFICATION_LABELS.nothing)) return;
+      const unanswered = !chosen.length && !item.note;
+      const deferred = unanswered || (!item.note && lone === CLARIFICATION_LABELS.defer);
+      const picked = chosen.length > 1 ? chosen.filter(label => label !== CLARIFICATION_LABELS.defer) : chosen;
+      const answer = unanswered ? 'Sin respuesta' : picked.join(', ');
+      parts.push(`Question: ${item.question}\n${picked.length > 1 ? `Answers:\n${picked.map(label => `- ${label}`).join('\n')}` : `Answer: ${answer}`}${
+        unanswered ? '\nLeft unanswered by the user; unresolved. Do not assume a choice. Continue only with work safe without this decision.'
+        : deferred ? '\nDeferred by the user; unresolved. Do not assume a choice. Continue only with work safe without this decision.' : ''}`);
+      answers.push({ question: item.question, answer, phase, disposition: deferred ? 'deferred' : 'answered' });
+      if (deferred) deferrals.push(item);
+    });
+    // Keep prose in content, not the bounded label. One entry per interaction, not per question.
+    if (parts.length) this.runner.contribute?.({ label: 'Clarification', content: parts.join('\n\n') }, entry.runtime);
+    entry.clarificationAnswers = [...entry.clarificationAnswers, ...answers].slice(-CLARIFICATION_ANSWERS_MAX);
+    entry.deferred.push(...deferrals);
   }
 
   async #startRunner(entry: Intake, selections: unknown, source: 'startup-profile' | 'native-question'): Promise<void> {

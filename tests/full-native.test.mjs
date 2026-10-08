@@ -656,7 +656,7 @@ test('opt-in failed Verify restores rework and complete runs close before a fres
 });
 
 // Native SDK/hook contract fixtures. No model or real shell execution is performed.
-async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', partial = false, summary = 'low', telemetry = true, memoryEnabled = true, memoryFault, start = true, worktree: worktreeLayout = false } = {}) {
+async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', partial = false, summary = 'low', telemetry = true, memoryEnabled = true, memoryFault, start = true, worktree: worktreeLayout = false, autoReview = true } = {}) {
   isolateHome(t);
   // When asked, the session runs inside a linked git worktree laid out as git does on disk — a
   // `.git` file pointing at the administrative directory, which names the shared git directory. It
@@ -714,7 +714,7 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
   const status = async () => {
     const current = JSON.parse(await hooks.tool.mdd_status.execute({ detail: 'full' }, context));
     // Existing route tests act as a coordinator with no outstanding clarification.
-    return current.state === 'review-ready'
+    return current.state === 'review-ready' && autoReview
       ? JSON.parse(await hooks.tool.mdd_prepare_advance.execute({ questions: [] }, context))
       : current;
   };
@@ -728,7 +728,7 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
     // 'Ruta' is the one native route question (3a) that replaces the generic approval at the
     // suggested route's first tail phase; the default answer here keeps the suggested route,
     // exactly like the plain 'Continuar' it stands in for.
-    const labels = { 'Aprobación': 'Continuar', Ruta: 'Continuar con la ruta sugerida', Cambio: 'Confirmar el cambio', Certeza: known.certainty === 'not-sure' ? 'Poco seguro' : known.certainty === 'somewhat-sure' ? 'Algo seguro' : 'Muy seguro', Artefactos: { none: 'Ninguno', openspec: 'OpenSpec', engram: 'Engram', both: 'Ambos' }[store], Modo: mode === 'automatic' ? 'Automático' : 'Interactivo', Resumen: { low: 'Bajo', medium: 'Medio', detailed: 'Detallado' }[known.summary] };
+    const labels = { 'Aprobación': 'Continuar', Ruta: 'Continuar con la ruta sugerida', Cambio: 'Confirmar el cambio', Certeza: known.certainty === 'not-sure' ? 'Poco seguro' : known.certainty === 'somewhat-sure' ? 'Algo seguro' : 'Muy seguro', Artefactos: { none: 'Ninguno', openspec: 'OpenSpec', engram: 'Engram', both: 'Ambos' }[store], Modo: mode === 'automatic' ? 'Automático' : 'Interactivo', Resumen: { low: 'Bajo', medium: 'Medio', detailed: 'Detallado' }[known.summary], Notas: 'Nada que agregar' };
     const selections = Array.isArray(selection) ? selection : args.questions.map(q => [typeof selection === 'string' ? selection : labels[q.header]]);
     const formatted = args.questions.map((q, i) => `"${q.question}"="${selections[i].join(', ')}"`).join(', ');
     await hooks['tool.execute.after']({ ...call, args }, { title: `Asked ${args.questions.length} question${args.questions.length > 1 ? 's' : ''}`, output: `User has answered your questions: ${formatted}. You can now continue with the user's answers in mind.`, metadata: { answers: selections, truncated: false } });
@@ -880,6 +880,7 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
     }
     const result = { phase, runID: current.runID ?? current.explorationID, callID, outcome: options.outcome ?? 'passed', evidenceSummary: `Actual contract evidence for ${phase}.`, artifact: `Artifact for ${phase}: scoped requirements, changes and executable check plan.` };
     if (options.concerns) result.concerns = options.concerns;
+    if (options.questions) result.questions = options.questions;
     if (options.unauthorized) await tool('write', { filePath: join(root, 'feature.txt'), content: 'not permitted' }, { output: 'write', metadata: {} }, () => writeFile(join(root, 'feature.txt'), 'not permitted'));
     if (phase === 'mdd-apply') {
       if (result.outcome === 'passed') result.completed = ['feature'];
@@ -1053,13 +1054,63 @@ test('interactive review exposes expanded detail and carries clarification choic
     { question: 'Which retry strategy?', options: [{ label: 'Fixed', description: 'Use a fixed backoff.', recommended: true }] },
   ] }, f.context));
   assert.equal(current.question.questions[0].header, 'Detalle');
-  await f.answer('Dejar para más adelante');
-  await f.answer('Que decida el agente');
+  // Both clarifications arrive in one native interaction and are answered together.
+  assert.equal(current.question.questions.length, 2);
+  await f.answer([['Dejar para más adelante'], ['Que decida el agente']]);
   assert.equal((await f.status()).workflow.nextAction.kind, 'approve');
   await f.answer('Continuar');
   await f.phase();
   assert.match(f.delivered(), /Question: Which date format\?/);
   assert.match(f.delivered(), /Question: Which retry strategy\?/);
+});
+
+const REPORTED_QUESTIONS = [{ question: 'Which locale formats dates?', why: 'Every rendered date depends on it.',
+  options: [{ label: 'es-AR', description: 'Day first.', recommended: true }, { label: 'en-US', description: 'Month first.' }] }];
+
+test('automatic mode asks the questions a phase reported together and carries the answers into the next phase', async t => {
+  const f = await fixture(t, { memoryEnabled: false, store: 'none', autoReview: false });
+  await f.phase({ only: true, questions: REPORTED_QUESTIONS });
+  let current = await f.status();
+  // The risk stop is not a phase boundary; the questions wait, visible, for the first one.
+  assert.equal(current.stage, 'mdd-risk');
+  assert.deepEqual(current.openQuestions, { phase: 'mdd-explore', questions: REPORTED_QUESTIONS });
+  await f.phase({ only: true });
+  current = await f.status();
+  assert.equal(current.state, 'review-ready');
+  assert.equal(current.task, undefined);
+  assert.equal(current.workflow.nextAction.kind, 'execute', 'automatic mode asks no approval');
+  assert.equal(current.nextAction.tool, 'mdd_prepare_advance');
+  assert.match(current.nextAction.why, /openQuestions/);
+  const prepared = JSON.parse(await f.hooks.tool.mdd_prepare_advance.execute({ questions: [
+    { question: 'Which date format?', header: 'Date format', why: 'Every rendered date depends on it.', options: [{ label: 'es-AR', description: 'Day first.', recommended: true }, { label: 'en-US', description: 'Month first.' }] },
+    { question: 'Which screens?', header: 'Screens', multiple: true, options: [{ label: 'Orders', description: 'List.' }, { label: 'Dashboard', description: 'Home.' }] },
+  ] }, f.context));
+  assert.equal(prepared.openQuestions, undefined, 'asking them settles the pending phase questions');
+  assert.deepEqual(prepared.question.questions.map(question => [question.header, question.multiple]), [['Date format', false], ['Screens', true]]);
+  await f.answer([['es-AR (Recomendada)'], ['Orders', 'Dashboard']]);
+  current = await f.status();
+  assert.equal(current.question, undefined);
+  assert.equal(current.task.subagent_type, 'mdd-plan');
+  assert.equal(current.questionReceipts.at(-1).kind, 'clarification');
+  await f.phase({ only: true });
+  assert.ok(f.delivered().includes(JSON.stringify('Question: Which date format?\nAnswer: es-AR (Recomendada)\n\nQuestion: Which screens?\nAnswers:\n- Orders\n- Dashboard')),
+    'every answer of the interaction reaches the next phase as one context entry');
+});
+
+test('a restart before reported questions are asked keeps the automatic boundary', async t => {
+  const f = await fixture(t, { memoryEnabled: false, store: 'none', autoReview: false });
+  await f.phase({ only: true, questions: REPORTED_QUESTIONS });
+  await f.phase({ only: true });
+  const resumed = await plugin(f.input);
+  const restored = JSON.parse(await resumed.tool.mdd_status.execute({ detail: 'full' }, f.context));
+  assert.equal(restored.state, 'review-ready');
+  assert.equal(restored.task, undefined);
+  assert.equal(restored.openQuestions.phase, 'mdd-explore');
+  assert.match(restored.notice, /openQuestions/);
+  const asked = JSON.parse(await resumed.tool.mdd_prepare_advance.execute({ questions: [{ question: 'Which locale?', options: [] }] }, f.context));
+  assert.equal(asked.state, 'question-ready');
+  assert.equal(asked.openQuestions, undefined);
+  assert.deepEqual(asked.question.questions[0].options.map(option => option.label), ['Que decida el agente']);
 });
 
 for (const fault of [{ noChecks: true }, { coverageFault: 'missing' }]) {
@@ -1353,9 +1404,9 @@ test('confirmed rerun asks every field once despite complete profile and preserv
   const confirmation = await f.change();
   assert.equal(confirmation.question.questions.length, 1);
   await f.answer();
-  const preflight = await f.status(); assert.equal(preflight.question.questions.length, 4);
+  const preflight = await f.status(); assert.equal(preflight.question.questions.length, 5);
   assert.equal(preflight.runID, old.runID);
-  await f.answer([['Muy seguro'], ['Ninguno'], ['Interactivo'], ['Bajo']]);
+  await f.answer([['Muy seguro'], ['Ninguno'], ['Interactivo'], ['Bajo'], ['Nada que agregar']]);
   const next = await f.status();
   assert.notEqual(next.runID, old.runID); assert.equal(next.task.subagent_type, 'mdd-explore');
   assert.equal(next.previousRuns[0].runID, old.runID);
@@ -1933,7 +1984,7 @@ test('a large history keeps mdd_status within budget and the task byte-identical
   // A superseded run leaves its own history and contexts behind in previousRuns.
   f.user('Please rerun the preflight for this task.');
   await f.change(); await f.answer();
-  await f.answer([['Poco seguro'], ['Ninguno'], ['Automático'], ['Bajo']]);
+  await f.answer([['Poco seguro'], ['Ninguno'], ['Automático'], ['Bajo'], ['Nada que agregar']]);
   f.visited.length = 0;
   await f.hooks.tool.mdd_contextual_explore.execute({ purpose: 'Inspect the current feature boundary.' }, f.context);
   await f.phase({ large: true });
@@ -2680,7 +2731,7 @@ test('audit D2: a pending re-preflight question on an existing run survives rest
   await f.change();
   await f.answer();
   const preflight = await f.status();
-  assert.equal(preflight.question.questions.length, 4);
+  assert.equal(preflight.question.questions.length, 5);
   await dispatchQuestion(f, 'preflight-before-restart', structuredClone(preflight.question));
   const resumed = await plugin(f.input);
   assert.equal(JSON.parse(await resumed.tool.mdd_status.execute({}, f.context)).state, 'recovery-blocked');

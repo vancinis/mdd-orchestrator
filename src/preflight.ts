@@ -36,8 +36,12 @@ const fields: Record<Field, { header: string; question: string; choices: Choice[
   ] },
 };
 
+/**
+ * Only a clarification may allow several choices; every preflight field, approval, route and
+ * change question stays single-choice, because each of those answers maps to exactly one token.
+ */
 export type QuestionEnvelope = { questions: {
-  header: string; question: string; options: { label: string; description: string }[]; multiple: false;
+  header: string; question: string; options: { label: string; description: string }[]; multiple: boolean;
 }[] };
 
 export function parsePartialAnswers(value: unknown): Partial<Answers> {

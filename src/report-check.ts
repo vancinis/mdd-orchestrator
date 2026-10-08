@@ -1,6 +1,7 @@
 import { boundedText, nonemptyText } from './phase-runner.js';
 import { acceptance, assertNoTraceSection, phaseFields } from './acceptance.js';
 import { concerns } from './concerns.js';
+import { openQuestions } from './open-questions.js';
 import { changed, deliverables, executed } from './phase-evidence.js';
 import { parsePhaseReport, parseRiskReport, parseSecurityReport, reportFormatLines } from './phase-report.js';
 import { parseRiskVerdict, riskReportFormatLines, RISK_REPORT_KEYS } from './risk.js';
@@ -73,6 +74,7 @@ export function checkReportForm(phase: Phase, text: unknown): ReportCheck {
     () => nonemptyText(fields.evidenceSummary, 'summary'),
     () => assertNoTraceSection(nonemptyText(fields.artifact, 'artifact')),
     () => concerns(fields.concerns),
+    () => openQuestions(fields.questions),
     // Phase-specific shape. Only what a document can answer on its own: `decisions` and
     // `verification` are left to the run, because both are checked against IDs it holds.
     ...(phase === 'mdd-spec' ? [() => boundedText(fields.domain, 'spec domain', 64)] : []),

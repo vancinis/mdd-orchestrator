@@ -387,7 +387,7 @@ test('plugin contract: scoped tools, in-place native args, result gating, no nat
   const f = await pluginFixture(t);
   const { hooks, context, writes } = f;
   assert.deepEqual(Object.keys(hooks.tool).sort(), ['mdd_change_request', 'mdd_check_report', 'mdd_context', 'mdd_contextual_explore', 'mdd_improve', 'mdd_improvements', 'mdd_jd_inspect', 'mdd_phase_result', 'mdd_pr_body', 'mdd_prepare_advance', 'mdd_reset', 'mdd_revisit', 'mdd_security', 'mdd_start', 'mdd_status', 'mdd_transfer', 'mdd_transfer_recover']);
-  assert.deepEqual(Object.keys(hooks.tool.mdd_start.args), ['requirements', 'context', 'exploration']);
+  assert.deepEqual(Object.keys(hooks.tool.mdd_start.args), ['requirements', 'context', 'exploration', 'questions']);
   assert.deepEqual(Object.keys(hooks.tool.mdd_contextual_explore.args), ['purpose', 'workItems']);
   const ready = JSON.parse(await hooks.tool.mdd_start.execute({ requirements: f.requirements }, context));
   const nativeArgs = ready.task;
@@ -679,11 +679,12 @@ test('native plugin contract: partial profile question receipt starts actual run
   const f = await pluginFixture(t, { certainty: 'very-sure', artifactStore: 'none', summary: 'low', complexity: 'not-complex' });
   const { hooks, context } = f;
   const pending = JSON.parse(await hooks.tool.mdd_start.execute({ requirements: f.requirements }, context));
-  assert.equal(pending.question.questions.length, 1);
+  // The one missing field, then the optional note every asked preflight ends with.
+  assert.deepEqual(pending.question.questions.map(question => question.header), ['Modo', 'Notas']);
   assert.equal(pending.task, undefined);
   const qc = questionCall(f, pending.question);
   await hooks['tool.execute.before'](qc, { args: pending.question });
-  await hooks['tool.execute.after']({ ...qc, args: pending.question }, questionOutput(pending.question, [['Interactivo']]));
+  await hooks['tool.execute.after']({ ...qc, args: pending.question }, questionOutput(pending.question, [['Interactivo'], ['Nada que agregar']]));
   const ready = JSON.parse(await hooks.tool.mdd_status.execute({}, context));
   assert.equal(ready.state, 'ready');
   assert.equal(ready.provenance.preflight, 'native-question');
@@ -743,7 +744,7 @@ test('native plugin contract: forcing the route through plugin hooks switches th
   const pending = JSON.parse(await hooks.tool.mdd_start.execute({ requirements: f.requirements }, context));
   const qc = questionCall(f, pending.question);
   await hooks['tool.execute.before'](qc, { args: pending.question });
-  await hooks['tool.execute.after']({ ...qc, args: pending.question }, questionOutput(pending.question, [['Interactivo']]));
+  await hooks['tool.execute.after']({ ...qc, args: pending.question }, questionOutput(pending.question, [['Interactivo'], ['Nada que agregar']]));
   const ready = JSON.parse(await hooks.tool.mdd_status.execute({}, context));
   const afterExplore = await settlePhase(f, context, ready, result(ready));
   const afterRisk = await settlePhase(f, context, afterExplore, riskReport('low', 'passed'));
@@ -770,7 +771,7 @@ test('native plugin contract: stopping the route through plugin hooks pauses wit
   const pending = JSON.parse(await hooks.tool.mdd_start.execute({ requirements: f.requirements }, context));
   const qc = questionCall(f, pending.question);
   await hooks['tool.execute.before'](qc, { args: pending.question });
-  await hooks['tool.execute.after']({ ...qc, args: pending.question }, questionOutput(pending.question, [['Interactivo']]));
+  await hooks['tool.execute.after']({ ...qc, args: pending.question }, questionOutput(pending.question, [['Interactivo'], ['Nada que agregar']]));
   const ready = JSON.parse(await hooks.tool.mdd_status.execute({}, context));
   const afterExplore = await settlePhase(f, context, ready, result(ready));
   const afterRisk = await settlePhase(f, context, afterExplore, riskReport('low', 'passed'));
@@ -823,7 +824,7 @@ async function startInteractive(t) {
   const pending = JSON.parse(await f.hooks.tool.mdd_start.execute({ requirements: f.requirements }, f.context));
   const qc = questionCall(f, pending.question);
   await f.hooks['tool.execute.before'](qc, { args: pending.question });
-  await f.hooks['tool.execute.after']({ ...qc, args: pending.question }, questionOutput(pending.question, [['Interactivo']]));
+  await f.hooks['tool.execute.after']({ ...qc, args: pending.question }, questionOutput(pending.question, [['Interactivo'], ['Nada que agregar']]));
   return f;
 }
 
@@ -1042,7 +1043,7 @@ test('native plugin contract: a real runner checkpoint fault after a persisted r
   const pending = JSON.parse(await hooks.tool.mdd_start.execute({ requirements: f.requirements }, context));
   const qc = questionCall(f, pending.question);
   await hooks['tool.execute.before'](qc, { args: pending.question });
-  await hooks['tool.execute.after']({ ...qc, args: pending.question }, questionOutput(pending.question, [['Interactivo']]));
+  await hooks['tool.execute.after']({ ...qc, args: pending.question }, questionOutput(pending.question, [['Interactivo'], ['Nada que agregar']]));
   const ready = JSON.parse(await hooks.tool.mdd_status.execute({}, context));
   const afterExplore = await settlePhase(f, context, ready, result(ready));
   const afterRisk = await settlePhase(f, context, afterExplore, riskReport('low', 'passed'));

@@ -47,7 +47,7 @@ export const FIELD_SCHEMA: Record<string, string> = {
  * were ignored so the next report is cleaner. Fields that carry meaning are still validated.
  */
 export function phaseFields(phase: Phase, result: Record<string, unknown>): { fields: Record<string, unknown>; ignored: string[] } {
-  const allowed = new Set(['phase', 'runID', 'callID', 'outcome', 'evidenceSummary', 'how', 'artifact', 'concerns', ...PHASE_RESULT_FIELDS[phase]]);
+  const allowed = new Set(['phase', 'runID', 'callID', 'outcome', 'evidenceSummary', 'how', 'artifact', 'concerns', 'questions', ...PHASE_RESULT_FIELDS[phase]]);
   const fields: Record<string, unknown> = {};
   const ignored: string[] = [];
   for (const [key, value] of Object.entries(result)) {

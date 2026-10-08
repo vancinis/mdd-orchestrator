@@ -104,7 +104,7 @@ Supply **exactly one** of `--answers` and `--profile`. Repeated flags, unknown a
 | `2` | Invalid CLI arguments, JSON, answers, profile, or configuration. |
 | `1` | File I/O or unexpected failure. |
 
-Errors go to stderr; no decision JSON is emitted on failure. A proof `--profile` file is only `{ "answers": { ...all five fields... } }`; named profiles are managed separately through `config` or `profile` commands and are not sessions.
+Errors go to stderr; no decision JSON is emitted on failure. A proof `--profile` file is only `{ "answers": { ...all four fields... } }` (a legacy `complexity` field is accepted and ignored); named profiles are managed separately through `config` or `profile` commands and are not sessions.
 
 ## Policy at a glance
 

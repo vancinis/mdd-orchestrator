@@ -9,8 +9,25 @@ import type { Answers } from './policy.js';
 
 export const QUESTION_CHECKPOINT_VERSION = 1;
 export const QUESTION_CHECKPOINT_BYTES = 160000;
+/** Clarifications pending at once: new ones plus deferrals re-offered at the same boundary. */
+export const CLARIFICATIONS_MAX = 16;
+/** Answer history kept with the record; older answers already travelled to the run as context. */
+export const CLARIFICATION_ANSWERS_MAX = 64;
+/** One native interaction: preflight fields, startup doubts and the note, or every clarification. */
+const QUESTIONS_MAX = 24;
+/** A multi-choice answer may add the user's own words to every option; anything past this is not an answer. */
+const SELECTIONS_MAX = 64;
 type Kind = 'preflight' | 'approval' | 'change' | 'clarification' | 'route' | 'risk-recovery';
-type Clarification = { question: string; options: { label: string; description: string; recommended?: boolean }[]; deferrable?: boolean };
+/**
+ * A question the coordinator (or a phase, through it) needs the user to decide. `header` is the
+ * short topic shown above it, `why` says what depends on the answer, `multiple` allows several
+ * choices, and `note` marks the free-form note offered with preflight, which has no delegation.
+ */
+export type Clarification = {
+  question: string; header?: string; why?: string;
+  options: { label: string; description: string; recommended?: boolean }[];
+  multiple?: boolean; deferrable?: boolean; note?: boolean;
+};
 export type QuestionRecord = {
   version: 1; parent: string; sequence: number; runID?: string;
   requirements: string; userMessageID?: string; known: Partial<Answers>; context?: { label: string; content: string };
@@ -22,7 +39,11 @@ export type QuestionRecord = {
    */
   reservation?: { runID: string; stable: 'ready' | 'await-approval' | 'blocked' | 'complete' | 'risk-ready' | 'risk-blocked' };
   state: 'prepared' | 'pending' | 'answered' | 'cancelled' | 'settled' | 'withdrawn';
-  slot: { kind: Kind; phase?: Phase; requirements?: string; args: QuestionEnvelope };
+  /**
+   * `fields` counts the leading preflight-field questions of a preflight envelope; the questions
+   * after them are clarifications (startup doubts and the note). Absent means all are fields.
+   */
+  slot: { kind: Kind; phase?: Phase; requirements?: string; fields?: number; args: QuestionEnvelope };
   clarifications: Clarification[]; deferred: Clarification[];
   clarificationAnswers: { question: string; answer: string; phase: Phase; disposition: 'answered' | 'deferred' }[];
   callID?: string; answer?: string[][];
@@ -38,29 +59,42 @@ function array(value: unknown, max: number): unknown[] {
   if (!Array.isArray(value) || value.length > max) throw new ValidationError('Invalid native question record.');
   return value;
 }
-function envelope(value: unknown, isClarification: boolean): QuestionEnvelope {
+/**
+ * Questions from `openFrom` on are clarifications: their prose has no individual ceiling, they may
+ * allow several choices, and the user's own words answer them. Every earlier question maps to an
+ * exact token, so it stays bounded and single-choice.
+ */
+function envelope(value: unknown, kind: Kind, fields: unknown): { args: QuestionEnvelope; openFrom: number } {
   const item = objectWithKeys(value, 'question envelope', ['questions']);
-  const questions = array(item.questions, 5);
+  const questions = array(item.questions, QUESTIONS_MAX);
   if (!questions.length) throw new ValidationError('Empty native question envelope.');
-  for (const raw of questions) {
+  let openFrom = kind === 'clarification' ? 0 : questions.length;
+  if (fields !== undefined) {
+    if (kind !== 'preflight' || !Number.isSafeInteger(fields) || (fields as number) < 0 || (fields as number) > questions.length) throw new ValidationError('Invalid preflight field count.');
+    openFrom = fields as number;
+  }
+  questions.forEach((raw, index) => {
+    const open = index >= openFrom;
     const question = objectWithKeys(raw, 'native question', ['header', 'question', 'multiple', 'options']);
-    if (!text(question.header, 100) || !text(question.question, isClarification ? undefined : 4000) || question.multiple !== false) throw new ValidationError('Invalid native question.');
+    if (!text(question.header, 200) || !text(question.question, open ? undefined : 4000) || typeof question.multiple !== 'boolean' ||
+        (!open && question.multiple)) throw new ValidationError('Invalid native question.');
     const options = array(question.options, 8);
     if (!options.length) throw new ValidationError('Native question needs choices.');
     const labels = options.map(rawOption => {
       const option = objectWithKeys(rawOption, 'native question option', ['label', 'description']);
-      if (!text(option.label, isClarification ? undefined : 120) || !text(option.description, isClarification ? undefined : 500)) throw new ValidationError('Invalid native question choice.');
+      if (!text(option.label, open ? undefined : 120) || !text(option.description, open ? undefined : 500)) throw new ValidationError('Invalid native question choice.');
       return option.label;
     });
     if (new Set(labels).size !== labels.length) throw new ValidationError('Duplicate native question choice.');
-  }
-  return item as QuestionEnvelope;
+  });
+  return { args: item as QuestionEnvelope, openFrom };
 }
 function clarification(value: unknown): void {
-  const item = objectWithKeys(value, 'clarification', ['question', 'options', 'deferrable']);
-  if (!text(item.question) || (item.deferrable !== undefined && typeof item.deferrable !== 'boolean')) throw new ValidationError('Invalid clarification.');
+  const item = objectWithKeys(value, 'clarification', ['question', 'header', 'why', 'options', 'multiple', 'deferrable', 'note']);
+  if (!text(item.question) || (item.header !== undefined && !text(item.header, 200)) || (item.why !== undefined && !text(item.why)) ||
+      (['multiple', 'deferrable', 'note'] as const).some(key => item[key] !== undefined && typeof item[key] !== 'boolean')) throw new ValidationError('Invalid clarification.');
   const options = array(item.options, 6);
-  if (!options.length) throw new ValidationError('Missing clarification choices.');
+  if (!options.length && item.note) throw new ValidationError('Missing clarification choices.');
   for (const raw of options) {
     const option = objectWithKeys(raw, 'clarification choice', ['label', 'description', 'recommended']);
     if (!text(option.label) || !text(option.description) || (option.recommended !== undefined && typeof option.recommended !== 'boolean')) throw new ValidationError('Invalid clarification choice.');
@@ -74,7 +108,7 @@ export function validateQuestionRecord(value: unknown): QuestionRecord {
       !Number.isSafeInteger(item.sequence) || (item.sequence as number) < 0 ||
       Buffer.byteLength(JSON.stringify(value) ?? '') > QUESTION_CHECKPOINT_BYTES ||
       !['prepared', 'pending', 'answered', 'cancelled', 'settled', 'withdrawn'].includes(String(item.state))) throw new ValidationError('Invalid native question record.');
-  const slot = objectWithKeys(item.slot, 'native question slot', ['kind', 'phase', 'requirements', 'args']);
+  const slot = objectWithKeys(item.slot, 'native question slot', ['kind', 'phase', 'requirements', 'fields', 'args']);
   if (!text(item.requirements, 12000) || (item.userMessageID !== undefined && !text(item.userMessageID, 256)) ||
       !isDeepStrictEqual(parsePartialAnswers(item.known), item.known)) throw new ValidationError('Invalid native question objective.');
   if (item.context !== undefined) {
@@ -82,7 +116,7 @@ export function validateQuestionRecord(value: unknown): QuestionRecord {
     if (!text(context.label, 200) || !text(context.content, 96000)) throw new ValidationError('Invalid native question context.');
   }
   if (!['preflight', 'approval', 'change', 'clarification', 'route', 'risk-recovery'].includes(String(slot.kind))) throw new ValidationError('Invalid native question kind.');
-  const args = envelope(slot.args, slot.kind === 'clarification');
+  const { args, openFrom } = envelope(slot.args, slot.kind as Kind, slot.fields);
   if (slot.phase !== undefined && !PHASES.includes(String(slot.phase))) throw new ValidationError('Invalid question phase.');
   if ((slot.kind === 'approval' || slot.kind === 'clarification' || slot.kind === 'route') !== (slot.phase !== undefined) ||
       (slot.kind === 'change') !== (slot.requirements !== undefined) ||
@@ -102,17 +136,22 @@ export function validateQuestionRecord(value: unknown): QuestionRecord {
   }
   if (['prepared', 'withdrawn'].includes(String(item.state)) ? item.callID !== undefined || item.answer !== undefined : !text(item.callID, 256)) throw new ValidationError('Invalid native question call correlation.');
   if (item.state === 'answered') {
-    const answer = array(item.answer, 5);
-    if (answer.length !== args.questions.length || answer.some((selection, index) =>
-      !Array.isArray(selection) || selection.length !== 1 || !text(selection[0], slot.kind === 'clarification' ? undefined : 12000) ||
-      (slot.kind !== 'clarification' && !args.questions[index]!.options.some(option => option.label === selection[0])))) throw new ValidationError('Invalid native answer.');
+    const answer = array(item.answer, QUESTIONS_MAX);
+    if (answer.length !== args.questions.length || answer.some((selection, index) => {
+      if (!Array.isArray(selection)) return true;
+      const question = args.questions[index]!;
+      // A clarification may be left unanswered, answered in the user's own words, or (when it
+      // allows it) answered with several choices; a token question takes exactly one listed label.
+      if (index >= openFrom) return selection.length > (question.multiple ? SELECTIONS_MAX : 1) || selection.some(entry => !text(entry));
+      return selection.length !== 1 || !text(selection[0], 12000) || !question.options.some(option => option.label === selection[0]);
+    })) throw new ValidationError('Invalid native answer.');
   } else if (item.answer !== undefined) throw new ValidationError('Historical answer cannot authorize another question.');
   if (item.retiredCalls !== undefined) {
     const retired = array(item.retiredCalls, 64);
     if (retired.some(call => !text(call, 256)) || new Set(retired).size !== retired.length || retired.includes(item.callID)) throw new ValidationError('Invalid retired native call IDs.');
   }
-  for (const raw of [...array(item.clarifications, 8), ...array(item.deferred, 8)]) clarification(raw);
-  for (const raw of array(item.clarificationAnswers, 16)) {
+  for (const raw of [...array(item.clarifications, CLARIFICATIONS_MAX), ...array(item.deferred, CLARIFICATIONS_MAX)]) clarification(raw);
+  for (const raw of array(item.clarificationAnswers, CLARIFICATION_ANSWERS_MAX)) {
     const answer = objectWithKeys(raw, 'clarification answer', ['question', 'answer', 'phase', 'disposition']);
     if (!text(answer.question) || !text(answer.answer) || !PHASES.includes(String(answer.phase)) ||
         !['answered', 'deferred'].includes(String(answer.disposition))) throw new ValidationError('Invalid clarification answer.');

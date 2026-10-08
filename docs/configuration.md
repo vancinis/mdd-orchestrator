@@ -99,7 +99,7 @@ no Engram setup, and telemetry/workers enabled. Reading never creates a settings
 | `version`, `activeProfile`, `profiles` | Required. Version exactly 1; active name must exist; 1–64 profiles. Unknown keys rejected at every level. |
 | Names | 1–64 ASCII letters/digits/underscores/hyphens, starting alphanumeric; prototype/device names rejected. |
 | Profile `models` | Optional `orchestrator`, all eight exact phase mappings, `mdd-risk`, `mdd-security`, `mdd-jd-judge-a`, `mdd-jd-judge-b`, and `mdd-jd-fix`. `provider/model`, nested model paths allowed, an optional trailing `#variant` reasoning-effort suffix, at most 256 characters. No whitespace/traversal. Omitted role inherits native selection, not the orchestrator override. |
-| Profile `answers` | Optional partial/complete original five-field canonical answers. Missing fields remain missing. |
+| Profile `answers` | Optional partial/complete canonical answers for the four preflight fields (`certainty`, `artifactStore`, `mode`, `summary`); a legacy `complexity` value is accepted and ignored. Missing fields remain missing. |
 | `engram` | Omitted means memory off. `{ endpoint }` opts into an explicit loopback service; `{ mode: 'local', binary, dataDirectory }` opts into a managed installed binary. Legacy `project` is deprecated and ignored with a runtime notice. No secrets or session IDs in settings. |
 | `telemetry` | Optional `{ "enabled": boolean }`, default enabled. No external destination. |
 | `workers` | Optional `{ "enabled": boolean }`, default enabled when the whole field is omitted. Global, not per profile. If present, `enabled` is required; strings, numbers, null, arrays, and unknown keys are rejected. |

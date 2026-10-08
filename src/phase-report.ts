@@ -34,7 +34,7 @@ export class MalformedReport extends Error {
 }
 
 /** Headings MDD reads. Everything else in the document belongs to the section it sits in. */
-const SECTIONS = ['outcome', 'summary', 'how', 'artifact', 'data', 'concerns', 'phase', 'run'] as const;
+const SECTIONS = ['outcome', 'summary', 'how', 'artifact', 'data', 'concerns', 'questions', 'phase', 'run'] as const;
 type Section = typeof SECTIONS[number];
 const REQUIRED: readonly Section[] = ['outcome', 'summary', 'artifact'];
 /**
@@ -47,6 +47,7 @@ const PREFIX = 'mdd ';
 const ALIASES: Record<string, Section> = {
   outcome: 'outcome', summary: 'summary', how: 'how', artifact: 'artifact',
   data: 'data', concerns: 'concerns', phase: 'phase',
+  questions: 'questions', 'open questions': 'questions',
   run: 'run', runid: 'run', 'run id': 'run',
   'evidence summary': 'summary',
 };
@@ -159,6 +160,8 @@ function parseReportSections(text: string, hasFields: boolean, standaloneField?:
   if (run) result.runID = run.replace(EMPHASIS, '').trim();
   const concerns = parts.has('concerns') ? structured(parts.get('concerns')!, 'concerns') : undefined;
   if (concerns !== undefined) result.concerns = concerns;
+  const questions = parts.has('questions') ? structured(parts.get('questions')!, 'questions') : undefined;
+  if (questions !== undefined) result.questions = questions;
   const data = parts.has('data') ? structured(parts.get('data')!, 'data') : undefined;
   if (data !== undefined) {
     if (!data || typeof data !== 'object' || Array.isArray(data)) throw new MalformedReport('The data section must hold one JSON object whose keys are this phase\'s fields.');
@@ -195,6 +198,7 @@ export function reportFormatLines(phase: Phase): string[] {
          ...fields.map(field => `  ${FIELD_SCHEMA[field]!}`)]
       : [`This phase reports no structured data, so omit "## MDD Data" entirely.`]),
     'Optional "## MDD Concerns" holding a fenced json array of at most eight {category,evidence,impact} entries, category objective/integrations/sensitive-data/permissions. Advisory only: concerns never change scores and never request governance for ordinary implementation choices.',
+    'Optional "## MDD Questions" holding a fenced json array of at most eight {question,why,options:[{label,description,recommended?}],multiple?,deferrable?} entries: decisions only the user can make that the work genuinely needs, instead of guessing them. "why" states what depends on the answer. Leave options empty for an open-ended answer; set multiple when several options can apply together, and deferrable only when a later phase can safely decide. Never ask what reading the request or the repository answers, and never ask for approval. The coordinator asks the user and hands the answers to the next phase.',
     'Write nothing outside these headings. Prose around them is ignored, but anything you need MDD to record belongs under a heading.',
   ];
 }

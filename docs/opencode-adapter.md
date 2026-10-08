@@ -52,7 +52,10 @@ Run the single [setup wizard](setup.md): `npm run setup` from trusted source, or
    `mdd_start({ requirements })` with that exact text, not a rewrite. Starting opts in
    to the workflow; only configured memory stores requirements and compact progress receipts. Complete compatible profile answers
    skip questions; otherwise `mdd_status.question` contains one grouped native question
-   argument object covering all and only the missing fields. Submit it once to `question`.
+   argument object covering all and only the missing fields, followed by an optional **Notas**
+   question the user answers in their own words. Genuine doubts about the request that the
+   coordinator passes as `mdd_start({ requirements, questions })` join that same interaction; with
+   a complete profile they are asked alone, before the first phase. Submit it once to `question`.
    No typed JSON preflight or model-supplied answer override is accepted.
 6. After the question, read `mdd_status`. It returns `nextAction`: the single call to make now,
    with ready-to-dispatch `args` whenever the call is dispatchable as written. Submit exactly the
@@ -62,7 +65,8 @@ Run the single [setup wizard](setup.md): `npm run setup` from trusted source, or
    After the task, call `mdd_status` and present the readable artifact to the user.
    In interactive mode, a passed phase exposes an exact native Proceed/Stop question for
    the next phase. Approval prepares only that phase's task. Automatic mode returns the next
-   exact executable task without an approval question. Repeat through final Verify. A rejected
+   exact executable task without an approval question, unless the phase reported open questions:
+   then it stops at review until they are answered. Repeat through final Verify. A rejected
     read-only attempt may become ready again. An uncertain Apply writer never retries automatically.
     Neither mode suppresses native edit/shell permission requests.
 
@@ -391,11 +395,40 @@ The coordinator always converses in Spanish, including question text, option lab
 descriptions embedded in `mdd_prepare_advance` or native question arguments. Protocol keys,
 technical artifacts and phase reports remain English; native user text is preserved verbatim.
 
+Every pending clarification is asked in **one native interaction**, the way preflight is, rather
+than one question per round trip. Each question may carry:
+
+| Field | Shown as |
+|---|---|
+| `header` | Short topic above the question, at most 30 characters; `Detalle` when omitted. |
+| `why` | A `Por qué importa: …` line under the question: what depends on the answer. |
+| `options` | Zero to six choices; none makes it an open-ended question the user types. |
+| `multiple` | The user may pick several choices together. |
+| `deferrable` | Adds `Dejar para más adelante`; a later boundary asks it again. |
+
+`Que decida el agente` and free text are always available. An answer left empty stays
+unresolved and returns at a later boundary like a deferral. A deferral picked together with real
+choices is not a deferral: the choices are the answer.
+
+Questions reach the user at three boundaries:
+
+| Boundary | Source | When |
+|---|---|---|
+| Start | `mdd_start({ questions })` | Together with preflight, or alone when the profile is complete. |
+| After a phase | `## MDD Questions` in the phase report, plus the coordinator's own | Interactive: before the approval. Automatic: only when the phase reported questions; no approval follows. |
+| Before dispatch | `mdd_prepare_advance` while a phase is `ready` | Any mode, while no task is in flight. |
+
+A phase reports decisions only the user can make under the optional `## MDD Questions` section:
+an English JSON array of up to eight `{question, why, options, multiple?, deferrable?}`. MDD keeps
+them as `openQuestions` in status and in the checkpoint until the coordinator submits them,
+translated, with `mdd_prepare_advance`; a restart in between still asks them.
+
 Clarification questions, option labels/descriptions and free-text answers have no individual
-prose byte ceilings. The adapter carries the complete question and answer in context content
-under the stable `Clarification` label, including deferred answers and their unresolved status.
-Durable question records and reconstructed phase prompts preserve those strings without truncation.
-Clarification answers do not authorize a phase: approval is still a separate native interaction.
+prose byte ceilings. The adapter carries every answer of one interaction in a single context
+entry under the stable `Clarification` label, including deferred answers and their unresolved
+status. Durable question records and reconstructed phase prompts preserve those strings without
+truncation. Clarification answers do not authorize a phase: approval is still a separate native
+interaction.
 
 Nonempty string validation, choice counts, unique/reserved labels, exact native output matching
 and parent/call correlation still apply. Aggregate safety bounds also remain: the question record
@@ -630,7 +663,7 @@ validated strictly. No keyword scoring or automatic route replacement occurs.
 
 The existing native gate shows one exact confirmation. Keeping the current plan or dismissing
 the change leaves its answers, artifacts and pending approval unchanged. Confirmation leads
-to **one grouped question containing all five fields**, even with a complete profile. Only
+to **one grouped question containing every preflight field and the optional note**, even with a complete profile. Only
 accepted answers create the new planned run. Prior runs remain in `previousRuns` for live
 inspection; no artifact or general-memory record is deleted. Identical proposals are not
 repeatedly presented without a new user request. Ordinary implementation choices and automatic
@@ -739,7 +772,7 @@ delegation exists to protect. A handed-back phase may still be delegated again b
 A phase answers with a short markdown document, not a serialized object. `## MDD Outcome` holds
 `passed` or `failed`, `## MDD Summary` holds the prose a person reads first, `## MDD Artifact`
 holds the deliverable, and `## MDD Data` holds one fenced JSON block for the phases that carry
-traceability fields. `## MDD Concerns` is optional. The headings are prefixed so an artifact may
+traceability fields. `## MDD Concerns` and `## MDD Questions` are optional. The headings are prefixed so an artifact may
 use its own `## Summary` or `## Data` without being cut in half by the envelope carrying it, and
 a heading inside a fenced block is content rather than a delimiter. Unprefixed headings are read
 for a document that used no prefixed heading anywhere.

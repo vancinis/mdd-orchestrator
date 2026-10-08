@@ -52,9 +52,9 @@ export function nextAction(status: unknown): NextAction | undefined {
   }
 
   if (state === 'review-ready') return { tool: 'mdd_prepare_advance',
-    why: 'Present the finished phase and identify all necessary uncertainties before asking to advance. Supply their detailed choices together; mark a recommended choice, allow free text and agent delegation, and offer deferral only when safe. Pass [] only once none remain. This call does not approve the next phase.' };
+    why: `Present the finished phase and identify all necessary uncertainties before asking to advance.${Array.isArray(object(value.openQuestions)?.questions) ? ' Include every openQuestions entry the phase reported, translated into Spanish.' : ''} Submit them all in one call; MDD asks them together. Give each a short header, why it matters, detailed choices with a recommendation, multiple when several can apply, and deferral only when safe; free text and agent delegation are always offered. Pass [] only once none remain. This call approves nothing.` };
   if (state === 'paused') return { tool: 'mdd_prepare_advance',
-    why: 'The user paused without rejecting the phase. Wait for their request to resume, then prepare remaining clarifications (or []) and ask for a fresh native approval; never advance automatically.' };
+    why: 'The user paused without rejecting the phase. Wait for their request to resume, then prepare remaining clarifications (or []); interactive mode then asks for a fresh native approval. Never advance automatically.' };
 
   // A failed verification is the one stop whose useful next step is not the same phase again:
   // re-checking an unchanged implementation reproduces the same failure. It outranks the exhausted

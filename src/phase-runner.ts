@@ -24,6 +24,8 @@ import type { RiskVerdict } from './risk.js';
 import type { Acceptance, Decision, Verification } from './acceptance.js';
 import { concerns } from './concerns.js';
 import type { Concern } from './concerns.js';
+import { openQuestions } from './open-questions.js';
+import type { OpenQuestion } from './open-questions.js';
 import type { ProgressGuard } from './progress.js';
 import { CHANGED_LIST_MAX, CheckpointConflictError, CheckpointStorageError, CONCERNS_MAX, EXPLANATION_MAX_BYTES, REJECTED_TEXT_MAX_BYTES,
   STABLE_CHECKPOINT_VERSION, reconcileProgress, sealResumeData } from './checkpoint.js';
@@ -224,6 +226,11 @@ type Run = {
    * checkpoint dependencies are bound one to one to phase results, and this is not one.
    */
   riskArtifact?: ArtifactResult; riskVerdict?: RiskVerdict; riskSummary?: string;
+  /**
+   * Decisions the latest recorded phase said only the user can make. Held until the coordinator
+   * asks them at the next boundary (`takeOpenQuestions`), and replaced by the next phase result.
+   */
+  openQuestions?: { phase: Phase; questions: OpenQuestion[] };
   /** The terminal state already written to the run ledger, so one run occupies one row. */
   ledgered?: 'complete' | 'blocked';
   uncertain: boolean; userMessageID: string; concerns: Concern[]; contextReport?: string; context: RunContext[]; dossierDiagnostic?: string;
@@ -950,6 +957,7 @@ export class PhaseRunner {
         ...(stable.fallbackExhausted ? { fallbackExhausted: true } : {}),
         ...(stable.reportRepairExhausted ? { reportRepairExhausted: true } : {}),
         malformed: stable.malformed, ...(stable.rejected ? { rejected: { ...stable.rejected } } : {}),
+        ...(stable.openQuestions ? { openQuestions: structuredClone(stable.openQuestions) } : {}),
         brief: '', report: structuredClone(stable.report),
       };
       // Explicit Verify rework is a new implementation pass, not recovery of an incomplete batch.
@@ -1076,6 +1084,9 @@ export class PhaseRunner {
       // counter guesses, and the guess it made was to take the phase over early.
       attemptsLeft: Math.max(0, DELEGATION_ATTEMPTS - run.attempts),
       contextual: !!run.side, contexts: this.#contexts(run.contexts), concerns: structuredClone(run.concerns),
+      // Decisions the last phase left for the user. The coordinator translates and asks them at
+      // the next boundary; until then they are pending here, in both modes.
+      ...(run.openQuestions ? { openQuestions: structuredClone(run.openQuestions) } : {}),
       // Labels and sizes only: the text itself is already visible inside the phase prompt, so
       // repeating it here would spend the payload budget twice on the same bytes.
       ...(run.context.length ? { providedContext: run.context.map(item => ({ label: item.label, bytes: Buffer.byteLength(item.content), source: item.source })) } : {}),
@@ -1878,6 +1889,7 @@ export class PhaseRunner {
         how: result.how === undefined ? undefined : nonemptyText(result.how, 'how'),
         artifact: assertNoTraceSection(nonemptyText(result.artifact, 'artifact')),
         advisory: concerns(result.concerns),
+        questions: openQuestions(result.questions),
       };
     } catch (error) { throw asMalformed(error); }
   }
@@ -1886,7 +1898,7 @@ export class PhaseRunner {
   async #record(run: Run, text: string, callID?: string, publication?: { batchID: string }): Promise<void> {
     if (this.#risking(run)) { await this.#recordRisk(run, text, callID); return; }
     const report = this.#readReport(run, text, callID);
-    const { result, ignored, outcome, evidenceSummary, advisory } = report;
+    const { result, ignored, outcome, evidenceSummary, advisory, questions } = report;
     let artifact = report.artifact;
     if (run.side) { await this.#sideResult(run, outcome, artifact, evidenceSummary, advisory); return; }
     let planned = run.planned;
@@ -1978,6 +1990,9 @@ export class PhaseRunner {
       run.decisions = choices;
       // Bounded exactly as the checkpoint bounds them, so holding more can never stop resumption.
       run.concerns = mergeConcerns(run.concerns, advisory);
+      // Only the latest phase's questions are pending: an older one was asked or superseded.
+      if (questions.length) run.openQuestions = { phase: run.phase, questions };
+      else delete run.openQuestions;
       if (applied) {
         // A correction pass reports only what it touched; the first pass's files still changed.
         run.changedList = mergeChangedFiles(run.changedList, applied.files);
@@ -2880,6 +2895,23 @@ export class PhaseRunner {
     if (run) { this.#checkpoint(run); this.#preserve(run); }
   }
 
+  /** Decisions the latest recorded phase left for the user, until the coordinator asks them. */
+  openQuestions(sessionID: string): { phase: Phase; questions: OpenQuestion[] } | undefined {
+    const run = this.#runs.get(sessionID);
+    return run?.openQuestions ? structuredClone(run.openQuestions) : undefined;
+  }
+
+  /**
+   * The coordinator has put the pending phase questions to the user (or found none still needed),
+   * so they stop being pending. Recorded durably: a restart must not ask them a second time.
+   */
+  takeOpenQuestions(sessionID: string): void {
+    const run = this.#runs.get(sessionID);
+    if (!run?.openQuestions) return;
+    delete run.openQuestions;
+    this.#checkpoint(run);
+  }
+
   /** Reuse guards from a run this process never saw. Restoring them can only reject, never allow. */
   priorGuards(sessionID: string): { usedMessages: string[]; proposed: string[] } | undefined {
     const prior = this.#prior(sessionID);
@@ -3057,6 +3089,7 @@ export class PhaseRunner {
         ...(!advanced && run.lastFailure ? { lastFailure: clip(run.lastFailure, EXPLANATION_MAX_BYTES) } : {}),
         ...(run.reason ? { reason: clip(run.reason, EXPLANATION_MAX_BYTES) } : {}),
         ...(run.rejected ? { rejected: { reason: clip(run.rejected.reason, EXPLANATION_MAX_BYTES), text: run.rejected.text } } : {}),
+        ...(run.openQuestions ? { openQuestions: structuredClone(run.openQuestions) } : {}),
       };
       return {
         version: STABLE_CHECKPOINT_VERSION, runID: run.id, parent: run.runtime.sessionID, sequence: (run.checkpointSequence ?? -1) + 1,

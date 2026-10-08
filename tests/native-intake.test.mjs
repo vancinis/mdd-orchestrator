@@ -81,9 +81,12 @@ for (const known of [{}, { certainty: 'very-sure', artifactStore: 'none', summar
     const f = await fixture(t, known);
     const status = await f.start();
     assert.equal(status.state, 'question-ready');
-    assert.equal(status.question.questions.length, 4 - Object.keys(known).length);
+    // The missing fields, then the free-form note that rides on every preflight that is asked.
+    assert.equal(status.question.questions.length, 4 - Object.keys(known).length + 1);
+    assert.equal(status.question.questions.at(-1).header, 'Notas');
+    assert.deepEqual(status.question.questions.at(-1).options.map(option => option.label), [CLARIFICATION_LABELS.nothing]);
     assert.equal(f.starts(), 0);
-    const labels = { Certeza: 'Muy seguro', Artefactos: 'Ninguno', Modo: 'Automático', Resumen: 'Bajo' };
+    const labels = { Certeza: 'Muy seguro', Artefactos: 'Ninguno', Modo: 'Automático', Resumen: 'Bajo', Notas: CLARIFICATION_LABELS.nothing };
     const selections = status.question.questions.map(q => [labels[q.header]]);
     status.question.questions[0].question = 'mutated snapshot';
     await f.answer(selections);
@@ -91,6 +94,9 @@ for (const known of [{}, { certainty: 'very-sure', artifactStore: 'none', summar
     assert.equal(f.gate.status(runtime.sessionID).provenance.preflight, 'native-question');
     assert.equal(f.checks.filter(check => check[0] === 'question').length, 2);
     assert.equal(f.starts(), 1);
+    // "Nothing to add" is not an answer the next phase has to carry.
+    assert.equal(f.contributions.length, 0);
+    assert.deepEqual(f.gate.status(runtime.sessionID).clarificationAnswers, []);
   });
 }
 
@@ -177,7 +183,7 @@ test('native approval: Pause preserves the proposal without approving or fabrica
   assert.equal(f.workflow().nextAction().kind, 'execute');
 });
 
-test('review questions precede approval and retain recommended, delegated, deferred and free-text answers', async t => {
+test('review questions are asked together before approval and retain recommended, delegated, deferred and free-text answers', async t => {
   const f = await fixture(t, { ...answers, mode: 'interactive' });
   await f.start(); f.pass();
   assert.equal(f.gate.status(runtime.sessionID).state, 'review-ready');
@@ -189,23 +195,160 @@ test('review questions precede approval and retain recommended, delegated, defer
     { question: 'Which fallback?', options: [{ label: 'Local', description: 'Use local cache.' }] },
     { question: 'What copy?', options: [{ label: 'Short', description: 'Use short copy.' }] },
   ] }, runtime);
-  assert.deepEqual(f.gate.status(runtime.sessionID).question.questions[0].options.map(option => option.label), ['Centered (Recomendada)', 'Edge', CLARIFICATION_LABELS.delegate]);
-  await f.answer([['Centered (Recomendada)']]);
-  assert.match(f.gate.status(runtime.sessionID).question.questions[0].question, /^Which date format\? \[MDD clarification /);
-  await f.answer([[CLARIFICATION_LABELS.defer]]);
-  await f.answer([[CLARIFICATION_LABELS.delegate]]);
-  await f.answer([['Use this exact custom wording']]);
+  // One native interaction carries every question, the way preflight does.
+  const grouped = f.gate.status(runtime.sessionID).question;
+  assert.equal(grouped.questions.length, 4);
+  assert.deepEqual(grouped.questions.map(question => question.header), ['Detalle', 'Detalle', 'Detalle', 'Detalle']);
+  assert.deepEqual(grouped.questions[0].options.map(option => option.label), ['Centered (Recomendada)', 'Edge', CLARIFICATION_LABELS.delegate]);
+  assert.deepEqual(grouped.questions[1].options.map(option => option.label), ['ISO', CLARIFICATION_LABELS.defer, CLARIFICATION_LABELS.delegate]);
+  assert.match(grouped.questions[0].question, /^Which layout\? \[MDD clarification /);
+  assert.equal(grouped.questions[3].question, 'What copy?');
+  await f.answer([['Centered (Recomendada)'], [CLARIFICATION_LABELS.defer], [CLARIFICATION_LABELS.delegate], ['Use this exact custom wording']]);
   assert.deepEqual(f.gate.status(runtime.sessionID).clarificationAnswers.map(item => item.answer),
     ['Centered (Recomendada)', CLARIFICATION_LABELS.defer, CLARIFICATION_LABELS.delegate, 'Use this exact custom wording']);
   assert.equal(f.gate.status(runtime.sessionID).clarificationAnswers[1].disposition, 'deferred');
   assert.deepEqual(f.gate.status(runtime.sessionID).pendingClarifications.map(item => item.question), ['Which date format?']);
-  assert.equal(f.contributions.length, 4);
-  assert.match(f.contributions[1].content, /unresolved.*Do not assume/);
-  assert.deepEqual(f.contributions[3], { label: 'Clarification', content: 'Question: What copy?\nAnswer: Use this exact custom wording' });
+  // All answers of one interaction travel as one context entry.
+  assert.equal(f.contributions.length, 1);
+  assert.equal(f.contributions[0].label, 'Clarification');
+  assert.match(f.contributions[0].content, /Question: Which date format\?\nAnswer: Dejar para más adelante\nDeferred by the user; unresolved\. Do not assume/);
+  assert.match(f.contributions[0].content, /Question: What copy\?\nAnswer: Use this exact custom wording$/);
   assert.equal(f.gate.status(runtime.sessionID).question.questions[0].header, 'Aprobación');
   assert.equal(f.workflow().nextAction().kind, 'approve');
   await f.answer([[APPROVAL_LABELS.proceed]]);
   assert.equal(f.workflow().nextAction().kind, 'execute');
+});
+
+test('clarifications carry a header and why, allow several choices or none, and treat an empty answer as unresolved', async t => {
+  const f = await fixture(t, { ...answers, mode: 'interactive' });
+  await f.start(); f.pass();
+  f.gate.prepareAdvance({ questions: [
+    { question: '¿Qué navegadores soportamos?', header: 'Navegadores', why: 'Define qué APIs puede usar la implementación.', multiple: true,
+      options: [{ label: 'Chrome', description: 'Últimas dos versiones.' }, { label: 'Firefox', description: 'Últimas dos versiones.' }, { label: 'Safari', description: 'iOS incluido.' }] },
+    { question: '¿Cuál es la URL base de la API?', header: 'URL de la API', options: [] },
+    { question: '¿Qué texto usamos en el botón?', options: [{ label: 'Guardar', description: 'Texto corto.' }] },
+  ] }, runtime);
+  const grouped = f.gate.status(runtime.sessionID).question;
+  assert.deepEqual(grouped.questions.map(question => question.header), ['Navegadores', 'URL de la API', 'Detalle']);
+  assert.match(grouped.questions[0].question, /^¿Qué navegadores soportamos\?\nPor qué importa: Define qué APIs puede usar la implementación\. \[MDD clarification /);
+  assert.deepEqual(grouped.questions.map(question => question.multiple), [true, false, false]);
+  // An open-ended question still offers delegation; the user types the answer.
+  assert.deepEqual(grouped.questions[1].options.map(option => option.label), [CLARIFICATION_LABELS.delegate]);
+  await f.answer([['Chrome', 'Safari', 'Edge también'], ['https://api.example.test'], []]);
+  const status = f.gate.status(runtime.sessionID);
+  assert.deepEqual(status.clarificationAnswers.map(item => [item.answer, item.disposition]), [
+    ['Chrome, Safari, Edge también', 'answered'], ['https://api.example.test', 'answered'], ['Sin respuesta', 'deferred']]);
+  assert.match(f.contributions[0].content, /Question: ¿Qué navegadores soportamos\?\nAnswers:\n- Chrome\n- Safari\n- Edge también/);
+  assert.match(f.contributions[0].content, /Answer: Sin respuesta\nLeft unanswered by the user; unresolved/);
+  assert.deepEqual(status.pendingClarifications.map(item => item.question), ['¿Qué texto usamos en el botón?']);
+  assert.equal(status.question.questions[0].header, 'Aprobación');
+  // A single-choice question cannot be answered with two choices.
+  const g = await fixture(t, { ...answers, mode: 'interactive' });
+  await g.start(); g.pass();
+  g.gate.prepareAdvance({ questions: [{ question: 'Which one?', options: [{ label: 'A', description: 'First.' }, { label: 'B', description: 'Second.' }] }] }, runtime);
+  await assert.rejects(g.answer([['A', 'B']]), /Invalid native question answer label/);
+});
+
+test('automatic mode stops for questions a phase reported, asks them together, then dispatches without approval', async t => {
+  const f = await fixture(t, { ...answers, mode: 'automatic' });
+  let reported = { phase: 'mdd-explore', questions: [{ question: 'Which locale?', why: 'Dates render differently.', options: [] }] };
+  let taken = 0;
+  f.runner.openQuestions = () => reported && structuredClone(reported);
+  f.runner.takeOpenQuestions = () => { taken++; reported = undefined; };
+  await f.start(); f.pass();
+  assert.equal(f.workflow().nextAction().kind, 'execute');
+  const review = f.gate.status(runtime.sessionID);
+  assert.equal(review.state, 'review-ready');
+  assert.equal(review.task, undefined);
+  assert.match(review.notice, /openQuestions.*before the next phase is dispatched/s);
+  assert.throws(() => f.gate.guardTask(runtime.sessionID));
+  f.gate.prepareAdvance({ questions: [
+    { question: '¿Qué idioma usamos para las fechas?', header: 'Idioma', why: 'Las fechas se muestran distinto según el idioma.', options: [{ label: 'Español', description: 'es-AR.', recommended: true }] },
+    { question: '¿Mostramos la hora?', options: [{ label: 'Sí', description: 'Con hora.' }, { label: 'No', description: 'Solo fecha.' }] },
+  ] }, runtime);
+  assert.equal(taken, 1);
+  assert.equal(f.gate.status(runtime.sessionID).question.questions.length, 2);
+  await f.answer([['Español (Recomendada)'], ['No']]);
+  const after = f.gate.status(runtime.sessionID);
+  assert.equal(after.question, undefined);
+  assert.equal(after.state, 'phase-recorded');
+  assert.match(after.notice, /no approval is needed/);
+  assert.doesNotThrow(() => f.gate.guardTask(runtime.sessionID));
+  assert.equal(f.contributions.length, 1);
+  assert.deepEqual(after.clarificationAnswers.map(item => item.phase), [f.workflow().nextAction().phase, f.workflow().nextAction().phase]);
+  // No receipt approves anything: automatic mode records the answers, not consent.
+  assert.equal(after.questionReceipts.at(-1).kind, 'clarification');
+  // A later phase that reports nothing does not stop the run.
+  f.pass();
+  assert.notEqual(f.gate.status(runtime.sessionID).state, 'review-ready');
+});
+
+test('automatic mode: an empty answer set resumes the ready phase at once', async t => {
+  const f = await fixture(t, { ...answers, mode: 'automatic' });
+  let reported = { phase: 'mdd-explore', questions: [{ question: 'Which locale?', why: 'Dates.', options: [] }] };
+  f.runner.openQuestions = () => reported;
+  f.runner.takeOpenQuestions = () => { reported = undefined; };
+  await f.start(); f.pass();
+  assert.equal(f.gate.status(runtime.sessionID).state, 'review-ready');
+  f.gate.prepareAdvance({ questions: [] }, runtime);
+  assert.equal(reported, undefined);
+  assert.equal(f.gate.status(runtime.sessionID).question, undefined);
+  assert.doesNotThrow(() => f.gate.guardTask(runtime.sessionID));
+});
+
+test('the coordinator may stop a ready phase before dispatch to ask, in either mode, but not while work is in flight', async t => {
+  const f = await fixture(t, { ...answers, mode: 'automatic' });
+  await f.start();
+  let state = 'await-result';
+  const status = f.runner.status;
+  f.runner.status = (...args) => ({ ...status(...args), state });
+  assert.throws(() => f.gate.prepareAdvance({ questions: [{ question: '¿Qué color?', options: [{ label: 'Azul', description: 'Fondo azul.' }] }] }, runtime), /not ready/);
+  state = 'ready';
+  // Nothing to ask leaves the ready task untouched.
+  f.gate.prepareAdvance({ questions: [] }, runtime);
+  assert.equal(f.gate.status(runtime.sessionID).question, undefined);
+  f.gate.prepareAdvance({ questions: [{ question: '¿Qué color?', options: [{ label: 'Azul', description: 'Fondo azul.' }] }] }, runtime);
+  assert.equal(f.gate.status(runtime.sessionID).question.questions[0].header, 'Detalle');
+  assert.throws(() => f.gate.guardTask(runtime.sessionID));
+  await f.answer([['Azul']]);
+  assert.equal(f.gate.status(runtime.sessionID).question, undefined);
+  assert.doesNotThrow(() => f.gate.guardTask(runtime.sessionID));
+  assert.match(f.contributions[0].content, /Question: ¿Qué color\?\nAnswer: Azul/);
+  assert.equal(f.workflow().snapshot().results.length, 0);
+});
+
+test('startup doubts ride in the same native interaction as preflight and reach the first phase', async t => {
+  const f = await fixture(t, { certainty: 'very-sure', artifactStore: 'none', summary: 'low' });
+  const status = await f.gate.start({ requirements: 'Human requirements', questions: [
+    { question: '¿Para qué pantalla es el cambio?', header: 'Pantalla', why: 'El pedido no dice dónde va.', options: [{ label: 'Dashboard', description: 'Inicio.' }, { label: 'Pedidos', description: 'Listado.' }] },
+  ] }, runtime, 'msg_start');
+  assert.deepEqual(status.question.questions.map(question => question.header), ['Modo', 'Pantalla', 'Notas']);
+  assert.equal(f.starts(), 0);
+  await f.answer([['Automático'], ['Pedidos'], ['No tocar el backend']]);
+  assert.equal(f.starts(), 1);
+  const started = f.gate.status(runtime.sessionID);
+  assert.equal(started.provenance.preflight, 'native-question');
+  assert.equal(f.contributions.length, 1);
+  assert.match(f.contributions[0].content, /Question: ¿Para qué pantalla es el cambio\?\nAnswer: Pedidos/);
+  assert.match(f.contributions[0].content, /Answer: No tocar el backend/);
+  assert.deepEqual(started.clarificationAnswers.map(item => [item.answer, item.phase]), [['Pedidos', 'mdd-explore'], ['No tocar el backend', 'mdd-explore']]);
+});
+
+test('a complete profile starts at once unless the coordinator has doubts, which are then asked alone', async t => {
+  const f = await fixture(t);
+  const status = await f.gate.start({ requirements: 'Human requirements', questions: [
+    { question: '¿Qué formato de fecha?', options: [{ label: 'ISO', description: 'AAAA-MM-DD.' }], deferrable: true },
+  ] }, runtime, 'msg_start');
+  // Only the doubt: no preflight field and no note, because preflight itself is not asked.
+  assert.deepEqual(status.question.questions.map(question => question.header), ['Detalle']);
+  assert.equal(f.starts(), 0);
+  await f.answer([[CLARIFICATION_LABELS.defer]]);
+  assert.equal(f.starts(), 1);
+  const started = f.gate.status(runtime.sessionID);
+  assert.equal(started.provenance.preflight, 'startup-profile');
+  assert.deepEqual(started.pendingClarifications.map(item => item.question), ['¿Qué formato de fecha?']);
+  assert.match(f.contributions[0].content, /Deferred by the user; unresolved/);
+  await assert.rejects(fixture(t).then(g => g.gate.start({ requirements: 'Human requirements', questions: [{ question: 'Bad', options: [], header: 'x'.repeat(31) }] }, runtime, 'msg_start')), /at most 30 characters/);
 });
 
 test('regression: clarification prose still requires nonempty strings and bounded choice counts', async t => {
@@ -218,10 +361,12 @@ test('regression: clarification prose still requires nonempty strings and bounde
       assert.throws(() => f.gate.prepareAdvance({ questions: [{ ...base, options: [{ ...base.options[0], [key]: value }] }] }, runtime));
     }
   }
-  for (const options of [[], Array(7).fill(base.options[0])]) {
-    assert.throws(() => f.gate.prepareAdvance({ questions: [{ ...base, options }] }, runtime));
-  }
+  // An empty list is an open-ended question now; more than six choices is still refused.
+  assert.throws(() => f.gate.prepareAdvance({ questions: [{ ...base, options: Array(7).fill(base.options[0]) }] }, runtime));
   assert.throws(() => f.gate.prepareAdvance({ questions: Array(9).fill(base) }, runtime));
+  assert.throws(() => f.gate.prepareAdvance({ questions: [{ ...base, header: 'Un encabezado demasiado largo para la UI' }] }, runtime), /at most 30 characters/);
+  for (const key of ['multiple', 'deferrable']) assert.throws(() => f.gate.prepareAdvance({ questions: [{ ...base, [key]: 'yes' }] }, runtime));
+  assert.throws(() => f.gate.prepareAdvance({ questions: [{ ...base, why: '  ' }] }, runtime));
   assert.equal(f.gate.status(runtime.sessionID).state, 'review-ready');
 });
 
@@ -309,7 +454,7 @@ test('unrelated native questions cannot compete during MDD accepting or await-an
   await assert.rejects(f.gate.beforeQuestion({ sessionID: runtime.sessionID, callID: 'other-awaiting' }, other), /already pending/);
   assert.equal(f.gate.status(runtime.sessionID).state, 'await-answer');
   f.inspect.question = async () => {};
-  await f.gate.afterQuestion(call, args, output(args, [['Muy seguro'], ['Ninguno'], ['Automático'], ['Bajo']]));
+  await f.gate.afterQuestion(call, args, output(args, [['Muy seguro'], ['Ninguno'], ['Automático'], ['Bajo'], [CLARIFICATION_LABELS.nothing]]));
   assert.equal(f.starts(), 1);
 });
 
@@ -390,7 +535,7 @@ test('the detail choice is conditional and does not grant approval', async t => 
   assert.match(f.gate.status(runtime.sessionID).notice, /expandedReport|full/);
 });
 
-for (const selections of [[], [['forged']], [['Muy seguro', 'Poco seguro']], [['Muy seguro', 'Poco seguro'], ['Ninguno'], ['Automático'], ['Bajo']]]) {
+for (const selections of [[], [['forged']], [['Muy seguro', 'Poco seguro']], [['Muy seguro', 'Poco seguro'], ['Ninguno'], ['Automático'], ['Bajo'], ['Nada que agregar']]]) {
   test(`native question: reject malformed answer envelopes ${JSON.stringify(selections)}`, async t => {
     const f = await fixture(t, {}); await f.start();
     await assert.rejects(f.answer(selections));
@@ -405,14 +550,14 @@ for (const selections of [[], [['forged']], [['Muy seguro', 'Poco seguro']], [['
 // the question simply stays open and can be answered again.
 test('native question: an unlisted label answers nothing and leaves the question open', async t => {
   const f = await fixture(t, {}); await f.start();
-  await f.answer([['Ninguno'], ['Muy seguro'], ['Automático'], ['Bajo']]);
+  await f.answer([['Ninguno'], ['Muy seguro'], ['Automático'], ['Bajo'], [CLARIFICATION_LABELS.nothing]]);
   const stalled = f.gate.status(runtime.sessionID);
   assert.equal(stalled.state, 'question-ready');
   assert.ok(stalled.question);
   assert.equal(f.starts(), 0);
   assert.equal(stalled.questionReceipts.at(-1).cancelled, true);
   assert.equal(stalled.questionReceipts.at(-1).answers.length, 0);
-  await f.answer([['Muy seguro'], ['Ninguno'], ['Automático'], ['Bajo']]);
+  await f.answer([['Muy seguro'], ['Ninguno'], ['Automático'], ['Bajo'], [CLARIFICATION_LABELS.nothing]]);
   assert.equal(f.starts(), 1);
   assert.equal(f.gate.status(runtime.sessionID).state, 'phase-recorded');
 });

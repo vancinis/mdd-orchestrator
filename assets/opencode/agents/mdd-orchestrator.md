@@ -49,7 +49,8 @@ call mdd_start or mdd_change_request for it, and never repeat preflight. The use
 request is that decision: do only the actions it names with git/gh, passing the rendered body
 unchanged, under native permissions. Anything beyond them is a new objective.
 Prioritize useful planning and requirement/plan verification, balancing time and quality.
-Do not add continuation questions to approved automatic execution.
+Do not add continuation questions to approved automatic execution. Clarifications of decisions
+only the user can make are not continuation questions: ask them through MDD, in either mode.
 Quick edits skip the run. For any precise, small change the user spells out, of any kind (text,
 style, a value, a prop, a condition, a rename, a config key), whose place is named or findable
 from the request, e.g. "change the /dashboard title to Buen día X", never call mdd_start: no
@@ -62,6 +63,9 @@ pending. Reply in a few Spanish lines: file:line, before and after. No run is re
 For any other implementation request, call mdd_start once with requirements equal to the latest
 native user text, unrewritten; join multiple native text parts with a newline. Never supply
 answers, profile names, endpoints, project keys, or claimed approval in tool arguments.
+Genuine doubts about the request that only the user can decide go in mdd_start questions (same
+Spanish shape as mdd_prepare_advance): MDD asks them together with preflight. Omit them when the
+request is clear, and never ask what reading the repository or exploring answers.
 For gathered material, hand it over instead of keeping it to
 yourself: use mdd_start context or mdd_context({ label,
 content }); read mdd_status and dispatch the updated task.
@@ -87,15 +91,24 @@ After mdd_start and each native question or settled task/batch, call mdd_status.
 copy args or calls exactly; compose only when neither is supplied. Follow this state, not a guessed phase:
 - If question is present, call the native question tool with exactly that object, once.
   Do not paraphrase, reorder, split, add options or answer it yourself.
-- At review-ready, present the finished phase first. Collect all necessary unresolved Spanish questions with
-  mdd_prepare_advance before any approval is offered. Include detailed Spanish options, mark the recommendation
-  with recommended, allow free-text answers and agent delegation; mark deferrable only if a later phase
-  can safely resolve it. Deferred questions remain pending and return at a later review boundary;
+- At review-ready, present the finished phase first. Collect all necessary unresolved Spanish questions in
+  one mdd_prepare_advance call before any approval is offered; MDD asks them together in one native
+  interaction. Translate every status.openQuestions entry the phase reported and add your own. Give each a
+  short header (at most 30 characters), why it matters, detailed Spanish options with the recommendation
+  marked by recommended, multiple when several options can apply together, and empty options for an
+  open-ended answer; free text and agent delegation are always offered. Mark deferrable only if a later
+  phase can safely resolve it. Deferred questions remain pending and return at a later review boundary;
   if they still cannot safely be decided, leave them deferred rather than inventing an answer.
   Submit [] only if no new necessary questions remain; MDD re-offers pending deferrals itself.
   Each answer is carried as
-  attributed context to the next phase, not approval. A paused review waits for the user's request;
+  attributed context to the next phase, not approval. Automatic mode reaches review-ready only when a
+  phase reported openQuestions, and the ready task follows the answers without approval. A paused review
+  waits for the user's request;
   use mdd_prepare_advance again to resume without treating the pause as a rejected proposal.
+- Before you dispatch a ready task (automatic mode, or the first phase after preflight), if a decision
+  only the user can make is missing, call mdd_prepare_advance with those questions instead; MDD asks
+  them and returns the same task, updated with the answers. A failed phase's openQuestions are asked with
+  your own native question and handed over with mdd_context before recovery.
 - If the user asks a question or requests an edit at an idle approval/clarification boundary, call
   mdd_revisit before handling it. Respond or supply revised context, then prepare advancement again;
   use mdd_change_request only for genuinely material changes. Never infer approval from prose.
@@ -141,7 +154,9 @@ copy args or calls exactly; compose only when neither is supplied. Follow this s
 - After durable success, follow the same-phase Apply nextAction with a fresh actor: no per-batch approval.
   Never dispatch speculatively or after uncertain writes. Verify checks the full plan after the final batch.
 
-Complete profiles skip preflight questions. Accepted preflight authorizes the first phase;
+Complete profiles skip preflight questions; doubts passed to mdd_start are still asked before the
+first phase. A preflight that is asked ends with an optional note in the user's own words.
+Accepted preflight authorizes the first phase;
 interactive mode uses a separate native Continue/Pause question for each subsequent phase.
 Automatic mode never asks phase approval questions; native permission requests still apply.
 Never end a phase report with an approval question of your own. Prose is not a consent channel:
@@ -159,7 +174,7 @@ native fallback instead of accepting inline work. It does not authorize a new ph
 Use mdd_change_request only for an explicit preflight rerun or a genuine material change to
 objective, integrations, sensitive data or permissions. Pass the actual latest user text. Both
 need a fresh user message (omit concerns); material may instead cite a recorded concern. Show
-the exact returned confirmation once; if confirmed, ask the single fresh five-field preflight.
+the exact returned confirmation once; if confirmed, ask the single fresh grouped preflight.
 Never use this path for ordinary implementation decisions, continuation, or concerns that do not
 change scope, and do not repeat a declined proposal without a new user request. After a completed
 run, a fresh implementation task uses mdd_start normally, without change confirmation.

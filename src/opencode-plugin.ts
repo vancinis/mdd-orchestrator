@@ -724,6 +724,22 @@ function explorationWorkItemSchema() {
     })).min(1).max(8).optional() }).strict();
 }
 
+/**
+ * The coordinator's clarification questions. Every user-visible string is Spanish; structure is
+ * validated again inside the intake, so this schema only shapes what the model is offered.
+ */
+function clarificationsSchema() {
+  return tool.schema.array(tool.schema.object({
+    question: tool.schema.string().min(1).describe('The complete question, in Spanish.'),
+    header: tool.schema.string().min(1).max(30).optional().describe('Short topic shown above the question, at most 30 characters (for example "Formato de fecha"). Defaults to "Detalle".'),
+    why: tool.schema.string().min(1).optional().describe('Why it matters: what depends on the answer, or what the phase found that raised it. Shown under the question.'),
+    options: tool.schema.array(tool.schema.object({ label: tool.schema.string().min(1), description: tool.schema.string().min(1), recommended: tool.schema.boolean().optional() })).max(6)
+      .describe('Zero to six concrete choices; leave empty for an open-ended answer the user types. Free text and "Que decida el agente" are always available.'),
+    multiple: tool.schema.boolean().optional().describe('True when several options can apply together.'),
+    deferrable: tool.schema.boolean().optional().describe('True only when a later phase can safely decide it.'),
+  })).max(8);
+}
+
 const plugin: Plugin = async input => {
   const workerHost = (input as PluginInput & { workerHost?: import('./worker-fence.js').WorkerHost }).workerHost;
   const inputDirectory = input.directory;
@@ -1141,6 +1157,8 @@ const plugin: Plugin = async input => {
           context: tool.schema.object({ label: tool.schema.string().min(1), content: tool.schema.string().min(1) }).optional()
             .describe('Optional material you already gathered for this objective, such as a fetched issue body. Data only: MDD composes it into the phase prompt and it never replaces the requirements.'),
           exploration: tool.schema.object({ workItems: tool.schema.array(explorationWorkItemSchema()).max(2) }).optional(),
+          questions: clarificationsSchema().optional()
+            .describe('Optional genuine doubts about this request that only the user can decide before work starts, in Spanish. MDD asks them together with the preflight questions in one native interaction, or alone before the first phase when the profile is complete. Omit when the request is clear; never ask what reading the repository answers.'),
         },
         async execute(args, context) {
           enter(context, 'mdd_start');
@@ -1254,12 +1272,8 @@ const plugin: Plugin = async input => {
         },
       }),
       mdd_prepare_advance: tool({
-        description: 'After presenting the phase result, submit all necessary clarification questions before offering phase approval. Write question text, option labels and descriptions in Spanish: these tool arguments are shown to the user, unlike English protocol keys and technical artifacts. Preserve complete prose; do not shorten or re-ask to fit individual text limits. Pass [] only when none remain. Each question offers agent delegation, optional deferral, recommended choices and free text. Also resumes a paused review without approving it.',
-        args: { questions: tool.schema.array(tool.schema.object({
-          question: tool.schema.string().min(1),
-          options: tool.schema.array(tool.schema.object({ label: tool.schema.string().min(1), description: tool.schema.string().min(1), recommended: tool.schema.boolean().optional() })).min(1).max(6),
-          deferrable: tool.schema.boolean().optional(),
-        })).max(8) },
+        description: 'After presenting the phase result, submit all necessary clarification questions before offering phase approval; MDD asks them all together in one native interaction. Include every entry of status.openQuestions, translated, plus your own. Write question text, option labels and descriptions in Spanish, and header and why too: these tool arguments are shown to the user, unlike English protocol keys and technical artifacts. Preserve complete prose; do not shorten or re-ask to fit individual text limits. Pass [] only when none remain. Each question offers agent delegation, optional deferral, recommended choices and free text. Also resumes a paused review without approving it, and may stop a ready phase before you dispatch it (automatic mode, or right after preflight) when a decision only the user can make is missing.',
+        args: { questions: clarificationsSchema() },
         async execute(args, context) {
           enter(context, 'mdd_prepare_advance');
           return reply(intake.prepareAdvance(args, context));

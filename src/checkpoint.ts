@@ -15,6 +15,8 @@ import { evidenceCoverage, renderReport } from './reporting.js';
 import type { Evidence, PhaseReport } from './reporting.js';
 import type { Phase } from './policy.js';
 import type { Concern } from './concerns.js';
+import { openQuestions } from './open-questions.js';
+import type { OpenQuestion } from './open-questions.js';
 import { validateWorkerState, workerReport } from './worker-state.js';
 import { validateExplorationRecord, type ExplorationRecord, type WorkerState } from './worker-state.js';
 import type { WorkerPolicy } from './settings.js';
@@ -97,6 +99,11 @@ export type StableRunnerState = {
   report: PhaseReport; changedList: ChangedFile[]; concerns: Concern[];
   delivered?: Delivered; nativeUsed?: true; fallbackExhausted?: true; reportRepairExhausted?: true;
   lastFailure?: string; reason?: string; rejected?: { reason: string; text: string };
+  /**
+   * Decisions the latest phase reported only the user can make, held until the coordinator asks
+   * them. Kept here so a restart between the phase and that question still asks it.
+   */
+  openQuestions?: { phase: Phase; questions: OpenQuestion[] };
 };
 /**
  * `mdd-risk` names an attempt at the risk stop rather than at a Phase: it is dispatched, settled
@@ -114,7 +121,7 @@ export function sealResumeData(data: ResumeData, runID: string, parent: string, 
 function validateStable(value: unknown, workflow: Workflow, data: ResumeData): StableRunnerState {
   const item = objectWithKeys(value, 'stable runner state', ['phase', 'state', 'mode', 'attempts', 'spent', 'malformed',
     'report', 'changedList', 'concerns', 'delivered', 'nativeUsed', 'fallbackExhausted', 'reportRepairExhausted',
-    'lastFailure', 'reason', 'rejected']);
+    'lastFailure', 'reason', 'rejected', 'openQuestions']);
   const next = workflow.nextAction();
   const phase = next.kind === 'finished' || !('phase' in next) ? workflow.snapshot().results.at(-1)?.phase : next.phase;
   const state = { execute: 'ready', approve: 'await-approval', 'await-result': 'await-result', blocked: 'blocked', finished: 'complete',
@@ -154,6 +161,13 @@ function validateStable(value: unknown, workflow: Workflow, data: ResumeData): S
   const advisory = list(item.concerns, CONCERNS_MAX, 'stable concerns').map(value => concerns([value])[0]);
   if (!isDeepStrictEqual(advisory, item.concerns)) throw new ValidationError('Invalid stable concerns.');
   if (item.delivered !== undefined && !isDeepStrictEqual(delivered(item.delivered), item.delivered)) throw new ValidationError('Invalid delivered summary.');
+  if (item.openQuestions !== undefined) {
+    const held = objectWithKeys(item.openQuestions, 'stable open questions', ['phase', 'questions']);
+    let questions: OpenQuestion[];
+    try { questions = openQuestions(held.questions); } catch { throw new ValidationError('Invalid stable open questions.'); }
+    if (!workflow.snapshot().results.some(result => result.phase === held.phase) || !questions.length ||
+        !isDeepStrictEqual(questions, held.questions)) throw new ValidationError('Invalid stable open questions.');
+  }
   return structuredClone(value) as StableRunnerState;
 }
 
