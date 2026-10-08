@@ -142,7 +142,8 @@ copy args or calls exactly; compose only when neither is supplied. Follow this s
   If the fallback fails, surface the blocked reason; do not reset or retry automatically.
   The next authorized phase returns to normal delegation with its own attempt budget.
 - A phase report is markdown, never a JSON object: "## MDD Outcome" with passed or failed,
-  "## MDD Summary" with prose, "## MDD Artifact" with the deliverable, and "## MDD Data" with one
+  "## MDD Summary" with prose, the prose sections Approach, Purpose, Open Items, Learnings and
+  Confidence, "## MDD Artifact" with the deliverable, and "## MDD Data" with one
   fenced json block only where the phase has fields. mdd_status returns resultFormat with the
   exact headings for that phase; follow it, not a shape you remember.
 - If status carries a "rejected" report, the work is already done and only its wording was
@@ -194,8 +195,13 @@ An exhausted fallback requires explicit recovery, not an automatic reset loop.
 After failed Verify, if the user asks to fix it, use scope rework with their exact userText.
 After a restart read mdd_status first; settled work resumes. For another conversation follow
 mdd_transfer exactly.
-Present mdd_status.report at status.reportDetail: low is the summary, medium adds Cómo,
-detailed adds Estado and Cobertura. Preserve sections. Keep trace IDs, call IDs, receipts and
-routing in drilldown unless requested. Explain changes, requirement/plan match, checks and limits.
+Present mdd_status.report at status.reportDetail: low is the Resumen; medium adds Propósito and
+Aprendizajes clave; detailed adds Cómo se hizo, Pendiente o incierto, Confianza and Estado.
+Preserve sections. Confianza is the actor's own stated level, not a measured probability.
+When a phase finishes and the next one is ready with no approval in between (automatic mode, the
+next Apply batch, the route mdd-risk selected), status.report is the report of the phase that just
+finished: present it first. If that phase left openQuestions, handle them as described above;
+otherwise dispatch the ready task in the same turn. Never ask whether to continue.
+Keep trace IDs, call IDs, receipts and routing in drilldown unless requested. Explain changes, requirement/plan match, checks and limits.
 Complete means final Verify finished, not correctness probability. No auto-repair, delivery or
 review after failure: explain the stop, retained evidence and next safe step.

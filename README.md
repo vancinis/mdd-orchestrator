@@ -19,9 +19,8 @@ describes the shared runtime settings; model-backed E2E and final review remain 
 
 An approved plan continues without redundant process prompts in automatic mode. Explicit
 interactive mode, native permissions, scope safety and review boundaries remain intact.
-Low uses one compact plan, not extra phases or mandatory design paperwork. Existing weights
-and the high-route threshold of 50 are unchanged; style-weight tuning is future work, not a
-reason to stop an approved plan.
+Low uses one compact plan, not extra phases or mandatory design paperwork. The preflight is not
+scored: every run starts with exploration, and the `mdd-risk` assessment selects low or high.
 
 ## Set up MDD
 
@@ -77,45 +76,41 @@ node dist/cli.js --answers examples/answers.json
 
 `npm test` builds the TypeScript source and runs the native Node test suite. To build without running tests, use `npm run build`.
 
-The example scores **20 points** and selects `low` with `mdd-plan → mdd-apply → mdd-verify`. Output is JSON containing `policyVersion`, `score`, `threshold`, `route`, `phases`, individual `contributions`, and explanatory `reasons`.
+The example validates the answers and prints the first phase, `mdd-explore`; nothing is scored, and the route is selected later by `mdd-risk`. Output is JSON containing `policyVersion`, `phases` and explanatory `reasons`.
 
-### Profiles, overrides, and exploration
+### Profiles
 
 ```powershell
 # Same result as the explicit answers above; no prompts.
 node dist/cli.js --profile examples/profile.json
 
-# Override one weight: score 50 equals the threshold, so the route is high.
-node dist/cli.js --answers examples/answers.json --config examples/config.json
-
-# Request exploration for otherwise clear low-route work.
-node dist/cli.js --answers examples/answers.json --explore
-
 node dist/cli.js --help
 ```
 
+`--explore` is still accepted for saved invocations but no longer changes the first phase, and
+`--config` is refused: there are no weights or threshold left to configure.
+
 Quote paths containing spaces, for example `--answers "C:\work items\answers.json"`. Files use UTF-8 JSON; a leading UTF-8 BOM is accepted for PowerShell compatibility. Relative paths resolve from the current working directory. The proof flags have file inputs only, not inline JSON or stdin.
 
-Supply **exactly one** of `--answers` and `--profile`. Repeated flags, unknown arguments, malformed JSON, incomplete answers, and invalid configuration fail rather than selecting hidden defaults. `--help` must appear alone. Read `$LASTEXITCODE` immediately after a command to inspect its result:
+Supply **exactly one** of `--answers` and `--profile`. Repeated flags, unknown arguments, malformed JSON and incomplete answers fail rather than selecting hidden defaults. `--help` must appear alone. Read `$LASTEXITCODE` immediately after a command to inspect its result:
 
 | Exit code | Meaning |
 |---|---|
 | `0` | Decision printed, or help displayed. |
-| `2` | Invalid CLI arguments, JSON, answers, profile, or configuration. |
+| `2` | Invalid CLI arguments, JSON, answers or profile. |
 | `1` | File I/O or unexpected failure. |
 
 Errors go to stderr; no decision JSON is emitted on failure. A proof `--profile` file is only `{ "answers": { ...all four fields... } }` (a legacy `complexity` field is accepted and ignored); named profiles are managed separately through `config` or `profile` commands and are not sessions.
 
 ## Policy at a glance
 
-- Default score range: **20–90 points**, not probability or confidence.
-- High route: score **≥ 50** by default; threshold and weights are configurable.
-- Low: optional `mdd-explore`, then `mdd-plan`, `mdd-apply`, `mdd-verify`.
+- No score: every run starts with exactly one `mdd-explore`, then `mdd-risk` selects the route.
+- Low: `mdd-explore`, `mdd-plan`, `mdd-apply`, `mdd-verify`.
 - High: `mdd-explore`, `mdd-propose`, `mdd-spec`, `mdd-design`, `mdd-tasks`, `mdd-apply`, `mdd-verify`.
-- Low requires exploration if certainty is not `very-sure`. Explicit exploration can also be requested. High always contains exactly one explore. (The legacy `complexity` preflight field is accepted but ignored; it no longer influences this decision.)
-- Artifact storage never contributes points. Engram installation and use are optional. With memory off, choose OpenSpec or live-only `none`; Engram and Both require an opted-in backend.
+- The certainty answer reaches `mdd-risk` as the user's statement of how clear the requirements are; it is weighed, never obeyed. (The legacy `complexity` preflight field is accepted but ignored.)
+- Engram installation and use are optional. With memory off, choose OpenSpec or live-only `none`; Engram and Both require an opted-in backend.
 
-See the [product contract](docs/product-contract.md) for every stable input token, score, validation constraint, kernel API, and deferred product requirement.
+See the [product contract](docs/product-contract.md) for every stable input token, validation constraint, kernel API, and deferred product requirement.
 
 ## In-memory lifecycle
 
@@ -150,7 +145,7 @@ To continue a run in a **new conversation**, read `mdd_status` in the old one fo
 |---|---|
 | Kernel | Pure validated evaluation; no clocks, randomness, model inference, I/O, or confidence reporting. |
 | CLI/setup | One consent-driven setup TUI, source bootstrap, trusted local package installation, optional pinned Windows memory installer, owned-asset updates, read-only doctor and advanced editor; proof flags unchanged. |
-| Foundations | Frozen models/profile/Engram settings, phase-specific coverage reports, and allowlisted local runtime telemetry. |
+| Foundations | Frozen models/profile/Engram settings, phase reports whose detail level selects which narrative sections are shown, and allowlisted local runtime telemetry. |
 | Lifecycle | Private in-memory state, isolated snapshots, exact phase/result/approval boundaries; no dispatch. No state is terminal: a failed attempt returns its phase to ready, one retry stays with the same actor before the coordinator takes over, an unlisted answer leaves its question open, and `mdd_reset` always has an exit, including re-opening a pending approval. |
 | OpenCode adapter | Requirements-only native intake; exact questions/approvals; all eight phases by delegation or carried out inline by the coordinator; bounded dependency handoff; reported change/check evidence; selected artifact storage and general receipts. |
 | Tests | Native Node tests, CLI subprocesses, real loopback HTTP transport, and explicitly mocked SDK contract tests. No paid agent E2E execution. |

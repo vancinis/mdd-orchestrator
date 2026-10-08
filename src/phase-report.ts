@@ -1,5 +1,7 @@
 import { PHASE_RESULT_FIELDS, FIELD_SCHEMA } from './acceptance.js';
 import type { Phase } from './policy.js';
+import { parseNarrative } from './reporting.js';
+import type { Narrative } from './reporting.js';
 
 /**
  * How a phase answers. A phase report is a short markdown document a person can read, not a
@@ -34,8 +36,10 @@ export class MalformedReport extends Error {
 }
 
 /** Headings MDD reads. Everything else in the document belongs to the section it sits in. */
-const SECTIONS = ['outcome', 'summary', 'how', 'artifact', 'data', 'concerns', 'questions', 'phase', 'run'] as const;
+const SECTIONS = ['outcome', 'summary', 'how', 'purpose', 'openItems', 'learnings', 'confidence', 'artifact', 'data', 'concerns', 'questions', 'phase', 'run'] as const;
 type Section = typeof SECTIONS[number];
+/** The prose sections a phase report carries beside its summary, under the field each is read into. */
+const NARRATIVE = ['purpose', 'openItems', 'learnings', 'confidence'] as const;
 const REQUIRED: readonly Section[] = ['outcome', 'summary', 'artifact'];
 /**
  * The canonical headings carry the `MDD` prefix precisely so an artifact may hold its own
@@ -45,7 +49,11 @@ const REQUIRED: readonly Section[] = ['outcome', 'summary', 'artifact'];
  */
 const PREFIX = 'mdd ';
 const ALIASES: Record<string, Section> = {
-  outcome: 'outcome', summary: 'summary', how: 'how', artifact: 'artifact',
+  outcome: 'outcome', summary: 'summary', artifact: 'artifact',
+  // A phase reports "Approach"; "How" is the heading the risk and security reports still use and
+  // the one phase reports used before, so both name the same section and cannot appear together.
+  approach: 'how', how: 'how',
+  purpose: 'purpose', 'open items': 'openItems', learnings: 'learnings', 'key learnings': 'learnings', confidence: 'confidence',
   data: 'data', concerns: 'concerns', phase: 'phase',
   questions: 'questions', 'open questions': 'questions',
   run: 'run', runid: 'run', 'run id': 'run',
@@ -109,6 +117,43 @@ function outcomeOf(body: string): 'passed' | 'failed' {
   return word;
 }
 
+/**
+ * Reads the level the actor gave its confidence and the reason it gave for it. Strict, because a
+ * level is a claim the user reads: guessing "high" out of "highly uncertain" would invert it.
+ */
+export function parseConfidence(value: unknown): { level: 'high' | 'medium' | 'low'; reason: string } {
+  const match = typeof value === 'string'
+    ? /^[\s*_`]*(high|medium|low)\b[*_`]*(?:[ \t]+confidence\b)?[*_`]*[ \t]*[-—–:.,;]*\s*([\s\S]*)$/i.exec(value)
+    : null;
+  if (!match) {
+    throw new MalformedReport(`The confidence section must start with exactly one level word, High, Medium or Low; it read ${JSON.stringify(String(value).slice(0, 64))}.`);
+  }
+  const reason = match[2]!.trim();
+  if (!reason) throw new MalformedReport('The confidence section must give the evidence behind its level, not the level alone.');
+  return { level: match[1]!.toLowerCase() as 'high' | 'medium' | 'low', reason };
+}
+
+/**
+ * The narrative sections of a parsed phase report, validated exactly as the renderer will read
+ * them, so a section that cannot be shown is named back to its writer instead of failing later.
+ * Absent sections stay absent: the renderer says so, and nothing here writes one on their behalf.
+ */
+export function narrativeOf(fields: Record<string, unknown>): Narrative {
+  const prose = (key: 'purpose' | 'openItems' | 'learnings', label: string) => {
+    const value = fields[key];
+    if (value === undefined) return {};
+    if (typeof value !== 'string' || !value.trim()) throw new MalformedReport(`The ${label} section must be nonempty prose.`);
+    return { [key]: value };
+  };
+  try {
+    return parseNarrative({ ...prose('purpose', 'purpose'), ...prose('openItems', 'open items'), ...prose('learnings', 'learnings'),
+      ...(fields.confidence !== undefined ? { confidence: parseConfidence(fields.confidence) } : {}) });
+  } catch (error) {
+    if (error instanceof MalformedReport) throw error;
+    throw new MalformedReport(`A narrative section could not be presented: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 function structured(body: string, label: string): unknown {
   const text = fenced(body);
   if (!text) return undefined;
@@ -154,6 +199,7 @@ function parseReportSections(text: string, hasFields: boolean, standaloneField?:
     artifact: parts.get('artifact')!,
   };
   if (parts.has('how')) result.how = parts.get('how')!;
+  for (const name of NARRATIVE) if (parts.has(name)) result[name] = parts.get(name)!;
   const binding = parts.get('phase');
   const run = parts.get('run');
   if (binding) result.phase = binding.replace(EMPHASIS, '').trim();
@@ -190,14 +236,19 @@ export function reportFormatLines(phase: Phase): string[] {
   return [
     'Report this phase as a short markdown document, not as a JSON object. Use these exact headings, each once:',
     '"## MDD Outcome" holding exactly passed or failed.',
-    '"## MDD Summary" holding plain prose a person reads first: what you did and what it means. No call IDs, routing details or confidence percentages.',
-    '"## MDD How" holding a distinct, source-grounded explanation of the concrete decision or change, why it was chosen, and how it advances the user objective. Do not repeat the summary, list commands or invent a reason; if the cause is unknown, state that explicitly.',
+    '"## MDD Summary" holding plain prose a person reads first: what you did and what came of it, in a short paragraph. No call IDs, routing details or confidence statements.',
+    '"## MDD Approach" holding how you carried out the work: the concrete changes, decisions or investigation steps, and the source-grounded reason for each. Do not repeat the summary or list commands; if a reason is unknown, say so instead of inventing one.',
+    '"## MDD Purpose" holding why this work was done: the problem it addresses and how it advances the user objective.',
+    '"## MDD Open Items" holding what remains uncertain or still to be done, each with its impact. Write "None." when nothing remains; never leave an open item out to make the work look finished.',
+    '"## MDD Learnings" holding the key points learned that matter to the user or to later phases: facts about the code, constraints, surprises, options rejected and why. Write "None." when nothing notable was learned.',
+    '"## MDD Confidence" starting with exactly one level word, High, Medium or Low, for how confident you are that this result is the best one achievable for the objective, followed by the evidence that supports that level and what would raise it. A level, never a percentage.',
+    'Write every one of these prose sections in every report. The user\'s chosen report detail decides which of them they are shown, not which of them you write: the rest is shown when they ask for more.',
     `"## MDD Artifact" holding the actual deliverable of this phase, in ordinary markdown. ${fields.length ? 'MDD appends its own links section to this text. ' : ''}Headings inside it must not reuse an "MDD ..." name.`,
     ...(fields.length
       ? [`"## MDD Data" holding ONE fenced json block with exactly these keys: ${fields.join(', ')}. No other key is accepted.`,
          ...fields.map(field => `  ${FIELD_SCHEMA[field]!}`)]
       : [`This phase reports no structured data, so omit "## MDD Data" entirely.`]),
-    'Optional "## MDD Concerns" holding a fenced json array of at most eight {category,evidence,impact} entries, category objective/integrations/sensitive-data/permissions. Advisory only: concerns never change scores and never request governance for ordinary implementation choices.',
+    'Optional "## MDD Concerns" holding a fenced json array of at most eight {category,evidence,impact} entries, category objective/integrations/sensitive-data/permissions. Advisory only: concerns never change the route or the evidence and never request governance for ordinary implementation choices.',
     'Optional "## MDD Questions" holding a fenced json array of at most eight {question,why,options:[{label,description,recommended?}],multiple?,deferrable?} entries: decisions only the user can make that the work genuinely needs, instead of guessing them. "why" states what depends on the answer. Leave options empty for an open-ended answer; set multiple when several options can apply together, and deferrable only when a later phase can safely decide. Never ask what reading the request or the repository answers, and never ask for approval. The coordinator asks the user and hands the answers to the next phase.',
     'Write nothing outside these headings. Prose around them is ignored, but anything you need MDD to record belongs under a heading.',
   ];

@@ -67,6 +67,19 @@ test('phase-specific shape is checked, and only what a document can answer on it
   assert.deepEqual(failed.problems, []);
 });
 
+// The narrative is checked where the actor can still fix it. Leaving a section out is not a
+// problem of form: the renderer says it is missing rather than refusing the work.
+test('narrative sections are checked for form, never demanded', () => {
+  const narrative = { approach: 'Linked every scenario.', purpose: 'Make the plan executable.', openItems: 'None.', learnings: 'None.', confidence: 'High — every link validated.' };
+  assert.deepEqual(checkReportForm('mdd-plan', planReport(narrative)).problems, []);
+  assert.deepEqual(checkReportForm('mdd-plan', planReport()).problems, []);
+  const vague = checkReportForm('mdd-plan', planReport({ ...narrative, confidence: 'Pretty sure it works.' }));
+  assert.equal(vague.ok, false);
+  assert.ok(vague.problems.some(problem => /exactly one level word, High, Medium or Low/.test(problem)), vague.problems.join(' | '));
+  const bare = checkReportForm('mdd-plan', planReport({ ...narrative, confidence: 'Medium' }));
+  assert.ok(bare.problems.some(problem => /evidence behind its level/.test(problem)), bare.problems.join(' | '));
+});
+
 test('cross-link problems are left to the run, which is the only place that holds the IDs', () => {
   // A plan whose deliverable covers only half the accepted scenarios is readable as a document.
   // `validatePlan` is what rejects it, reporting every broken link at once.

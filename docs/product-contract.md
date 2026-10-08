@@ -14,8 +14,8 @@
 
 Automatic execution continues an approved plan without redundant continuation questions.
 Explicit interactive mode, native permission requests, scope checks and review boundaries
-are not disabled. Scoring weights and high >= 50 remain as previously approved. The possible
-mismatch between summary-style weight and these priorities is future tuning, not a blocker.
+are not disabled. The preflight answers are not scored: every run starts with exploration and a
+validated `mdd-risk` verdict selects the continuation.
 
 ### Acceptance and plan alignment
 
@@ -40,32 +40,29 @@ and plan match, actual checks and material limits. Internal IDs and receipts sta
 This is original MDD code/instructions using traceability patterns, not imported Gentle AI
 SDD/RDD runtime, commands, dependencies or copied gate text.
 
-The four preflight questions preserve their original order, option meanings, and now-approved default scores. Field names and case-sensitive tokens below are the executable interface. A legacy fifth field, `complexity`, is still accepted on input (saved profiles, kernel requests) for backward compatibility, but it is never asked and never scored: judging complexity is being moved to a dedicated risk assessment after exploration, not this intake.
+The four preflight questions preserve their original order and option meanings. Field names and case-sensitive tokens below are the executable interface. A legacy fifth field, `complexity`, is still accepted on input (saved profiles, kernel requests) for backward compatibility, but it is never asked: judging complexity belongs to the risk assessment after exploration, not this intake.
 
-| # | Question / field | Options in order: label → token (default points) |
-|---|---|---|
-| 1 | Requirements certainty / `certainty` | Very sure → `very-sure` (**10**); Somewhat sure → `somewhat-sure` (**15**); Not sure → `not-sure` (**25**) |
-| 2 | Workflow artifact storage / `artifactStore` | Engram → `engram`; OpenSpec → `openspec`; Engram + OpenSpec → `both`; None → `none` — **unscored** |
-| 3 | Phase advancement / `mode` | Interactive (ask each phase) → `interactive` (**15**); Automatic (advance) → `automatic` (**5**) |
-| 4 | Phase summary level / `summary` | Detailed → `detailed` (**25**); Medium → `medium` (**10**); Low → `low` (**5**) |
+| # | Question / field | Options in order: label → token | What uses it |
+|---|---|---|---|
+| 1 | Requirements certainty / `certainty` | Very sure → `very-sure`; Somewhat sure → `somewhat-sure`; Not sure → `not-sure` | `mdd-risk` receives it as the user's own statement of how clear the requirements are and weighs it beside the exploration findings; it never selects a route by itself |
+| 2 | Workflow artifact storage / `artifactStore` | Engram → `engram`; OpenSpec → `openspec`; Engram + OpenSpec → `both`; None → `none` | Where phase artifacts are stored |
+| 3 | Phase advancement / `mode` | Interactive (ask each phase) → `interactive`; Automatic (advance) → `automatic` | Whether each later phase waits for an approval |
+| 4 | Phase summary level / `summary` | Detailed → `detailed`; Medium → `medium`; Low → `low` | Which report sections are shown |
 
-All four answers are required. There are no invented answer defaults. `mode` controls lifecycle advancement. All native phases use selected artifact storage, and reports reflect grounded current-phase evidence.
-
-The raw score is the sum of the three scored answers (certainty, mode, summary). Its default range is **20–65 points**, not a normalized value, probability, or confidence percentage. Changing weights may change the range. Artifact storage never contributes points.
+All four answers are required. There are no invented answer defaults. All native phases use selected artifact storage, and reports reflect grounded current-phase evidence. No answer is scored: there are no weights, no threshold and no score.
 
 ## 2. Approved routing policy
 
-The applied rule version is **`mdd-routing-v1`**. High means **raw score ≥ threshold**, with default threshold **50**. Otherwise the route is low. The version identifies the algorithm and default policy; configurable weights and threshold do not change this identifier.
+The applied rule version is **`mdd-routing-v2`**. Version 1 scored the preflight answers against a threshold; version 2 scores nothing. Every run starts with exactly one `mdd-explore`, followed by the `mdd-risk` stop, and a validated `mdd-risk` verdict — or the user forcing the other route at its first approval, or choosing one manually after a blocked assessment — selects the continuation. Until then the run has no route, and status shows it as pending.
 
 Phase identities use the `mdd-*` form everywhere in output:
 
 | Route | Exact ordered phases |
 |---|---|
-| Low, without exploration | `mdd-plan`, `mdd-apply`, `mdd-verify` |
-| Low, with exploration | `mdd-explore`, `mdd-plan`, `mdd-apply`, `mdd-verify` |
+| Low | `mdd-explore`, `mdd-plan`, `mdd-apply`, `mdd-verify` |
 | High | `mdd-explore`, `mdd-propose`, `mdd-spec`, `mdd-design`, `mdd-tasks`, `mdd-apply`, `mdd-verify` |
 
-Low-route exploration is required when **certainty is not `very-sure`**. Otherwise it may be explicitly requested using `explore: true` in the kernel or `--explore` in the CLI. `false` or omission never suppresses required exploration. High includes exactly one explore, even when exploration is explicitly requested. No extra complexity heuristic or model inference is used.
+A run recorded before the risk stop existed keeps the route it recorded, including the older low route without exploration (`mdd-plan`, `mdd-apply`, `mdd-verify`). `explore` is still accepted on input for those saved requests but no longer changes the first phase.
 
 ## 3. Kernel API and validation
 
@@ -90,43 +87,24 @@ const saved = evaluate({ profile: { answers } });
 |---|---|
 | `answers` | Complete four-field answer object. Mutually exclusive with `profile`. The legacy `complexity` key is accepted and ignored if present. |
 | `profile` | Exactly `{ answers: <complete four-field object> }`. Uses the same answer validator and evaluator. |
-| `config` | Optional object containing `threshold` and/or `weights`. Omission or `{}` uses defaults. |
-| `explore` | Optional boolean, default `false`. Requests additional low-route exploration, never disables required exploration. |
+| `explore` | Optional boolean, accepted for saved requests; it no longer changes the first phase. |
 
-Complete kernel profiles bypass prompting. Partial kernel profiles fail; the proof never fills or prompts for missing answers. Separate project settings support named profiles, models, and partial answers through the terminal editor; see [configuration](configuration.md). Native model overrides and protected grouped question consent are integrated. Supply optional kernel `config` and `explore` alongside either input source; identical inputs produce identical results.
+A request that still carries `config` (the old threshold and weights) is rejected with a `ValidationError` that says scoring was removed, rather than having its weights silently ignored; the CLI's `--config` flag is refused the same way.
 
-### Configuration
+Complete kernel profiles bypass prompting. Partial kernel profiles fail; the proof never fills or prompts for missing answers. Separate project settings support named profiles, models, and partial answers through the terminal editor; see [configuration](configuration.md). Native model overrides and protected grouped question consent are integrated. Identical inputs produce identical results.
 
-Configuration supports partial overrides at the field and option levels. Omitted entries retain approved defaults; **present invalid entries are rejected**, never silently replaced. This example changes one weight and produces exactly 50 points with `examples/answers.json`:
-
-```json
-{
-  "threshold": 50,
-  "weights": {
-    "certainty": { "very-sure": 40 }
-  }
-}
-```
-
-`weights` permits only `certainty`, `mode`, and `summary`, each keyed by that field's tokens in section 1. Empty override objects are valid no-ops. `artifactStore` weights are invalid.
-
-**Numeric constraints:** all weights and the threshold must be numbers that are nonnegative safe integers, from `0` through `Number.MAX_SAFE_INTEGER` (`9007199254740991`). Fractions, numeric strings, negative numbers, NaN, and infinities fail. The sum of the maximum weight in each scored field must also remain within that safe range, even when the selected answers would produce a smaller score. This keeps every possible configured sum exact. A threshold outside the configured score range is allowed: it intentionally makes every answer set high or low. Zero is valid and is not replaced with a default.
-
-Unknown fields/options, missing required answers, nulls, arrays, non-plain objects, and incorrectly typed optional fields fail with `ValidationError`. Explicit `undefined` is invalid for optional fields; omission is different. Exactly one input source is required. Callers receive fresh defaults from `getDefaultConfig()` in `dist/policy.js`; mutating returned defaults or evaluation results does not affect future calls. Evaluation does not mutate its inputs.
+Unknown fields/options, missing required answers, nulls, arrays, non-plain objects, and incorrectly typed optional fields fail with `ValidationError`. Explicit `undefined` is invalid for optional fields; omission is different. Exactly one input source is required. Mutating evaluation results does not affect future calls. Evaluation does not mutate its inputs.
 
 ### Deterministic result
 
 | Field | Meaning |
 |---|---|
-| `policyVersion` | Applied rule identifier, currently `mdd-routing-v1`. |
-| `score` | Raw configured points sum. |
-| `threshold` | Effective high-route threshold. |
-| `route` | `low` or `high`. |
-| `phases` | Exact ordered `mdd-*` phase identities. |
-| `contributions` | Four entries in question order, excluding artifact storage: field, selected answer, and configured points. |
-| `reasons` | Fixed-order explanations of the comparison, unscored storage, and exploration decision. |
+| `policyVersion` | Applied rule identifier, currently `mdd-routing-v2`. |
+| `route` | Absent from a fresh evaluation. A workflow sets it to `low` or `high` only once `mdd-risk`, an override or a manual recovery choice selects the continuation. |
+| `phases` | Exact ordered `mdd-*` phase identities: `mdd-explore` until a continuation is selected. |
+| `reasons` | Fixed-order explanations of how the first phase and the continuation are decided. |
 
-The kernel does not emit timestamps, random identifiers, model inference, confidence, or persistence metadata. Identical validated inputs produce structurally identical output; equivalent CLI sources also produce byte-identical JSON. The version is not a configuration fingerprint, and the output is not a persisted lifecycle receipt.
+The kernel does not emit timestamps, random identifiers, model inference, confidence, or persistence metadata. Identical validated inputs produce structurally identical output; equivalent CLI sources also produce byte-identical JSON. The output is not a persisted lifecycle receipt.
 
 ### In-memory workflow API
 
@@ -165,11 +143,11 @@ questions before a ready phase is dispatched. Answers are context, never approva
 
 ## 4. Runnable proof and verification boundaries
 
-The [README](../README.md) provides working PowerShell commands and exit codes. `examples/answers.json` and `examples/profile.json` are equivalent complete sources. `examples/config.json` demonstrates the equality boundary. The CLI reads UTF-8 JSON files, accepts a leading BOM, validates input, and prints a decision. It never executes the returned phases or creates artifact folders.
+The [README](../README.md) provides working PowerShell commands and exit codes. `examples/answers.json` and `examples/profile.json` are equivalent complete sources. The CLI reads UTF-8 JSON files, accepts a leading BOM, validates input, and prints the evaluation. It never executes the returned phases or creates artifact folders.
 
 The stack is TypeScript compiled to Node.js ESM with native Node tests. Node 24.6+ within 24.x, or 26.4+ within 26.x, remains the declared proof runtime (Node 25 is not supported). The host adapter pins `@opencode/plugin@2.0.22` and `@opencode/client@2.0.22`; `@opencode-ai/plugin@1.18.31` remains an internal motor/regression dependency. Host SDK and schema dependencies do not enter the pure kernel.
 
-The focused suite covers default contributions and extrema, every scored-answer combination, unscored stores, threshold boundaries, override validation, exploration, safe arithmetic, and CLI subprocess behavior. Lifecycle tests cover exact phase order, live preflight reuse, mutation isolation, phase-scoped approvals, failure blocking, and invalid operations. These tests are **kernel, lifecycle, and CLI verification, not full harness integration or independent review**. The runnable `examples/workflow-demo.mjs` uses simulated results and approvals only.
+The focused suite covers that no answer is scored, that a request still carrying the removed `config` is refused, answer and profile validation, and CLI subprocess behavior. Lifecycle tests cover exact phase order, live preflight reuse, mutation isolation, phase-scoped approvals, failure blocking, and invalid operations. These tests are **kernel, lifecycle, and CLI verification, not full harness integration or independent review**. The runnable `examples/workflow-demo.mjs` uses simulated results and approvals only.
 
 ## 5. Finished harness direction — confirmed, deferred
 
@@ -200,9 +178,13 @@ OpenSpec is used only when requested; no automatic folders are authorized. The u
 
 | Level | Implemented report fields |
 |---|---|
-| Detailed | `Resumen` (understood request/current phase outcome), `Cómo`, `Estado`, `Cobertura` percentage |
-| Medium | `Resumen`, `Cómo` |
-| Low | Completed-work summary only |
+| Detailed | `Resumen`, `Cómo se hizo`, `Propósito`, `Pendiente o incierto`, `Aprendizajes clave`, `Confianza` (the actor's stated High/Medium/Low level and its reason), `Estado` |
+| Medium | `Resumen`, `Propósito`, `Aprendizajes clave` |
+| Low | `Resumen` only |
+
+Every phase actor writes all of these sections whatever level the user chose, so the level only
+decides what is shown and an approval's request for more detail has more to show. `Confianza` is
+a claim the actor makes about its own result, not a probability MDD measured.
 
 The rendered frame is Spanish because it is read by the user. The prose inside it is written by
 the phase actor in English and translated by the coordinator, which keeps the sections intact.
@@ -210,7 +192,9 @@ That applies to the closure report the coordinator presents and to the PR body a
 differs only in that its translation is checked against the recorded text before it is rendered,
 because nobody reading a pull request is in a position to notice a paragraph that drifted.
 
-Reports evolve with evidence rather than phase counts. **Implemented:** coverage is 20 points for accepted native requirements/profile intake, 20 for validated planning deliverables, 25 for reported implementation changes, and 35 for reported Verify checks that passed. The flags describe what each phase reported; MDD records the claim as a claim and never re-runs a command, so coverage is not correctness probability. A recorded failure loses its points; an attempt that never completed loses nothing because it claimed nothing. A no-change Apply earns no implementation points. No confidence is fabricated in the kernel.
+Reports evolve with evidence rather than phase counts. Coverage is internal bookkeeping that
+decides whether a run may close as complete; it is reported by `mdd_status` but no longer
+rendered in any report. **Implemented:** coverage is 20 points for accepted native requirements/profile intake, 20 for validated planning deliverables, 25 for reported implementation changes, and 35 for reported Verify checks that passed. The flags describe what each phase reported; MDD records the claim as a claim and never re-runs a command, so coverage is not correctness probability. A recorded failure loses its points; an attempt that never completed loses nothing because it claimed nothing. A no-change Apply earns no implementation points. No confidence is fabricated in the kernel.
 
 ### Configuration, telemetry, and contextual skills
 

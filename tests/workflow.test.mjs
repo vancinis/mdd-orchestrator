@@ -31,11 +31,12 @@ function throughRisk(workflow, route) {
 
 for (const [name, request, tail] of [
   ['low', { answers }, low],
-  ['high', { answers, config: { threshold: 0 } }, high],
+  ['high', { answers: { ...answers, certainty: 'not-sure' } }, high],
 ]) {
   test(`automatic ${name} always explores first, then mdd-risk selects the exact tail`, () => {
     const workflow = new Workflow(request);
     assert.deepEqual(workflow.snapshot().evaluation.phases, ['mdd-explore']);
+    assert.equal(workflow.snapshot().evaluation.route, undefined, 'no route before mdd-risk selects one');
     throughRisk(workflow, name);
     assert.deepEqual(workflow.snapshot().evaluation.phases, ['mdd-explore', ...tail]);
     for (const phase of tail) {
@@ -52,13 +53,17 @@ for (const [name, request, tail] of [
   });
 }
 
-test('a disagreeing legacy score never overrides the validated mdd-risk verdict', () => {
-  // High score by the legacy threshold, but mdd-risk validates "low": only low is authorized.
-  const workflow = new Workflow({ answers, config: { threshold: 0 } });
-  assert.equal(workflow.snapshot().evaluation.route, 'high');
-  throughRisk(workflow, 'low');
-  assert.deepEqual(workflow.snapshot().evaluation.phases, ['mdd-explore', ...low]);
-  assert.deepEqual(workflow.nextAction(), { kind: 'execute', phase: 'mdd-plan' });
+test('no preflight answer predicts a route; only the validated mdd-risk verdict selects one', () => {
+  for (const certainty of ['very-sure', 'somewhat-sure', 'not-sure']) {
+    for (const route of ['low', 'high']) {
+      const workflow = new Workflow({ answers: { ...answers, certainty, summary: 'detailed', mode: 'automatic' } });
+      assert.equal(workflow.snapshot().evaluation.route, undefined);
+      assert.equal('score' in workflow.snapshot().evaluation, false);
+      throughRisk(workflow, route);
+      assert.equal(workflow.snapshot().evaluation.route, route);
+      assert.deepEqual(workflow.snapshot().evaluation.phases, ['mdd-explore', ...(route === 'low' ? low : high)]);
+    }
+  }
 });
 
 test('failed exploration blocks the route and never dispatches mdd-risk', () => {
@@ -281,9 +286,8 @@ test('premature, duplicate, wrong-phase and malformed actions never change state
 });
 
 test('explicit and profile controllers remain equivalent through execution', () => {
-  const options = { config: { threshold: 0 } };
-  const direct = new Workflow({ answers, ...options });
-  const profile = new Workflow({ profile: { answers }, ...options });
+  const direct = new Workflow({ answers });
+  const profile = new Workflow({ profile: { answers } });
   for (const workflow of [direct, profile]) throughRisk(workflow, 'high');
   for (const phase of high) {
     assert.deepEqual(direct.snapshot(), profile.snapshot());
@@ -327,18 +331,15 @@ test('preflight is read once; status reads have no effects throughout the lifecy
 });
 
 test('caller inputs, results and returned snapshots cannot mutate held state', () => {
-  const request = { profile: { answers: { ...answers } },
-    config: { threshold: 50, weights: { certainty: { 'very-sure': 10 } } } };
+  const request = { profile: { answers: { ...answers } } };
   const workflow = new Workflow(request);
   const initial = workflow.snapshot();
   request.profile.answers.mode = 'interactive';
   request.profile.answers.certainty = 'not-sure';
-  request.config.threshold = 0;
-  request.config.weights.certainty['very-sure'] = 100;
   const exposed = workflow.snapshot();
   exposed.answers.mode = 'interactive';
   exposed.evaluation.phases.length = 0;
-  exposed.evaluation.contributions[0].points = 999;
+  exposed.evaluation.route = 'high';
   exposed.evaluation.reasons.length = 0;
   exposed.nextAction.kind = 'finished';
   exposed.results.push(result('mdd-verify'));
@@ -360,7 +361,8 @@ test('construction shares strict kernel validation, including incomplete profile
     { profile: {} }, { profile: { answers: { mode: 'automatic' } } },
     { profile: { answers, models: {} } }, { answers: { ...answers, mode: true } },
     { answers, extra: true }, { answers, explore: undefined },
-    { answers, config: { threshold: -1 } },
+    // Scoring was removed; its configuration is refused, never silently ignored.
+    { answers, config: { threshold: -1 } }, { answers, config: {} }, { profile: { answers }, config: { threshold: 50 } },
   ]) assert.throws(() => new Workflow(request), ValidationError);
 });
 

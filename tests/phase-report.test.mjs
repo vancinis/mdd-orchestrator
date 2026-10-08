@@ -95,6 +95,63 @@ for (const [label, text] of [
   });
 }
 
+const narrated = document.replace('## MDD Artifact', [
+  '## MDD Approach', '', 'Validated at the CLI boundary because input enters there.', '',
+  '## MDD Purpose', '', 'Invalid input must fail before dispatch.', '',
+  '## MDD Open Items', '', 'None.', '',
+  '## MDD Learnings', '', '- The parser already trims input.', '- Exit codes are part of the contract.', '',
+  '## MDD Confidence', '', '**High** — every new branch has a passing test.', '',
+  '## MDD Artifact',
+].join('\n'));
+
+test('the narrative sections are read under their own headings', () => {
+  const result = parsePhaseReport(narrated, 'mdd-explore');
+  assert.equal(result.how, 'Validated at the CLI boundary because input enters there.');
+  assert.equal(result.purpose, 'Invalid input must fail before dispatch.');
+  assert.equal(result.openItems, 'None.');
+  assert.equal(result.learnings, '- The parser already trims input.\n- Exit codes are part of the contract.');
+  assert.equal(result.confidence, '**High** — every new branch has a passing test.');
+  assert.equal(result.artifact, 'Changed src/cli.ts to validate input before dispatch.');
+  assert.deepEqual(reports.narrativeOf(result), {
+    purpose: 'Invalid input must fail before dispatch.', openItems: 'None.',
+    learnings: '- The parser already trims input.\n- Exit codes are part of the contract.',
+    confidence: { level: 'high', reason: 'every new branch has a passing test.' },
+  });
+  // Nothing is written on the actor's behalf: an absent section stays absent.
+  assert.deepEqual(reports.narrativeOf(parsePhaseReport(document, 'mdd-explore')), {});
+});
+
+test('"How" is still the approach, and the two cannot both appear', () => {
+  assert.equal(parsePhaseReport(document.replace('## MDD Artifact', '## MDD How\n\nOld heading.\n\n## MDD Artifact'), 'mdd-explore').how, 'Old heading.');
+  assert.throws(() => parsePhaseReport(narrated.replace('## MDD Artifact', '## MDD How\n\nAgain.\n\n## MDD Artifact'), 'mdd-explore'), MalformedReport);
+});
+
+test('confidence is a level word followed by its reason', () => {
+  for (const [text, level, reason] of [
+    ['High — all checks pass.', 'high', 'all checks pass.'],
+    ['**Medium**: two scenarios were not run.', 'medium', 'two scenarios were not run.'],
+    ['low confidence. The build could not run.', 'low', 'The build could not run.'],
+    ['MEDIUM\n\nThe plan depends on an unconfirmed API.', 'medium', 'The plan depends on an unconfirmed API.'],
+  ]) assert.deepEqual(reports.parseConfidence(text), { level, reason }, text);
+  // A level guessed out of a longer word would invert the claim; a level alone explains nothing.
+  for (const text of ['Highly uncertain about the API.', '90% — tests pass.', 'Confident.', 'High', '**Low**', '', undefined, 3]) {
+    assert.throws(() => reports.parseConfidence(text), MalformedReport, String(text));
+  }
+  assert.throws(() => reports.narrativeOf({ confidence: 'Very high, it works.' }), MalformedReport);
+  assert.throws(() => reports.narrativeOf({ purpose: '   ' }), MalformedReport);
+});
+
+test('the form asks for every narrative section and a level, never a percentage', () => {
+  for (const phase of ['mdd-explore', 'mdd-plan', 'mdd-apply', 'mdd-verify']) {
+    const form = reportFormatLines(phase).join('\n');
+    for (const heading of ['Summary', 'Approach', 'Purpose', 'Open Items', 'Learnings', 'Confidence']) assert.match(form, new RegExp(`"## MDD ${heading}"`), heading);
+    assert.doesNotMatch(form, /"## MDD How"/);
+    assert.match(form, /High, Medium or Low/);
+    assert.match(form, /never a percentage/);
+    assert.match(form, /Write every one of these prose sections in every report/);
+  }
+});
+
 test('the form an actor is shown names only its own fields', () => {
   assert.match(reportFormatLines('mdd-verify').join('\n'), /exactly these keys: checks, verification\./);
   assert.match(reportFormatLines('mdd-apply').join('\n'), /exactly these keys: changes, noChangeReason, checks, delivered, completed\./);

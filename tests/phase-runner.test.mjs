@@ -170,22 +170,21 @@ test('risk stage: native fallback re-prepares the same risk prompt for a general
   assert.match(dispatched.prompt, /exactly this key: risk/);
 });
 
-// The validated verdict alone selects the continuation; the diagnostic score never does.
+// The validated verdict alone selects the continuation; no preflight answer predicts or overrides it.
 for (const [label, preflight, route, first] of [
   ['low verdict continues with mdd-plan', { answers, explore: false }, 'low', 'mdd-plan'],
-  ['high verdict continues with mdd-propose even when the score says low', { answers, explore: false }, 'high', 'mdd-propose'],
-  ['low verdict continues with mdd-plan even when the score says high', { profile: { answers: { ...answers, certainty: 'not-sure', summary: 'detailed' } } }, 'low', 'mdd-plan'],
+  ['high verdict continues with mdd-propose even when the user was very sure', { answers, explore: false }, 'high', 'mdd-propose'],
+  ['low verdict continues with mdd-plan even when the user was not sure', { profile: { answers: { ...answers, certainty: 'not-sure', summary: 'detailed' } } }, 'low', 'mdd-plan'],
 ]) {
   test(`risk stage: ${label}`, async t => {
     const { runner, endpoint, writes } = await fixture(t);
     const input = { ...request(endpoint), preflight };
     const ready = await runner.start(input, runtime);
-    const score = ready.workflow.evaluation.route;
+    assert.equal(ready.workflow.evaluation.route, undefined, 'no route before the verdict');
     await runner.after(call, await runner.before(call, ready.task), result(ready));
     const assessing = { ...call, callID: 'call_risk' };
     await runner.after(assessing, await runner.before(assessing, runner.status(runtime.sessionID).task), riskReport(route));
     const next = runner.status(runtime.sessionID);
-    assert.notEqual(score === route && label.includes('even when'), true, 'the fixture really disagrees with the score');
     assert.equal(next.phase, first);
     assert.equal(next.stage, undefined);
     assert.equal(next.state, 'ready');
@@ -552,7 +551,7 @@ test('runner contract: a phase prompt carries only the schema of its own result 
   // `before` returns is exactly what the dispatched subagent receives.
   const dispatched = await runner.before(call, ready.task);
   assert.match(dispatched.prompt, /exactly these keys: acceptance, decisions, deliverables\./);
-  assert.match(dispatched.prompt, /concrete changes or decisions, their source-grounded causal reason/);
+  assert.match(dispatched.prompt, /concrete changes, decisions or investigation steps, and the source-grounded reason for each/);
   // The injected mdd-doc guide names verification reports in prose; no verification schema leaks.
   assert.doesNotMatch(dispatched.prompt, /verification=\{|keys: checks, verification/);
   const plan = reportFormatLines('mdd-plan').join('\n');
@@ -564,33 +563,175 @@ test('runner contract: a phase prompt carries only the schema of its own result 
   assert.match(reportFormatLines('mdd-explore').join('\n'), /reports no structured data/);
 });
 
-test('completed plan presents a distinct causal Cómo grounded in its decision', async t => {
+const PLAN_NARRATIVE = {
+  approach: 'The CLI boundary was chosen because trace decision D1 ties validation to the input scenario; this keeps invalid input from reaching execution and supports the requested clear errors.',
+  purpose: 'Users need actionable errors instead of a stack trace when input is malformed.',
+  openItems: 'Whether empty input counts as malformed is still undecided.',
+  learnings: 'Exit codes are part of the CLI contract, so validation must keep them.',
+  confidence: 'Medium — the plan covers every accepted scenario, but the empty-input rule is still open.',
+};
+
+test('completed plan presents its full narrative, grounded in its decision', async t => {
   const { runner, endpoint } = await fixture(t);
   const input = request(endpoint);
-  input.preflight.answers = { ...answers, mode: 'interactive', summary: 'medium' };
+  input.preflight.answers = { ...answers, mode: 'interactive', summary: 'detailed' };
   const ready = await toPlan(runner, await runner.start(input, runtime));
   const dispatched = await runner.before(call, ready.task);
   await runner.after(call, dispatched, reportDocument({
     evidenceSummary: 'Planned CLI input validation to make errors actionable.',
-    how: 'The CLI boundary was chosen because trace decision D1 ties validation to the input scenario; this keeps invalid input from reaching execution and supports the requested clear errors.',
-    artifact: ARTIFACT_TEXT, ...traceFixture(),
+    ...PLAN_NARRATIVE, artifact: ARTIFACT_TEXT, ...traceFixture(),
   }));
   const status = runner.status(runtime.sessionID);
   assert.equal(status.state, 'await-approval');
   assert.match(status.report, /Resumen \(Planificación\)\nPlanned CLI input validation/);
-  assert.match(status.report, /Cómo\n- The CLI boundary was chosen because trace decision D1/);
+  assert.match(status.report, /\nCómo se hizo\nThe CLI boundary was chosen because trace decision D1/);
+  assert.match(status.report, /\nPropósito\nUsers need actionable errors/);
+  assert.match(status.report, /\nPendiente o incierto\nWhether empty input counts as malformed/);
+  assert.match(status.report, /\nAprendizajes clave\nExit codes are part of the CLI contract/);
+  assert.match(status.report, /\nConfianza\nMedia — the plan covers every accepted scenario/);
+  assert.match(status.report, /\nEstado\ncompletado\n$/);
+  assert.doesNotMatch(status.report, /Cobertura|cobertura/);
   assert.equal(status.report.split('Planned CLI input validation').length, 2);
   assert.doesNotMatch(status.report, /Ignored \d+ field|file\(s\) reported as changed|Reported running/);
+  assert.equal('expandedReport' in status, false, 'detailed already shows everything');
 });
 
-test('runner contract: high route starts only explore and preserves profile validation', async t => {
+// The actor writes every section whatever the level, so asking for more at an approval shows
+// the narrative the lower level left out instead of repeating the summary.
+for (const summary of ['low', 'medium']) {
+  test(`a ${summary} report keeps the full narrative for the expanded view`, async t => {
+    const { runner, endpoint } = await fixture(t);
+    const input = request(endpoint);
+    input.preflight.answers = { ...answers, mode: 'interactive', summary };
+    const ready = await toPlan(runner, await runner.start(input, runtime));
+    const dispatched = await runner.before(call, ready.task);
+    await runner.after(call, dispatched, reportDocument({
+      evidenceSummary: 'Planned CLI input validation to make errors actionable.',
+      ...PLAN_NARRATIVE, artifact: ARTIFACT_TEXT, ...traceFixture(),
+    }));
+    const status = runner.status(runtime.sessionID);
+    assert.equal(status.state, 'await-approval');
+    assert.equal(status.report.includes('\nPropósito\n'), summary === 'medium');
+    assert.doesNotMatch(status.report, /Cómo se hizo|Confianza|Estado/);
+    for (const heading of ['Cómo se hizo', 'Propósito', 'Pendiente o incierto', 'Aprendizajes clave', 'Confianza', 'Estado']) {
+      assert.match(status.expandedReport, new RegExp(`\\n${heading}\\n`), heading);
+    }
+    assert.doesNotMatch(status.expandedReport, /El agente no lo informó/);
+  });
+}
+
+// With no approval between phases, "ready for …" said nothing about the work just done. The
+// finished phase's report is what status shows until the next phase is dispatched.
+test('automatic mode shows each finished phase report until the next phase is dispatched', async t => {
+  const { runner, endpoint } = await fixture(t);
+  const input = request(endpoint);
+  input.preflight.answers = { ...answers, mode: 'automatic', summary: 'medium' };
+  const started = await runner.start(input, runtime);
+  const exploring = { ...call, callID: 'call_explore' };
+  await runner.after(exploring, await runner.before(exploring, started.task), reportDocument({
+    evidenceSummary: 'Found the CLI boundary where input enters.', purpose: 'Locate where validation belongs.',
+    learnings: 'Exit codes are part of the CLI contract.', artifact: ARTIFACT_TEXT }));
+  const assessing = runner.status(runtime.sessionID);
+  assert.equal(assessing.stage, 'mdd-risk');
+  assert.equal(assessing.state, 'ready');
+  assert.match(assessing.report, /Resumen \(Exploración\)\nFound the CLI boundary where input enters\.\n\nPropósito\nLocate where validation belongs\.\n\nAprendizajes clave\nExit codes are part of the CLI contract\.\n$/);
+  assert.doesNotMatch(assessing.report, /Listo para/);
+  const risk = { ...call, callID: 'call_risk' };
+  await runner.after(risk, await runner.before(risk, assessing.task), riskReport('low'));
+  const planning = runner.status(runtime.sessionID);
+  assert.equal(planning.phase, 'mdd-plan');
+  assert.equal(planning.state, 'ready');
+  assert.match(planning.report, /Complexity is low; the low route follows\./);
+  const dispatched = await runner.before(call, planning.task);
+  assert.match(runner.status(runtime.sessionID).report, /Planificación en curso\./);
+  await runner.after(call, dispatched, reportDocument({
+    evidenceSummary: 'Planned CLI input validation to make errors actionable.',
+    ...PLAN_NARRATIVE, artifact: ARTIFACT_TEXT, ...traceFixture(),
+  }));
+  const applying = runner.status(runtime.sessionID);
+  assert.equal(applying.state, 'ready');
+  assert.equal(applying.phase, 'mdd-apply');
+  assert.equal(applying.task.subagent_type, 'mdd-apply');
+  assert.match(applying.report, /Resumen \(Planificación\)\nPlanned CLI input validation/);
+  assert.match(applying.report, /\nPropósito\nUsers need actionable errors/);
+  assert.doesNotMatch(applying.report, /Listo para|Confianza/);
+  assert.equal(applying.expandedReport, undefined, 'no approval, so nothing to expand before');
+});
+
+test('a restart before the next dispatch still shows the finished phase report', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'mdd-advance-checkpoint-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const checkpoint = new CheckpointStore(root); const progress = new ProgressGuard(root);
+  const inspect = { parent: async () => {}, result: async (_runtime, _call, _phase, output) => output, stopped: async () => true };
+  const runner = new PhaseRunner(inspect, { checkpoint, progress });
+  const ready = await toPlan(runner, await runner.start({ preflight: { answers: { ...answers, summary: 'detailed' } }, requirements: 'Plan a scoped change.' }, runtime,
+    { requirementsConfirmed: true, userMessageID: 'message-advance' }));
+  await runner.after(call, await runner.before(call, ready.task), reportDocument({
+    evidenceSummary: 'Planned CLI input validation to make errors actionable.', ...PLAN_NARRATIVE, artifact: ARTIFACT_TEXT, ...traceFixture() }));
+  const before = runner.status(runtime.sessionID);
+  assert.equal(before.phase, 'mdd-apply');
+  assert.match(before.report, /\nConfianza\nMedia — the plan covers every accepted scenario/);
+  const restored = new PhaseRunner(inspect, { checkpoint, progress });
+  assert.deepEqual(await restored.restore(runtime), { restored: true });
+  const after = restored.status(runtime.sessionID);
+  assert.equal(after.phase, 'mdd-apply');
+  assert.equal(after.state, 'ready');
+  assert.equal(after.report, before.report);
+});
+
+test('a plan that gives a confidence without a level is returned to be restated, not failed', async t => {
+  const { runner, endpoint } = await fixture(t);
+  const input = request(endpoint);
+  input.preflight.answers = { ...answers, mode: 'interactive', summary: 'detailed' };
+  const ready = await toPlan(runner, await runner.start(input, runtime));
+  const dispatched = await runner.before(call, ready.task);
+  await assert.rejects(runner.after(call, dispatched, reportDocument({
+    evidenceSummary: 'Planned CLI input validation to make errors actionable.',
+    ...PLAN_NARRATIVE, confidence: 'Fairly sure this is right.', artifact: ARTIFACT_TEXT, ...traceFixture(),
+  })), /no attempt was spent[\s\S]*exactly one level word, High, Medium or Low/);
+  const status = runner.status(runtime.sessionID);
+  assert.notEqual(status.state, 'await-approval');
+  assert.match(status.rejected?.reason ?? '', /High, Medium or Low/);
+});
+
+test('runner contract: every run starts only explore, with no route and no score', async t => {
   const { runner, endpoint } = await fixture(t);
   const input = request(endpoint);
   input.preflight = { profile: { answers: { ...answers, certainty: 'not-sure', summary: 'detailed' } } };
   const ready = await runner.start(input, runtime);
-  assert.equal(ready.workflow.evaluation.route, 'high');
   assert.equal(ready.phase, 'mdd-explore');
+  assert.equal(ready.workflow.evaluation.route, undefined);
+  assert.equal('score' in ready.workflow.evaluation, false);
+  assert.equal(ready.visual.route, 'pending');
+  assert.match(ready.report, /^\*\*MDD · pending route\*\*/);
 });
+
+test('runner contract: a request still carrying the removed scoring config is refused', async t => {
+  const { runner, endpoint } = await fixture(t);
+  const input = request(endpoint);
+  input.preflight = { answers, config: { threshold: 0 } };
+  await assert.rejects(runner.start(input, runtime), /request\.config is no longer accepted/);
+});
+
+// The certainty answer is the one signal exploration cannot produce, so it reaches the actor
+// that selects the route, as data to weigh rather than an instruction.
+for (const [certainty, expected] of [['very-sure', /very-sure: the user says the requirements are clear and confirmed\./],
+  ['somewhat-sure', /somewhat-sure: the user says some requirements still need clarification\./],
+  ['not-sure', /not-sure: the user says the requirements are not clear yet\./]]) {
+  test(`risk stage: the user's ${certainty} certainty reaches mdd-risk as data to weigh`, async t => {
+    const { runner, endpoint } = await fixture(t);
+    const input = request(endpoint);
+    input.preflight = { answers: { ...answers, certainty } };
+    const ready = await runner.start(input, runtime);
+    await runner.after(call, await runner.before(call, ready.task), result(ready));
+    const assessing = { ...call, callID: 'call_risk' };
+    const dispatched = await runner.before(assessing, runner.status(runtime.sessionID).task);
+    assert.match(dispatched.prompt, /User-stated requirements clarity \(preflight answer, data\): /);
+    assert.match(dispatched.prompt, expected);
+    assert.match(dispatched.prompt, /never overrides what the exploration found, and it is not a route choice/);
+    assert.doesNotMatch(dispatched.prompt, /preflight score/);
+  });
+}
 
 test('runner contract: invalid preflight or non-orchestrator performs no memory writes', async t => {
   const { runner, endpoint, writes } = await fixture(t);

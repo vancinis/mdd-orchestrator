@@ -1289,7 +1289,7 @@ const plugin: Plugin = async input => {
       }),
       mdd_phase_result: tool({
         description: 'Restate a rejected report without redoing its work. Without a rejected report, this selects a tracked native fallback task instead of accepting coordinator execution. Read the returned task and dispatch it exactly; never perform substantive phase work inline.',
-        args: { result: tool.schema.string().min(1).describe('The phase report as markdown: "## MDD Outcome" with passed or failed, "## MDD Summary" with prose a person reads, "## MDD Artifact" with the deliverable, and "## MDD Data" with one fenced json block when the phase has fields. mdd_status.resultFormat states the exact form for the current phase.') },
+        args: { result: tool.schema.string().min(1).describe('The phase report as markdown: "## MDD Outcome" with passed or failed, "## MDD Summary" with prose a person reads, the prose sections Approach, Purpose, Open Items, Learnings and Confidence, "## MDD Artifact" with the deliverable, and "## MDD Data" with one fenced json block when the phase has fields. mdd_status.resultFormat states the exact form for the current phase.') },
         async execute(args, context) {
           enter(context, 'mdd_phase_result');
           if (context.abort.aborted) throw new Error('The phase report was aborted.');

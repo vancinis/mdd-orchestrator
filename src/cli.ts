@@ -16,8 +16,8 @@ Uso:
   mdd-ai telemetry status | report | on | off | clear
   mdd-ai lessons report | list [texto] | mark <id> | clear
   mdd-ai retro               qué viene pasando: ejecuciones, fallos y automejoras
-  node dist/cli.js --answers <archivo.json> [--config <archivo.json>] [--explore]
-  node dist/cli.js --profile <archivo.json> [--config <archivo.json>] [--explore]
+  node dist/cli.js --answers <archivo.json> [--explore]
+  node dist/cli.js --profile <archivo.json> [--explore]
   node dist/cli.js --help
 
 El comando global se instala como mdd-ai; los mismos comandos funcionan con
@@ -43,7 +43,8 @@ Las automejoras anotan, con texto, qué salió mal: las escribe cada fase que fa
 y también vos cuando pedís que algo quede registrado. Son locales al workspace.
 
 Answers: los cuatro campos del preflight. Profile: { "answers": { ... } }.
-Config: overrides opcionales de umbral y peso parcial. Ver docs/product-contract.md.
+Las respuestas no se puntúan: toda ejecución empieza explorando y la evaluación
+de riesgo elige la ruta. Ver docs/product-contract.md.
 Usá exactamente una fuente. Las rutas son relativas al directorio actual.
 Códigos de salida: 0 éxito o ayuda; 2 error de uso, JSON o validación; 1 error de
 E/S o falla inesperada.
@@ -59,7 +60,10 @@ function parseArguments(args: string[]): Record<string, unknown> {
       explore = true;
       continue;
     }
-    if (flag !== '--answers' && flag !== '--profile' && flag !== '--config') {
+    if (flag === '--config') {
+      throw new ValidationError('--config ya no existe: las respuestas del preflight no se puntúan y la evaluación de riesgo elige la ruta.');
+    }
+    if (flag !== '--answers' && flag !== '--profile') {
       throw new ValidationError(`Opción desconocida: ${flag}. Ejecutá con --help para ver el uso.`);
     }
     if (paths.has(flag)) throw new ValidationError(`Opción duplicada: ${flag}.`);

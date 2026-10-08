@@ -54,6 +54,12 @@ Answer in the markdown form the task prompt specifies. The summary is prose a pe
 first; the artifact is the deliverable itself. Structured data appears only where the prompt
 asks for it, in one fenced block.
 
+Write every prose section the task prompt lists beside the summary — approach, purpose, open
+items, learnings and confidence — in every report. The detail the user chose decides which of
+them they are shown, not which of them you write; the rest is what they see when they ask for
+more. Confidence is a level, High, Medium or Low, with the evidence behind it: how sure you are
+that this result is the best one achievable, never a percentage.
+
 When the work needs a decision only the user can make, do not guess it: state it under
 `## MDD Questions` as the task prompt describes, with why it matters and concrete choices. Ask
 only what the request, the repository and the earlier artifacts cannot answer, and never ask for

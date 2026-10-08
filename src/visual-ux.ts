@@ -26,7 +26,9 @@ export function phaseVisual(status: VisualStatus, ascii = false): { route: strin
   }).join('  ');
   // routeOrigin names whether the risk verdict's suggested route was kept or forced into its
   // opposite; a manual recovery choice from blocked-risk carries no verdict to be forced against.
-  return { route: evaluation.route ?? 'unknown', ...(status.workflow?.routeOrigin ? { routeOrigin: status.workflow.routeOrigin } : {}),
+  // Before mdd-risk selects a continuation there is no route at all, and saying so is the only
+  // honest thing to show: nothing in the preflight predicts which one it will be.
+  return { route: evaluation.route ?? 'pending', ...(status.workflow?.routeOrigin ? { routeOrigin: status.workflow.routeOrigin } : {}),
     progress, skills: status.phase ? [...injectedSkillNames(status.phase)] : [] };
 }
 

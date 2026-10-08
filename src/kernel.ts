@@ -1,18 +1,16 @@
 import { POLICY_VERSION } from './policy.js';
-import type { Answers, Phase, ScoredField } from './policy.js';
-import { objectWithKeys, parseAnswers, parseConfig, ValidationError } from './validation.js';
+import type { Answers, Phase } from './policy.js';
+import { objectWithKeys, parseAnswers, ValidationError } from './validation.js';
 
 export type Evaluation = {
   policyVersion: string;
-  score: number;
-  threshold: number;
   /**
-   * Diagnostic only until a validated `mdd-risk` verdict selects the continuation; see
-   * `Workflow.recordRiskResult`. No preflight score authorizes a route.
+   * Absent until a validated `mdd-risk` verdict, a user override of it, or a manual recovery
+   * choice selects the continuation (see `Workflow.recordRiskResult`). Nothing in the preflight
+   * selects or predicts a route, so there is nothing to show before then.
    */
-  route: 'low' | 'high';
+  route?: 'low' | 'high';
   phases: Phase[];
-  contributions: { field: ScoredField; answer: string; points: number }[];
   reasons: string[];
 };
 
@@ -26,7 +24,13 @@ export const LOW_EXPLORE_ROUTE: readonly Phase[] = Object.freeze(['mdd-explore',
 export const ROUTES: readonly (readonly Phase[])[] = Object.freeze([HIGH_ROUTE, LOW_EXPLORE_ROUTE, LOW_ROUTE]);
 
 export function preflight(value: unknown): { answers: Answers; evaluation: Evaluation } {
-  const request = objectWithKeys(value, 'request', ['answers', 'profile', 'config', 'explore']);
+  // The preflight used to be scored against a threshold, configurable through `config`. Nothing
+  // is scored now, so a request that still tries to tune a score is told so rather than having
+  // its weights quietly ignored.
+  if (value && typeof value === 'object' && !Array.isArray(value) && Object.hasOwn(value, 'config')) {
+    throw new ValidationError('request.config is no longer accepted: preflight answers are not scored, and a validated mdd-risk verdict selects the route.');
+  }
+  const request = objectWithKeys(value, 'request', ['answers', 'profile', 'explore']);
   const hasAnswers = Object.hasOwn(request, 'answers');
   const hasProfile = Object.hasOwn(request, 'profile');
   if (hasAnswers === hasProfile) {
@@ -41,33 +45,17 @@ export function preflight(value: unknown): { answers: Answers; evaluation: Evalu
     source = profile.answers;
   }
   const answers = parseAnswers(source);
-  const config = parseConfig(Object.hasOwn(request, 'config') ? request.config : {});
   if (Object.hasOwn(request, 'explore') && typeof request.explore !== 'boolean') {
     throw new ValidationError('request.explore must be a boolean.');
   }
-
-  const contributions: Evaluation['contributions'] = [
-    { field: 'certainty', answer: answers.certainty, points: config.weights.certainty[answers.certainty] },
-    { field: 'mode', answer: answers.mode, points: config.weights.mode[answers.mode] },
-    { field: 'summary', answer: answers.summary, points: config.weights.summary[answers.summary] },
-  ];
-  const score = contributions.reduce((sum, contribution) => sum + contribution.points, 0);
-  // The legacy score is kept as a diagnostic, not a decision: it no longer picks low or high.
-  // Every run always starts with exploration, then a validated mdd-risk verdict is the only thing
-  // that selects the continuation (see Workflow.recordRiskResult). request.explore and
-  // answers.certainty are accepted for backward compatibility with saved profiles but no longer
-  // change which phase runs first.
-  const route = score >= config.threshold ? 'high' : 'low';
+  // request.explore is accepted for backward compatibility with saved requests but no longer
+  // changes which phase runs first: every run starts with exploration.
   const reasons = [
-    `Score ${score} ${route === 'high' ? '>=' : '<'} threshold ${config.threshold} (diagnostic only; mdd-risk's validated verdict selects the route, not this score).`,
-    'Artifact storage is unscored.',
     'Every run always starts with exactly one exploration phase before any routing decision.',
+    'A validated mdd-risk verdict selects the low or high continuation; the preflight answers are not scored.',
   ];
   const phases: Phase[] = ['mdd-explore'];
-  return {
-    answers,
-    evaluation: { policyVersion: POLICY_VERSION, score, threshold: config.threshold, route, phases, contributions, reasons },
-  };
+  return { answers, evaluation: { policyVersion: POLICY_VERSION, phases, reasons } };
 }
 
 export function evaluate(value: unknown): Evaluation {

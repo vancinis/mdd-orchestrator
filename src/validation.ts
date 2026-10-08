@@ -1,5 +1,4 @@
-import { getDefaultConfig } from './policy.js';
-import type { Answers, Config } from './policy.js';
+import type { Answers } from './policy.js';
 
 export class ValidationError extends Error {
   constructor(message: string) {
@@ -35,13 +34,6 @@ function option<Value extends string>(value: unknown, path: string, options: rea
   return value as Value;
 }
 
-function points(value: unknown, path: string): number {
-  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
-    throw new ValidationError(`${path} must be a nonnegative safe integer (0..${Number.MAX_SAFE_INTEGER}).`);
-  }
-  return value;
-}
-
 // 'complexity' is accepted for backward compatibility with saved profiles and existing kernel
 // callers, but it is never read: mdd-risk, not this legacy field, now judges complexity.
 export function parseAnswers(value: unknown): Answers {
@@ -52,44 +44,4 @@ export function parseAnswers(value: unknown): Answers {
     mode: option(answers.mode, 'answers.mode', ['interactive', 'automatic']),
     summary: option(answers.summary, 'answers.summary', ['detailed', 'medium', 'low']),
   };
-}
-
-function weightOverrides<Key extends string>(
-  value: unknown,
-  defaults: Record<Key, number>,
-  path: string,
-): Record<Key, number> {
-  const overrides = objectWithKeys(value, path, Object.keys(defaults));
-  const result = { ...defaults };
-  for (const key of Object.keys(overrides) as Key[]) {
-    result[key] = points(overrides[key], `${path}.${key}`);
-  }
-  return result;
-}
-
-export function parseConfig(value: unknown): Config {
-  const input = objectWithKeys(value, 'config', ['threshold', 'weights']);
-  const config = getDefaultConfig();
-  if (Object.hasOwn(input, 'threshold')) config.threshold = points(input.threshold, 'config.threshold');
-  if (Object.hasOwn(input, 'weights')) {
-    const weights = objectWithKeys(input.weights, 'config.weights', Object.keys(config.weights));
-    if (Object.hasOwn(weights, 'certainty')) {
-      config.weights.certainty = weightOverrides(weights.certainty, config.weights.certainty, 'config.weights.certainty');
-    }
-    if (Object.hasOwn(weights, 'mode')) {
-      config.weights.mode = weightOverrides(weights.mode, config.weights.mode, 'config.weights.mode');
-    }
-    if (Object.hasOwn(weights, 'summary')) {
-      config.weights.summary = weightOverrides(weights.summary, config.weights.summary, 'config.weights.summary');
-    }
-  }
-  let maximum = 0;
-  for (const values of Object.values(config.weights)) {
-    const largest = Math.max(...Object.values(values));
-    if (largest > Number.MAX_SAFE_INTEGER - maximum) {
-      throw new ValidationError('config.weights maximum possible score exceeds Number.MAX_SAFE_INTEGER. Reduce weights.');
-    }
-    maximum += largest;
-  }
-  return config;
 }

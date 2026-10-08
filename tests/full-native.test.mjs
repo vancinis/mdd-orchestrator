@@ -925,6 +925,7 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
       }
     }
     if (options.artifact !== undefined) result.artifact = options.artifact;
+    if (options.narrative) Object.assign(result, options.narrative);
     if (options.large) {
       const suffix = traceArtifact(phase, '', trace.acceptance, trace.decisions, trace.deliverables, result.verification);
       // `fill` lets a test choose characters JSON must escape, so serialized size exceeds raw size.
@@ -1039,10 +1040,16 @@ test('regression: clarification preparation tool requires Spanish user-visible f
 
 test('interactive review exposes expanded detail and carries clarification choices into the next actor', async t => {
   const f = await fixture(t, { mode: 'interactive', summary: 'low', store: 'none', memoryEnabled: false });
-  await f.phase();
+  await f.phase({ narrative: { approach: 'Read the feature boundary first.', purpose: 'Find where input enters.', openItems: 'None.',
+    learnings: 'The boundary is a single module.', confidence: 'High — the whole module was read.' } });
   let current = JSON.parse(await f.hooks.tool.mdd_status.execute({ detail: 'full' }, f.context));
   assert.equal(current.state, 'question-ready');
-  assert.match(current.expandedReport, /Cobertura/);
+  // Low shows the summary; the expanded view shows the narrative the actor wrote anyway.
+  assert.doesNotMatch(current.report, /Propósito|Confianza/);
+  assert.match(current.expandedReport, /\nPropósito\nFind where input enters\.\n/);
+  assert.match(current.expandedReport, /\nAprendizajes clave\nThe boundary is a single module\.\n/);
+  assert.match(current.expandedReport, /\nConfianza\nAlta — the whole module was read\.\n/);
+  assert.doesNotMatch(current.expandedReport, /Cobertura/);
   assert.ok(current.question.questions[0].options.some(option => option.label === 'Obtener un resumen más completo de esta fase'));
   await f.answer('Obtener un resumen más completo de esta fase');
   current = await f.status();
@@ -1247,8 +1254,9 @@ for (const summary of ['low', 'medium', 'detailed']) {
     assert.deepEqual(status.visual.skills, ['mdd-doc', 'cognitive-doc-design']);
     assert.match(status.report, /los requisitos y el plan coinciden con lo implementado/);
     assert.doesNotMatch(status.report, /mdd-|task-\d|bash-\d|receipt/i);
-    assert.equal(status.report.includes('\nCómo\n'), summary !== 'low');
-    assert.equal(status.report.includes('de cobertura de evidencia (no es una probabilidad de acierto)'), summary === 'detailed');
+    assert.equal(status.report.includes('\nVerificación\n'), summary !== 'low');
+    assert.equal(status.report.includes('\nEstado\ncompletado\n'), summary === 'detailed');
+    assert.doesNotMatch(status.report, /Cobertura|cobertura/);
     // The level the user chose is named in the payload, not buried in a droppable snapshot: the
     // coordinator cannot present the report they asked for if it has to guess which one that is.
     assert.equal(status.reportDetail, summary);
@@ -1256,15 +1264,35 @@ for (const summary of ['low', 'medium', 'detailed']) {
   });
 }
 
-// Answering "medium" used to move a routing score and nothing else a person could see. The level
-// now reaches the actor writing the summary, so the summary itself changes, not only its wrapper.
-test('the chosen report detail reaches the actor that writes the summary', async t => {
-  for (const [summary, expected] of [['low', /brief reports/], ['medium', /medium-detail reports/], ['detailed', /detailed reports/]]) {
+// The actor writes every narrative section whatever detail the user chose: the level decides
+// what the user is shown, so a request for more detail at an approval has more to show.
+test('every report detail asks the actor for the full narrative, never a level-specific summary', async t => {
+  for (const summary of ['low', 'medium', 'detailed']) {
     const f = await fixture(t, { summary, memoryEnabled: false });
     assert.equal((await f.status()).reportDetail, summary);
     await f.phase();
-    assert.match(f.delivered(), expected, `${summary} never reached the phase prompt`);
+    const prompt = f.delivered();
+    for (const heading of ['Summary', 'Approach', 'Purpose', 'Open Items', 'Learnings', 'Confidence']) {
+      assert.match(prompt, new RegExp(`\\\\"## MDD ${heading}\\\\"|"## MDD ${heading}"`), `${summary}: ${heading}`);
+    }
+    assert.match(prompt, /write every prose section the result format below lists/);
+    assert.doesNotMatch(prompt, /brief reports|medium-detail reports|The user asked for detailed reports/);
   }
+});
+
+// A checkpoint written at the approval carries the narrative, so a restart restores the same
+// report, including the sections the actor left out.
+test('a restored approval presents the narrative it was checkpointed with', async t => {
+  const f = await fixture(t, { mode: 'interactive', summary: 'detailed', store: 'none', memoryEnabled: false });
+  await f.phase({ narrative: { purpose: 'Find where input enters.', confidence: 'Low — only one file was read.' } });
+  const before = await f.status();
+  assert.match(before.report, /\nPropósito\nFind where input enters\.\n/);
+  assert.match(before.report, /\nConfianza\nBaja — only one file was read\.\n/);
+  assert.match(before.report, /\nAprendizajes clave\nEl agente no lo informó\.\n/);
+  const resumed = await plugin(f.input);
+  const after = JSON.parse(await resumed.tool.mdd_status.execute({ detail: 'full' }, f.context));
+  assert.equal(after.runID, before.runID);
+  assert.equal(after.report, before.report);
 });
 test('late result memory failure never completes Verify or retains checks credit', async t => {
   const f = await fixture(t, { memoryFault(req, reply, writes) {

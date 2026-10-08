@@ -1,8 +1,0 @@
-{
-  "threshold": 50,
-  "weights": {
-    "certainty": {
-      "very-sure": 40
-    }
-  }
-}

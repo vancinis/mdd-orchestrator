@@ -14,10 +14,10 @@ type Choice = { label: string; description: string; token: string };
  * label comparison elsewhere reads them from here instead of repeating a literal.
  */
 const fields: Record<Field, { header: string; question: string; choices: Choice[] }> = {
-  certainty: { header: 'Certeza', question: '¿Qué tan claros están los requisitos?', choices: [
+  certainty: { header: 'Certeza', question: '¿Qué tan claros están los requisitos? La evaluación de riesgo tiene en cuenta tu respuesta.', choices: [
     { label: 'Muy seguro', token: 'very-sure', description: 'Los requisitos están claros y confirmados.' },
     { label: 'Algo seguro', token: 'somewhat-sure', description: 'Algunos requisitos necesitan aclaración.' },
-    { label: 'Poco seguro', token: 'not-sure', description: 'Conviene explorar los requisitos antes de planificar.' },
+    { label: 'Poco seguro', token: 'not-sure', description: 'Los requisitos todavía no están claros.' },
   ] },
   artifactStore: { header: 'Artefactos', question: '¿Dónde se guardan los artefactos del flujo? La memoria opcional se configura por separado.', choices: [
     { label: 'Engram', token: 'engram', description: 'Guardar los artefactos del flujo en Engram.' },
@@ -30,9 +30,9 @@ const fields: Record<Field, { header: string; question: string; choices: Choice[
     { label: 'Automático', token: 'automatic', description: 'Continuar las fases posteriores sin aprobación individual.' },
   ] },
   summary: { header: 'Resumen', question: '¿Cuánto detalle querés en los reportes?', choices: [
-    { label: 'Detallado', token: 'detailed', description: 'Resumen, cómo se hizo, estado y cobertura de evidencia.' },
-    { label: 'Medio', token: 'medium', description: 'Resumen y cómo se realizó el trabajo.' },
-    { label: 'Bajo', token: 'low', description: 'Un resumen corto del trabajo de la fase actual.' },
+    { label: 'Detallado', token: 'detailed', description: 'Resumen, cómo se hizo, propósito, pendientes, aprendizajes clave, confianza y estado.' },
+    { label: 'Medio', token: 'medium', description: 'Resumen, propósito del cambio y aprendizajes clave.' },
+    { label: 'Bajo', token: 'low', description: 'Solo el resumen de lo que se hizo en la fase.' },
   ] },
 };
 

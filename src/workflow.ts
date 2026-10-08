@@ -93,7 +93,7 @@ export class Workflow {
     const current = resolved.evaluation;
     // A new run's route is provisional at construction: exploration is the one phase every route
     // starts with, and nothing beyond it is authorized until a validated mdd-risk verdict selects
-    // the low or high continuation. A disagreeing score never substitutes for that. Only a run
+    // the low or high continuation; nothing in the preflight substitutes for that. Only a run
     // that recorded its route before the risk stop existed keeps that route instead.
     this.#legacyRoute = route !== undefined;
     this.#evaluation = !route ? current : {
@@ -282,7 +282,7 @@ export class Workflow {
       return;
     }
     // Exploration is always the first and, until a route is selected, only phase this run holds.
-    // A passed exploration moves to the risk stop, never straight to a tail phase: no score here
+    // A passed exploration moves to the risk stop, never straight to a tail phase: nothing here
     // decides the continuation.
     if (current === 'mdd-explore' && !this.#legacyRoute) {
       this.#next = { kind: 'execute-risk' };

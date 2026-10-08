@@ -350,7 +350,11 @@ test('assets: mdd-risk ships no permission map, demands grounded evidence and ke
   assert.match(text, /low \(plan\/apply\/verify\)/);
   assert.match(text, /high \(propose\/spec\/design\/tasks\/apply\/verify\)/);
   assert.match(text, /this recommendation is authoritative: it alone selects which route/);
-  assert.match(text, /no preflight score substitutes for it/);
+  assert.match(text, /nothing in the preflight substitutes for it/);
+  // The certainty answer is weighed beside the findings, never obeyed as a route choice.
+  assert.match(text, /user's own statement of how clear the requirements are/);
+  assert.match(text, /never overrides what exploration found and is not a route choice/);
+  assert.doesNotMatch(text, /score/);
   assert.doesNotMatch(text, /not yet authoritative/);
   assert.match(text, /inventing a citation/);
   assert.match(text, /"## MDD Outcome", "## MDD Summary"/);

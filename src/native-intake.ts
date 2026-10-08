@@ -930,7 +930,7 @@ export class NativeIntake {
         const current = this.runner.status(call.sessionID);
         if (!('runID' in current) || !slot.phase) throw new Error('Phase detail is no longer available.');
         this.#slot(entry, { kind: 'approval', phase: slot.phase, args: approvalEnvelope(current.runID, slot.phase) });
-        entry.notice = 'Show the full phase report and relevant artifact from mdd_status(detail="full") before asking this approval again. Nothing was approved.';
+        entry.notice = 'Show expandedReport, the full phase report with every narrative section the actor wrote, and the relevant artifact from mdd_status(detail="full") before asking this approval again. Nothing was approved.';
       } else {
         this.runner.approveNative(call.sessionID, slot.phase!);
         entry.state = 'active';

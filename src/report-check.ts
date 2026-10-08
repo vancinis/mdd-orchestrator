@@ -3,7 +3,7 @@ import { acceptance, assertNoTraceSection, phaseFields } from './acceptance.js';
 import { concerns } from './concerns.js';
 import { openQuestions } from './open-questions.js';
 import { changed, deliverables, executed } from './phase-evidence.js';
-import { parsePhaseReport, parseRiskReport, parseSecurityReport, reportFormatLines } from './phase-report.js';
+import { narrativeOf, parsePhaseReport, parseRiskReport, parseSecurityReport, reportFormatLines } from './phase-report.js';
 import { parseRiskVerdict, riskReportFormatLines, RISK_REPORT_KEYS } from './risk.js';
 import type { RiskVerdict } from './risk.js';
 import type { Phase } from './policy.js';
@@ -72,6 +72,7 @@ export function checkReportForm(phase: Phase, text: unknown): ReportCheck {
   return done(collect([
     () => { if (outcome !== 'passed' && outcome !== 'failed') throw new Error('The phase report must state outcome passed or failed.'); },
     () => nonemptyText(fields.evidenceSummary, 'summary'),
+    () => narrativeOf(fields),
     () => assertNoTraceSection(nonemptyText(fields.artifact, 'artifact')),
     () => concerns(fields.concerns),
     () => openQuestions(fields.questions),

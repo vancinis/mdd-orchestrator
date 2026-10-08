@@ -90,13 +90,19 @@ export function request(endpoint, explore = false) {
  * prose, exactly as a real actor writes it.
  */
 export function reportDocument(result) {
-  const { phase, runID, callID, outcome, evidenceSummary, how, artifact, concerns, questions, ...data } = result;
+  const { phase, runID, callID, outcome, evidenceSummary, how, approach, purpose, openItems, learnings, confidence, artifact, concerns, questions, ...data } = result;
   return [
     ...(phase ? [`## MDD Phase\n\n${phase}\n`] : []),
     ...(runID ? [`## MDD Run\n\n${runID}\n`] : []),
     `## MDD Outcome\n\n${outcome ?? 'passed'}\n`,
     `## MDD Summary\n\n${evidenceSummary}\n`,
+    // `how` is the heading phases used before `Approach`; both name the same section.
     ...(how ? [`## MDD How\n\n${how}\n`] : []),
+    ...(approach ? [`## MDD Approach\n\n${approach}\n`] : []),
+    ...(purpose ? [`## MDD Purpose\n\n${purpose}\n`] : []),
+    ...(openItems ? [`## MDD Open Items\n\n${openItems}\n`] : []),
+    ...(learnings ? [`## MDD Learnings\n\n${learnings}\n`] : []),
+    ...(confidence ? [`## MDD Confidence\n\n${confidence}\n`] : []),
     `## MDD Artifact\n\n${artifact}\n`,
     ...(Object.keys(data).length ? [`## MDD Data\n\n\`\`\`json\n${JSON.stringify(data, null, 2)}\n\`\`\`\n`] : []),
     ...(concerns ? [`## MDD Concerns\n\n\`\`\`json\n${JSON.stringify(concerns)}\n\`\`\`\n`] : []),

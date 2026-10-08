@@ -486,7 +486,7 @@ material retires the current dispatch handle, so the phase can only be started w
 
 Context is data, never authority. It cannot replace `requirements`, which still must equal the
 exact native user text proven by `inspector.intake`; it grants no approval and changes no
-preflight answer, route, score or evidence flag. Provenance is explicit: every entry is recorded
+preflight answer, route or evidence flag. Provenance is explicit: every entry is recorded
 as `source: "coordinator"`, distinct from `provenance.requirements: "native-user"`.
 
 Entries accumulate rather than replace, because useful context also appears after the run starts.
@@ -770,9 +770,15 @@ delegation exists to protect. A handed-back phase may still be delegated again b
 `mdd_reset` with scope `phase` restores the three dispatches.
 
 A phase answers with a short markdown document, not a serialized object. `## MDD Outcome` holds
-`passed` or `failed`, `## MDD Summary` holds the prose a person reads first, `## MDD Artifact`
-holds the deliverable, and `## MDD Data` holds one fenced JSON block for the phases that carry
-traceability fields. `## MDD Concerns` and `## MDD Questions` are optional. The headings are prefixed so an artifact may
+`passed` or `failed`, `## MDD Summary` holds the prose a person reads first, `## MDD Approach`,
+`## MDD Purpose`, `## MDD Open Items`, `## MDD Learnings` and `## MDD Confidence` hold the rest
+of the narrative the user may be shown, `## MDD Artifact` holds the deliverable, and
+`## MDD Data` holds one fenced JSON block for the phases that carry traceability fields.
+`## MDD Concerns` and `## MDD Questions` are optional. The narrative sections are written whatever report detail the user
+chose and are not required to parse; one an actor leaves out is shown as missing. Confidence must
+start with High, Medium or Low and give its reason, or the report is returned to be restated.
+`## MDD How`, the heading phases used before and the one risk and security reports still use,
+names the same section as `## MDD Approach`. The headings are prefixed so an artifact may
 use its own `## Summary` or `## Data` without being cut in half by the envelope carrying it, and
 a heading inside a fenced block is content rather than a delimiter. Unprefixed headings are read
 for a document that used no prefixed heading anywhere.
@@ -868,8 +874,9 @@ checks are a snapshot: future dispatch must revalidate and enforce scopes at the
 `mdd_status` exposes detached `acceptance`, `decisions`, `planned` and `verification` for
 drilldown. Terminal `report` leads with the goal, recorded changes, requirement/plan match,
 checks and material gaps. Checks are recorded with the exit code Verify reported, so a command
-that failed is counted apart and named apart instead of disappearing among the successful ones. Low remains concise; medium adds `Cómo`; detailed adds `Estado` and
-evidence-coverage `Cobertura`. The frame is rendered in Spanish for the reader while the phase
+that failed is counted apart and named apart instead of disappearing among the successful ones. Low remains the `Resumen`; medium adds `Propósito`, `Aprendizajes clave` and the
+`Verificación` block; detailed adds `Cómo se hizo`, `Pendiente o incierto`, `Confianza` and
+`Estado`, taken from Verify's own report. The frame is rendered in Spanish for the reader while the phase
 prose inside it arrives in English and is translated by the coordinator, section for section.
 Default reports omit internal routing, calls and receipts.
 The map and assessments are agent interpretations of the user request, not a parser's proof
@@ -882,7 +889,9 @@ deliverables + **25** reported implementation changes + **35** reported Verify c
 passed. The flags describe what each phase reported, not independent proof. Other phases earn
 no automatic points. A recorded failure withdraws affected evidence; an attempt that never
 completed withdraws nothing, because it claimed nothing.
-Reports honor low/medium/detailed settings and never take a model-selected percentage.
+Coverage decides whether a run may close as complete and is reported by `mdd_status`; it is not
+rendered in reports. Reports honor low/medium/detailed settings and never take a model-selected
+percentage: the actor's confidence is a High/Medium/Low level with its reason.
 Telemetry supports off/delete and retains 30 days locally. Diagnostics are bounded, and
 telemetry failure does not alter phase outcomes. Status reads do not append telemetry.
 

@@ -36,21 +36,20 @@ test('CLI emits JSON for explicit answers and byte-identical complete profile ou
   assert.equal(explicit.stderr, '');
   assert.equal(saved.stderr, '');
   assert.equal(explicit.stdout, saved.stdout);
-  assert.equal(JSON.parse(explicit.stdout).score, 20);
+  const result = JSON.parse(explicit.stdout);
+  assert.deepEqual(result.phases, ['mdd-explore']);
+  assert.equal('score' in result, false);
+  assert.equal('route' in result, false);
 });
 
-test('CLI applies configured threshold boundary and optional exploration', () => {
-  const boundary = invoke('--answers', answers, '--config', 'examples/config.json');
-  const saved = invoke('--profile', profile, '--config', 'examples/config.json');
-  assert.equal(boundary.status, 0);
-  assert.equal(saved.status, 0);
-  assert.equal(boundary.stdout, saved.stdout);
-  const result = JSON.parse(boundary.stdout);
-  assert.equal(result.score, 50);
-  assert.equal(result.route, 'high');
+test('CLI accepts the legacy explore flag and refuses the removed scoring config', t => {
   const explored = invoke('--explore', '--answers', answers);
   assert.equal(explored.status, 0);
-  assert.equal(JSON.parse(explored.stdout).phases[0], 'mdd-explore');
+  assert.equal(explored.stdout, invoke('--answers', answers).stdout);
+  const config = invoke('--answers', answers, '--config', temporaryFile(t, '{"threshold":50}'));
+  assert.equal(config.status, 2);
+  assert.equal(config.stdout, '');
+  assert.match(config.stderr, /--config ya no existe: las respuestas del preflight no se puntúan/);
 });
 
 test('help is standalone, succeeds, and identifies dry-run and exit semantics', () => {
@@ -66,7 +65,7 @@ for (const args of [
   [], ['--answers'], ['--answers', '--explore'], ['--answers', ''],
   ['--answers', answers, '--profile', profile],
   ['--answers', answers, '--answers', answers],
-  ['--answers', answers, '--config', 'examples/config.json', '--config', 'examples/config.json'],
+  ['--answers', answers, '--config', answers],
   ['--answers', answers, '--explore', '--explore'],
   ['--unknown'], [answers], ['--help', '--answers', answers],
   ['--answers', answers, '--explore', 'false'],
@@ -88,12 +87,11 @@ for (const contents of ['{', '', '{"certainty":}', 'null', '[]', '{}', '{"certai
   });
 }
 
-test('CLI rejects malformed config/profile and incomplete profiles without prompting', (t) => {
+test('CLI rejects malformed profiles and incomplete profiles without prompting', (t) => {
   const malformed = temporaryFile(t, '{');
   const partial = temporaryFile(t, '{"answers":{"certainty":"very-sure"}}');
   for (const args of [
-    ['--profile', malformed], ['--answers', answers, '--config', malformed],
-    ['--profile', partial],
+    ['--profile', malformed], ['--profile', partial],
   ]) {
     const result = invoke(...args);
     assert.equal(result.status, 2);
@@ -102,11 +100,11 @@ test('CLI rejects malformed config/profile and incomplete profiles without promp
   assert.match(invoke('--profile', partial).stderr, /answers.artifactStore.*complete answer set/);
 });
 
-test('CLI rejects nonfinite and invalid config values parsed from JSON', (t) => {
-  for (const contents of ['{"threshold":1e309}', '{"threshold":-1}', '{"weights":{"mode":{"automatic":"5"}}}']) {
+test('CLI refuses --config whatever it holds, before reading it', (t) => {
+  for (const contents of ['{"threshold":1e309}', '{"threshold":-1}', '{', '{}']) {
     const result = invoke('--answers', answers, '--config', temporaryFile(t, contents));
     assert.equal(result.status, 2);
-    assert.match(result.stderr, /nonnegative safe integer/);
+    assert.match(result.stderr, /--config ya no existe/);
     assert.equal(result.stdout, '');
   }
 });
@@ -126,7 +124,7 @@ test('CLI accepts UTF-8 BOM and spaces in file paths', (t) => {
   });
   const result = invoke('--answers', temporaryFile(t, contents));
   assert.equal(result.status, 0);
-  assert.equal(JSON.parse(result.stdout).score, 20);
+  assert.deepEqual(JSON.parse(result.stdout).phases, ['mdd-explore']);
 });
 
 function workerCLI(t) {

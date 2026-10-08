@@ -55,9 +55,9 @@ or Ctrl+C discards the entire draft. No writes occur before Save.
 Non-TTY input fails immediately instead of waiting. Profile `create` creates an empty
 profile and makes it active; it never copies another profile's answers.
 
-Original proof flags and exit codes are unchanged. `--profile` still takes the narrow
-`{ "answers": { ... } }` file; it is not a named-profile selector. `--config` still takes
-scoring overrides; it is not project settings. `--help` remains standalone.
+Proof exit codes are unchanged. `--profile` still takes the narrow `{ "answers": { ... } }`
+file; it is not a named-profile selector. `--config` was removed with the scoring it configured
+and is refused with an explanation. `--help` remains standalone.
 
 ## Version-1 settings
 
@@ -418,12 +418,19 @@ type EvidenceFlag = 'requirements' | 'plan' | 'implementation' | 'checks';
 type EvidenceState = 'unearned' | 'confirmed' | 'invalidated';
 type Evidence = Record<EvidenceFlag, EvidenceState>;
 type ReportStatus = 'in-progress' | 'passed' | 'failed' | 'blocked';
+type ConfidenceLevel = 'high' | 'medium' | 'low';
+type Narrative = {
+  purpose?: string; openItems?: string; learnings?: string;
+  confidence?: { level: ConfidenceLevel; reason: string };
+};
 type PhaseReport = {
   phase: Phase; summary: string; how: string[]; status: ReportStatus; evidence: Evidence;
+  narrative?: Narrative;
 };
 function emptyEvidence(): Evidence;
 function invalidateEvidence(value: Evidence, affected: readonly EvidenceFlag[]): Evidence;
 function evidenceCoverage(value: Evidence): number;
+function parseNarrative(value: unknown): Narrative;
 function renderReport(detail: Answers['summary'], value: PhaseReport): string;
 ```
 
@@ -432,10 +439,26 @@ function renderReport(detail: Answers['summary'], value: PhaseReport): string;
 points. The adapter corroborates them, never accepts model-selected percentages or
 infers confidence from phase counts. Failures invalidate affected flags; failed/blocked
 reports without invalidation are rejected. Unrelated confirmed evidence can remain earned.
-Detailed output has `Resumen`/`Cómo`/`Estado`/`Cobertura` labeled **percentage evidence coverage,
-not probability**; medium has `Resumen`/`Cómo`; low has the caller's actual phase work summary.
-Those headings, the phase labels, the evidence flags and the statuses are rendered in Spanish for
-the reader; the keys they are stored and compared under stay the protocol's English ones.
+Coverage still decides whether a run may close as complete, and `mdd_status` still reports it,
+but it is not rendered in any report. Every phase actor writes all of its prose sections —
+`## MDD Approach`, `## MDD Purpose`, `## MDD Open Items`, `## MDD Learnings` and
+`## MDD Confidence` beside `## MDD Summary` — whatever detail the user chose; the level decides
+only what is shown, so asking for more detail at an approval has more to show:
+
+| Level | Rendered sections, in order |
+|---|---|
+| Low | `Resumen` |
+| Medium | `Resumen`, `Propósito`, `Aprendizajes clave` |
+| Detailed | `Resumen`, `Cómo se hizo`, `Propósito`, `Pendiente o incierto`, `Aprendizajes clave`, `Confianza`, `Estado` |
+
+`Confianza` is the actor's own stated level, `Alta`/`Media`/`Baja`, followed by the evidence it
+gives for it; it is a claim, never a measured probability, and a report whose confidence does
+not start with High, Medium or Low, or gives no reason, is returned to be restated. A section an
+actor left out of its report is shown as `El agente no lo informó.` rather than skipped; reports
+no actor wrote (placeholders, the risk stop, checkpoints from before narratives) show only what
+they hold. `## MDD How` is still read as the approach. Those headings, the phase labels, the
+confidence levels and the statuses are rendered in Spanish for the reader; the keys they are
+stored and compared under stay the protocol's English ones.
 Reports generate neither receipts nor invented claims about implementation/checks.
 
 ### Local telemetry (`telemetry.ts`)

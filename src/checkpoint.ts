@@ -144,7 +144,8 @@ function validateStable(value: unknown, workflow: Workflow, data: ResumeData): S
     const rejected = objectWithKeys(item.rejected, 'rejected report', ['reason', 'text']);
     if (!bounded(rejected.reason, EXPLANATION_MAX_BYTES) || !bounded(rejected.text, REJECTED_TEXT_MAX_BYTES)) throw new ValidationError('Invalid rejected report.');
   }
-  const report = objectWithKeys(item.report, 'stable report', ['phase', 'summary', 'how', 'status', 'evidence']);
+  // `narrative` is optional: a checkpoint written before reports carried it still resumes.
+  const report = objectWithKeys(item.report, 'stable report', ['phase', 'summary', 'how', 'status', 'evidence', 'narrative']);
   const last = workflow.snapshot().results.at(-1);
   if (![phase, last?.phase].includes(report.phase as Phase) || !isDeepStrictEqual(report.evidence, data.evidence)) {
     throw new ValidationError('Stable report is not bound to this run.');
