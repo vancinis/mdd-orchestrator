@@ -28,7 +28,37 @@ and no automatic activation after Verify. The parent owns scope, ledger, consent
 
 Freeze `target:{base,commit}`, `scope:[exact safe paths]`, `standards:[provenance IDs]`, criteria,
 standards text and exclusions. Scope exceeding supported limits requires escalation, not truncation.
-The parent cannot use judge-only mdd_jd_inspect to load arbitrary live skill documents.
+The parent must not call mdd_jd_inspect; it is judge-only, including for committed material.
+
+## Parent readiness before paired dispatch
+
+Complete this part of the existing freeze protocol before either initial judgment or scoped
+rejudgment. Use only already authorized parent read-only local inspection capabilities. If those
+capabilities cannot establish readiness, report the exact gap and stop; do not invent a tool or
+borrow the judge-only tool. The parent must not call mdd_jd_inspect.
+
+- Confirm base and target are available local commit objects with the exact frozen **40 or 64 lowercase
+  hexadecimal IDs**. A syntactically valid ID or tree object does not establish commit availability.
+- Check every requested path against the supported path rules below, including the 1024-character
+  maximum. Confirm all existing relevant sides: base-only deletions use base blobs, target-only additions
+  use target blobs, and changed files require both existing sides. Absence on the expected nonexistent
+  side is not missing evidence; an unavailable required object is. Never guess from the live workspace.
+- Check required blob availability, type, byte size and textual compatibility, and bounded per-path
+  diff/tree output needed by the judges. Missing objects, binary or invalid UTF-8 material, non-blob
+  source and output exceeding **128 KiB per command** are unsupported, not material to silently omit.
+  Do not substitute an excerpt for the complete requested source. Known size bounds cannot guarantee
+  completion within the five-second timeout; later inspection can still fail or be cancelled.
+
+Do not launch either judge with known unsupported material or unconfirmed readiness. Escalate the
+scoped limitation, naming commit/path/side/operation and the missing capability or exceeded bound;
+never truncate, guess, silently narrow scope, fetch (including lazy fetch), create snapshots or
+execute target code to make readiness pass. Any revised target or separately authorized snapshot
+returns through the freeze protocol before dispatch.
+
+Readiness is not inspection evidence or approval. Both judges must independently inspect the same
+immutable target and report residual unavailability honestly. Keep this as a parent protocol check:
+the current dispatch hook has no structured target input, so there is no new manifest or runtime gate
+and a successful native admission does not attest readiness.
 
 ## Blind foreground dispatch
 
@@ -51,6 +81,8 @@ Relevant standards by value with path provenance: <identical source paths, diges
 Scope/exclusions and acceptance: <complete exact frozen boundaries>.
 For rejudgment only: <frozen ledger plus immutable fix delta and addressed IDs, not the other result>.
 Inspect through mdd_jd_inspect only. No live source, skill reads, shell, MCP, delegation, memory or tests.
+Parent readiness is not inspection evidence. Independently inspect every required diff and existing
+source side; report residual unavailability in limitations, never as successful inspection.
 Return exactly the neutral JSON contract below; incomplete inspection must state its limitations.
 <Inline the complete neutral result contract from the next section, not merely its file path.>
 ```
@@ -181,6 +213,13 @@ Ask for explicit authorization naming ledger IDs, exact allowed paths, bounded c
 round before calling `mdd-jd-fix`. The parent may not edit alongside the one fix writer. An original
 implementation request, automatic mode, test success or judgment alone is not correction consent.
 Native edit/bash consent still applies; shell executes real project code and is not a sandbox.
+
+Runtime admission checks native parent/workspace, conflicting workflow ownership/pending interactions
+and one active fix writer; tool categories allow only read/edit/shell calls under native permissions.
+This is not a path sandbox. Explicit consent, severe ledger IDs, allowed edit paths and the two-round limit
+remain parent/actor protocol obligations, not mechanically validated from the free-text prompt.
+The parent must supply and track them; the fix actor must check them before changing files and block
+on missing or conflicting authority. Native admission is not proof that these obligations were met.
 
 ```text
 Apply only explicitly authorized introduced severe ledger IDs <IDs>, correction round <1 or 2>.

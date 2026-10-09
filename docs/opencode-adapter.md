@@ -732,6 +732,37 @@ invalid results and incomplete coverage end only this audit, without retries or 
 Findings are advisory: the coordinator presents them and waits for **separate user authorization
 for corrections through `mdd-apply`**. Nothing grants fix, commit, publication or delivery authority.
 
+Redaction alone does not prove credential exposure. An exposure finding needs supporting unredacted,
+runtime-bound evidence; hidden values and heuristic markers cannot supply it. When redaction or access
+limits prevent assessment, the actor reports the affected scope and unresolved question as inconclusive,
+retains independently grounded findings and never claims to have inspected omitted material. This does
+not authorize reconstruction of secrets or wider live access; snapshot/findings binding still applies.
+
+## Judgment Day readiness and correction limits
+
+**Parent readiness before paired dispatch** is part of the existing immutable-target freeze protocol
+in [the packaged parent reference](../assets/opencode/skills/mdd-judgment-day/references/prompts-and-formats.md).
+Before either initial review or scoped rejudgment, the parent confirms exact local full commit objects,
+supported requested paths and all existing relevant source sides (base for deletions, target for
+additions, both for changed files). Already authorized read-only capabilities must establish required
+blob/text availability and known blob/diff/tree output bounds: 128 KiB and five seconds per command.
+Size checks cannot guarantee completion within the timeout. Missing objects, binary/invalid UTF-8
+material, unsupported paths or oversized output require a scoped limitation, not partial inspection,
+guessed content or predictably unable judge launches. Readiness permits no fetch, snapshot creation
+or execution of target code. The parent cannot call judge-only `mdd_jd_inspect`.
+
+Readiness is not inspection evidence or approval. The dispatch hook has no structured target input;
+these instructions add no manifest or runtime readiness gate. Both judges retain identical criteria
+and independently inspect immutable material. Residual failures remain incomplete/unavailable with
+exact limitations and only successful reads recorded; an empty findings list cannot imply completion.
+
+For JD Fix, native hooks check admission, ownership, workspace and one active correction writer,
+and restrict tool categories under native permissions. Explicit correction consent, confirmed severe
+ledger IDs, exact allowed edit paths and the two-round budget remain parent/actor protocol obligations,
+not mechanically validated from the prompt. Tool admission is not a path sandbox or correction consent.
+The parent supplies and tracks those constraints; the actor blocks ambiguous or conflicting authority.
+Structural instruction assertions and immutable-tool regressions verify contracts, not live-model behavior.
+
 ## Safety and storage boundaries
 
 | Boundary | Behavior |

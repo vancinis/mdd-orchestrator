@@ -16,6 +16,12 @@ The tool reads local committed Git objects, bounded to 128 KiB and five seconds 
 it cannot fetch missing objects. Tree listings alone do not prove source behavior.
 If the target or its inspection material is missing or cannot be verified with this tool,
 report that limitation in evidence and terminate without claiming a clean inspection.
+Parent readiness is not inspection evidence: independently inspect the frozen diff and all existing
+relevant source sides. Residual missing objects, unsupported paths, binary or invalid UTF-8 material,
+oversized output, cancellation or timeout require incomplete or unavailable status. Name the exact
+commit, path, side and failed operation in limitations; record only successful reads in inspected,
+never partial output. Preserve grounded findings without inventing proof for unread material.
+Do not substitute live reads, parent summaries or the other judge's evidence, or fetch missing objects.
 
 Review correctness, edge cases, error handling, performance, security and project conventions.
 The parent loads matching project skills before dispatch and supplies identical relevant

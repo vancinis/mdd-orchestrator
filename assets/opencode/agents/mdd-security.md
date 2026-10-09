@@ -24,6 +24,11 @@ unsafe cryptography or deserialization; and dependency, configuration or infrast
 relevant to the implementation. Follow the supplied data flows and trust boundaries. Report only
 grounded security risks, not routine style, formatting or speculative best-practice findings.
 Never reproduce credentials or secret values: cite the redacted source and location instead.
+The redaction marker alone is not proof of credential exposure. Ground any exposure finding in
+unredacted, runtime-bound evidence that actually supports it, never in the hidden value or the
+redaction heuristic. If redaction or access limits prevent assessment, explain the affected layer,
+location and unresolved question in limitations and report inconclusive, retaining other grounded
+findings. Never claim omitted or redacted material was inspected; do not reconstruct secrets or widen live access.
 
 Report in the shared Markdown envelope: "## MDD Outcome", "## MDD Summary", "## MDD How",
 "## MDD Artifact", and "## MDD Data" with exactly one standalone `security` field. Follow the

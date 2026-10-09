@@ -245,6 +245,62 @@ const jdReferencePath = 'assets/opencode/skills/mdd-judgment-day/references/prom
 const jdText = () => fs.readFileSync(jdSkillPath, 'utf8');
 const jdReference = () => fs.readFileSync(jdReferencePath, 'utf8');
 
+// These assertions verify shipped instruction contracts, not model compliance or review execution.
+test('SA-4: security treats redaction as an assessment limit rather than credential-exposure proof', () => {
+  const text = fs.readFileSync('assets/opencode/agents/mdd-security.md', 'utf8');
+  assert.match(text, /redaction marker alone is not proof of credential exposure/);
+  assert.match(text, /unredacted, runtime-bound evidence/);
+  assert.match(text, /redaction or access limits prevent assessment[\s\S]*inconclusive/);
+  assert.match(text, /Never claim omitted or redacted material was inspected/);
+  assert.match(text, /do not reconstruct secrets or widen live access/);
+});
+
+test('SA-4: parent readiness precedes paired dispatch and remains a protocol obligation', () => {
+  const skill = jdText(); const reference = jdReference();
+  const readiness = reference.slice(reference.indexOf('## Parent readiness before paired dispatch'), reference.indexOf('## Blind foreground dispatch'));
+  assert.ok(readiness.length > 0, 'readiness must precede either judge launch');
+  for (const pattern of [/local commit objects/, /40 or 64 lowercase/, /1024/, /base-only deletions/, /target-only additions/,
+    /all existing relevant sides/, /128 KiB/, /five-second/, /binary/, /invalid UTF-8/, /diff.*output/s,
+    /Do not launch either judge/, /never truncate/, /fetch/, /create snapshots/, /execute target code/,
+    /parent must not call mdd_jd_inspect/, /already authorized/, /not inspection evidence or approval/,
+    /cannot guarantee.*timeout/s, /no structured target input/, /no new manifest or runtime gate/]) assert.match(readiness, pattern);
+  assert.match(skill, /Complete parent readiness before paired dispatch/);
+  assert.match(skill, /known unavailable.*[\s\S]*escalate/i);
+  const prompt = reference.match(/```text\nPerform one blind[\s\S]*?```/)?.[0];
+  assert.match(prompt, /Parent readiness is not inspection evidence/);
+  assert.match(prompt, /Independently inspect/);
+  assert.match(prompt, /residual unavailability/);
+});
+
+test('SA-4: identical judges independently report residual unavailable evidence', () => {
+  const bodies = ['a', 'b'].map(role => fs.readFileSync(`assets/opencode/agents/mdd-jd-judge-${role}.md`, 'utf8').split('---').slice(2).join('---'));
+  assert.equal(bodies[0], bodies[1]);
+  for (const pattern of [/Parent readiness is not inspection evidence/, /independently inspect/, /timeout/, /binary/,
+    /invalid UTF-8/, /oversized/, /incomplete or unavailable/, /only successful reads/, /never partial output/,
+    /commit, path, side and failed operation/, /Do not substitute live reads/]) assert.match(bodies[0], pattern);
+});
+
+test('SA-4: fix instructions separate runtime admission from ledger, path and consent obligations', () => {
+  const fix = fs.readFileSync('assets/opencode/agents/mdd-jd-fix.md', 'utf8');
+  for (const text of [fix, jdReference()]) {
+    for (const pattern of [/Runtime admission/, /tool categories/, /protocol obligations/,
+      /consent, severe ledger IDs, allowed edit paths and the two-round limit/,
+      /not mechanically validated/, /not a path sandbox/]) assert.match(text, pattern);
+  }
+  assert.match(fix, /Do not interpret admission or native tool permission as correction consent/);
+  assert.match(fix, /return a blocked handoff/);
+});
+
+test('SA-4: adapter guide discloses readiness and redaction limits without promising model behavior', () => {
+  const text = fs.readFileSync('docs/opencode-adapter.md', 'utf8');
+  assert.match(text, /Redaction alone does not prove credential exposure/);
+  assert.match(text, /Parent readiness before paired dispatch/);
+  assert.match(text, /no structured target input/);
+  assert.match(text, /not inspection evidence or approval/);
+  assert.match(text, /protocol obligations,\s+not mechanically validated/);
+  assert.match(text, /not live-model behavior/);
+});
+
 test('Judgment Day routing is explicit, namespaced and precedes generic phase routing within the size cap', () => {
   const text = fs.readFileSync('assets/opencode/agents/mdd-orchestrator.md', 'utf8');
   assert.match(text, /Standalone override:.*explicit request/);
