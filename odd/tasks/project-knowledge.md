@@ -20,7 +20,7 @@ Reuse validated project knowledge and relevant skills without filling the coordi
 - Feature branch: `feat/project-knowledge`.
 - Delivery strategy: `ask-on-risk`; user selected `feature-branch-chain`. Keep four reviewable work-unit boundaries on the local feature line; publication, PR branches and merges remain separate user decisions.
 - Forecast: 1,850-2,900 authored changed lines across four cohesive units; generated output excluded. This is an estimate, not a size limit. Keep tests and documentation with behavior; do not compress or omit them to meet a line target.
-- Running authored changes in work-unit commits: 0. No implementation commits yet; slice boundaries pending.
+- Running authored changes: PK-1 650 implementation/test/doc lines, plus 85 tracking lines. First slice: `1f4b700..2353cbe`. No PRs published.
 - RDD: off, decided by `clone_local`; do not start reviews or change the switch.
 - Verification: assess each writer diff with native risk assessment only. High/unassessable requires writer checks plus independent verification. Parent repeats one reported command before delivery.
 - TDD: no explicit strict repository setting found. Apply the ODD default: observe deterministic RED, implement GREEN, then refactor. No RED/GREEN evidence exists yet.
@@ -28,7 +28,7 @@ Reuse validated project knowledge and relevant skills without filling the coordi
 
 ## Tasks
 
-- [ ] **PK-1: Record and query reusable project observations.**
+- [x] **PK-1: Record and query reusable project observations.**
   - Route: delegated direct; new behavior spans adapter, settings, tools and tests, requiring preparation and multiple non-trivial edits.
   - Implement opt-in, coordinator-only recording/query interfaces using supported Engram observation operations and native identity checks. Return bounded summaries/references rather than bodies to the coordinator.
   - Validate versioned envelopes, project identity, provenance, applicability and bounded source dependencies. Start records as observations; never promote model claims into policy.
@@ -40,17 +40,21 @@ Reuse validated project knowledge and relevant skills without filling the coordi
   - Proof: observed correction RED 0 passed/3 failed; focused GREEN 233 passed; full suite 1,773 passed/0 failed/3 skipped; build/typecheck passed. Independent verifier repeated 233 focused tests with no blockers; parent repeated `npm run typecheck` successfully. Previous three suite failures were not reproduced in a 52-test sequential diagnostic run or final full run; root cause not established.
   - Skips: two Windows symlink-privilege tests and optional installed-Engram smoke. Real-provider interoperability remains unverified.
   - Native assessment: high/unassessable due to new untracked files; independent verification performed. RDD off, disabled/unmanaged; no review started.
-  - Authored unit: 650 changed lines (including tests/docs, excluding tracking). Kept cohesive rather than separating security checks or tests merely to meet an advisory line count. Commit pending immediately after verified task update.
+  - Authored unit: 650 changed lines (including tests/docs, excluding tracking). Kept cohesive rather than separating security checks or tests merely to meet an advisory line count. Commit: `2353cbe` (`feat(knowledge): record and query project observations`).
 
 - [ ] **PK-2: Cache knowledge with checkout-specific freshness.**
   - Route: delegated direct; persistent bounded cache, validation and multiple test surfaces.
   - Add one bounded, rebuildable `.mdd/knowledge-cache.json` using existing safe persistence. Validate declared dependency bytes against the target checkout, not the shared cache root.
   - Initial budget targets: 100 entries, 512 KiB total, 4 KiB per body; tighten if existing envelope limits require it. Missing files differ from empty files. Reject traversal and unsafe linked/nonregular source files.
-  - Intended surfaces: `src/project-knowledge.ts`, `src/knowledge-cache.ts` (new), `src/local-files.ts`; `tests/project-knowledge.test.mjs`, `tests/knowledge-cache.test.mjs` (new), `tests/engram-http.test.mjs`; `docs/project-knowledge.md`.
+  - Intended surfaces: `src/project-knowledge.ts`, `src/knowledge-cache.ts` (new), `src/local-files.ts`, `src/native-intake.ts`, `src/engram-http.ts`; `tests/project-knowledge.test.mjs`, `tests/knowledge-cache.test.mjs` (new), `tests/engram-http.test.mjs`, `tests/opencode-plugin.test.mjs`, `tests/adapter-fixture.mjs`; `docs/project-knowledge.md`. Intake/adapter surfaces connect capture and query to the actual checkout; they must not become a disconnected cache utility.
+  - User approved wording-only extensions to `src/opencode-plugin.ts`, `docs/mdd-config.schema.json` and `assets/opencode/agents/mdd-orchestrator.md` so descriptions reflect fresh/stale/unverified results rather than PK-1's always-unverified state.
   - Acceptance: divergent linked-worktree bytes, dirty/untracked changes and deletions invalidate affected entries; unsafe paths cannot be read; eviction is bounded; cache corruption/loss does not block ordinary work. Provider outage omits optional knowledge rather than silently replaying revoked material.
   - Checks: `npm run build`; `node --import ./tests/isolate-home.mjs --test tests/project-knowledge.test.mjs tests/knowledge-cache.test.mjs tests/engram-http.test.mjs`; `npm run typecheck`; `npm test`.
   - Rollback: remove derived cache integration; canonical Engram observations and runtime state survive.
-  - Commit, assessed risk and proof: pending.
+  - Proof: observed RED 1 passed/10 failed, final focused suite 174 passed, full suite 1,786 passed/0 failed/3 skipped; build/typecheck/diff-check passed. Independent verification repeated all 174 focused tests with no blockers. Parent repeated typecheck successfully.
+  - Limits: freshness means declared source dependencies match, not semantic truth; cache avoids repeated envelope parsing but still requires canonical fetch and current source hashing. Tests simulate linked-worktree Git metadata; real-provider interoperability remains unverified. Same three documented environment-dependent skips as PK-1.
+  - Risk: native assessment high/unassessable due new files; independent verifier completed. RDD remains off, disabled/unmanaged.
+  - Authored unit: 571 changed lines, tests/docs included, tracking excluded. Commit pending after verified task update.
 
 - [ ] **PK-3: Deliver selected knowledge at real dispatch boundaries.**
   - Route: delegated direct; stateful single/parallel dispatch integration and regression coverage.
@@ -82,4 +86,4 @@ Source digest checks validate declared dependencies, not the completeness of a c
 
 ## Progress and next step
 
-PK-1 implementation and independent verification complete; first work-unit commit next, then PK-2. Source freshness, cache, dispatch integration, skills and metrics are not yet delivered. Engram mirror remains pending due to session/project mismatch.
+PK-1 committed as `2353cbe`. PK-2 source freshness/cache implemented and independently verified; commit next, then PK-3 dispatch integration. Skills and metrics remain pending. Engram mirror remains pending due to session/project mismatch.

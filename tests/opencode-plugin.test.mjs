@@ -11,7 +11,7 @@ import { MODEL_ROLES } from '../dist/settings.js';
 import { defaultSettings, saveSettings } from '../dist/settings.js';
 import { saveGlobalSettings } from '../dist/global-settings.js';
 import { installationPaths } from '../dist/installation-paths.js';
-import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -89,9 +89,15 @@ test('organic knowledge tools are coordinator-only, disabled without provider ca
   assert.equal(saved.state, 'recorded');
   assert.equal(writes.length, 1);
   assert.equal(JSON.parse(writes[0].content).provenance.kind, 'coordinator-observation');
+  assert.equal(JSON.parse(writes[0].content).version, 2);
+  assert.deepEqual(JSON.parse(writes[0].content).dependencies, [{ path: 'src/example.ts', digest: 'missing' }]);
   const found = JSON.parse(await hooks.tool.mdd_knowledge.execute({}, context));
   assert.equal(found.entries.length, 1);
+  assert.equal(found.entries[0].freshness, 'fresh');
   assert.equal(JSON.stringify(found).includes('complete private rationale'), false);
+  await mkdir(join(root, 'src'));
+  await writeFile(join(root, 'src/example.ts'), '');
+  assert.equal(JSON.parse(await hooks.tool.mdd_knowledge.execute({}, context)).entries[0].freshness, 'stale');
 });
 
 test('legacy security sessions cannot bypass runtime isolation with a forged claimed actor', async t => {

@@ -40,7 +40,7 @@
       }]
     },
     "knowledge": {
-      "description": "Optional project observation recording and summary lookup through configured Engram. Defaults off; observations are advisory and source freshness is not yet checked.",
+      "description": "Optional project observation recording and summary lookup through configured Engram. Defaults off; advisory results distinguish fresh, stale and legacy-unverified source dependencies in the current checkout. Freshness validates declared bytes, not the claim's truth or authority.",
       "type": "object",
       "additionalProperties": false,
       "required": ["enabled"],

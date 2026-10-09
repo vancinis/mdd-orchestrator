@@ -1,9 +1,27 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
+import { test, beforeEach } from 'node:test';
+import fs from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { NativeIntake } from '../dist/native-intake.js';
 import { defaultSettings } from '../dist/settings.js';
-import { memoryServer, runtime } from './adapter-fixture.mjs';
+import { memoryServer as fixtureMemoryServer, runtime as nativeRuntime } from './adapter-fixture.mjs';
+
+let runtime;
+beforeEach(t => {
+  const root = fs.mkdtempSync(join(tmpdir(), 'mdd-knowledge-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.mkdirSync(join(root, 'src'));
+  fs.writeFileSync(join(root, 'src/settings.ts'), 'original settings');
+  fs.writeFileSync(join(root, 'src/validation.ts'), 'original validation');
+  runtime = { ...nativeRuntime, directory: root, worktree: root };
+});
+async function memoryServer(t, change) {
+  const server = await fixtureMemoryServer(t, change);
+  server.binding.directory = runtime.directory;
+  return server;
+}
 
 const body = 'Use boundary validation. Detailed rationale stays in canonical memory only.';
 const draft = () => ({ summary: 'Use boundary validation.', body,
@@ -79,7 +97,7 @@ test('knowledge crosses sessions in the same project, fetches full records and n
   const found = await later.knowledge({ query: 'validation', phase: 'mdd-apply', paths: ['src/settings.ts'] }, { ...runtime, sessionID: binding.id });
   assert.equal(found.state, 'available');
   assert.equal(found.entries.length, 1);
-  assert.equal(found.entries[0].freshness, 'unverified');
+  assert.equal(found.entries[0].freshness, 'fresh');
   assert.equal(found.entries[0].summary, draft().summary);
   assert.equal(JSON.stringify(found).includes('Detailed rationale'), false);
   assert.ok(fetched.length >= 2, 'save and query require full readback');
@@ -99,7 +117,7 @@ for (const fault of ['foreign', 'deleted', 'malformed', 'version', 'policy', 'sc
       if (fault === 'missing') { reply.status = 404; return; }
       if (fault === 'malformed') { reply.data.content = '{'; return; }
       const envelope = JSON.parse(reply.data.content);
-      if (fault === 'version') envelope.version = 2;
+      if (fault === 'version') envelope.version = 99;
       if (fault === 'policy') envelope.status = 'approved-policy';
       if (fault === 'provenance') delete envelope.provenance.userMessageID;
       if (fault === 'path') envelope.sources = ['../secret'];
@@ -185,4 +203,153 @@ test('knowledge results are capped even if provider ignores requested limit and 
   const gate = intake(endpoint);
   await gate.recordKnowledge(request(), runtime, 'assistant');
   assert.equal((await gate.knowledge({ limit: 1 }, runtime)).entries.length, 1);
+});
+
+test('PK2 records native digests and checks changed, deleted, empty and untracked source bytes', async t => {
+  const { endpoint, writes } = await memoryServer(t);
+  const gate = intake(endpoint);
+  const input = request({ ...draft(), sources: ['src/settings.ts', 'src/new.ts'] });
+  assert.equal((await gate.recordKnowledge(input, runtime, 'assistant')).entry.freshness, 'fresh');
+  const record = JSON.parse(writes[0].content);
+  assert.equal(record.version, 2);
+  assert.deepEqual(record.dependencies, [
+    { path: 'src/settings.ts', digest: createHash('sha256').update('original settings').digest('hex') },
+    { path: 'src/new.ts', digest: 'missing' },
+  ]);
+  const freshness = async () => (await gate.knowledge({}, runtime)).entries[0].freshness;
+  assert.equal(await freshness(), 'fresh');
+  const original = fs.statSync(join(runtime.directory, 'src/settings.ts'));
+  fs.writeFileSync(join(runtime.directory, 'src/settings.ts'), 'modified settings');
+  fs.utimesSync(join(runtime.directory, 'src/settings.ts'), original.atime, original.mtime);
+  assert.equal(await freshness(), 'stale', 'same-sized dirty bytes with restored mtime are still checked');
+  fs.writeFileSync(join(runtime.directory, 'src/settings.ts'), 'original settings');
+  fs.writeFileSync(join(runtime.directory, 'src/new.ts'), '');
+  assert.equal(await freshness(), 'stale', 'missing is not an empty untracked file');
+  fs.unlinkSync(join(runtime.directory, 'src/new.ts'));
+  assert.equal(await freshness(), 'fresh');
+  fs.unlinkSync(join(runtime.directory, 'src/settings.ts'));
+  assert.equal(await freshness(), 'stale');
+  assert.ok(fs.existsSync(join(runtime.directory, '.mdd/knowledge-cache.json')));
+  assert.equal(JSON.stringify(await gate.knowledge({}, runtime)).includes(body), false);
+});
+
+test('PK2 linked checkout shares cache anchor but validates its own dependency bytes', async t => {
+  const { endpoint, binding } = await memoryServer(t);
+  const gate = intake(endpoint);
+  await gate.recordKnowledge(request(), runtime, 'assistant');
+  await gate.knowledge({}, runtime);
+  const linked = fs.mkdtempSync(join(tmpdir(), 'mdd-knowledge-linked-'));
+  t.after(() => fs.rmSync(linked, { recursive: true, force: true }));
+  const admin = join(runtime.directory, '.git/worktrees/linked');
+  fs.mkdirSync(admin, { recursive: true });
+  fs.writeFileSync(join(admin, 'commondir'), '../..');
+  fs.writeFileSync(join(linked, '.git'), `gitdir: ${admin.replaceAll('\\', '/')}`);
+  fs.mkdirSync(join(linked, 'src'));
+  fs.writeFileSync(join(linked, 'src/settings.ts'), 'different checkout');
+  binding.id = 'ses_linked'; binding.directory = linked;
+  const other = { ...runtime, sessionID: binding.id, directory: linked, worktree: linked };
+  const later = intake(endpoint);
+  assert.equal((await later.knowledge({}, other)).entries[0].freshness, 'stale');
+  fs.writeFileSync(join(linked, 'src/settings.ts'), 'original settings');
+  assert.equal((await later.knowledge({}, other)).entries[0].freshness, 'fresh');
+  assert.equal(fs.existsSync(join(linked, '.mdd/knowledge-cache.json')), false);
+});
+
+test('PK2 legacy records stay unverified and canonical deletion, foreign records and outages override cache', async t => {
+  let mode = 'normal';
+  let fullReads = 0;
+  const { endpoint, binding, writes } = await memoryServer(t, (req, reply) => {
+    if (req.url.startsWith('/search?') && mode === 'outage') reply.status = 503;
+    if (!req.url.startsWith('/observations/')) return;
+    fullReads++;
+    if (mode === 'deleted') reply.data = { ...reply.data, deleted_at: 'now' };
+    if (mode === 'foreign') reply.data = { ...reply.data, project: 'foreign' };
+  });
+  const gate = intake(endpoint);
+  await gate.recordKnowledge(request(), runtime, 'assistant');
+  await gate.knowledge({}, runtime);
+  await gate.knowledge({}, runtime);
+  assert.equal(fullReads, 3, 'warm cache still reads the complete canonical record');
+  mode = 'outage';
+  assert.deepEqual((await gate.knowledge({}, runtime)).entries, []);
+  mode = 'deleted';
+  assert.deepEqual((await gate.knowledge({}, runtime)).entries, []);
+  mode = 'foreign';
+  assert.deepEqual((await gate.knowledge({}, runtime)).entries, []);
+  mode = 'normal';
+  const { knowledgeObservation } = await import('../dist/project-knowledge.js');
+  writes[0].content = JSON.stringify(knowledgeObservation(draft(), binding.project, runtime.sessionID, 'msg_user', 'assistant', 'a'.repeat(64)));
+  assert.equal((await gate.knowledge({}, runtime)).entries[0].freshness, 'unverified');
+  assert.equal(JSON.parse(writes[0].content).dependencies, undefined, 'legacy digests are never backfilled');
+});
+
+test('PK2 rejects caller digests and private or unsafe sources before observation publication', async t => {
+  const { endpoint, writes } = await memoryServer(t);
+  const gate = intake(endpoint);
+  for (const source of ['.env', '.env.local', '.git/config', '.mdd/knowledge-cache.json', '.ssh/id_rsa', 'keys/server.pem', 'credentials.json', 'src/secrets.json', 'ENV~1', '../escape', '/outside', 'src']) {
+    await assert.rejects(gate.recordKnowledge(request({ ...draft(), sources: [source] }), runtime, 'assistant'));
+  }
+  await assert.rejects(gate.recordKnowledge(request({ ...draft(), dependencies: [{ path: 'src/settings.ts', digest: 'a'.repeat(64) }] }), runtime, 'assistant'));
+  fs.linkSync(join(runtime.directory, 'src/settings.ts'), join(runtime.directory, 'src/alias.ts'));
+  await assert.rejects(gate.recordKnowledge(request(), runtime, 'assistant'));
+  assert.equal(writes.length, 0);
+});
+
+test('PK2 rejects junction source escapes and refuses reuse when safe sources become linked', async t => {
+  const { endpoint } = await memoryServer(t);
+  const gate = intake(endpoint);
+  await gate.recordKnowledge(request(), runtime, 'assistant');
+  const outside = fs.mkdtempSync(join(tmpdir(), 'mdd-knowledge-outside-'));
+  t.after(() => fs.rmSync(outside, { recursive: true, force: true }));
+  fs.writeFileSync(join(outside, 'settings.ts'), 'original settings');
+  fs.rmSync(join(runtime.directory, 'src'), { recursive: true });
+  fs.symlinkSync(outside, join(runtime.directory, 'src'), process.platform === 'win32' ? 'junction' : 'dir');
+  assert.equal((await gate.knowledge({}, runtime)).entries[0].freshness, 'stale');
+  await assert.rejects(intake(endpoint).recordKnowledge(request(), runtime, 'assistant'));
+});
+
+test('PK2 bounds individual and aggregate source bytes before writing', async t => {
+  const { endpoint, writes } = await memoryServer(t);
+  const gate = intake(endpoint);
+  fs.writeFileSync(join(runtime.directory, 'src/settings.ts'), Buffer.alloc(262145));
+  await assert.rejects(gate.recordKnowledge(request(), runtime, 'assistant'));
+  const sources = Array.from({ length: 5 }, (_, i) => `src/file${i}.ts`);
+  for (const source of sources) fs.writeFileSync(join(runtime.directory, source), Buffer.alloc(262144));
+  await assert.rejects(gate.recordKnowledge(request({ ...draft(), sources }), runtime, 'assistant'));
+  assert.equal(writes.length, 0);
+});
+
+test('PK2 rejects source mutation during hashing without publishing an observation', async t => {
+  const { endpoint, writes } = await memoryServer(t);
+  const read = fs.readSync;
+  let changed = false;
+  t.mock.method(fs, 'readSync', (...args) => {
+    const count = read(...args);
+    if (!changed && count) {
+      changed = true;
+      fs.writeFileSync(join(runtime.directory, 'src/settings.ts'), 'modified settings');
+    }
+    return count;
+  });
+  await assert.rejects(intake(endpoint).recordKnowledge(request(), runtime, 'assistant'), /changed/);
+  assert.equal(writes.length, 0);
+});
+
+test('PK2 rechecks ancestors after open and reads no bytes through a raced junction', async t => {
+  const { endpoint, writes } = await memoryServer(t);
+  const outside = fs.mkdtempSync(join(tmpdir(), 'mdd-knowledge-race-'));
+  t.after(() => fs.rmSync(outside, { recursive: true, force: true }));
+  fs.writeFileSync(join(outside, 'settings.ts'), 'outside source');
+  const file = join(runtime.directory, 'src/settings.ts');
+  const open = fs.openSync;
+  t.mock.method(fs, 'openSync', (name, ...args) => {
+    if (name === file) {
+      fs.rmSync(join(runtime.directory, 'src'), { recursive: true });
+      fs.symlinkSync(outside, join(runtime.directory, 'src'), process.platform === 'win32' ? 'junction' : 'dir');
+    }
+    return open(name, ...args);
+  });
+  t.mock.method(fs, 'readSync', () => assert.fail('outside source bytes must not be read'));
+  await assert.rejects(intake(endpoint).recordKnowledge(request(), runtime, 'assistant'), /Linked|identity/);
+  assert.equal(writes.length, 0);
 });
