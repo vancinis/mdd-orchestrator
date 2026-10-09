@@ -20,7 +20,7 @@ Reuse validated project knowledge and relevant skills without filling the coordi
 - Feature branch: `feat/project-knowledge`.
 - Delivery strategy: `ask-on-risk`; user selected `feature-branch-chain`. Keep four reviewable work-unit boundaries on the local feature line; publication, PR branches and merges remain separate user decisions.
 - Forecast: 1,850-2,900 authored changed lines across four cohesive units; generated output excluded. This is an estimate, not a size limit. Keep tests and documentation with behavior; do not compress or omit them to meet a line target.
-- Completed authored work units: PK-1 650 + PK-2 571 + PK-3 690 + PK-4 855 = 2,766 changed implementation/test/doc lines, tracking excluded. Net branch diff is 2,491 additions + 39 deletions = 2,530 lines. Slices: `1f4b700..2353cbe`, `2353cbe..a3e9d4d`, `a3e9d4d..487573c`, `487573c..f5adb57`. No PRs published.
+- Initial authored work units: PK-1 650 + PK-2 571 + PK-3 690 + PK-4 855 = 2,766 changed implementation/test/doc lines, tracking excluded. Initial net branch diff was 2,491 additions + 39 deletions = 2,530 lines. Slices: `1f4b700..2353cbe`, `2353cbe..a3e9d4d`, `a3e9d4d..487573c`, `487573c..f5adb57`; published directly to main through `8d329dd` on explicit user request. PK-5 adds 104 authored lines in local slice `8d329dd..a00a8bd`, bringing cumulative work-unit changes to 2,870. No PRs created.
 - RDD: off, decided by `clone_local`; do not start reviews or change the switch.
 - Verification: assess each writer diff with native risk assessment only. High/unassessable requires writer checks plus independent verification. Parent repeats one reported command before delivery.
 - TDD: no explicit strict repository setting found. Apply the ODD default: observe deterministic RED, implement GREEN, then refactor. Observed evidence is recorded per completed unit below.
@@ -91,7 +91,7 @@ Reuse validated project knowledge and relevant skills without filling the coordi
 
 ## Follow-up
 
-- [ ] **PK-5: Enable knowledge by default without overriding explicit opt-out.**
+- [x] **PK-5: Enable knowledge by default without overriding explicit opt-out.**
   - User explicitly requested default activation after delivery of PK-1 through PK-4. Route: delegated direct because settings, update regression tests and documentation need coordinated edits. Forecast: 50-90 authored changed lines; retain the existing feature identity and local chain strategy.
   - Surfaces: `src/settings.ts`, `tests/settings.test.mjs`, `tests/opencode-plugin.test.mjs`, `tests/setup-ui.test.mjs`, `docs/project-knowledge.md`, `docs/mdd-config.schema.json`.
   - User explicitly approved `tests/full-native.test.mjs` telemetry assertion updates after default activation exposed sixteen unknown-field checks and one run-ID accounting assumption. Preserve metadata and per-phase usage validation; do not disable knowledge in the fixtures to hide these failures.
@@ -100,7 +100,7 @@ Reuse validated project knowledge and relevant skills without filling the coordi
   - Rollback: restore previous default and corresponding tests/docs, leaving explicit user settings untouched.
   - Evidence: deterministic RED 2 passed/4 failed; initial integration 588 passed/17 failed/1 skipped exposed outdated telemetry assertions, corrected only after explicit scope approval. Final focused 605 passed/0 failed/1 skipped; full suite 1,859 passed/0 failed/3 skipped. Build/typecheck/diff-check passed; parent independently repeated typecheck and inspected the actual default/update/telemetry regression diff.
   - Skips remain two Windows file-symlink privilege tests and optional installed-Engram smoke. Native assessment returned `medium` (`configuration_change`), `under_budget`; writer verification plus parent spot check is the applicable gate. No separate verifier required at this tier; RDD remains off.
-  - Authored unit: 104 changed lines across seven implementation/test/doc files, tracking excluded. Existing installed configuration and provider/catalog setup remain untouched. Commit pending; no new publication is authorized by this follow-up request.
+  - Authored unit: 104 changed lines across seven implementation/test/doc files, tracking excluded. Existing installed configuration and provider/catalog setup remain untouched. Commit: `a00a8bd` (`feat(knowledge): enable project knowledge by default`). No new publication is authorized by this follow-up request.
 
 ## Verification and limitations
 
@@ -110,6 +110,6 @@ Source digest checks validate declared dependencies, not the completeness of a c
 
 ## Progress and next step
 
-Initial four tasks are complete and independently verified: `2353cbe`, `a3e9d4d`, `487573c`, `f5adb57`. They were published through `8d329dd`. PK-5 default-on implementation and applicable verification are complete; local commit pending, publication not authorized by this follow-up.
+Initial four tasks are complete and independently verified: `2353cbe`, `a3e9d4d`, `487573c`, `f5adb57`. They were published through `8d329dd`. PK-5 default-on implementation and applicable verification are complete in local commit `a00a8bd`; publication remains a separate user decision.
 
 No installed settings, installation or project catalog will be changed by PK-5; only the shipped default changes. Real-host trials and token-savings evidence remain pending. Three environment-dependent test skips and the native-fallback post-restart limitation remain documented. Engram's full task mirror remains pending due to session/project mismatch; separate progress observations and session summaries were saved without changing the binding.
