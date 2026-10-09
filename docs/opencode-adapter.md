@@ -64,6 +64,42 @@ semantic gaps remain incomplete under `Bloqueos`, even when every recorded execu
 Unversioned PR facts retain legacy behavior: every nonzero or interrupted execution is a blocker.
 Recorded limits, missing implementation evidence and uncertainty continue to be reported separately.
 
+## Continue working after failed verification
+
+A recorded failed Verify stops the current run, not all future work. Nothing continues automatically.
+The coordinator interprets the user's request and selects an existing typed action; the runtime
+authenticates the exact latest native text without parsing intent or requiring special consent words.
+
+| User intent | Action |
+|---|---|
+| Correct the same implementation | `mdd_reset({scope:"rework", userText})` returns to Apply with the findings. |
+| Retry the checks | `mdd_reset({scope:"phase"})` retries Verify in the same run. |
+| Proceed despite the failed checks | `mdd_reset({scope:"continue", runID, userText})` preserves the failed run and releases its active stop. |
+| Start a clear new objective | `mdd_start({requirements})` authenticates the latest request, preserves the failed predecessor and applies normal new-task preflight. No manual discard is needed. |
+
+Verify is the last phase in both routes. `continued-with-failed-verification` is **not complete or
+PASS**, and bare continuation authorizes no next work. Unclear requested work may need one focused
+clarification; an already clear request does not need a new workflow-confirmation ritual.
+
+Continuation requires a matching run ID, unused native message identity, settled checkpoint/progress
+and the existing exclusive writer. It cannot release a pending actor, question, intake or transfer,
+and never enters stopped-child attestation or aborts a child. Replayed consent cannot retire a later
+run. Reported uncertainties remain evidence; they are not automatically new native questions.
+
+Before retiring the parent claim, MDD writes and reads back a parent/run-bound
+`.mdd/run-<64-hex>.continued.json` archive and its current dossier index. It records the native request,
+message identity, action, timestamp and source checkpoint sequence/digest alongside the failed result.
+Archive errors leave the active failed run and ownership intact. Retirement is the final durable
+mutation: the original failed checkpoint and settled progress stay data-only behind the existing
+retirement marker until a fresh authenticated start clears them. A restart checks their archive binding
+and never replays the failed run as successful. Continued records are excluded from active workspace
+run listings; the archive remains accessible after the current dossier is replaced by new work.
+
+`mdd_pr_body({runID, userText, ...})` targets that retained failed run explicitly. Its checks and limits
+remain visible and `verified` stays false for both version 1 and unversioned legacy evidence; no IDs
+or proof are manufactured. This local continuation grants no security review, Judgment Day, commit,
+push or publication authority. These tests exercise native host contracts, not live-model behavior.
+
 ## Setup
 
 ### Visual status

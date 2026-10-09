@@ -67,8 +67,11 @@ export function nextAction(status: unknown): NextAction | undefined {
   // fallback notice because the findings are recorded, whatever route produced them.
   if (state === 'blocked' && typeof value.reworkable === 'string') {
     return { tool: 'mdd_reset',
-      why: `Verification reported failure and its findings are recorded. Present them and let the user choose: to correct them, call mdd_reset with scope rework and userText set to their exact latest message asking for it, which sends the run back to ${value.reworkable} with the findings; to re-check without changes, scope phase. Never choose for them.` };
+      why: `Verification reported failure and its findings are recorded. Follow the user's explicit choice: scope rework with exact latest userText sends the run back to ${value.reworkable}; scope phase retries Verify; scope continue with this runID and exact latest userText preserves the failed result and releases the stop without PASS. Verify has no next phase. For a clear new objective, call mdd_start with the exact latest request; normal preflight still applies, without a discard ritual. Never choose or continue automatically, and never treat continuation as stopped-child attestation.` };
   }
+
+  if (state === 'continued-with-failed-verification') return { tool: 'mdd_status',
+    why: 'The failed verification remains recorded and no work is authorized by releasing its stop. Follow a separately explicit request; mdd_start handles a new objective. There is no next phase to dispatch and no PASS to claim.' };
 
   if (value.fallbackExhausted === true) return { tool: 'mdd_status', why: 'Native fallback is exhausted. Present the blocked reason and request explicit recovery; do not automatically reset, redispatch, or perform the work inline.' };
   if (value.reportRepairExhausted === true) return { tool: 'mdd_status', why: 'Report repair is exhausted. Present the retained report and request explicit recovery; never rerun substantive work to repair its wording.' };

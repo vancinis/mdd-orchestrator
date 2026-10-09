@@ -14,6 +14,17 @@ import { nextAction, withNextAction } from '../dist/next-action.js';
 const task = { description: 'MDD plan phase', subagent_type: 'mdd-plan', prompt: 'mdd:dispatch:token' };
 const question = { questions: [{ header: 'Aprobación', question: '¿Continuar?', multiple: false, options: [] }] };
 
+test('SA-3: failed Verify offers explicit actions without fabricating the next phase or consent', () => {
+  const action = nextAction({ state: 'blocked', reworkable: 'mdd-apply', runID: 'failed' });
+  assert.equal(action.tool, 'mdd_reset');
+  assert.equal(action.args, undefined);
+  for (const hint of [/scope rework/, /scope phase/, /scope continue/, /runID/, /mdd_start/, /no next phase/i]) assert.match(action.why, hint);
+  const continued = nextAction({ state: 'continued-with-failed-verification' });
+  assert.equal(continued.tool, 'mdd_status');
+  assert.equal(continued.args, undefined);
+  assert.match(continued.why, /no work/i);
+});
+
 test('next action: a pending question outranks everything the run could otherwise do', () => {
   const action = nextAction({ state: 'ready', question, task, mode: 'delegate' });
   assert.equal(action.tool, 'question');

@@ -5,7 +5,8 @@ import type { Acceptance, Decision, Verification } from './acceptance.js';
 import { acceptance, decisions, validatePlan } from './acceptance.js';
 import { deliverables, executed, retainedVerification, verificationVersion, type VerificationVersion } from './phase-evidence.js';
 import type { Concern } from './concerns.js';
-import type { Check, Deliverable, Delivered } from './phase-evidence.js';
+import type { Check, Deliverable, Delivered, ChangedFile } from './phase-evidence.js';
+import { objectWithKeys } from './validation.js';
 import type { Answers, Phase } from './policy.js';
 import type { Evidence } from './reporting.js';
 import type { PhaseResult } from './workflow.js';
@@ -43,6 +44,9 @@ export type PriorReceipt = { kind: 'preflight' | 'approval' | 'change' | 'clarif
   typed?: { source: 'form' | 'chat'; userMessageID?: string } };
 
 export type RunDossier = {
+  /** Permission to leave a failed stop, never a successful workflow transition. */
+  continuation?: { kind: 'continue' | 'new-task'; userMessageID: string; userText: string;
+    checkpointSequence: number; checkpointDigest: string; timestamp: number };
   verificationVersion?: VerificationVersion;
   version: typeof DOSSIER_VERSION;
   runID: string;
@@ -67,6 +71,7 @@ export type RunDossier = {
   /** Every check Verify reported, with its exit code: a failed one is evidence too. */
   executedChecks: Check[];
   changedFiles: number;
+  changedList?: ChangedFile[];
   /** Apply's summary of the finished change, kept so a later reader knows what was delivered. */
   delivered?: Delivered;
   concerns: Concern[];
@@ -107,6 +112,19 @@ function parse(value: unknown): RunDossier {
     throw new Error('shape');
   }
   const version = verificationVersion(item.verificationVersion);
+  if (item.continuation !== undefined) {
+    const consent = objectWithKeys(item.continuation, 'failed verification continuation',
+      ['kind', 'userMessageID', 'userText', 'checkpointSequence', 'checkpointDigest', 'timestamp']);
+    const last = (item.results as PhaseResult[]).at(-1);
+    if (!['continue', 'new-task'].includes(String(consent.kind)) ||
+        typeof consent.userMessageID !== 'string' || !consent.userMessageID.trim() || consent.userMessageID.length > 256 ||
+        typeof consent.userText !== 'string' || !consent.userText.trim() || consent.userText.length > 12000 ||
+        !Number.isSafeInteger(consent.checkpointSequence) || (consent.checkpointSequence as number) < 0 ||
+        typeof consent.checkpointDigest !== 'string' || !/^[a-f0-9]{64}$/.test(consent.checkpointDigest) ||
+        typeof consent.timestamp !== 'number' || !Number.isFinite(consent.timestamp) ||
+        item.lastState !== 'blocked' || item.phase !== 'mdd-verify' || last?.phase !== 'mdd-verify' || last.outcome !== 'failed' ||
+        !(item.usedMessages as string[]).includes(consent.userMessageID)) throw new Error('invalid failed verification continuation');
+  }
   // Older dossiers were data-only and loosely shaped. Preserve their historical fields, but
   // reject structured evidence with a missing marker rather than silently downgrading it.
   const planned = item.planned as Deliverable[];
@@ -163,6 +181,7 @@ export function priorRunView(dossier: RunDossier, file: string): Record<string, 
     ...(dossier.verificationVersion ? { verificationVersion: dossier.verificationVersion } : {}),
     verificationEvidence: dossier.verificationVersion ? 'Structured actor-reported evidence; execution is not independently attested.' : 'Legacy command-based evidence; requiredness and execution identity were not recorded.',
     changedFiles: dossier.changedFiles, delivered: dossier.delivered, concerns: dossier.concerns, contexts: dossier.contexts,
+    ...(dossier.continuation ? { continuation: dossier.continuation } : {}),
     artifacts: dossier.artifacts, questionReceipts: dossier.questionReceipts,
     ...(dossier.artifactContentOmitted ? { artifactContentOmitted: true as const } : {}),
   };
@@ -191,6 +210,32 @@ export class RunDossierStore {
   /** The local file backing a conversation, so a report can point the user at the real source. */
   name(parent: string): string { return this.#name(parent); }
 
+  #continued(parent: string, runID: string): `.mdd/run-${string}.json` {
+    return `.mdd/run-${createHash('sha256').update(JSON.stringify([parent, runID])).digest('hex')}.continued.json`;
+  }
+
+  readContinued(parent: string, runID: string): RunDossier | undefined {
+    const text = this.#files.read(this.#continued(parent, runID), DOSSIER_MAX_BYTES);
+    if (text === undefined) return undefined;
+    const entry = parse(JSON.parse(text));
+    if (!entry.continuation || entry.runID !== runID || entry.parent.sessionID !== parent) throw new Error('Continued run binding differs.');
+    return entry;
+  }
+
+  /** Strict preservation precedes ownership retirement. Unlike discard, failure must propagate. */
+  archiveContinuation(parent: string, dossier: RunDossier): { file: string; runID: string } {
+    const entry = parse(dossier);
+    if (!entry.continuation || entry.parent.sessionID !== parent) throw new Error('Missing continuation provenance.');
+    const file = this.#continued(parent, entry.runID);
+    const text = JSON.stringify(entry);
+    this.#files.update(file, () => text, DOSSIER_MAX_BYTES);
+    if (JSON.stringify(this.readContinued(parent, entry.runID)) !== text) throw new Error('Continuation archive readback differs.');
+    // Keep the latest failed target discoverable until a fresh run replaces this live index.
+    this.#files.update(this.#name(parent), () => text, DOSSIER_MAX_BYTES);
+    if (JSON.stringify(this.read(parent)) !== text) throw new Error('Continuation index readback differs.');
+    return { file, runID: entry.runID };
+  }
+
   read(parent: string): RunDossier | undefined {
     try {
       const text = this.#files.read(this.#name(parent), DOSSIER_MAX_BYTES);
@@ -211,7 +256,10 @@ export class RunDossierStore {
     for (const { name } of this.#files.runRecords().slice(0, Math.max(0, limit))) {
       try {
         const text = this.#files.read(name, DOSSIER_MAX_BYTES);
-        if (text !== undefined) found.push({ file: name, dossier: parse(JSON.parse(text)) });
+        if (text !== undefined) {
+          const dossier = parse(JSON.parse(text));
+          if (!dossier.continuation) found.push({ file: name, dossier });
+        }
       } catch { /* Another conversation's unreadable record is not this conversation's problem. */ }
     }
     return found;

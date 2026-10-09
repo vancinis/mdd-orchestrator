@@ -1106,6 +1106,7 @@ const plugin: Plugin = async input => {
         description: 'Draft only a PR body using the exact local skill/template and recorded current-run evidence. Two calls: without translations it returns the recorded text to translate into Spanish; with them it renders the body. Never commits, pushes or publishes. Optional notes must quote whole lines of the actual latest user text; unknown facts remain unverified.',
         args: {
           userText: tool.schema.string().min(1),
+          runID: tool.schema.string().min(1).optional().describe('Optional explicit retained failed-run target after continuation; never uses another run as its evidence.'),
           notes: tool.schema.object({ environmentVariables: tool.schema.string().optional(), followUps: tool.schema.string().optional(), deployment: tool.schema.string().optional() }).optional(),
           digest: tool.schema.string().min(1).optional().describe('The digest the first call returned. Required with translations, and it binds them to the evidence they were made from.'),
           translations: tool.schema.array(tool.schema.object({ key: tool.schema.string().min(1), text: tool.schema.string().min(1) })).max(128).optional()
@@ -1114,10 +1115,10 @@ const plugin: Plugin = async input => {
         async execute(args, context) {
           enter(context, 'mdd_pr_body');
           if (context.abort.aborted) throw new Error('The PR body draft was aborted.');
-          const current = runner.prFacts(context.sessionID);
+          const current = runner.prFacts(context.sessionID, args.runID);
           await inspector.intake(context, boundedText(args.userText, 'actual user request', 12000), context.messageID);
           runner.owner(context.sessionID);
-          const facts = runner.prFacts(context.sessionID);
+          const facts = runner.prFacts(context.sessionID, args.runID);
           if (facts.runID !== current.runID) throw new Error('The current run changed while drafting; no draft was produced.');
           // Asking again for the recorded text is how a stuck translation is restarted, so it
           // clears the budget: the next set is judged on its own, not on what came before it.
@@ -1192,6 +1193,9 @@ const plugin: Plugin = async input => {
         async execute(args, context) {
           enter(context, 'mdd_start');
           if (context.abort.aborted) throw new Error('MDD start was aborted.');
+          const saved = checkpoint.read(context.sessionID)?.checkpoint;
+          if (saved?.version === STABLE_CHECKPOINT_VERSION && saved.stable.state === 'blocked' && saved.stable.phase === 'mdd-verify')
+            await runner.restore(context, project => intake.boundRunMemory(context, project));
           const status = record(await intake.start(args, context, context.messageID), 'start status');
           runner.owner(context.sessionID);
           if (status.setupOrigin) status.setupOrigin = { ...record(status.setupOrigin, 'setup origin'), projectID: input.project.id };
@@ -1349,13 +1353,27 @@ const plugin: Plugin = async input => {
         },
       }),
       mdd_reset: tool({
-        description: 'Release stopped MDD work in this conversation. Scope phase makes the current phase runnable again; scope rework, available when status reports reworkable after a failed verification, sends the run back to mdd-apply to correct what verification found; scope run forgets the run so a new objective can start here. Recorded artifacts and memory are never deleted. Scope rework needs userText with the user\'s exact latest message choosing to fix it. When a subagent was interrupted and OpenCode cannot confirm it stopped, pass userText with the user\'s exact latest message saying it stopped: MDD stops it through OpenCode when it can and releases it, unless OpenCode still reports it busy.',
+        description: 'Release stopped MDD work in this conversation. Scope phase retries; scope rework returns a recorded failed Verify to Apply; scope continue preserves a durably settled failed Verify and retires its active stop without PASS, a next phase, or permission for new work; scope run discards the active run. Rework and continue require exact latest userText; continue also requires the failed runID. A clear fresh objective can use mdd_start directly. Continue never attests a child stopped and cannot release pending actors, questions or transfers. For other scopes, interrupted-child recovery requires actual latest user text saying the child stopped; native liveness still applies.',
         args: {
-          scope: tool.schema.enum(['phase', 'run', 'rework']).describe('phase releases the current attempt; rework returns a failed verification to mdd-apply with its findings; run discards the run state for this conversation.'),
-          userText: tool.schema.string().min(1).optional().describe('Required for rework: the user\'s exact latest native message asking to fix what verification found. Otherwise only when the user says the interrupted subagent is stopped. Never rewrite it.'),
+          scope: tool.schema.enum(['phase', 'run', 'rework', 'continue']).describe('phase retries; rework corrects failed Verify in Apply; continue archives settled failed Verify and frees this conversation without PASS or next work; run discards run state.'),
+          runID: tool.schema.string().min(1).optional().describe('Required for continue: the exact failed runID from status.'),
+          userText: tool.schema.string().min(1).optional().describe('Required for rework or continue: the exact latest native request choosing that action. Continuation is not stopped-child attestation. For other scopes, provide only when the user says an interrupted subagent stopped. Never rewrite it.'),
         },
         async execute(args, context) {
           enter(context, 'mdd_reset');
+          if (args.scope === 'continue') {
+            if (context.abort.aborted || !args.runID || !args.userText) throw new Error('Continue requires runID and the exact latest native userText; nothing was released.');
+            intake.assertContinuationIdle(context.sessionID);
+            // A request to proceed is never stopped-child attestation. Do not enter recovery,
+            // abort a child, release a question, or take over a crashed operation on this path.
+            runner.authorizeReset(context.sessionID, false);
+            return runner.withReset(context.sessionID, async () => {
+              const userMessageID = await inspector.intake(context, boundedText(args.userText, 'continuation request', 12000), context.messageID);
+              if (context.abort.aborted || !userMessageID) throw new Error('The continuation request could not be confirmed.');
+              await runner.restore(context, project => intake.boundRunMemory(context, project));
+              return reply(intake.reset(context, 'continue', { runID: args.runID!, userMessageID, userText: args.userText!, kind: 'continue' }));
+            });
+          }
           const discard = args.scope === 'run';
           // The run left for another conversation: only freeing this one is meaningful here, and it
           // needs no attestation because nothing of that run can be touched from this side.
@@ -1596,8 +1614,12 @@ const plugin: Plugin = async input => {
     if (['mdd_security', 'mdd_status', 'mdd_reset', 'mdd_improvements', 'mdd_improve', 'mdd_pr_body', 'mdd_transfer', 'mdd_transfer_recover'].includes(name)) continue;
     const registered = hooks.tool![name]!;
     const execute = registered.execute;
-    registered.execute = ((args: never, context: { sessionID: string }) =>
-      runner.withOperation(context.sessionID, name, () => execute(args, context as never))) as typeof execute;
+    registered.execute = (async (args: never, context: { sessionID: string }) => {
+      const saved = name === 'mdd_start' ? checkpoint.read(context.sessionID)?.checkpoint : undefined;
+      if (saved?.version === STABLE_CHECKPOINT_VERSION && saved.stable.state === 'blocked' && saved.stable.phase === 'mdd-verify')
+        return runner.withReset(context.sessionID, () => execute(args, context as never));
+      return runner.withOperation(context.sessionID, name, () => execute(args, context as never));
+    }) as typeof execute;
   }
   // Share only provenance enforcement with the V2 adapter, before its location/role exits.
   Object.assign(hooks, { [SECURITY_RUNTIME_GUARD]: (sessionID: string, name: string, args: unknown, agent?: string) =>

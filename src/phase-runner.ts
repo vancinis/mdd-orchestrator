@@ -594,6 +594,7 @@ export class PhaseRunner {
 
   /** The durable owner of one specific in-memory run (or, with none, of the parent's checkpoint). */
   #ownerOf(sessionID: string, run: Run | undefined, callID?: string): RunOwner | undefined {
+    if (!run && this.#continuedRetirement(sessionID)) return undefined;
     const active = this.#operation.getStore();
     const effectiveCallID = callID ?? (active?.sessionID === sessionID ? active.callID : undefined);
     const checkpoint = run ? undefined : this.options.checkpoint?.read(sessionID)?.checkpoint;
@@ -744,6 +745,7 @@ export class PhaseRunner {
   }
 
   #resetSource(sessionID: string, tolerant = false): { owner: RunOwner; sequence: number; digest: string } | undefined {
+    if (this.#continuedRetirement(sessionID)) return undefined;
     let saved;
     try { saved = this.options.checkpoint?.read(sessionID)?.checkpoint; }
     catch (error) { if (!tolerant) throw error; return undefined; }
@@ -875,6 +877,7 @@ export class PhaseRunner {
 
   /** Opt-in, same-parent recovery of a fully settled ready phase. No saved ref is a capability. */
   async restore(runtime: Runtime, bindMemory?: (project: string) => Promise<EngramHttp>): Promise<{ restored: boolean; reason?: string }> {
+    if (this.#continuedRetirement(runtime.sessionID)) return { restored: false };
     if (!this.#explorations.has(runtime.sessionID) && this.#explorationBlocked(runtime.sessionID))
       return { restored: false, reason: 'Exploration progress authority was lost; retained member evidence must not automatically replay.' };
     if (this.#runs.has(runtime.sessionID)) { this.owner(runtime.sessionID); return { restored: true }; }
@@ -1049,6 +1052,9 @@ export class PhaseRunner {
         // along, because blocking a restart is no reason to hide what the last 40 minutes produced.
         if (marker && marker.state === 'pending') return { state: 'recovery-blocked', sessionID, ...investigation, ...preserved, recoverable: true, reason: 'A previous attempt in this conversation never reported an outcome, so it is not resumed automatically. Its evidence was preserved. Use mdd_reset to release it and start new work here, or open a new conversation. Read-only investigation remains available. ' + ATTEST_HINT };
       } catch (error) { return { state: 'recovery-blocked', sessionID, ...investigation, ...preserved, recoverable: true, reason: `${error instanceof Error ? error.message : 'Progress is unavailable.'} Use mdd_reset to clear the local marker.` }; }
+      if (this.#continuedRetirement(sessionID))
+        return { state: 'continued-with-failed-verification', sessionID, ...investigation, ...preserved,
+          reason: 'The user released the failed verification stop. Its evidence remains failed; no next phase or new work was authorized.' };
       if (preserved.priorRun) return { state: 'recoverable', sessionID, ...investigation, ...preserved, recoverable: true, recovery: 'data-only', reason: RECOVERY_REASON };
       return { state: 'not-started', sessionID, ...investigation, ...preserved };
     }
@@ -2359,7 +2365,14 @@ export class PhaseRunner {
     return workflow.evaluation.phases.includes('mdd-apply') ? 'mdd-apply' : undefined;
   }
 
-  reset(sessionID: string, scope: 'phase' | 'run' | 'rework'): { scope: 'phase' | 'run' | 'rework'; phase?: Phase; approval?: true; preserved?: { file: string; runID: string } } {
+  failedVerification(sessionID: string): string | undefined {
+    const run = this.#runs.get(sessionID);
+    return run && this.#reworkTarget(run) ? run.id : undefined;
+  }
+
+  reset(sessionID: string, scope: 'phase' | 'run' | 'rework' | 'continue', consent?: {
+    runID: string; userMessageID: string; userText: string; kind: 'continue' | 'new-task';
+  }): { scope: 'phase' | 'run' | 'rework' | 'continue'; phase?: Phase; approval?: true; preserved?: { file: string; runID: string } } {
     if (this.#workerOperations.has(sessionID)) throw new ValidationError('Wait for pending worker persistence before resetting.');
     if (this.#inflight.has(sessionID)) throw new ValidationError(`The child may still be running: OpenCode has not confirmed it stopped. ${ATTEST_HINT}`);
     const run = this.#runs.get(sessionID);
@@ -2370,6 +2383,39 @@ export class PhaseRunner {
     const pending = run ?? this.#solo.get(sessionID);
     if (!pending && this.options.progress?.read(sessionID)?.state === 'pending') throw new ValidationError(`A previous child has unconfirmed liveness: OpenCode has not confirmed it stopped. ${ATTEST_HINT}`);
     if (pending && ['persisting-intent', 'persisting-result'].includes(pending.state)) throw new ValidationError('Wait for the current persistence operation before resetting.');
+    if (scope === 'continue') {
+      const saved = this.options.checkpoint?.read(sessionID)?.checkpoint;
+      const marker = this.options.progress?.read(sessionID);
+      const owner = this.owner(sessionID);
+      const operation = this.#operation.getStore();
+      if (!run || !this.#reworkTarget(run) || !consent || consent.runID !== run.id ||
+          !consent.userMessageID.trim() || !consent.userText.trim() ||
+          run.userMessageID === consent.userMessageID || this.#consent.get(sessionID)?.usedMessages.includes(consent.userMessageID) ||
+          run.uncertain || run.checkpointDegraded || run.rejected || run.side ||
+          (this.#solo.has(sessionID) && !['settled', 'blocked'].includes(this.#solo.get(sessionID)!.state)) ||
+          this.readOnlyWorkers(sessionID) || !this.options.dossier || !this.options.ownership ||
+          !owner || owner.state !== 'reserved' || operation?.sessionID !== sessionID || owner.callID !== operation.callID ||
+          saved?.version !== STABLE_CHECKPOINT_VERSION || saved.runID !== run.id || saved.stable.state !== 'blocked' ||
+          saved.data.usedMessages.includes(consent.userMessageID) ||
+          saved.stable.phase !== 'mdd-verify' || saved.stable.rejected || saved.attempt?.state !== 'settled' ||
+          marker?.runID !== run.id || marker.state !== 'settled' || marker.userMessageID !== run.userMessageID ||
+          marker.attemptID !== saved.attempt.id ||
+          !isDeepStrictEqual(saved.data.verification, run.verification) || !isDeepStrictEqual(saved.data.executedChecks, run.executedChecks))
+        throw new ValidationError('Continue requires a fresh native request bound to this durably settled failed Verify; pending or uncertain work cannot be released.');
+      const dossier = this.#dossier(run);
+      // Persisted identities remain replay guards after restart, not restored live consent receipts.
+      dossier.usedMessages = [...new Set([...saved.data.usedMessages, ...dossier.usedMessages, run.userMessageID, consent.userMessageID])];
+      dossier.continuation = { kind: consent.kind, userMessageID: consent.userMessageID, userText: consent.userText,
+        checkpointSequence: saved.sequence, checkpointDigest: saved.dataDigest, timestamp: this.#now() };
+      const preserved = this.options.dossier.archiveContinuation(sessionID, dossier);
+      if (owner.receipt) this.options.ownership.retireTransferredParent(sessionID, run.id, operation.callID, owner.epoch);
+      else this.options.ownership.retireParent(sessionID, run.id);
+      // Retirement is the final durable mutation: leave checkpoint/progress as failed data.
+      // A later authenticated objective clears these under the existing fresh-start path.
+      this.#runs.delete(sessionID);
+      this.#consent.delete(sessionID);
+      return { scope, preserved };
+    }
     if (scope === 'rework' && (!run || !this.#reworkTarget(run))) {
       throw new ValidationError('Rework is available only after mdd-verify reported failure in a route that includes mdd-apply. Use scope phase to run the current phase again.');
     }
@@ -2453,8 +2499,19 @@ export class PhaseRunner {
 
   approvalStopped(sessionID: string): void { const run = this.#runs.get(sessionID); if (run) this.#event(run, 'approval', 'cancelled'); }
 
-  prFacts(sessionID: string): PRFacts {
+  prFacts(sessionID: string, runID?: string): PRFacts {
     const run = this.#runs.get(sessionID);
+    if (!run || (runID !== undefined && runID !== run.id)) {
+      const prior = runID ? this.options.dossier?.readContinued(sessionID, runID) : this.#prior(sessionID);
+      if (!prior?.continuation) throw new Error('No recorded MDD run is available for this parent or retained failed verification target. A draft cannot claim implementation evidence.');
+      return { runID: prior.runID, goal: prior.acceptance?.goal ?? prior.requirements,
+        ...(prior.verificationVersion ? { verificationVersion: prior.verificationVersion } : {}),
+        ...(prior.delivered ? { delivered: { ...prior.delivered } } : {}),
+        verification: prior.verification?.changes ?? 'Verification failed.', changedFiles: prior.changedFiles,
+        files: structuredClone(prior.changedList ?? []), checks: structuredClone(prior.executedChecks), verified: false, uncertain: false,
+        limits: [...(prior.verification?.limits ?? []), 'The user continued after failed verification; the failed result was not accepted as PASS.',
+          ...(!prior.verificationVersion ? ['Legacy command-based evidence; requiredness and execution identity were not recorded.'] : [])] };
+    }
     if (!run) throw new Error('No recorded MDD run is available for this parent. A draft cannot claim implementation evidence.');
     return { runID: run.id, goal: run.acceptance?.goal ?? 'Unverified: a requested outcome has not been recorded.',
       ...(run.verificationVersion ? { verificationVersion: run.verificationVersion } : {}),
@@ -2529,6 +2586,8 @@ export class PhaseRunner {
   #closableClaim(sessionID: string): { runID: string; finished: boolean; moved?: true } | undefined {
     const ownership = this.options.ownership;
     if (!ownership || this.#runs.has(sessionID)) return undefined;
+    const continued = this.#continuedRetirement(sessionID);
+    if (continued) return { runID: continued.runID, finished: true };
     // A run that finished a transfer away left this parent nothing to protect.
     const moved = ownership.movedAway(sessionID);
     if (moved) return { runID: moved.runID, finished: true, moved: true };
@@ -2556,6 +2615,11 @@ export class PhaseRunner {
     const closable = this.#closableClaim(sessionID);
     if (!closable) return;
     if (closable.moved) { this.retireMovedAway(sessionID); return; }
+    if (this.#continuedRetirement(sessionID)) {
+      this.options.checkpoint?.clear(sessionID);
+      this.options.progress?.clear(sessionID);
+      return;
+    }
     const calls = this.#prior(sessionID)?.calls;
     this.options.ownership!.retireParent(sessionID, closable.runID);
     if (calls?.length) this.#inheritedCalls.set(sessionID, [...calls]);
@@ -2906,7 +2970,7 @@ export class PhaseRunner {
       ...(run.acceptance ? { acceptance: structuredClone(run.acceptance) } : {}),
       decisions: structuredClone(run.decisions), planned: structuredClone(run.planned),
       ...(run.verification ? { verification: structuredClone(run.verification) } : {}),
-      executedChecks: structuredClone(run.executedChecks), changedFiles: run.changedFiles,
+      executedChecks: structuredClone(run.executedChecks), changedFiles: run.changedFiles, changedList: structuredClone(run.changedList),
       ...(run.delivered ? { delivered: { ...run.delivered } } : {}), concerns: structuredClone(run.concerns),
       artifacts: run.history.map(item => ({ ref: structuredClone(item.ref), content: item.content })),
       contexts: run.contexts.map(item => ({ explorationID: item.explorationID, outcome: item.outcome, summary: item.summary,
@@ -2955,6 +3019,22 @@ export class PhaseRunner {
 
   #prior(sessionID: string): RunDossier | undefined {
     try { return this.options.dossier?.read(sessionID); } catch { return undefined; }
+  }
+
+  /** Existing retirement tombstone plus matching archive makes the old checkpoint data-only. */
+  #continuedRetirement(sessionID: string): RunDossier | undefined {
+    const claim = this.options.ownership?.parentClaim(sessionID);
+    if (!claim?.retired) return undefined;
+    const prior = this.options.dossier?.read(sessionID);
+    if (!prior?.continuation || prior.runID !== claim.runID) return undefined;
+    const archive = this.options.dossier!.readContinued(sessionID, claim.runID);
+    const saved = this.options.checkpoint?.read(sessionID)?.checkpoint;
+    const marker = this.options.progress?.read(sessionID);
+    if (!isDeepStrictEqual(archive, prior) ||
+        (saved && (saved.version !== STABLE_CHECKPOINT_VERSION || saved.runID !== claim.runID || saved.dataDigest !== prior.continuation.checkpointDigest)) ||
+        (marker && (marker.runID !== claim.runID || marker.state !== 'settled' || marker.userMessageID !== prior.userMessageID)))
+      throw new Error('Continued verification archive and retired ownership disagree; no work may resume.');
+    return prior;
   }
 
   /**

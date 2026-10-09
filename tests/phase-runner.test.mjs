@@ -5,6 +5,8 @@ import { reportFormatLines } from '../dist/phase-report.js';
 import { memoryServer, request, result, reportDocument, riskReport, runtime, call, answers, installCleanup, structuredTraceFixture as traceFixture, structuredVerificationFixture, traceFixture as legacyTraceFixture, ARTIFACT_TEXT, SUMMARY_TEXT } from './adapter-fixture.mjs';
 import { validateCheckpoint, CheckpointStore, CheckpointStorageError, sealResumeData } from '../dist/checkpoint.js';
 import { ProgressGuard } from '../dist/progress.js';
+import { RunOwnershipStore } from '../dist/run-ownership.js';
+import { RunDossierStore } from '../dist/run-dossier.js';
 import { statusPayload, STATUS_BUDGET_BYTES } from '../dist/status-budget.js';
 import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -143,6 +145,69 @@ for (const requirement of ['required', 'optional']) {
       assert.equal(runner.status(runtime.sessionID).state, 'complete');
       assert.deepEqual(runner.prFacts(runtime.sessionID).checks, data.checks);
     }
+  });
+}
+
+for (const legacy of [false, true]) {
+  test(`SA-3: continued ${legacy ? 'legacy' : 'v1'} failure retains exact evidence and PR truth after restart`, async t => {
+    const root = await mkdtemp(join(tmpdir(), 'mdd-continued-'));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const here = { ...runtime, directory: root, worktree: root };
+    const options = { checkpoint: new CheckpointStore(root), progress: new ProgressGuard(root),
+      ownership: new RunOwnershipStore(root), dossier: new RunDossierStore(root) };
+    const inspect = { parent: async () => {}, result: async (_r, _c, _p, output) => output, stopped: async () => true };
+    const first = new PhaseRunner(inspect, options);
+    await first.start({ preflight: { answers }, requirements: 'Preserve the failed verification.' }, here,
+      { requirementsConfirmed: true, userMessageID: 'initial-user' });
+    if (legacy) {
+      const saved = options.checkpoint.read(here.sessionID).checkpoint;
+      delete saved.data.verificationVersion;
+      saved.dataDigest = sealResumeData(saved.data, saved.runID, saved.parent, saved.events, saved.stable);
+      options.checkpoint.clear(here.sessionID); options.checkpoint.write(here.sessionID, saved);
+    }
+    const runner = new PhaseRunner(inspect, options);
+    assert.deepEqual(await runner.restore(here), { restored: true });
+    const settle = async (callID, data) => {
+      const issued = { sessionID: here.sessionID, callID };
+      await runner.after(issued, await runner.before(issued, runner.status(here.sessionID).task),
+        reportDocument({ evidenceSummary: 'Recorded evidence.', artifact: 'The inspected boundary.', ...data }));
+      runner.releaseSettled(here.sessionID, callID);
+    };
+    await settle('explore', {});
+    const riskCall = { sessionID: here.sessionID, callID: 'risk' };
+    await runner.after(riskCall, await runner.before(riskCall, runner.status(here.sessionID).task), riskReport('low'));
+    runner.releaseSettled(here.sessionID, riskCall.callID);
+    await settle('plan', legacy ? legacyTraceFixture() : traceFixture());
+    await settle('apply', { completed: ['cli-validation'], changes: ['src/cli.ts'] });
+    const data = structuredVerificationFixture(); data.checks[0].exit = 1;
+    data.verification.checkResults[0].disposition = 'failed';
+    data.verification.checkResults[0].reason = 'The required check failed.';
+    for (const row of [...data.verification.scenarios, ...data.verification.steps, ...data.verification.decisions]) {
+      row.status = 'not-verified'; row.checks = legacy ? ['npm test'] : ['E1'];
+    }
+    if (legacy) {
+      delete data.verificationVersion; delete data.checks[0].id;
+      delete data.verification.checkResults; delete data.verification.supplementalChecks;
+    }
+    await settle('verify', { ...data, outcome: 'failed' });
+    const before = options.checkpoint.read(here.sessionID).checkpoint;
+    const historical = validateCheckpoint(before);
+    assert.equal(historical.workflow.nextAction().kind, 'blocked');
+    const consent = { runID: before.runID, userMessageID: 'continue-user', userText: 'Please proceed despite those checks.', kind: 'continue' };
+    await runner.withReset(here.sessionID, async () => runner.reset(here.sessionID, 'continue', consent));
+    const restarted = new PhaseRunner(inspect, options);
+    assert.deepEqual(await restarted.restore(here), { restored: false });
+    assert.equal(restarted.status(here.sessionID).state, 'continued-with-failed-verification');
+    const archive = options.dossier.readContinued(here.sessionID, before.runID);
+    assert.deepEqual(archive.executedChecks, data.checks);
+    assert.deepEqual(archive.verification, before.data.verification);
+    assert.equal(archive.verificationVersion, legacy ? undefined : 1);
+    assert.equal(archive.continuation.checkpointDigest, before.dataDigest);
+    const facts = restarted.prFacts(here.sessionID, before.runID);
+    assert.equal(facts.verified, false);
+    assert.deepEqual(facts.checks, data.checks);
+    assert.deepEqual(facts.files, [{ path: 'src/cli.ts' }]);
+    assert.equal(facts.verificationVersion, legacy ? undefined : 1);
   });
 }
 

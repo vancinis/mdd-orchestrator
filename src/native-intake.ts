@@ -32,7 +32,7 @@ export type IntakeInspect = {
   transferLiveness?(runtime: Runtime, sourceSessionID: string, runID: string, requestDigest: string,
     assistantMessageID?: string): Promise<'running' | 'stopped' | 'unknown'>;
 };
-type Runner = Pick<PhaseRunner, 'start' | 'status' | 'approveNative' | 'block'> & Partial<Pick<PhaseRunner, 'approvalStopped' | 'assertChangeable' | 'assertFreshStart' | 'closeForFreshStart' | 'contribute' | 'explore' | 'movedAway' | 'priorGuards' | 'recordConsent' | 'reset' | 'resumable' | 'submit' | 'owner' | 'reserve' | 'release' | 'handoffRecoveredQuestion' | 'forceRoute' | 'retryRisk' | 'chooseManualRoute' | 'openQuestions' | 'takeOpenQuestions'>>;
+type Runner = Pick<PhaseRunner, 'start' | 'status' | 'approveNative' | 'block'> & Partial<Pick<PhaseRunner, 'approvalStopped' | 'assertChangeable' | 'assertFreshStart' | 'closeForFreshStart' | 'contribute' | 'explore' | 'movedAway' | 'priorGuards' | 'recordConsent' | 'reset' | 'failedVerification' | 'resumable' | 'submit' | 'owner' | 'reserve' | 'release' | 'handoffRecoveredQuestion' | 'forceRoute' | 'retryRisk' | 'chooseManualRoute' | 'openQuestions' | 'takeOpenQuestions'>>;
 /** The run and settled state a native question reserved the durable writer against. */
 type Reservation = NonNullable<QuestionRecord['reservation']>;
 /** `fields` counts a preflight envelope's leading field questions; the rest are its clarifications. */
@@ -425,11 +425,13 @@ export class NativeIntake {
     if (!this.#sessions.has(runtime.sessionID) && this.#unresolved(runtime.sessionID)) throw new Error('A native question in this parent has an unresolved outcome. Inspect mdd_status and explicitly discard the run before starting another.');
     this.runner.assertFreshStart?.(runtime.sessionID);
     const previous = this.#sessions.get(runtime.sessionID);
+    const failedTarget = this.runner.failedVerification?.(runtime.sessionID);
+    if (failedTarget) this.assertContinuationIdle(runtime.sessionID);
     if (previous) {
       // An intake that never reached a run has nothing to protect. Refusing it would strand the
       // conversation: change requests need a run, so a failed intake could never be replaced.
       const state = this.runner.status(runtime.sessionID).state;
-      const replaceable = state === 'complete' ||
+      const replaceable = state === 'complete' || !!failedTarget ||
         (state === 'not-started' && ['blocked', 'stopped'].includes(previous.state));
       if (!replaceable) throw new Error('This parent already has an MDD intake; use mdd_status or request a confirmed change.');
     }
@@ -443,7 +445,7 @@ export class NativeIntake {
     // Only the pair is held: the runner attributes provenance itself when the run is created.
     const context = input.context === undefined ? undefined : (({ label, content }) => ({ label, content }))(runContext(input.context));
     const engram = this.#settings.engram;
-    const pending = !previous && this.runner.status?.(runtime.sessionID).state !== 'complete' ? await this.inspect.setupPending?.(runtime, requirements, boundedText(messageID, 'native messageID', 256)) : undefined;
+    const pending = !failedTarget && !previous && this.runner.status?.(runtime.sessionID).state !== 'complete' ? await this.inspect.setupPending?.(runtime, requirements, boundedText(messageID, 'native messageID', 256)) : undefined;
     if (pending && pending.requirements !== requirements) throw new Error('The original objective is pending. Resubmit its exact pendingStart arguments, not continuation text. For a different objective, use a fresh parent.');
     this.runner.owner?.(runtime.sessionID);
     if (this.#sessions.get(runtime.sessionID) !== previous) throw new Error('Intake changed during setup inspection; read mdd_status.');
@@ -455,19 +457,28 @@ export class NativeIntake {
     if (previous) entry.restore = { state: previous.state, requirements: previous.requirements, known: previous.known, clarifications: previous.clarifications, deferred: previous.deferred, clarificationAnswers: previous.clarificationAnswers, ...(previous.slot ? { slot: previous.slot } : {}), ...(previous.userMessageID ? { userMessageID: previous.userMessageID } : {}) };
     this.#sessions.set(runtime.sessionID, entry);
     if (exploration) entry.exploration = { workItems: structuredClone(exploration.workItems) as unknown[] };
+    let continued = false;
     try {
       // An objective may be older than the last thing the user said: a continuation message never
       // replaces the request it continues. Consent paths keep requiring the latest user text.
-      const userID = pending?.userMessageID ?? await this.inspect.intake(entry.runtime, requirements, boundedText(messageID, 'native messageID', 256), 'objective');
+      const userID = pending?.userMessageID ?? await this.inspect.intake(entry.runtime, requirements, boundedText(messageID, 'native messageID', 256), failedTarget ? 'latest' : 'objective');
       this.runner.owner?.(runtime.sessionID);
       if (typeof userID === 'string') {
         if (entry.usedMessages.has(userID)) throw new Error('This user message was already used; wait for an actual new request.');
+        if (failedTarget) {
+          // The existing writer binds this request to the failed target captured before inspection.
+          // Preservation must succeed before fresh preflight or implementation can own the parent.
+          if (this.#unresolved(runtime.sessionID)) throw new Error('A native question is unresolved; nothing was released.');
+          this.runner.reset!(runtime.sessionID, 'continue', { runID: failedTarget, userMessageID: userID, userText: requirements, kind: 'new-task' });
+          continued = true;
+          delete entry.replacing; delete entry.restore;
+        }
         entry.userMessageID = userID; entry.usedMessages.add(userID);
         // A finished run a restart left unloaded is closed now, as the same run would be replaced
         // in process: the new objective is proven native, and the old evidence is set aside.
-        if (!previous) this.runner.closeForFreshStart?.(runtime.sessionID);
+        if (!previous || continued) this.runner.closeForFreshStart?.(runtime.sessionID);
         this.runner.assertFreshStart?.(runtime.sessionID, userID);
-      } else if (previous) throw new Error('A fresh native user identity is required for another run.');
+      } else if (previous || failedTarget) throw new Error('A fresh native user identity is required for another run.');
       if (!engram && ['engram', 'both'].includes(entry.known.artifactStore ?? '')) {
         delete entry.known.artifactStore;
         entry.notice = 'The saved artifact choice requires optional Engram memory, which is off. Choose a compatible artifact store for this run; the saved profile is unchanged.';
@@ -486,6 +497,12 @@ export class NativeIntake {
       else await this.#startRunner(entry, [], 'startup-profile');
       return this.status(runtime.sessionID);
     } catch (error) {
+      if (failedTarget && !continued) {
+        if (previous) this.#sessions.set(runtime.sessionID, previous);
+        else this.#sessions.delete(runtime.sessionID);
+        throw error;
+      }
+      if (continued) return this.#fail(entry, error);
       if (previous) { this.#sessions.set(runtime.sessionID, previous); throw error; }
       return this.#fail(entry, error);
     }
@@ -729,8 +746,16 @@ export class NativeIntake {
    * Explicit recovery for the conversation. Phase scope releases the current attempt; run scope
    * forgets the run and its intake so a new objective can start here without a new conversation.
    */
-  reset(runtime: Runtime, scope: 'phase' | 'run' | 'rework'): unknown {
+  assertContinuationIdle(sessionID: string): void {
+    const entry = this.#sessions.get(sessionID);
+    if (this.#unresolved(sessionID) || (entry && (entry.restore || ['starting', 'accepting', 'question-ready', 'await-answer'].includes(entry.state))) ||
+        this.durable.ownership?.intake(sessionID)?.state === 'pending')
+      throw new Error('A native question or intake is unresolved; continuation cannot release it.');
+  }
+
+  reset(runtime: Runtime, scope: 'phase' | 'run' | 'rework' | 'continue', consent?: Parameters<PhaseRunner['reset']>[2]): unknown {
     if (runtime.agent !== 'mdd-orchestrator') throw new Error('Only the coordinator may reset MDD state.');
+    if (scope === 'continue') this.assertContinuationIdle(runtime.sessionID);
     const entry = this.#sessions.get(runtime.sessionID);
     // Releasing the phase of a conversation whose run never started is really about the question
     // the user is stuck on, so the pending one is re-opened rather than the intake discarded.
@@ -743,8 +768,8 @@ export class NativeIntake {
       return { ...this.status(runtime.sessionID), reset: { scope: 'phase' as const } };
     }
     const intakeToken = this.durable.ownership?.intake(runtime.sessionID)?.token;
-    const applied = this.runner.reset?.(runtime.sessionID, scope) ?? { scope: 'run' as const };
-    if (applied.scope === 'run') {
+    const applied = this.runner.reset?.(runtime.sessionID, scope, consent) ?? { scope: 'run' as const };
+    if (applied.scope === 'run' || applied.scope === 'continue') {
       if (intakeToken) {
         const current = this.durable.ownership?.intake(runtime.sessionID);
         if (current?.state !== 'retired') this.durable.ownership?.retireIntake(runtime.sessionID, intakeToken);

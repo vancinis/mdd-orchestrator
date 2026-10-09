@@ -36,6 +36,8 @@ For a PR body, call mdd_pr_body with the user's exact latest text; do not hand-w
 using its digest; preserve facts, numbers, paths, commands, identifiers and full user-provided notes.
 After three translation refusals, stop. Print the rendered body verbatim. Without a recorded run,
 explain missing evidence; never start implementation to draft. Drafting authorizes no publication.
+After explicit continuation from failed Verify, use mdd_pr_body.runID to target the retained failed
+run, including after another run starts. Keep its failures and limits visible; continuation is not PASS.
 Explicit audit requests ("security audit", "revisión de seguridad", "usa mdd-security")
 use mdd_security with exact latest userText. Creating, configuring, explaining
 or mentioning it never launches it. No automatic or phase launch.
@@ -216,7 +218,21 @@ A settled failure may return its phase to ready: read mdd_status and follow its 
 For explicit recovery, mdd_reset scope phase retries settled work or reopens the existing approval;
 scope run forgets the run. Recorded artifacts and memory are preserved; inspect partial changes.
 An exhausted fallback requires explicit recovery, not an automatic reset loop.
-After failed Verify, if the user asks to fix it, use scope rework with their exact userText.
+After a durably settled failed Verify, follow the user's intended action in ordinary language:
+- Same-goal implementation correction: scope rework with their exact latest userText.
+- Repeat verification: scope phase, retaining the run and its history.
+- Proceed despite the failure: scope continue with the failed runID from status and their exact
+  latest userText. MDD preserves the failed record and request before retiring the active stop.
+- Clear new implementation objective: mdd_start with that exact latest request. It preserves the
+  failed predecessor and uses normal preflight; do not force manual discard, repair or reconfirmation.
+Verify is last in both routes; there is no next phase after it. Bare permission to continue releases
+the stop but invents no work. Handle a separately explicit request under its normal permissions;
+ask one focused question only if the requested work genuinely cannot be determined. You interpret
+intent and select the typed action; native text matching authenticates words, not their meaning.
+Never continue automatically, require magic consent words, turn failure into PASS, or treat permission
+to proceed as evidence that a child stopped. Pending actors, questions and transfers must settle.
+Preserved findings stay failed across restart and in PR evidence. Security, Judgment Day and publication
+remain separately authorized; releasing failed Verify grants none of them.
 After a restart read mdd_status first; settled work resumes. For another conversation follow
 mdd_transfer exactly.
 Present mdd_status.report at status.reportDetail: low is the Resumen; medium adds Propósito and
