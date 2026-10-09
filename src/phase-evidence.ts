@@ -1,5 +1,6 @@
 import { objectWithKeys } from './validation.js';
-import { references, shortText } from './acceptance.js';
+import { raise, readVerification, references, shortText } from './acceptance.js';
+import type { HeldPlan, Verification } from './acceptance.js';
 import { parseParallelScope } from './worker-batch.js';
 import type { ParallelScope } from './worker-batch.js';
 
@@ -16,7 +17,7 @@ export function deliverables(value: unknown): Deliverable[] {
     ids.add(entry.id);
     const parallel = Object.hasOwn(entry, 'parallel') ? parseParallelScope(entry.parallel) : undefined;
     return { id: entry.id, description: shortText(entry.description, `description of deliverable ${entry.id}`),
-      path: shortText(entry.path, `implementation target of deliverable ${entry.id}`, 400), check: shortText(entry.check, `planned check command of deliverable ${entry.id}`, 500),
+      path: shortText(entry.path, `implementation target of deliverable ${entry.id}`, 400), check: shortText(entry.check, `planned check command of deliverable ${entry.id}`, Infinity),
       scenarios: references(entry.scenarios, `scenarios of deliverable ${entry.id}`), decisions: references(Object.hasOwn(entry, 'decisions') ? entry.decisions : [], `decisions of deliverable ${entry.id}`, true), dependsOn: references(Object.hasOwn(entry, 'dependsOn') ? entry.dependsOn : [], `dependencies of deliverable ${entry.id}`, true),
       // An omitted dependency declaration is not an attestation, even after JSON/checkpoint replay.
       ...(parallel && Object.hasOwn(entry, 'dependsOn') ? { parallel } : {}) };
@@ -24,18 +25,64 @@ export function deliverables(value: unknown): Deliverable[] {
 }
 
 /**
- * Executed checks as the actor reports them. MDD records the claim and shows it as a claim; it
- * neither re-runs the command nor presents an exit code as proof of behaviour.
+ * Executed checks as the actor reports them, with every problem in the list rather than the first.
+ *
+ * A command has no length limit. A verification legitimately runs a long inline script, the PR body
+ * already shows only short commands, and a limit here once rejected a finished 33 KB verification
+ * over one 1019-character `node -e` probe. It must still be one line: it is cited back verbatim by
+ * the assessments and rendered as one bullet.
+ *
+ * Each problem is named by its position, `checks[9].command`, because the coordinator that restates
+ * the report fixes it by hand and cannot find which of twelve commands an unlabelled message meant.
+ * `reported`/`passed` keep the commands as stated, so assessments citing them are judged against
+ * what the report says it ran even when another entry of the list is malformed.
  */
-export function executed(value: unknown): Check[] {
-  if (value === undefined) return [];
-  if (!Array.isArray(value) || value.length > 32) throw new Error('Report executed checks as a list of at most 32 entries.');
-  return value.map(item => {
-    const entry = objectWithKeys(item, 'executed check', ['command', 'exit']);
+function readExecuted(value: unknown): { checks: Check[]; problems: string[]; reported?: string[]; passed?: string[] } {
+  if (value === undefined) return { checks: [], problems: [], reported: [], passed: [] };
+  if (!Array.isArray(value) || value.length > 32) {
+    return { checks: [], problems: [`Report executed checks as a list of at most 32 entries${Array.isArray(value) ? `; this report lists ${value.length}` : ''}.`] };
+  }
+  const checks: Check[] = [];
+  const problems: string[] = [];
+  const reported: string[] = [];
+  const passed: string[] = [];
+  value.forEach((item, index) => {
+    let entry: Record<string, unknown>;
+    try { entry = objectWithKeys(item, `checks[${index}]`, ['command', 'exit']); }
+    catch (error) { problems.push(error instanceof Error ? error.message : String(error)); return; }
     const exit = entry.exit ?? null;
-    if (exit !== null && !Number.isInteger(exit)) throw new Error('An executed check reports an integer exit code, or null when it did not finish.');
-    return { command: shortText(entry.command, 'executed command', 500), exit: exit as number | null };
+    if (typeof entry.command === 'string') {
+      reported.push(entry.command.trim());
+      if (exit === 0) passed.push(entry.command.trim());
+    }
+    const own: string[] = [];
+    if (exit !== null && !Number.isInteger(exit)) own.push(`checks[${index}].exit must be an integer exit code, or null when the command did not finish; it read ${JSON.stringify(exit) ?? String(exit)}.`);
+    let command: string | undefined;
+    try { command = shortText(entry.command, `checks[${index}].command`, Infinity); }
+    catch (error) { own.push(error instanceof Error ? error.message : String(error)); }
+    problems.push(...own);
+    if (!own.length) checks.push({ command: command!, exit: exit as number | null });
   });
+  return { checks, problems, reported, passed };
+}
+
+/** Executed checks as reported. MDD records the claim and shows it as a claim; it neither re-runs the command nor presents an exit code as proof of behaviour. */
+export function executed(value: unknown): Check[] {
+  const read = readExecuted(value);
+  raise(read.problems, 'The executed checks');
+  return read.checks;
+}
+
+/**
+ * Verify's two fields read as one report, so a restatement is told everything at once: the checks it
+ * ran and the verification that cites them are written together and fixed together. With a held
+ * plan this is the real validation; without one it is the form `mdd_check_report` can answer.
+ */
+export function verifyReport(checks: unknown, report: unknown, held?: HeldPlan): { ran: Check[]; verification?: Verification } {
+  const ran = readExecuted(checks);
+  const read = readVerification(report, held, ran.reported, ran.passed);
+  raise([...ran.problems, ...read.problems], 'The verification report');
+  return { ran: ran.checks, ...(read.verification ? { verification: read.verification } : {}) };
 }
 
 export type Delivered = { what: string; implies?: string };

@@ -651,7 +651,7 @@ for corrections through `mdd-apply`**. Nothing grants fix, commit, publication o
 | Failure | Infrastructure failures never fabricate phase results. Read-only phases may retry with failure context, then use one tracked native fallback after `DELEGATION_ATTEMPTS` (3). Apply is different: uncertain writes, failed native results or interrupted actors block with pending recovery protection, never automatic redispatch. Unknown child termination remains `await-result`. A malformed completed report permits only bounded report restatement, not substantive work. A reported phase failure blocks until explicit recovery. `mdd_status` never grants approval or dispatches by itself. |
 | Recovery | No MDD state is terminal. `mdd_reset` releases the current attempt (`scope: phase`) or forgets the run for this conversation (`scope: run`), clearing the local progress marker. Scope `phase` also covers work waiting on a person rather than on an actor: a run stopped at an approval returns to `await-approval` with that question re-armed, and an intake stopped before any run re-opens its pending question. Neither prepares a phase nobody authorized. When Verify reports failure, status names `reworkable: "mdd-apply"` and `scope: rework` sends the run back to Apply to correct what it found, instead of re-checking the unchanged implementation or filing a material change. It needs `userText`, the user's exact latest message choosing the correction; the failed verification becomes Apply's newest dependency artifact, earlier changes are kept, and Verify follows through the route's ordinary approval. Recorded artifacts, memory and `previousRuns` are never deleted by a reset, and `scope: run` sets the preserved record aside under a discarded name rather than destroying it. |
 | Handoff budget | Each phase prompt carries the artifacts it depends on. A seven-phase route holding large artifacts outgrows what a dispatched task can be delivered at, and the phases that paid for it were the last ones. Artifacts are therefore inlined newest-first while the prompt stays within 38000 bytes, the size that still fits inside the 46000-byte payload budget with the rest of the status; older ones travel as their own recorded `evidenceSummary` plus the ref that identifies the complete text in the artifact store. Shedding is ordered and announced in the prompt, and `mdd_status` reports it as `handoff`. Contextual findings are not compacted: they accumulate by the user's own choice, and `PHASE_CONTEXT_MAX_BYTES` (96000) remains the absolute bound that fails explicitly rather than cutting anything. |
-| Payload budget | Every MDD tool serializes through `statusPayload`, bounded to 46000 bytes so the host cannot truncate a result and make the exact `task`/`question` uncopyable. Artifact history is reported as refs only (content lives in the artifact store and is already injected into the next phase prompt), and `brief` accompanies only `mode: "inline"`. Over budget, fields are dropped in the fixed order `priorRun, previousRuns, workspaceRuns, contexts, contextualReport, providedContext, artifacts, artifactAttempts, artifact, concerns, report, planned, decisions, acceptance, verification, workflow` and listed in `omitted`; `task`, `brief`, `question`, `state`, `phase`, `next`, `mode`, `reason`, `runID`, `sessionID`, `runtime`, `questionReceipts`, `recovery`/`pendingStart`, `notice`, `provenance`, `reset`, `evidence`, `coverage` and `recoverable` are never dropped. A task too large to fit is reported in `budget.problem`, never cut. |
+| Payload budget | Every MDD tool serializes through `statusPayload`, bounded to 46000 bytes so the host cannot truncate a result and make the exact `task`/`question` uncopyable. Artifact history is reported as refs only (content lives in the artifact store and is already injected into the next phase prompt), and `brief` accompanies only `mode: "inline"`. Over budget, fields are dropped in the fixed order `priorRun, previousRuns, workspaceRuns, contexts, contextualReport, providedContext, artifacts, artifactAttempts, artifact, concerns, expandedReport, report, visual, planned, decisions, acceptance, verification, handoff, workflow, rejected` and listed in `omitted`. `rejected` goes last and never whole: only its text is shed (`rejected.text` in `omitted`), leaving `reason`, `restatementsLeft`, `textOmitted` and `textBytes`, and `mdd_status` with `detail="rejected"` returns that report alone with its reason and `resultFormat`; `task`, `brief`, `question`, `state`, `phase`, `next`, `mode`, `reason`, `runID`, `sessionID`, `runtime`, `questionReceipts`, `recovery`/`pendingStart`, `notice`, `provenance`, `reset`, `evidence`, `coverage` and `recoverable` are never dropped. A task too large to fit is reported in `budget.problem`, never cut. |
 | Next phase | Successful nonfinal Apply batches prepare the next assigned Apply task after durable completion. Final Apply advances to Verify through ordinary automatic/interactive semantics. Only final corroborated Verify returns `complete`. |
 | Other sessions | Unrelated tasks outside MDD are untouched. `mdd-*` native tasks are rejected unless they exactly match a registered parent run or an issued read-only investigation. |
 
@@ -827,6 +827,10 @@ back under `rejected`, the phase becomes the coordinator's to restate through
 `mdd_phase_result`, and the telemetry failure class is `result-malformed`, distinct from
 `result-rejected`. After `MALFORMED_RESTATEMENTS` (3) consecutive unreadable reports the attempt
 is spent normally, because a report nobody can state correctly is no longer only transcription.
+A rejection names every independent problem at once, each by its position and the rule it broke
+(`checks[9].command "node -e …" is 1019 characters…`), so one restatement can fix them all; a
+payload too small to carry the text alongside the run sheds only `rejected.text`, and
+`mdd_status` with `detail="rejected"` returns it alone.
 
 `## MDD Data` permits these phase-specific fields:
 - Plan: `acceptance`, `decisions`, and nonempty `deliverables`. The same single plan artifact
@@ -845,8 +849,9 @@ is spent normally, because a report nobody can state correctly is no longer only
   was one of the ways a finished implementation had to be run twice. They are recorded as the
   phase's claim and shown as one; only Verify's checks earn the `checks` evidence flag.
 - Verify: `checks: [{ command, exit }]`, the commands the phase reports having run. `exit` is
-  an integer, or `null` when the command did not finish. MDD records the claim as a claim: it
-  never re-runs the command and an exit code is not a semantic certificate.
+  an integer, or `null` when the command did not finish. A command has no length limit but must
+  be one line, with no control characters. MDD records the claim as a claim: it never re-runs
+  the command and an exit code is not a semantic certificate.
 
 Verify also requires `verification: { scenarios, steps, decisions, changes, limits }`:
 - Scenario rows name `requirementID`, `scenarioID`, `stepID`; step rows name `stepID`;
@@ -856,6 +861,8 @@ Verify also requires `verification: { scenarios, steps, decisions, changes, limi
   command the same phase reported running, and a `verified` row may not rest on a check that
   did not pass. That consistency is the honesty MDD can offer without re-running anything.
 - `changes` is a plain-language interpretation; `limits` contains up to four material notes.
+  `mdd_check_report` reads `checks` and `verification` on every Verify outcome, as the run does;
+  only which links exist is left to the run, which holds the plan.
   A passed outcome with missing coverage or any not-verified/deviation row blocks; an explicit
   failed outcome with complete partial coverage remains failed and visible. No extra check
   commands or user approval questions are introduced to satisfy this map.

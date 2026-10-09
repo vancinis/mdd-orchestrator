@@ -123,15 +123,53 @@ test('compact view: a run with nothing to shed is never made larger by the note'
 });
 
 test('compact view: the budget still applies after the projection', () => {
-  const value = { ...base(), rejected: { reason: 'r', text: filler(40000) }, acceptance: { goal: filler(5000) } };
+  const value = { ...base(), rejected: { reason: 'r', text: filler(40000), restatementsLeft: 2 }, acceptance: { goal: filler(5000) } };
   const text = statusPayload(value, 'compact');
   assert.ok(Buffer.byteLength(text) <= STATUS_BUDGET_BYTES, `payload was ${Buffer.byteLength(text)} bytes`);
   const payload = JSON.parse(text);
-  // `acceptance` goes with the projection; `rejected` is kept by the compact view but is still
-  // droppable, so budget pressure sheds it exactly as it would in the full view.
+  // `acceptance` goes with the projection; `rejected` is kept by the compact view, and budget
+  // pressure sheds only its text, never what was refused or how to read it.
   assert.ok(payload.omitted.includes('acceptance'));
-  assert.ok(payload.omitted.includes('rejected'));
+  assert.ok(payload.omitted.includes('rejected.text'));
+  assert.equal(payload.omitted.includes('rejected'), false);
+  assert.deepEqual(payload.rejected, { reason: 'r', restatementsLeft: 2, textOmitted: true, textBytes: 40000, read: payload.rejected.read });
+  assert.match(payload.rejected.read, /detail="rejected"/);
   assert.deepEqual(payload.task, value.task);
+});
+
+test('status budget: a rejected report outlives the state machine', () => {
+  // The observed failure: a 35 KB Verify report was shed whole from both views while the
+  // workflow snapshot stayed, and the coordinator could only re-run Verify to fix its wording.
+  const rejected = { reason: 'checks[9].command is too long.', text: filler(35000), restatementsLeft: 2 };
+  const value = { state: 'ready', phase: 'mdd-verify', mode: 'inline', reason: rejected.reason, rejected,
+    acceptance: { goal: filler(2000) }, workflow: { answers: {}, history: filler(12000) } };
+  for (const view of ['full', 'compact']) {
+    const payload = JSON.parse(statusPayload(value, view));
+    assert.deepEqual(payload.rejected, rejected, `${view} keeps the text once the workflow makes room`);
+    assert.ok(payload.omitted.includes('workflow'), view);
+  }
+});
+
+test('rejected view: the report waiting to be restated is returned alone', () => {
+  const rejected = { reason: 'r', text: filler(42000), restatementsLeft: 1 };
+  const value = { ...base(), state: 'ready', mode: 'inline', rejected, resultFormat: ['Report this phase.'],
+    nextAction: { tool: 'mdd_phase_result', why: 'Restate it.' }, acceptance: { goal: filler(9000) }, workflow: { answers: {} } };
+  const full = JSON.parse(statusPayload(value, 'full'));
+  assert.equal(full.rejected.textOmitted, true, 'too large to ship with the run');
+  const alone = JSON.parse(statusPayload(value, 'rejected'));
+  assert.deepEqual(alone.rejected, rejected);
+  assert.deepEqual(alone.resultFormat, value.resultFormat);
+  assert.deepEqual(alone.nextAction, value.nextAction);
+  for (const key of ['task', 'brief', 'acceptance', 'workflow', 'omitted']) assert.equal(alone[key], undefined, key);
+
+  const huge = JSON.parse(statusPayload({ ...value, rejected: { ...rejected, text: filler(60000) } }, 'rejected'));
+  assert.equal(huge.rejected.textOmitted, true);
+  assert.equal(huge.rejected.textBytes, 60000);
+  assert.match(huge.rejected.read, /cannot be shown even alone/);
+
+  const none = JSON.parse(statusPayload({ state: 'ready', phase: 'mdd-apply' }, 'rejected'));
+  assert.equal(none.rejected, undefined);
+  assert.match(none.note, /nothing is waiting to be restated/);
 });
 
 test('compact view: the default for statusPayload stays full, so callers opt in', () => {

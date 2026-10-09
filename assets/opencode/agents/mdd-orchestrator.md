@@ -162,8 +162,9 @@ copy args or calls exactly; compose only when neither is supplied. Follow this s
   fenced json block only where the phase has fields. mdd_status returns resultFormat with the
   exact headings for that phase; follow it, not a shape you remember.
 - If status carries a "rejected" report, the work is already done and only its wording was
-  refused. Do not re-dispatch and do not redo the work: take rejected.text, fix exactly what
-  rejected.reason names, and send it back with mdd_phase_result. That costs no attempt.
+  refused. Do not re-dispatch and do not redo the work: take rejected.text, fix every problem
+  rejected.reason names, and send it back with mdd_phase_result. That costs no attempt. When
+  rejected carries textOmitted instead of text, read it alone with mdd_status detail="rejected".
 - If a tool fails or a question is dismissed, read mdd_status and continue from what it says.
   Never redispatch a task still in flight, or infer approval from prose. When the user answers a
   dismissed or interrupted question in their next message, record it with mdd_answer. A declined

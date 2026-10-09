@@ -105,6 +105,50 @@ test('Apply report form requires exactly one stable completed ID without claimin
   assert.equal(checkReportForm('mdd-apply', reportDocument({ evidenceSummary: 'Implemented.', artifact: 'Batch.', ...data, completed: ['first'] })).ok, true);
 });
 
+const verifyReport = (overrides = {}, data = {}) => {
+  const assessment = { status: 'verified', checks: ['npm test'], assessment: 'Source and focused checks support the plan.' };
+  return reportDocument({
+    outcome: 'passed', evidenceSummary: 'Every planned link was checked against source.', artifact: 'Verification of the plan.',
+    checks: [{ command: 'npm test', exit: 0 }],
+    verification: {
+      scenarios: ['S1', 'S2'].map(scenarioID => ({ requirementID: 'R1', scenarioID, stepID: 'cli-validation', ...assessment })),
+      steps: [{ stepID: 'cli-validation', ...assessment }], decisions: [{ decisionID: 'D1', ...assessment }],
+      changes: 'Input validation follows the plan.', limits: [], ...data,
+    },
+    ...overrides,
+  });
+};
+
+test('a readable Verify report checks clean, whatever the length of its commands', () => {
+  const probe = `node -e "${'console.log(1);'.repeat(80)}"`;
+  const checked = checkReportForm('mdd-verify', verifyReport({ checks: [{ command: 'npm test', exit: 0 }, { command: probe, exit: 0 }] }));
+  assert.deepEqual(checked.problems, []);
+  assert.equal(checked.ok, true);
+});
+
+test('a failed Verify report is checked exactly as the run will read it', () => {
+  // The observed miss: this check skipped `checks` on a failed Verify and cleared a report that
+  // the run then refused, at the one moment the actor could still have fixed it.
+  const checked = checkReportForm('mdd-verify', verifyReport(
+    { outcome: 'failed', checks: [{ command: 'npm test', exit: 0 }, { command: 'npm run\nlint', exit: 1 }] },
+    { limits: ['one', 'two', 'three', 'four', 'five'] }));
+  assert.equal(checked.ok, false);
+  assert.equal(checked.problems.length, 1, 'one rejection carrying every problem');
+  assert.match(checked.problems[0], /2 problem\(s\)/);
+  assert.match(checked.problems[0], /checks\[1\]\.command .* control character U\+000A/);
+  assert.match(checked.problems[0], /this report lists 5/);
+
+  const missing = checkReportForm('mdd-verify', reportDocument({ outcome: 'failed', evidenceSummary: 'Could not verify.', artifact: 'Blocked.' }));
+  assert.equal(missing.ok, false, 'the run requires verification on every outcome, so the check does too');
+  assert.ok(missing.problems.some(problem => /verification must be an object/.test(problem)), missing.problems.join(' | '));
+});
+
+test('a passed Verify report whose own assessments do not match is caught before it is sent', () => {
+  const checked = checkReportForm('mdd-verify', verifyReport({}, { decisions: [{ decisionID: 'D1', status: 'deviation', checks: [], assessment: 'Validation moved.' }] }));
+  assert.equal(checked.ok, false);
+  assert.ok(checked.problems.some(problem => /claiming a match the assessments do not support/.test(problem)));
+});
+
 const riskVerdict = (overrides = {}) => ({
   route: 'high', complexity: 'high',
   reason: 'The change touches authentication middleware shared by every route.',

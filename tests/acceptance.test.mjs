@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { acceptance, decisions, validatePlan, verification, MAX_REPORTED_PROBLEMS } from '../dist/acceptance.js';
-import { deliverables } from '../dist/phase-evidence.js';
+import { acceptance, decisions, shortText, validatePlan, verification, MAX_REPORTED_PROBLEMS } from '../dist/acceptance.js';
+import { deliverables, executed, verifyReport } from '../dist/phase-evidence.js';
 import { traceFixture } from './adapter-fixture.mjs';
 
 function fixture() {
@@ -138,6 +138,83 @@ test('explicit plan drift and not-verified acceptance remain visible instead of 
   const checked = verification(f.result, f.accepted, f.choices, f.steps, f.reported);
   assert.equal(checked.matched, false);
   assert.equal(checked.decisions[0].assessment, 'Validation moved away from the planned boundary.');
+});
+
+test('one-line text names the rule it broke, where, and on what value', () => {
+  assert.throws(() => shortText(undefined, 'what changed'), { message: 'what changed is missing.' });
+  assert.throws(() => shortText(42, 'what changed'), { message: 'what changed must be text; it read "42".' });
+  assert.throws(() => shortText('   ', 'what changed'), { message: 'what changed is empty; give nonempty text.' });
+  assert.throws(() => shortText('npm test\nnpm run lint', 'checks[3].command', Infinity), error => {
+    assert.match(error.message, /^checks\[3\]\.command "npm test\\nnpm run lint" contains the control character U\+000A \(a line break\) at character 9\./);
+    assert.match(error.message, /keep it on one line/);
+    assert.equal(error.message.includes('limit'), false, 'an unbounded field never mentions a length limit');
+    return true;
+  });
+  assert.throws(() => shortText('x'.repeat(260), 'remaining limit 2', 250), error => {
+    assert.match(error.message, /^remaining limit 2 "x{64}…" is 260 characters, above its 250-character limit\. To fix it, shorten it\.$/);
+    assert.equal(error.message.includes('control'), false, 'a length problem is not reported as a control character');
+    return true;
+  });
+  assert.equal(shortText('  npm test  ', 'command', Infinity), 'npm test');
+});
+
+test('an executed command has no length limit and can still be cited exactly', () => {
+  const f = fixture();
+  const probe = `node -e "${'console.log(1);'.repeat(80)}"`;
+  assert.ok(probe.length > 1000);
+  f.result.steps[0].checks = [probe];
+  const read = verifyReport([{ command: 'npm test', exit: 0 }, { command: probe, exit: 0 }], f.result, { accepted: f.accepted, choices: f.choices, planned: f.steps });
+  assert.equal(read.ran[1].command, probe);
+  assert.deepEqual(read.verification.steps[0].checks, [probe]);
+  assert.equal(read.verification.matched, true);
+  const planned = deliverables(f.data.deliverables.map(step => ({ ...step, check: probe })));
+  assert.equal(planned[0].check, probe, 'a planned check command is not length-limited either');
+});
+
+test('executed checks name every malformed entry by its position', () => {
+  assert.throws(() => executed([{ command: 'npm test', exit: 0 }, { command: 'a\tb', exit: 0 }, { command: '', exit: 1.5 }]), error => {
+    assert.match(error.message, /The executed checks has 3 problem\(s\)/);
+    assert.match(error.message, /checks\[1\]\.command "a\\tb" contains the control character U\+0009 \(a tab\) at character 2/);
+    assert.match(error.message, /checks\[2\]\.exit must be an integer exit code/);
+    assert.match(error.message, /checks\[2\]\.command is empty/);
+    return true;
+  });
+  assert.throws(() => executed(Array(33).fill({ command: 'npm test', exit: 0 })), /at most 32 entries; this report lists 33/);
+});
+
+test('a Verify report is refused once, for its checks and its verification together', () => {
+  // The observed failure: a rejected command was fixed and re-sent, only to be refused again for a
+  // fifth limit that had been in the same report the whole time.
+  const f = fixture();
+  f.result.limits = ['one', 'two', 'three', 'four', 'five'];
+  f.result.scenarios[0].assessment = '';
+  assert.throws(() => verifyReport([{ command: 'npm test', exit: 0 }, { command: 'npm run\nlint', exit: 0 }], f.result,
+    { accepted: f.accepted, choices: f.choices, planned: f.steps }), error => {
+    assert.match(error.message, /The verification report has 3 problem\(s\)/);
+    assert.match(error.message, /\(1\) checks\[1\]\.command "npm run\\nlint" contains the control character U\+000A/);
+    assert.match(error.message, /source-based assessment of scenario S1 on deliverable cli-validation is empty/);
+    assert.match(error.message, /at most four concise items; this report lists 5/);
+    // A malformed assessment still covers its link, so the same mistake is not also an omission.
+    assert.equal(error.message.includes('omits'), false);
+    return true;
+  });
+});
+
+test('a malformed checks list is reported once, not again for every assessment citing it', () => {
+  const f = fixture();
+  assert.throws(() => verifyReport('npm test', f.result, { accepted: f.accepted, choices: f.choices, planned: f.steps }), error => {
+    assert.equal(error.message, 'Report executed checks as a list of at most 32 entries.');
+    return true;
+  });
+});
+
+test('without a held plan, verification is checked for its own consistency only', () => {
+  const f = fixture();
+  // Links the run would call invented are not this check's to judge.
+  f.result.scenarios[0].stepID = 'unknown-step';
+  assert.equal(verifyReport([{ command: 'npm test', exit: 0 }], f.result).verification.matched, true);
+  f.result.steps[0].checks = ['npm run never-reported'];
+  assert.throws(() => verifyReport([{ command: 'npm test', exit: 0 }], f.result), /did not report running/);
 });
 
 test('a compact plan needs no invented decisions, dependencies or extra checks', () => {

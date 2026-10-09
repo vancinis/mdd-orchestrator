@@ -1,8 +1,8 @@
 import { boundedText, nonemptyText } from './phase-runner.js';
-import { acceptance, assertNoTraceSection, phaseFields } from './acceptance.js';
+import { acceptance, assertNoTraceSection, phaseFields, UNMATCHED_PASS } from './acceptance.js';
 import { concerns } from './concerns.js';
 import { openQuestions } from './open-questions.js';
-import { changed, deliverables, executed } from './phase-evidence.js';
+import { changed, deliverables, executed, verifyReport } from './phase-evidence.js';
 import { narrativeOf, parsePhaseReport, parseRiskReport, parseSecurityReport, reportFormatLines } from './phase-report.js';
 import { parseRiskVerdict, riskReportFormatLines, RISK_REPORT_KEYS } from './risk.js';
 import type { RiskVerdict } from './risk.js';
@@ -76,15 +76,22 @@ export function checkReportForm(phase: Phase, text: unknown): ReportCheck {
     () => assertNoTraceSection(nonemptyText(fields.artifact, 'artifact')),
     () => concerns(fields.concerns),
     () => openQuestions(fields.questions),
-    // Phase-specific shape. Only what a document can answer on its own: `decisions` and
-    // `verification` are left to the run, because both are checked against IDs it holds.
+    // Phase-specific shape. Only what a document can answer on its own: `decisions`, and the
+    // links in `verification`, are left to the run, because both are checked against IDs it holds.
     ...(phase === 'mdd-spec' ? [() => boundedText(fields.domain, 'spec domain', 64)] : []),
     ...(passed && (phase === 'mdd-plan' || phase === 'mdd-spec') ? [() => acceptance(fields.acceptance)] : []),
     ...(passed && (phase === 'mdd-plan' || phase === 'mdd-tasks') ? [() => deliverables(fields.deliverables)] : []),
     ...(passed && phase === 'mdd-apply' ? [() => changed(fields.changes, fields.noChangeReason), () => {
       if (taskIDs(fields.completed).length !== 1) throw new Error('Successful Apply must name exactly one completed task.');
+    }, () => executed(fields.checks)] : []),
+    // Verify's checks and verification are read on every outcome, exactly as the run reads them. A
+    // check that skipped them on a failed Verify once cleared a report the run then refused, so
+    // the actor was told it was fine at the one moment it could still have fixed it. Which links
+    // exist is the run's to judge; everything the document says about itself is checked here.
+    ...(phase === 'mdd-verify' ? [() => {
+      const { verification } = verifyReport(fields.checks, fields.verification);
+      if (passed && verification && !verification.matched) throw new Error(UNMATCHED_PASS);
     }] : []),
-    ...(passed && (phase === 'mdd-apply' || phase === 'mdd-verify') ? [() => executed(fields.checks)] : []),
   ]));
 }
 

@@ -11,12 +11,12 @@ import { mddInstructions, packagedSkillPath, PHASE_SKILLS } from './phase-assets
 import type { PackagedSkillName } from './phase-assets.js';
 import type { LessonInput } from './lessons.js';
 import type { RunLedgerInput } from './run-ledger.js';
-import { changed, deliverables, delivered, executed } from './phase-evidence.js';
+import { changed, deliverables, delivered, executed, verifyReport } from './phase-evidence.js';
 import type { ChangedFile, Check, Deliverable, Delivered } from './phase-evidence.js';
 import { emptyEvidence, invalidateEvidence, renderReport, renderClosure, phaseLabel, evidenceCoverage } from './reporting.js';
 import type { Evidence, EvidenceFlag, PhaseReport } from './reporting.js';
 import type { FailureClass, TelemetryEvent, TelemetryResult, TelemetryUsage } from './telemetry.js';
-import { acceptance, assertNoTraceSection, decisions, phaseFields, PHASE_RESULT_FIELDS, validatePlan, verification, traceArtifact } from './acceptance.js';
+import { acceptance, assertNoTraceSection, decisions, phaseFields, PHASE_RESULT_FIELDS, UNMATCHED_PASS, validatePlan, traceArtifact } from './acceptance.js';
 import { MALFORMED_RESTATEMENTS, MalformedReport, narrativeOf, parsePhaseReport, parseRiskReport, reportFormatLines } from './phase-report.js';
 import { checkRiskReportForm } from './report-check.js';
 import { riskReportFormatLines } from './risk.js';
@@ -457,6 +457,14 @@ export function intentEnvelope(base: Record<string, unknown>, context: readonly 
 export function receiptWithSummary(receipt: Record<string, unknown> & { evidenceSummary: string }): string {
   const whole = JSON.stringify(receipt);
   if (Buffer.byteLength(whole) <= 40000) return whole;
+  // Executed commands have no length limit either. A long one degrades first, to a clipped prefix
+  // with its size and digest, because the summary is what a later session actually recalls; the
+  // complete command stays in the checkpoint and the run record.
+  if (Array.isArray(receipt.reportedChecks) && (receipt.reportedChecks as Check[]).some(check => Buffer.byteLength(check.command) > 500)) {
+    const reportedChecks = (receipt.reportedChecks as Check[]).map(check => Buffer.byteLength(check.command) <= 500 ? check
+      : { command: clip(check.command, 500), exit: check.exit, commandBytes: Buffer.byteLength(check.command), commandSha256: createHash('sha256').update(check.command).digest('hex') });
+    return receiptWithSummary({ ...receipt, reportedChecks, reportedChecksClipped: true });
+  }
   const { evidenceSummary, ...rest } = receipt;
   return JSON.stringify({ ...rest, evidenceSummaryOmitted: true as const, evidenceSummaryBytes: Buffer.byteLength(evidenceSummary),
     evidenceSummarySha256: createHash('sha256').update(evidenceSummary).digest('hex') });
@@ -1521,7 +1529,7 @@ export class PhaseRunner {
       // would ask a fresh one to redo work that is already in the tree.
       run.mode = 'inline';
       this.#settle(run);
-      throw new Error(`MDD could not read the ${phase} report, so no attempt was spent and nothing was re-run: ${run.reason} The report is kept verbatim in mdd_status under rejected, and the exact form it must take is under brief. Restate it with mdd_phase_result, preserving the work it describes. ${MALFORMED_RESTATEMENTS - run.malformed} restatement(s) remain before this counts as a failed attempt.`);
+      throw new Error(`MDD could not read the ${phase} report, so no attempt was spent and nothing was re-run: ${run.reason} The report is kept verbatim in mdd_status under rejected, and the exact form it must take is under resultFormat; when a status payload leaves rejected.text out to stay readable, mdd_status with detail="rejected" returns it alone. Restate it with mdd_phase_result, fixing every problem named and preserving the work it describes. ${MALFORMED_RESTATEMENTS - run.malformed} restatement(s) remain before this counts as a failed attempt.`);
     }
     if (run.phase === 'mdd-apply' && !run.side) {
       // A stopped writer or an ambiguous save is not evidence that its work can be repeated.
@@ -1932,10 +1940,12 @@ export class PhaseRunner {
         if (run.phase === 'mdd-spec' && result.domain !== 'project') throw new MalformedReport('Specification domain must match the dispatched project storage namespace.');
         if (run.phase === 'mdd-verify') {
           if (!accepted) throw new Error('Verification has no held requirement map.');
-          ran = executed(result.checks);
-          run.verification = verification(result.verification, accepted, choices, planned,
-            ran.map(check => check.command), ran.filter(check => check.exit === 0).map(check => check.command));
-          if (outcome === 'passed' && !run.verification.matched) throw new MalformedReport('Requirements or plan remain not verified or deviate from the held plan. Report outcome failed, or close the gaps, rather than claiming a match the assessments do not support.');
+          // The checks and the verification that cites them are read as one report, so every problem
+          // in either reaches the restatement together instead of one rejection per round trip.
+          const read = verifyReport(result.checks, result.verification, { accepted, choices, planned });
+          ran = read.ran;
+          run.verification = read.verification!;
+          if (outcome === 'passed' && !run.verification.matched) throw new MalformedReport(UNMATCHED_PASS);
         }
         if (outcome === 'passed') {
           if (run.phase === 'mdd-plan' || run.phase === 'mdd-spec') accepted = acceptance(result.acceptance);

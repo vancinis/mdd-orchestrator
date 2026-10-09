@@ -49,12 +49,15 @@ export const STATUS_PROTECTED_FIELDS: readonly string[] = Object.freeze([
 export const STATUS_DROP_ORDER: readonly string[] = Object.freeze([
   'priorRun', 'previousRuns', 'workspaceRuns', 'contexts', 'contextualReport', 'providedContext', 'artifacts', 'artifactAttempts', 'artifact',
   'concerns', 'expandedReport', 'report', 'visual', 'planned', 'decisions', 'acceptance', 'verification',
-  // A rejected report is the work itself, waiting to be restated. It sheds late, because dropping
-  // it turns a free restatement into re-running the phase that produced it.
-  'rejected',
   // A handful of refs, and it explains why the phase prompt carries summaries instead of full
   // artifacts. Shedding it early would drop the explanation exactly in the payloads that need it.
   'handoff', 'workflow',
+  // A rejected report is the work itself, waiting to be restated, so it sheds last — after the
+  // state machine, which `state`, `phase`, `next` and `nextAction` already answer for while a
+  // restatement is pending. Even then only its text goes: see `rejectedWithoutText`. A 35 KB
+  // Verify report once vanished whole from both views while `nextAction` still said "take
+  // rejected.text", and the coordinator had no way to fix the wording without re-running Verify.
+  'rejected',
 ]);
 
 /**
@@ -107,6 +110,42 @@ function compactWorkflow(value: unknown): { workflow: unknown; omitted: boolean 
   return { workflow: { ...snapshot, results }, omitted };
 }
 
+/**
+ * The rejected report without its text, when even shedding everything else leaves no room for it.
+ * The reason, the restatements left and the size survive, so the coordinator still knows what was
+ * refused and how to read the text — never a pointer to evidence the same payload withheld.
+ */
+function rejectedWithoutText(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const { text, ...rest } = value as Record<string, unknown>;
+  if (typeof text !== 'string') return undefined;
+  return { ...rest, textOmitted: true, textBytes: bytes(text), read: REJECTED_READ };
+}
+const REJECTED_READ = 'The text was left out to keep this payload under the host output limit. Call mdd_status with detail="rejected" to read it alone, then fix every problem rejected.reason names and send it back with mdd_phase_result.';
+
+/**
+ * What the rejected view carries: the report waiting to be restated, why it was refused, the form it
+ * must take and the call that sends it back. Everything else is left out, so the one document the
+ * coordinator has to copy has the whole budget to itself.
+ */
+const REJECTED_VIEW_FIELDS: readonly string[] = Object.freeze([
+  'runID', 'sessionID', 'phase', 'stage', 'state', 'mode', 'reason', 'reportRepairExhausted', 'nextAction', 'rejected', 'resultFormat',
+]);
+
+function rejectedView(payload: Record<string, unknown>): string {
+  const view: Record<string, unknown> = {};
+  for (const key of REJECTED_VIEW_FIELDS) if (payload[key] !== undefined) view[key] = payload[key];
+  if (view.rejected === undefined) {
+    view.note = 'No rejected report is held here, so nothing is waiting to be restated. Call mdd_status for the run itself.';
+    return JSON.stringify(view);
+  }
+  const text = JSON.stringify(view);
+  if (bytes(text) <= STATUS_BUDGET_BYTES) return text;
+  const held = rejectedWithoutText(view.rejected);
+  return JSON.stringify({ ...view, ...(held ? { rejected: { ...held,
+    read: `The report is ${held.textBytes} bytes, more than one tool result can carry, so it cannot be shown even alone. The run still holds it unchanged. Either write the report again in full, fixing every problem rejected.reason names, and send it with mdd_phase_result, or ask the user before releasing the phase with mdd_reset scope phase, which runs the work again.` } } : {}) });
+}
+
 const OMITTED_NOTE = 'These fields were left out to keep this payload under the host output limit, so that task and question stay readable and copyable. Nothing was deleted: artifacts remain in the configured artifact store and every omitted field is still held by the run.';
 const COMPACT_NOTE = 'This is the compact view: the state machine, the next call, and what that call needs. Nothing was deleted — reference material the run still holds, such as acceptance, decisions, the plan, concerns, recorded evidence summaries, run history and the inline brief, was left out because a long run re-reads every payload on every later turn, and each phase re-reports what it needs. Call mdd_status with detail="full" to get any of it, including brief when a phase is yours to carry out.';
 
@@ -136,12 +175,13 @@ function bytes(text: string): number { return Buffer.byteLength(text); }
  * turn, so a 40 KB snapshot returned thirteen times is paid for hundreds of times over. The
  * compact view spends the same classification on that, rather than only on the host limit.
  */
-export type StatusView = 'full' | 'compact';
+export type StatusView = 'full' | 'compact' | 'rejected';
 
 /** Serialize an MDD tool payload, degrading in a fixed order rather than letting the host truncate it. */
 export function statusPayload(value: unknown, view: StatusView = 'full'): string {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return JSON.stringify(value) ?? 'null';
   const payload: Record<string, unknown> = { ...(value as Record<string, unknown>) };
+  if (view === 'rejected') return rejectedView(payload);
   const omitted: string[] = [];
   const render = () => JSON.stringify(omitted.length
     ? { ...payload, omitted, omittedNote: view === 'compact' ? COMPACT_NOTE : OMITTED_NOTE }
@@ -182,8 +222,9 @@ export function statusPayload(value: unknown, view: StatusView = 'full'): string
   for (const key of STATUS_DROP_ORDER) {
     if (bytes(text) <= STATUS_BUDGET_BYTES) break;
     if (!Object.hasOwn(payload, key) || payload[key] === undefined) continue;
-    delete payload[key];
-    omitted.push(key);
+    const held = key === 'rejected' ? rejectedWithoutText(payload.rejected) : undefined;
+    if (held) { payload.rejected = held; omitted.push('rejected.text'); }
+    else { delete payload[key]; omitted.push(key); }
     text = render();
   }
   // Truncating the task would be the one failure this module exists to prevent, so an oversized

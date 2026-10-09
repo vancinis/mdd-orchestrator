@@ -76,7 +76,7 @@ export function nextAction(status: unknown): NextAction | undefined {
   const rejected = object(value.rejected);
   if (rejected) {
     return { tool: 'mdd_phase_result',
-      why: 'The work is done and only its wording was refused. Take rejected.text, fix exactly what rejected.reason names, and send it back with mdd_phase_result. Do not re-dispatch and do not redo the work: this costs no attempt.' };
+      why: 'The work is done and only its wording was refused. Take rejected.text, fix every problem rejected.reason names, and send it back with mdd_phase_result. When this payload carries rejected.textOmitted instead of the text, call mdd_status with detail="rejected" to read it alone first. Do not re-dispatch and do not redo the work: this costs no attempt.' };
   }
 
   const workerProgress = object(value.workerProgress);

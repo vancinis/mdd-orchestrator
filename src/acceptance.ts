@@ -38,8 +38,8 @@ export const FIELD_SCHEMA: Record<string, string> = {
   changes: 'changes=[{path,reason}] lists the files this phase actually changed and why each one had to change. A bare path string is accepted where there is nothing to add.',
   noChangeReason: 'noChangeReason=text instead of changes when nothing needed changing.',
   delivered: 'delivered={what,implies} summarises the finished change for whoever reviews the pull request: what is now possible or different (what), and what that enables or requires of them (implies). Describe the outcome, never the mechanics — the per-file reasons already say how.',
-  checks: 'checks=[{command,exit}] reports only checks this phase actually ran.',
-  verification: 'verification={scenarios:[{requirementID,scenarioID,stepID,status,checks:[command],assessment}],steps:[{stepID,status,checks,assessment}],decisions:[{decisionID,status,checks,assessment}],changes,limits:[]}. Status is verified/not-verified/deviation. Assessment explains source evidence and limits, not just a pass label. Cover all held links exactly once.',
+  checks: 'checks=[{command,exit}] reports only checks this phase actually ran, at most 32. command is the exact command on one line, of any length, with no line breaks, tabs or other control characters; exit is its integer exit code, or null when it did not finish.',
+  verification: 'verification={scenarios:[{requirementID,scenarioID,stepID,status,checks:[command],assessment}],steps:[{stepID,status,checks,assessment}],decisions:[{decisionID,status,checks,assessment}],changes,limits:[]}. Status is verified/not-verified/deviation. Each checks entry repeats a command exactly as reported in checks; a verified row names at least one, and every one it names exited 0. Assessment explains source evidence and limits, not just a pass label. assessment and changes are one line of at most 500 characters; limits holds at most four one-line items of at most 250 characters each. Cover all held links exactly once.',
 };
 /**
  * Fields a phase reported that belong to no phase. They are dropped rather than fatal: a finished
@@ -55,8 +55,31 @@ export function phaseFields(phase: Phase, result: Record<string, unknown>): { fi
   }
   return { fields, ignored: ignored.slice(0, 16) };
 }
+/** A control character named so it can be found: its code point, and what it usually is. */
+function controlName(character: string): string {
+  const code = character.codePointAt(0)!;
+  const usual: Record<number, string> = { 9: 'a tab', 10: 'a line break', 13: 'a carriage return' };
+  return `U+${code.toString(16).toUpperCase().padStart(4, '0')}${usual[code] ? ` (${usual[code]})` : ''}`;
+}
+/**
+ * One-line report text. The rejection says which rule failed, where, and on what value: a message
+ * that listed every rule at once once sent a coordinator looking for a control character in a
+ * command whose only problem was its length, with no way to tell which of twelve commands it was.
+ * `max` may be `Infinity` where a length limit protects nothing, as for an executed command.
+ */
 export function shortText(value: unknown, label: string, max = 500): string {
-  if (typeof value !== 'string' || !value.trim() || value.length > max || /[\x00-\x1f\x7f]/.test(value)) throw new Error(`${label} must be concise nonempty text without control characters.`);
+  if (value === undefined) throw new Error(`${label} is missing.`);
+  if (typeof value !== 'string') throw new Error(`${label} must be text; it read ${preview(value)}.`);
+  if (!value.trim()) throw new Error(`${label} is empty; give nonempty text.`);
+  const control = /[\x00-\x1f\x7f]/.exec(value);
+  const problems = [
+    ...(control ? [`contains the control character ${controlName(control[0])} at character ${control.index + 1}`] : []),
+    ...(value.length > max ? [`is ${value.length} characters, above its ${max}-character limit`] : []),
+  ];
+  if (problems.length) {
+    const fixes = [...(control ? ['keep it on one line without control characters'] : []), ...(value.length > max ? ['shorten it'] : [])];
+    throw new Error(`${label} ${preview(value)} ${problems.join(' and ')}. To fix it, ${fixes.join(' and ')}.`);
+  }
   return value.trim();
 }
 /** Rejected values are echoed back bounded: an actor can only remap an ID it can see named. */
@@ -125,12 +148,12 @@ export const MAX_REPORTED_PROBLEMS = 8;
  * A single problem is still phrased exactly as it always was: it is the common case, and wrapping
  * one complaint in a list of one makes the message harder to act on, not easier.
  */
-function raise(problems: readonly string[], subject: string): void {
+export function raise(problems: readonly string[], subject: string): void {
   if (!problems.length) return;
   if (problems.length === 1) throw new Error(problems[0]!);
   const shown = problems.slice(0, MAX_REPORTED_PROBLEMS);
   const more = problems.length - shown.length;
-  throw new Error(`${subject} has ${problems.length} problem(s), and they are all in the links rather than in the work. Fix them together and restate the report once: ${shown.map((problem, index) => `(${index + 1}) ${problem}`).join(' ')}${more ? ` ...and ${more} more of the same kind.` : ''}`);
+  throw new Error(`${subject} has ${problems.length} problem(s), and they are all in the report rather than in the work. Fix them together and restate the report once: ${shown.map((problem, index) => `(${index + 1}) ${problem}`).join(' ')}${more ? ` ...and ${more} more of the same kind.` : ''}`);
 }
 export function validatePlan(accepted: Acceptance, choices: Decision[], steps: Deliverable[]): void {
   const scenarios = accepted.requirements.flatMap(requirement => requirement.scenarios.map(scenario => ({ id: scenario.id, requirement: requirement.id })));
@@ -168,59 +191,122 @@ export function validatePlan(accepted: Acceptance, choices: Decision[], steps: D
   }
   raise(problems, 'The plan');
 }
-export function verification(value: unknown, accepted: Acceptance, choices: Decision[], planned: Deliverable[], reported: string[] = [], passed: string[] = reported): Verification {
-  const input = objectWithKeys(value, 'verification', ['scenarios', 'steps', 'decisions', 'changes', 'limits']);
-  const assess = (entry: Record<string, unknown>, label: string): Assessment => {
-    if (!['verified', 'not-verified', 'deviation'].includes(String(entry.status))) throw new Error(`The assessment of ${label} has unknown status ${preview(entry.status)}. Use verified, not-verified or deviation.`);
-    const checks = items(entry.checks, `assessment checks of ${label}`, true).map(value => shortText(value, `check reference of ${label}`, 500));
-    const duplicate = checks.find((command, index) => checks.indexOf(command) !== index);
-    if (duplicate !== undefined) throw new Error(`The assessment of ${label} repeats the check reference ${preview(duplicate)}.`);
-    if (entry.status === 'verified' && !checks.length) throw new Error(`The verified assessment of ${label} must name the check it relies on.`);
-    // The report must be internally consistent: an assessment cannot lean on a check the same
-    // phase never reported running. MDD does not re-run it, so this is the honesty it can offer.
-    const unreported = checks.find(command => !reported.includes(command));
-    if (unreported !== undefined) throw new Error(`The assessment of ${label} cites check ${preview(unreported)}, which this phase did not report running. Reported checks: ${reported.length ? reported.map(preview).join(', ') : 'none'}.`);
-    const failed = entry.status === 'verified' ? checks.find(command => !passed.includes(command)) : undefined;
-    if (failed !== undefined) throw new Error(`The verified assessment of ${label} rests on check ${preview(failed)}, which did not pass.`);
-    return { status: entry.status as Assessment['status'], checks, assessment: shortText(entry.assessment, `source-based assessment of ${label}`) };
+/** The plan a verification answers to. Without it, only the report's own consistency is checked. */
+export type HeldPlan = { accepted: Acceptance; choices: Decision[]; planned: Deliverable[] };
+/** One wording for a passed Verify whose own assessments do not support a match, wherever it is checked. */
+export const UNMATCHED_PASS = 'Requirements or plan remain not verified or deviate from the held plan. Report outcome failed, or close the gaps, rather than claiming a match the assessments do not support.';
+/** Runs one independent check and keeps its complaint, instead of stopping the whole reading at it. */
+function attempt<T>(problems: string[], read: () => T): T | undefined {
+  try { return read(); }
+  catch (error) { problems.push(error instanceof Error ? error.message : String(error)); return undefined; }
+}
+/**
+ * Reads a verification report and collects everything wrong with it, rather than the first thing.
+ *
+ * A Verify report is the most expensive document a run restates: it arrives after every check has
+ * run, and on one observed run it was 33 KB. Stopping at the first problem there meant a command
+ * that was too long was fixed, re-sent, and then rejected again for a fifth limit that had been in
+ * the same report all along. Every check below is independent of the others, so they all run.
+ *
+ * `reported` and `passed` are the commands the same report says it ran, and which of them exited
+ * 0. They are undefined when the checks list itself could not be read: that list is reported once,
+ * not once more for every assessment that cites it. Without `held`, IDs are checked as IDs only —
+ * which links exist is state the run holds — and that is the form `mdd_check_report` can answer.
+ */
+export function readVerification(value: unknown, held: HeldPlan | undefined, reported: readonly string[] | undefined, passed: readonly string[] | undefined): { verification?: Verification; problems: string[] } {
+  const problems: string[] = [];
+  const input = attempt(problems, () => objectWithKeys(value, 'verification', ['scenarios', 'steps', 'decisions', 'changes', 'limits']));
+  if (!input) return { problems };
+  const assess = (entry: Record<string, unknown>, label: string): Assessment | undefined => {
+    const own: string[] = [];
+    const status = ['verified', 'not-verified', 'deviation'].includes(String(entry.status)) ? entry.status as Assessment['status'] : undefined;
+    if (!status) own.push(`The assessment of ${label} has unknown status ${preview(entry.status)}. Use verified, not-verified or deviation.`);
+    const checks = attempt(own, () => items(entry.checks, `assessment checks of ${label}`, true).map((value, index) => shortText(value, `check reference ${index + 1} of ${label}`, Infinity)));
+    if (checks) {
+      const duplicate = checks.find((command, index) => checks.indexOf(command) !== index);
+      if (duplicate !== undefined) own.push(`The assessment of ${label} repeats the check reference ${preview(duplicate)}.`);
+      if (status === 'verified' && !checks.length) own.push(`The verified assessment of ${label} must name the check it relies on.`);
+      // The report must be internally consistent: an assessment cannot lean on a check the same
+      // phase never reported running. MDD does not re-run it, so this is the honesty it can offer.
+      const unreported = reported && checks.find(command => !reported.includes(command));
+      const failed = status === 'verified' && passed ? checks.find(command => !passed.includes(command)) : undefined;
+      if (unreported !== undefined) own.push(`The assessment of ${label} cites check ${preview(unreported)}, which this phase did not report running. Reported checks: ${reported!.length ? reported!.map(preview).join(', ') : 'none'}.`);
+      else if (failed !== undefined) own.push(`The verified assessment of ${label} rests on check ${preview(failed)}, which did not pass.`);
+    }
+    const assessment = attempt(own, () => shortText(entry.assessment, `source-based assessment of ${label}`));
+    problems.push(...own);
+    return own.length ? undefined : { status: status!, checks: checks!, assessment: assessment! };
   };
-  const expected = planned.flatMap(step => step.scenarios.map(scenarioID => ({ step, scenarioID, requirementID: accepted.requirements.find(item => item.scenarios.some(scenario => scenario.id === scenarioID))!.id })));
-  const scenarios = items(input.scenarios, 'scenario coverage').map(value => {
-    const entry = objectWithKeys(value, 'scenario coverage', ['requirementID', 'scenarioID', 'stepID', 'status', 'checks', 'assessment']);
-    const link = expected.find(item => item.requirementID === entry.requirementID && item.scenarioID === entry.scenarioID && item.step.id === entry.stepID);
-    if (!link) throw new Error(`Verification invents the link ${preview(entry.requirementID)}/${preview(entry.scenarioID)}/${preview(entry.stepID)}. Held links: ${expected.map(item => `${item.requirementID}/${item.scenarioID}/${item.step.id}`).join(', ')}.`);
-    return { requirementID: link.requirementID, scenarioID: link.scenarioID, stepID: link.step.id, ...assess(entry, `scenario ${link.scenarioID} on deliverable ${link.step.id}`) };
-  });
-  const coverage: string[] = [];
-  const missingLinks = expected.filter(item => !scenarios.some(covered => covered.scenarioID === item.scenarioID && covered.stepID === item.step.id));
-  const repeatedLink = scenarios.find((item, index) => scenarios.findIndex(other => other.scenarioID === item.scenarioID && other.stepID === item.stepID) !== index);
-  if (missingLinks.length) coverage.push(`Verification omits scenario coverage for ${missingLinks.map(item => `${item.scenarioID} on ${item.step.id}`).join(', ')}.`);
-  if (repeatedLink) coverage.push(`Verification covers scenario ${repeatedLink.scenarioID} on deliverable ${repeatedLink.stepID} more than once.`);
-  raise(coverage, 'The verification report');
-  const steps = items(input.steps, 'step coverage').map(value => {
-    const entry = objectWithKeys(value, 'step coverage', ['stepID', 'status', 'checks', 'assessment']);
-    const step = planned.find(item => item.id === entry.stepID);
-    if (!step) throw new Error(`Verification invents planned deliverable ${preview(entry.stepID)}. Planned deliverables: ${planned.map(item => item.id).join(', ')}.`);
-    return { stepID: step.id, ...assess(entry, `deliverable ${step.id}`) };
-  });
-  const decisionCoverage = items(input.decisions, 'decision coverage', true).map(value => {
-    const entry = objectWithKeys(value, 'decision coverage', ['decisionID', 'status', 'checks', 'assessment']);
-    if (!choices.some(item => item.id === entry.decisionID)) throw new Error(`Verification invents plan decision ${preview(entry.decisionID)}. Plan decisions: ${choices.length ? choices.map(item => item.id).join(', ') : 'none'}.`);
-    return { decisionID: id(entry.decisionID, 'decision coverage ID'), ...assess(entry, `decision ${String(entry.decisionID)}`) };
-  });
-  const closing: string[] = [];
-  const uncoveredStep = planned.find(step => !steps.some(item => item.stepID === step.id));
-  const repeatedStep = steps.find((item, index) => steps.findIndex(other => other.stepID === item.stepID) !== index);
-  if (uncoveredStep) closing.push(`Verification omits coverage of planned deliverable ${uncoveredStep.id}.`);
-  if (repeatedStep) closing.push(`Verification covers planned deliverable ${repeatedStep.stepID} more than once.`);
-  const uncoveredDecision = choices.find(decision => !decisionCoverage.some(item => item.decisionID === decision.id));
-  const repeatedDecision = decisionCoverage.find((item, index) => decisionCoverage.findIndex(other => other.decisionID === item.decisionID) !== index);
-  if (uncoveredDecision) closing.push(`Verification omits coverage of plan decision ${uncoveredDecision.id}.`);
-  if (repeatedDecision) closing.push(`Verification covers plan decision ${repeatedDecision.decisionID} more than once.`);
-  raise(closing, 'The verification report');
-  const limits = items(input.limits, 'remaining limits', true).map(value => shortText(value, 'remaining limit', 250));
-  if (limits.length > 4) throw new Error('Summarize material limits in at most four concise items.');
-  return { scenarios, steps, decisions: decisionCoverage, changes: shortText(input.changes, 'what changed'), limits, matched: [...scenarios, ...steps, ...decisionCoverage].every(item => item.status === 'verified') };
+  // A row whose assessment is malformed still covers its link: counting it as missing too would
+  // report one mistake twice.
+  const expected = held ? held.planned.flatMap(step => step.scenarios.map(scenarioID => ({ step, scenarioID, requirementID: held.accepted.requirements.find(item => item.scenarios.some(scenario => scenario.id === scenarioID))!.id }))) : [];
+  const scenarios: Verification['scenarios'] = [];
+  const coveredLinks: { scenarioID: string; stepID: string }[] = [];
+  for (const value of attempt(problems, () => items(input.scenarios, 'scenario coverage')) ?? []) {
+    const entry = attempt(problems, () => objectWithKeys(value, 'scenario coverage', ['requirementID', 'scenarioID', 'stepID', 'status', 'checks', 'assessment']));
+    if (!entry) continue;
+    let link: { requirementID: string; scenarioID: string; stepID: string } | undefined;
+    if (held) {
+      const found = expected.find(item => item.requirementID === entry.requirementID && item.scenarioID === entry.scenarioID && item.step.id === entry.stepID);
+      if (!found) { problems.push(`Verification invents the link ${preview(entry.requirementID)}/${preview(entry.scenarioID)}/${preview(entry.stepID)}. Held links: ${expected.map(item => `${item.requirementID}/${item.scenarioID}/${item.step.id}`).join(', ')}.`); continue; }
+      link = { requirementID: found.requirementID, scenarioID: found.scenarioID, stepID: found.step.id };
+    } else {
+      link = attempt(problems, () => ({ requirementID: id(entry.requirementID, 'scenario coverage requirementID'), scenarioID: id(entry.scenarioID, 'scenario coverage scenarioID'), stepID: id(entry.stepID, 'scenario coverage stepID') }));
+      if (!link) continue;
+    }
+    coveredLinks.push(link);
+    const checked = assess(entry, `scenario ${link.scenarioID} on deliverable ${link.stepID}`);
+    if (checked) scenarios.push({ ...link, ...checked });
+  }
+  const missingLinks = expected.filter(item => !coveredLinks.some(covered => covered.scenarioID === item.scenarioID && covered.stepID === item.step.id));
+  const repeatedLink = coveredLinks.find((item, index) => coveredLinks.findIndex(other => other.scenarioID === item.scenarioID && other.stepID === item.stepID) !== index);
+  if (missingLinks.length) problems.push(`Verification omits scenario coverage for ${missingLinks.map(item => `${item.scenarioID} on ${item.step.id}`).join(', ')}.`);
+  if (repeatedLink) problems.push(`Verification covers scenario ${repeatedLink.scenarioID} on deliverable ${repeatedLink.stepID} more than once.`);
+  const steps: Verification['steps'] = [];
+  const coveredSteps: string[] = [];
+  for (const value of attempt(problems, () => items(input.steps, 'step coverage')) ?? []) {
+    const entry = attempt(problems, () => objectWithKeys(value, 'step coverage', ['stepID', 'status', 'checks', 'assessment']));
+    if (!entry) continue;
+    const stepID = held ? held.planned.find(item => item.id === entry.stepID)?.id : attempt(problems, () => id(entry.stepID, 'step coverage stepID'));
+    if (stepID === undefined) {
+      if (held) problems.push(`Verification invents planned deliverable ${preview(entry.stepID)}. Planned deliverables: ${held.planned.map(item => item.id).join(', ')}.`);
+      continue;
+    }
+    coveredSteps.push(stepID);
+    const checked = assess(entry, `deliverable ${stepID}`);
+    if (checked) steps.push({ stepID, ...checked });
+  }
+  const decisions: Verification['decisions'] = [];
+  const coveredDecisions: string[] = [];
+  for (const value of attempt(problems, () => items(input.decisions, 'decision coverage', true)) ?? []) {
+    const entry = attempt(problems, () => objectWithKeys(value, 'decision coverage', ['decisionID', 'status', 'checks', 'assessment']));
+    if (!entry) continue;
+    const decisionID = held ? held.choices.find(item => item.id === entry.decisionID)?.id : attempt(problems, () => id(entry.decisionID, 'decision coverage ID'));
+    if (decisionID === undefined) {
+      if (held) problems.push(`Verification invents plan decision ${preview(entry.decisionID)}. Plan decisions: ${held.choices.length ? held.choices.map(item => item.id).join(', ') : 'none'}.`);
+      continue;
+    }
+    coveredDecisions.push(decisionID);
+    const checked = assess(entry, `decision ${decisionID}`);
+    if (checked) decisions.push({ decisionID, ...checked });
+  }
+  for (const step of held?.planned ?? []) if (!coveredSteps.includes(step.id)) problems.push(`Verification omits coverage of planned deliverable ${step.id}.`);
+  const repeatedStep = coveredSteps.find((item, index) => coveredSteps.indexOf(item) !== index);
+  if (repeatedStep !== undefined) problems.push(`Verification covers planned deliverable ${repeatedStep} more than once.`);
+  for (const decision of held?.choices ?? []) if (!coveredDecisions.includes(decision.id)) problems.push(`Verification omits coverage of plan decision ${decision.id}.`);
+  const repeatedDecision = coveredDecisions.find((item, index) => coveredDecisions.indexOf(item) !== index);
+  if (repeatedDecision !== undefined) problems.push(`Verification covers plan decision ${repeatedDecision} more than once.`);
+  const listed = attempt(problems, () => items(input.limits, 'remaining limits', true)) ?? [];
+  const limits = listed.map((value, index) => attempt(problems, () => shortText(value, `remaining limit ${index + 1}`, 250)));
+  if (listed.length > 4) problems.push(`Summarize material limits in at most four concise items; this report lists ${listed.length}. Merge or drop the least material ones.`);
+  const changes = attempt(problems, () => shortText(input.changes, 'what changed'));
+  if (problems.length) return { problems };
+  return { problems, verification: { scenarios, steps, decisions, changes: changes!, limits: limits as string[], matched: [...scenarios, ...steps, ...decisions].every(item => item.status === 'verified') } };
+}
+export function verification(value: unknown, accepted: Acceptance, choices: Decision[], planned: Deliverable[], reported: string[] = [], passed: string[] = reported): Verification {
+  const read = readVerification(value, { accepted, choices, planned }, reported, passed);
+  raise(read.problems, 'The verification report');
+  return read.verification!;
 }
 export const TRACE_HEADING = '## Acceptance and plan links';
 /** The canonical trace section is adapter-owned; an actor writing it would fabricate links. */
