@@ -13,7 +13,8 @@ import { ProgressGuard } from '../dist/progress.js';
 import { Workflow } from '../dist/workflow.js';
 import { defaultSettings } from '../dist/settings.js';
 import { saveGlobalSettings } from '../dist/global-settings.js';
-import { isolateHome, memoryServer, reportDocument, traceFixture } from './adapter-fixture.mjs';
+import { isolateHome, memoryServer, reportDocument, traceFixture, structuredTraceFixture, throughRiskStop } from './adapter-fixture.mjs';
+import { projectTargetTransfer } from '../dist/transfer.js';
 import { RunOwnershipStore } from '../dist/run-ownership.js';
 import { PhaseRunner } from '../dist/phase-runner.js';
 import { EngramHttp } from '../dist/engram-http.js';
@@ -24,6 +25,45 @@ const sourceID = 'ses_source';
 const runID = 'run_explicit';
 const userText = `Continue MDD sourceSessionID=${sourceID} runID=${runID} here.`;
 const answers = { certainty: 'very-sure', artifactStore: 'none', mode: 'automatic', summary: 'low' };
+
+for (const legacy of [false, true]) {
+  test(`SA-2: transfer preserves the frozen ${legacy ? 'legacy' : 'structured'} held plan and target prompts`, async t => {
+    const root = mkdtempSync(join(tmpdir(), 'mdd-transfer-verification-'));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const store = new CheckpointStore(root); const progress = new ProgressGuard(root);
+    const source = { sessionID: 'source-contract', agent: 'mdd-orchestrator', directory: root, worktree: root };
+    const target = { ...source, sessionID: 'target-contract' };
+    const inspect = { parent: async () => {}, result: async (_r, _c, _p, output) => output, stopped: async () => true };
+    const first = new PhaseRunner(inspect, { checkpoint: store, progress });
+    await first.start({ preflight: { answers }, requirements: 'Transfer the exact held contract.' }, source,
+      { requirementsConfirmed: true, userMessageID: 'source-message' });
+    if (legacy) {
+      const historical = store.read(source.sessionID).checkpoint;
+      delete historical.data.verificationVersion;
+      historical.dataDigest = sealResumeData(historical.data, historical.runID, historical.parent, historical.events, historical.stable);
+      store.clear(source.sessionID); store.write(source.sessionID, historical);
+    }
+    const runner = new PhaseRunner(inspect, { checkpoint: store, progress });
+    assert.deepEqual(await runner.restore(source), { restored: true });
+    const ready = await throughRiskStop(runner, source.sessionID);
+    const trace = legacy ? traceFixture() : structuredTraceFixture();
+    const call = { sessionID: source.sessionID, callID: 'plan-contract' };
+    await runner.after(call, await runner.before(call, ready.task), reportDocument({ evidenceSummary: 'Plan held.', artifact: 'Boundary plan.', ...trace }));
+    const saved = store.read(source.sessionID).checkpoint;
+    const proof = { sessionID: target.sessionID, userMessageID: 'target-message', latest: true, authored: true,
+      userText: `Continue sourceSessionID=${source.sessionID} runID=${saved.runID}` };
+    const projected = projectTargetTransfer(saved, progress.read(source.sessionID), target, proof);
+    assert.equal(projected.checkpoint.data.verificationVersion, legacy ? undefined : 1);
+    assert.deepEqual(projected.checkpoint.data.planned, trace.deliverables);
+    store.write(target.sessionID, projected.checkpoint);
+    progress.write(target.sessionID, projected.progress);
+    const restored = new PhaseRunner(inspect, { checkpoint: store, progress });
+    assert.deepEqual(await restored.restore(target), { restored: true });
+    const args = await restored.before({ sessionID: target.sessionID, callID: 'target-apply' }, restored.status(target.sessionID).task);
+    assert.equal(/verificationVersion=1/.test(args.prompt), !legacy);
+    assert.deepEqual(JSON.parse(args.prompt.match(/^Applicable deliverables: (.*)$/m)[1]), trace.deliverables);
+  });
+}
 
 /** A validated verdict and its diagnostic artifact reference, shaped as checkpoint.ts expects. */
 function riskVerdict(route) {

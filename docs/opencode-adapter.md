@@ -3,8 +3,66 @@
 This opt-in adapter targets OpenCode **V2 2.0.22** and preserves the approved low/high main routes.
 It uses the native permission-controlled foreground `subagent` tool, not SDK prompting.
 When optional Engram memory is enabled, receipts must be read back before dispatch and before recording a result.
-Verify is grounded in actual native command outcomes. This is **execution evidence, not
-a guarantee of semantic correctness or independent review**. Model-backed E2E is pending.
+Verify reports commands and their outcomes. MDD validates the **consistency of actor-reported
+evidence**, not independent execution attestation, semantic correctness or independent review.
+Model-backed E2E is pending.
+
+## Structured verification and legacy replay
+
+New runs capture `verificationVersion: 1` before planning. The runner supplies the frozen contract
+and held plan to the shared validators; an actor cannot select the legacy contract by omitting
+structured fields. The marker survives checkpoints, dossiers, restart and transfer. Report format
+instructions select the recorded version, including on resumed runs.
+
+| Field | Version 1 contract |
+|---|---|
+| `deliverables[].checks` | Nonempty objects `{id, command, requirement, appliesWhen?}`. IDs are globally unique across the plan; `requirement` is `required` or `optional`. Declare conditions before execution. |
+| `checks` | Actual executions `{id, command, exit}` in chronological order. Each attempt has its own ID, including repeated commands. `exit` is an integer or `null` for an interrupted execution. |
+| Assessment `checks` | Execution IDs, covering every held scenario-step link, step and decision. A verified row cites successful final executions and explains source-based semantic evidence. |
+| `verification.checkResults` | Exactly one `{checkID, disposition, executions, reason?, equivalence?}` for each held check. Requiredness and applicability come from the held plan, never from this report. |
+| `verification.supplementalChecks` | Additional executions grouped as `{id, requirement, disposition, executions, reason?}`. Every execution is accounted for, including failures. Supplemental entries cannot overlap held evidence or downgrade held checks. |
+
+Disposition rules:
+
+- **passed / failed / ran:** at least one execution, ending in exit 0 / a nonzero exit / null.
+- **blocked:** no execution and a reason describing the blocker.
+- **not-applicable:** no execution, a condition already held in `appliesWhen`, and a source-based
+  reason explaining why it does not apply. Unconditional checks cannot be waived this way.
+- **replaced:** an actually executed successful replacement, a reason and an equivalence rationale
+  explaining how it covers the held check. Replacement references execution IDs, never another
+  replacement disposition. Command equality binds an attempt to a declared check; it does not
+  determine whether a check is material.
+
+Every disposition except `passed` requires a reason. Multiple attempts also require a reason.
+Preserve failed attempts and their order: the final attempt determines the disposition, and an
+earlier green attempt cannot support acceptance after a failed retry. One integration execution
+may support multiple held checks, but each must retain the same complete attempt history and
+provide equivalence evidence when replacing a different command. Do not invent duplicate executions.
+
+Required applicable failed, interrupted, blocked or missing results cannot earn PASS. Optional
+failures remain visible without blocking independently supported semantic acceptance; their failed
+executions cannot support verified rows. Supplemental dispositions are `passed`, `failed` or `ran`;
+required supplemental failures also prevent PASS. Successful checks alone never replace run-wide
+semantic acceptance coverage.
+
+`mdd_check_report` uses the version reported in the document for advisory form checking. It has no
+held plan and cannot authenticate requiredness or applicability. The runner checks the same report
+against its frozen plan. Neither validates that an actor actually executed a command or that its
+source-based applicability/equivalence rationale is true; these remain reported evidence.
+
+**Legacy records have no marker.** They resume the recorded command-based schema, retaining
+commands, outcomes and historical matched fields. MDD does not synthesize IDs, requiredness or
+execution proof. Status, preserved-run views and PR evidence limits label this weaker evidence.
+Mixed versioned/legacy payloads are rejected. Existing PR rendering retains command/exit counts,
+failures and reported limits for both contracts.
+
+PR facts carry the recorded verification version. For version 1, verification blockers use the
+runner's settled verification result, which includes unresolved required dispositions and semantic
+coverage. Optional failures and failed attempts followed by a successful retry remain visible under
+`Verificación` without becoming current blockers by themselves. Unresolved required checks and
+semantic gaps remain incomplete under `Bloqueos`, even when every recorded execution exited 0.
+Unversioned PR facts retain legacy behavior: every nonzero or interrupted execution is a blocker.
+Recorded limits, missing implementation evidence and uncertainty continue to be reported separately.
 
 ## Setup
 

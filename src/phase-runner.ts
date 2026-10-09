@@ -11,7 +11,7 @@ import { mddInstructions, packagedSkillPath, PHASE_SKILLS } from './phase-assets
 import type { PackagedSkillName } from './phase-assets.js';
 import type { LessonInput } from './lessons.js';
 import type { RunLedgerInput } from './run-ledger.js';
-import { changed, deliverables, delivered, executed, verifyReport } from './phase-evidence.js';
+import { changed, deliverables, delivered, executed, VERIFICATION_VERSION, verificationVersion, verifyReport, type VerificationVersion } from './phase-evidence.js';
 import type { ChangedFile, Check, Deliverable, Delivered } from './phase-evidence.js';
 import { emptyEvidence, invalidateEvidence, renderReport, renderClosure, phaseLabel, evidenceCoverage } from './reporting.js';
 import type { Evidence, EvidenceFlag, PhaseReport } from './reporting.js';
@@ -207,6 +207,7 @@ type Run = {
   history: ArtifactResult[]; calls: Set<string>; planned: Deliverable[]; evidence: Evidence;
   report: PhaseReport; started?: number; readyAt?: number; telemetryDiagnostic?: string;
   acceptance?: Acceptance; decisions: Decision[]; verification?: Verification; executedChecks: Check[]; changedFiles: number;
+  verificationVersion?: VerificationVersion;
   /** What Apply reported it changed and why, kept so a PR body can say more than a file count. */
   changedList: ChangedFile[];
   /** Apply's own summary of the finished change, for the reader of the pull request it becomes. */
@@ -966,6 +967,7 @@ export class PhaseRunner {
         ...(data.acceptance ? { acceptance: structuredClone(data.acceptance) } : {}),
         decisions: structuredClone(data.decisions), ...(data.verification ? { verification: structuredClone(data.verification) } : {}),
         executedChecks: structuredClone(data.executedChecks), changedFiles: data.changedFiles,
+        ...(data.verificationVersion ? { verificationVersion: data.verificationVersion } : {}),
         changedList: structuredClone(stable.changedList), ...(stable.delivered ? { delivered: { ...stable.delivered } } : {}),
         concerns: structuredClone(stable.concerns), context: structuredClone(data.context),
         ...(data.rework ? { rework: { ...data.rework } } : {}),
@@ -1052,7 +1054,7 @@ export class PhaseRunner {
     }
     const risking = this.#risking(run);
     const blockedRisk = risking && run.state === 'blocked' && run.workflow.nextAction().kind === 'blocked-risk';
-    const resultFormat = risking ? riskReportFormatLines() : reportFormatLines(run.phase);
+    const resultFormat = risking ? riskReportFormatLines() : reportFormatLines(run.phase, run.verificationVersion);
     return {
       runID: run.id, sessionID, phase: run.phase, state: run.state,
       // `phase` stays the last real phase; `stage` names the risk stop the task, attempt or
@@ -1093,6 +1095,8 @@ export class PhaseRunner {
       ...(blockedRisk ? { expandedReport: `${this.#visualFrame(run)}${this.#riskRecoveryReport(run)}` } : {}),
       visual: phaseVisual({ phase: run.phase, state: run.state, workflow: run.workflow.snapshot() }, presentationSettings().ascii),
       acceptance: structuredClone(run.acceptance), decisions: structuredClone(run.decisions), planned: structuredClone(run.planned), verification: structuredClone(run.verification),
+      ...(run.verificationVersion ? { verificationVersion: run.verificationVersion } : {}),
+      verificationEvidence: run.verificationVersion ? 'Structured actor-reported evidence; execution is not independently attested.' : 'Legacy command-based evidence; requiredness and execution identity were not recorded.',
       uncertain: run.uncertain, attempts: run.attempts, runAttempts: run.spent, recoverable: true, mode: run.mode,
       ...(run.fallbackExhausted ? { fallbackExhausted: true } : {}),
       ...(run.reportRepairExhausted ? { reportRepairExhausted: true } : {}),
@@ -1439,7 +1443,7 @@ export class PhaseRunner {
       args: { description: '', subagent_type: first.phase, prompt: '' }, state: 'starting',
       history: [], calls: new Set(previous?.calls ?? inherited), planned: [], evidence: { ...emptyEvidence(), requirements: trusted?.requirementsConfirmed ? 'confirmed' : 'unearned' },
       uncertain: false, userMessageID: trusted?.userMessageID ?? '', concerns: [], contexts: [], context, malformed: 0,
-      decisions: [], executedChecks: [], changedFiles: 0, changedList: [], attempts: 0, spent: 0, mode: 'delegate', brief: '',
+      decisions: [], executedChecks: [], verificationVersion: VERIFICATION_VERSION, changedFiles: 0, changedList: [], attempts: 0, spent: 0, mode: 'delegate', brief: '',
       report: { phase: first.phase, summary: `Preparando ${phaseLabel(first.phase).toLowerCase()}.`, how: [], status: 'in-progress', evidence: emptyEvidence() },
     };
     this.#runs.set(runtime.sessionID, run);
@@ -1938,15 +1942,17 @@ export class PhaseRunner {
       // The traceability fields are still validated link by link, and a mistake in them is still a
       // report that has to be restated. It is not a reason to re-run the phase that produced them.
       try {
+        if (result.verificationVersion !== undefined && verificationVersion(result.verificationVersion) !== run.verificationVersion)
+          throw new Error('Report verification version contradicts the frozen run contract.');
         if (run.phase === 'mdd-spec' && result.domain !== 'project') throw new MalformedReport('Specification domain must match the dispatched project storage namespace.');
         if (run.phase === 'mdd-verify') {
           if (!accepted) throw new Error('Verification has no held requirement map.');
           // The checks and the verification that cites them are read as one report, so every problem
           // in either reaches the restatement together instead of one rejection per round trip.
-          const read = verifyReport(result.checks, result.verification, { accepted, choices, planned });
+          const read = verifyReport(result.checks, result.verification, { accepted, choices, planned, verificationVersion: run.verificationVersion });
           ran = read.ran;
+          if (outcome === 'passed' && !read.verification!.matched) throw new MalformedReport(UNMATCHED_PASS);
           run.verification = read.verification!;
-          if (outcome === 'passed' && !run.verification.matched) throw new MalformedReport(UNMATCHED_PASS);
         }
         if (outcome === 'passed') {
           if (run.phase === 'mdd-plan' || run.phase === 'mdd-spec') accepted = acceptance(result.acceptance);
@@ -1956,7 +1962,7 @@ export class PhaseRunner {
           }
           if (run.phase === 'mdd-plan' || run.phase === 'mdd-tasks') {
             if (!accepted) throw new Error('Planning has no held requirement map.');
-            planned = deliverables(result.deliverables);
+            planned = deliverables(result.deliverables, run.verificationVersion);
             validatePlan(accepted, choices, planned);
             nextEvidence.plan = 'confirmed';
           }
@@ -1969,7 +1975,7 @@ export class PhaseRunner {
             if (applied.paths.length) nextEvidence.implementation = 'confirmed';
             // Apply may report the checks it ran; they are its claim and are shown as one. Only
             // Verify's checks earn the evidence flag, so reporting them here proves nothing extra.
-            ran = executed(result.checks);
+            ran = executed(result.checks, run.verificationVersion);
             // The phase that did the work is the one that can say what the work delivered. A
             // malformed summary is named back to it rather than failing the implementation.
             summary = delivered(result.delivered);
@@ -2451,13 +2457,15 @@ export class PhaseRunner {
     const run = this.#runs.get(sessionID);
     if (!run) throw new Error('No recorded MDD run is available for this parent. A draft cannot claim implementation evidence.');
     return { runID: run.id, goal: run.acceptance?.goal ?? 'Unverified: a requested outcome has not been recorded.',
+      ...(run.verificationVersion ? { verificationVersion: run.verificationVersion } : {}),
       ...(run.delivered ? { delivered: { ...run.delivered } } : {}),
       // Verify's own account of what it found. It belongs under the verification heading: printed
       // under Cambios it read as a description of the change, which is what it is not.
       verification: run.verification?.changes ?? 'Implementation details remain unverified; inspect the recorded artifact.',
       changedFiles: run.changedFiles, files: run.changedList.map(file => ({ ...file })), checks: run.executedChecks.map(check => ({ ...check })),
       verified: run.state === 'complete' && run.verification?.matched === true && run.evidence.checks === 'confirmed',
-      uncertain: run.uncertain, limits: [...(run.verification?.limits ?? [])] };
+      uncertain: run.uncertain, limits: [...(run.verification?.limits ?? []),
+        ...(!run.verificationVersion && run.verification ? ['Legacy command-based evidence; requiredness and execution identity were not recorded.'] : [])] };
   }
 
   /**
@@ -2889,6 +2897,7 @@ export class PhaseRunner {
     const settled = ['ready', 'blocked', 'await-approval', 'complete'] as const;
     return {
       version: DOSSIER_VERSION, runID: run.id,
+      ...(run.verificationVersion ? { verificationVersion: run.verificationVersion } : {}),
       parent: { sessionID: run.runtime.sessionID, directory: run.runtime.directory, worktree: run.runtime.worktree },
       userMessageID: run.userMessageID, requirements: run.requirements, context: structuredClone(run.context),
       answers: snapshot.answers, route: [...snapshot.evaluation.phases], phase: run.phase,
@@ -3077,6 +3086,7 @@ export class PhaseRunner {
       const body = (item: ArtifactResult) => ({ phase: item.ref.phase as Phase, ...(item.ref.batchID ? { batchID: item.ref.batchID } : {}), content: item.content,
         digest: createHash('sha256').update(item.content).digest('hex') });
       const data: ResumeData = {
+        ...(run.verificationVersion ? { verificationVersion: run.verificationVersion } : {}),
         ...(run.workerPolicy ? { workerPolicy: { ...run.workerPolicy } } : {}),
         ...(run.workerState ? { workerState: structuredClone(run.workerState) } : {}),
         directory: run.runtime.directory, worktree: run.runtime.worktree, userMessageID: run.userMessageID,
@@ -3501,8 +3511,8 @@ export class PhaseRunner {
       'mdd-spec': 'Supply acceptance with a concise A-to-B goal and stable requirement/scenario IDs reflecting the user request. Check completeness against the original user request, not only the proposal: identify omitted behavior, exclusions and unresolved assumptions in the artifact. Include concrete happy/error scenarios where applicable. Supply domain="project", the fixed storage namespace.',
       'mdd-design': 'Use held acceptance IDs to define only relevant decisions, boundaries and test seams. Anchor decisions to existing implementation seams and important constraints with concrete source references; explain compatibility, security and operational tradeoffs where relevant. Supply decisions; do not redefine requirements or invent extra process.',
       'mdd-tasks': 'Supply ordered deliverables linked to held scenarios and decisions. Distinguish assigned completion checks from deferred integration verification in the artifact, including who runs each check and what remains unknown until singular Verify. A scoped worker cannot run commands; require source evidence and defer execution explicitly. Keep check commands applicable to acceptance; no extra unrelated checks. Preserve ID and dependency consistency.',
-      'mdd-apply': 'Implement exactly the ONE assigned deliverable, not the full plan. Dependencies and prior results are context, not additional assignments. Supply completed=[assignedStepID] only when it is fully finished; partial, failed or interrupted work must report outcome failed, never fabricated completion. Supply changes as [{path,reason}], one entry per file you changed, where reason says why it had to change. A bare path is accepted when there is nothing to add. Use noChangeReason when nothing needed changing. Report only checks you ran as checks [{command,exit}]; an empty list is honest when you ran none. Report integration assumptions and deferred integration checks in the artifact so later actors know what this batch has not established.',
-      'mdd-verify': 'Check requirements, design decisions AND the held plan against the implementation. Run applicable tests and build checks as appropriate, including planned checks when applicable; if a check is inapplicable or cannot run, explain why, its impact and what remains unknown. Supply checks [{command,exit}] for what you actually ran and verification for EVERY scenario-step pair, step and decision. Give source-based semantic assessments naming the check they rely on; use not-verified/deviation and outcome failed for gaps. Explain any deviation or failed/unrun check, its impact, and the next choices (improve, reject or request implementation rework) so the user can decide. An exit code is not semantic proof; never report a check you did not run.',
+      'mdd-apply': 'Implement exactly the ONE assigned deliverable, not the full plan. Dependencies and prior results are context, not additional assignments. Supply completed=[assignedStepID] only when it is fully finished; partial, failed or interrupted work must report outcome failed, never fabricated completion. Supply changes as [{path,reason}], one entry per file you changed, where reason says why it had to change. A bare path is accepted when there is nothing to add. Use noChangeReason when nothing needed changing. Report only checks you ran using the dispatched checks schema; an empty list is honest when you ran none. Report integration assumptions and deferred integration checks in the artifact so later actors know what this batch has not established.',
+      'mdd-verify': 'Check requirements, design decisions AND the held plan against the implementation. Run applicable tests and build checks as appropriate, including planned checks when applicable; if a check is inapplicable or cannot run, explain why, its impact and what remains unknown. Supply checks using the dispatched execution schema for what you actually ran and verification for EVERY scenario-step pair, step and decision. Give source-based semantic assessments naming the check they rely on; use not-verified/deviation and outcome failed for gaps. Explain any deviation or failed/unrun check, its impact, and the next choices (improve, reject or request implementation rework) so the user can decide. An exit code is not semantic proof; never report a check you did not run.',
     };
     const hint = run.nativeUsed || scopedWorker || assignedID !== undefined ? undefined : skillHint(PHASE_SKILLS[phase]);
     const instructions = [
@@ -3532,7 +3542,7 @@ export class PhaseRunner {
         : 'Planning is read-only for project sources: never implement or repair sources, tests, fixtures, snapshots, configuration or dependencies. Investigative checks may produce ordinary generated test/build outputs; report findings and gaps without changing declared inputs.',
       ...(phase === 'mdd-explore' ? [SINGULAR_EXPLORATION] : []),
       ...(phase === 'mdd-apply' && run.rework ? [`This is a correction pass: ${run.rework.after} reported failure and the user chose to fix the implementation. Its artifact is the newest dependency artifact below and lists every deviation and missing check; its summary was ${JSON.stringify(run.rework.summary)}. The changes already applied are in the working tree: keep them, correct what verification found, and add the tests it named as missing. Report in changes only the files this pass touched; earlier ones are kept.`] : []),
-      ...reportFormatLines(phase),
+      ...reportFormatLines(phase, run.verificationVersion),
     ];
     const data = (handoff: readonly unknown[], compacted: readonly ArtifactRef[]) => [
       `Requirements data: ${JSON.stringify(run.requirements)}`,

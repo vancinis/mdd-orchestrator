@@ -4,7 +4,8 @@ import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, writeFileSync, symlinkSync, rmSync, readdirSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { RunDossierStore, DOSSIER_MAX_BYTES, DOSSIER_VERSION } from '../dist/run-dossier.js';
+import { RunDossierStore, priorRunView, DOSSIER_MAX_BYTES, DOSSIER_VERSION } from '../dist/run-dossier.js';
+import { structuredTraceFixture, structuredVerificationFixture, traceFixture } from './adapter-fixture.mjs';
 
 function root(t) { const path = mkdtempSync(join(tmpdir(), 'mdd-dossier-')); t.after(() => rmSync(path, { recursive: true, force: true })); return path; }
 function file(path, parent) { return join(path, '.mdd', `run-${createHash('sha256').update(parent).digest('hex')}.json`); }
@@ -37,6 +38,50 @@ test('a preserved run round-trips and stays confined to its own parent', t => {
   store.clear('parent');
   assert.equal(store.read('parent'), undefined);
   assert.equal(store.read('unrelated').runID, 'run-two');
+});
+
+test('SA-2: dossier retains versioned verification and rejects mixed or contradictory records', t => {
+  const store = new RunDossierStore(root(t));
+  const trace = structuredTraceFixture(); const report = structuredVerificationFixture(trace);
+  const current = dossier({ verificationVersion: 1, acceptance: trace.acceptance, decisions: trace.decisions, planned: trace.deliverables,
+    verification: { ...report.verification, matched: true }, executedChecks: report.checks,
+    results: [{ phase: 'mdd-verify', outcome: 'passed', evidenceSummary: 'Verified.' }] });
+  store.write('parent', current);
+  assert.deepEqual(store.read('parent'), current);
+  assert.equal(priorRunView(current, 'record').verificationVersion, 1);
+  for (const mutate of [
+    item => { delete item.verificationVersion; },
+    item => { item.verificationVersion = 2; },
+    item => { item.planned = traceFixture().deliverables; },
+    item => { delete item.verification.checkResults; },
+    item => { delete item.executedChecks[0].id; },
+    item => { item.verification.matched = false; },
+    item => { delete item.verification; },
+    item => { item.planned = []; },
+  ]) {
+    const damaged = structuredClone(current); mutate(damaged);
+    assert.throws(() => store.write('parent', damaged));
+    assert.deepEqual(store.read('parent'), current, 'invalid evidence cannot replace the retained record');
+  }
+});
+
+test('SA-2: versioned dossiers cannot omit earned planning or invent unattached execution evidence', t => {
+  const store = new RunDossierStore(root(t));
+  assert.throws(() => store.write('parent', dossier({ verificationVersion: 1 })), /plan|acceptance/);
+  assert.throws(() => store.write('parent', dossier({ verificationVersion: 1, results: [],
+    executedChecks: [{ id: 'E1', command: 'npm test', exit: 0 }] })), /verification/);
+});
+
+test('SA-2: legacy dossier retains historical matched fields without synthesized proof', t => {
+  const store = new RunDossierStore(root(t));
+  const legacy = dossier({ planned: traceFixture().deliverables, executedChecks: [{ command: 'npm test', exit: 1 }],
+    verification: { matched: true, changes: 'Historical claim.', limits: ['Historical evidence is incomplete.'] } });
+  store.write('parent', legacy);
+  assert.deepEqual(store.read('parent'), legacy);
+  const view = priorRunView(store.read('parent'), 'record');
+  assert.match(view.verificationEvidence, /Legacy command-based/);
+  assert.equal(Object.hasOwn(view, 'verificationVersion'), false);
+  assert.equal(Object.hasOwn(view.executedChecks[0], 'id'), false);
 });
 
 test('a corrupt record fails closed without leaking what it held', t => {

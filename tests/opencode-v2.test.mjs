@@ -9,7 +9,7 @@ import { legacyHistory, v2Payload, contentText } from '../dist/opencode-v2.js';
 import { defaultSettings } from '../dist/settings.js';
 import { saveGlobalSettings } from '../dist/global-settings.js';
 import { RunOwnershipStore } from '../dist/run-ownership.js';
-import { isolateHome, answers, reportDocument, riskReport, traceFixture } from './adapter-fixture.mjs';
+import { isolateHome, answers, reportDocument, riskReport, structuredTraceFixture as traceFixture } from './adapter-fixture.mjs';
 
 test('plural task payloads map native arguments without a wrapper or single-member instruction', () => {
   const tasks = ['one', 'two'].map(prompt => ({ description: prompt, subagent_type: 'mdd-apply', prompt }));
@@ -500,6 +500,7 @@ for (const [enabled, version] of [[true, '2.0.22'], [false, '2.0.22'], [true, '2
   await f.toolHooks.get('execute.before')(call);
   const trace = traceFixture(join(f.root, 'one.txt'), 'one');
   trace.deliverables = ['one', 'two'].map(id => ({ ...trace.deliverables[0], id, path: join(f.root, `${id}.txt`),
+    checks: [{ id: `${id}-check`, command: 'npm test', requirement: 'required' }],
     dependsOn: [], parallel: { complete: true, reads: [], writes: [`${id}.txt`] } }));
   const text = reportDocument({ phase: 'mdd-plan', runID: ready.runID, callID: call.id, outcome: 'passed',
     evidenceSummary: 'Two explicitly independent tasks.', artifact: 'Implement the two boundaries.', ...trace });
@@ -737,10 +738,11 @@ test('V2 foreground phase hooks complete plan, Apply and Verify with durable mot
       if (phase === 'mdd-plan') Object.assign(result, trace);
       if (phase === 'mdd-apply') { result.completed = ['feature']; result.changes = [{ path: join(f.root, 'feature.txt'), reason: 'Implement the planned boundary.' }]; result.delivered = { what: 'Requested behavior is implemented.', implies: 'Consumers use the new boundary.' }; }
       if (phase === 'mdd-verify') {
-        result.checks = [{ command: 'npm test', exit: 0 }];
-        const assessment = { status: 'verified', checks: ['npm test'], assessment: 'Scoped checks support the expected behavior.' };
+        result.checks = [{ id: 'E1', command: 'npm test', exit: 0 }];
+        const assessment = { status: 'verified', checks: ['E1'], assessment: 'Scoped checks support the expected behavior.' };
         result.verification = { scenarios: ['S1', 'S2'].map(scenarioID => ({ requirementID: 'R1', scenarioID, stepID: 'feature', ...assessment })),
-          steps: [{ stepID: 'feature', ...assessment }], decisions: [{ decisionID: 'D1', ...assessment }], changes: 'Planned change implemented.', limits: [] };
+          steps: [{ stepID: 'feature', ...assessment }], decisions: [{ decisionID: 'D1', ...assessment }], changes: 'Planned change implemented.', limits: [],
+          checkResults: [{ checkID: 'feature-check', disposition: 'passed', executions: ['E1'] }], supplementalChecks: [] };
       }
       text = reportDocument(result);
     }
@@ -773,7 +775,8 @@ for (const failed of [false, true]) {
     await settleExploreAndRisk(f);
     const trace = traceFixture(join(f.root, 'first.txt'), 'first');
     trace.deliverables[0].scenarios = ['S1'];
-    trace.deliverables.push({ ...trace.deliverables[0], id: 'second', path: join(f.root, 'second.txt'), scenarios: ['S2'], dependsOn: ['first'] });
+    trace.deliverables.push({ ...trace.deliverables[0], id: 'second', path: join(f.root, 'second.txt'), scenarios: ['S2'], dependsOn: ['first'],
+      checks: [{ id: 'second-check', command: 'npm test', requirement: 'required' }] });
     const children = new Set();
     for (const [index, step] of ['plan', 'first', 'second'].entries()) {
       const ready = await f.call('mdd_status', {});

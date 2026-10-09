@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { createLegacyPlugin as plugin } from '../dist/opencode-plugin.js';
 import { defaultSettings, MODEL_ROLES } from '../dist/settings.js';
 import { saveGlobalSettings } from '../dist/global-settings.js';
-import { memoryServer, installCleanup, isolateHome, answers, traceFixture, reportDocument, riskReport } from './adapter-fixture.mjs';
+import { memoryServer, installCleanup, isolateHome, answers, structuredTraceFixture as traceFixture, reportDocument, riskReport } from './adapter-fixture.mjs';
 import { traceArtifact } from '../dist/acceptance.js';
 import { ManagedMemory } from '../dist/managed-memory.js';
 import { STATUS_BUDGET_BYTES, STATUS_COMPACT_KEEP, STATUS_DROP_ORDER, STATUS_PROTECTED_FIELDS } from '../dist/status-budget.js';
@@ -872,6 +872,7 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
     const standalone = args.prompt.includes('Standalone read-only investigation only');
     const own = { 'mdd-explore': [], 'mdd-propose': [], 'mdd-plan': ['acceptance', 'decisions', 'deliverables'], 'mdd-spec': ['domain', 'acceptance'],
       'mdd-design': ['decisions'], 'mdd-tasks': ['deliverables'], 'mdd-apply': ['changes', 'noChangeReason', 'checks', 'delivered', 'completed'], 'mdd-verify': ['checks', 'verification'] }[phase];
+    if (own.length && current.verificationVersion === 1) own.push('verificationVersion');
     if (!standalone) {
       assert.equal(args.prompt.includes(own.length ? `exactly these keys: ${own.join(', ')}.` : 'This phase reports no structured data'), true, `own field list in ${phase}`);
       // The report is prose with one structured block, never a serialized object.
@@ -942,7 +943,7 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
         const command = 'npm test';
         const text = '1 test passed';
         await tool('bash', { command, workdir: root, description: 'Run scoped tests' }, { output: text, metadata: { output: text, exit: options.exit === undefined ? 0 : options.exit, truncated: false } });
-        result.checks = [{ command, exit: options.exit === undefined ? 0 : options.exit }];
+        result.checks = [{ id: 'E1', command, exit: options.exit === undefined ? 0 : options.exit }];
       } else result.checks = [];
     } else await tool('read', { filePath: join(root, 'feature.txt') }, { output: 'Inspected project context.', metadata: { truncated: false } });
     const trace = traceFixture(join(root, 'feature.txt'), 'feature');
@@ -951,9 +952,11 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
     if (phase === 'mdd-design') result.decisions = trace.decisions;
     if (phase === 'mdd-tasks') result.deliverables = trace.deliverables;
     if (phase === 'mdd-verify') {
-      const assessment = { status: 'verified', checks: ['npm test'], assessment: 'The inspected boundary and planned check output support the expected behavior.' };
+      const assessment = { status: 'verified', checks: ['E1'], assessment: 'The inspected boundary and planned check output support the expected behavior.' };
       result.verification = { scenarios: ['S1', 'S2'].map(scenarioID => ({ requirementID: 'R1', scenarioID, stepID: 'feature', ...assessment })),
-        steps: [{ stepID: 'feature', ...assessment }], decisions: [{ decisionID: 'D1', ...assessment }], changes: options.noChange ? 'No implementation change was needed.' : 'The requested input handling is implemented.', limits: [] };
+        steps: [{ stepID: 'feature', ...assessment }], decisions: [{ decisionID: 'D1', ...assessment }], changes: options.noChange ? 'No implementation change was needed.' : 'The requested input handling is implemented.', limits: [],
+        checkResults: [{ checkID: 'feature-check', disposition: options.noChecks ? 'blocked' : options.exit === null ? 'ran' : options.exit ? 'failed' : 'passed',
+          executions: options.noChecks ? [] : ['E1'], reason: options.noChecks ? 'Checks unavailable.' : 'Observed fixture execution.' }], supplementalChecks: [] };
       if (options.coverageFault === 'missing') result.verification.scenarios.pop();
       if (options.coverageFault === 'invented') result.verification.scenarios[0].requirementID = 'invented';
       if (options.coverageFault === 'drift' || options.coverageFault === 'partial') {

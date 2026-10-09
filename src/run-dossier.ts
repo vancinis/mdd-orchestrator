@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 import { LocalFiles } from './local-files.js';
 import type { ArtifactRef } from './artifacts.js';
 import type { Acceptance, Decision, Verification } from './acceptance.js';
+import { acceptance, decisions, validatePlan } from './acceptance.js';
+import { deliverables, executed, retainedVerification, verificationVersion, type VerificationVersion } from './phase-evidence.js';
 import type { Concern } from './concerns.js';
 import type { Check, Deliverable, Delivered } from './phase-evidence.js';
 import type { Answers, Phase } from './policy.js';
@@ -41,6 +43,7 @@ export type PriorReceipt = { kind: 'preflight' | 'approval' | 'change' | 'clarif
   typed?: { source: 'form' | 'chat'; userMessageID?: string } };
 
 export type RunDossier = {
+  verificationVersion?: VerificationVersion;
   version: typeof DOSSIER_VERSION;
   runID: string;
   parent: { sessionID: string; directory: string; worktree: string };
@@ -103,6 +106,38 @@ function parse(value: unknown): RunDossier {
       !item.answers || typeof item.answers !== 'object' || !item.evidence || typeof item.evidence !== 'object') {
     throw new Error('shape');
   }
+  const version = verificationVersion(item.verificationVersion);
+  // Older dossiers were data-only and loosely shaped. Preserve their historical fields, but
+  // reject structured evidence with a missing marker rather than silently downgrading it.
+  const planned = item.planned as Deliverable[];
+  const checks = item.executedChecks as Check[];
+  const checked = item.verification as Verification | undefined;
+  if (!version) {
+    if (planned.some(step => step.checks !== undefined) || checks.some(check => check.id !== undefined) ||
+        checked?.checkResults !== undefined || checked?.supplementalChecks !== undefined) throw new Error('mixed verification contract');
+  } else {
+    const steps = planned.length ? deliverables(planned, version) : [];
+    executed(checks, version);
+    const results = item.results as PhaseResult[];
+    if (results.some(result => result.outcome === 'passed' && ['mdd-plan', 'mdd-tasks'].includes(result.phase)) && !steps.length)
+      throw new Error('missing held plan');
+    if (results.some(result => result.outcome === 'passed' && ['mdd-plan', 'mdd-spec'].includes(result.phase)) && !item.acceptance)
+      throw new Error('missing earned acceptance');
+    if (checks.length && !checked) throw new Error('execution evidence has no verification');
+    if (item.acceptance !== undefined) decisions(item.decisions, acceptance(item.acceptance));
+    else if ((item.decisions as Decision[]).length) throw new Error('decisions have no acceptance');
+    if (steps.length || checked) {
+      const accepted = acceptance(item.acceptance);
+      const choices = decisions(item.decisions, accepted);
+      validatePlan(accepted, choices, steps);
+      if (checked) {
+        const read = retainedVerification(checked, checks, { accepted, choices, planned: steps, verificationVersion: version });
+        if ((item.results as PhaseResult[]).filter(result => result.phase === 'mdd-verify').at(-1)?.outcome === 'passed' && !read.matched)
+          throw new Error('inconsistent verification outcome');
+      }
+    }
+    if ((item.results as PhaseResult[]).some(result => result.phase === 'mdd-verify') && !checked) throw new Error('missing verification');
+  }
   return item as unknown as RunDossier;
 }
 
@@ -125,6 +160,8 @@ export function priorRunView(dossier: RunDossier, file: string): Record<string, 
     route: dossier.route, phase: dossier.phase, lastState: dossier.lastState, results: dossier.results,
     evidence: dossier.evidence, acceptance: dossier.acceptance, decisions: dossier.decisions,
     planned: dossier.planned, verification: dossier.verification, executedChecks: dossier.executedChecks,
+    ...(dossier.verificationVersion ? { verificationVersion: dossier.verificationVersion } : {}),
+    verificationEvidence: dossier.verificationVersion ? 'Structured actor-reported evidence; execution is not independently attested.' : 'Legacy command-based evidence; requiredness and execution identity were not recorded.',
     changedFiles: dossier.changedFiles, delivered: dossier.delivered, concerns: dossier.concerns, contexts: dossier.contexts,
     artifacts: dossier.artifacts, questionReceipts: dossier.questionReceipts,
     ...(dossier.artifactContentOmitted ? { artifactContentOmitted: true as const } : {}),

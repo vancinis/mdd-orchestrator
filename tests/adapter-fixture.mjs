@@ -38,6 +38,30 @@ export function traceFixture(path = 'src/cli.ts', stepID = 'cli-validation') {
   };
 }
 
+/** Fresh-run fixture, distinct from the historical command-based traceFixture above. */
+export function structuredTraceFixture(path = 'src/cli.ts', stepID = 'cli-validation') {
+  const { acceptance, decisions } = traceFixture(path, stepID);
+  return { verificationVersion: 1, acceptance, decisions,
+    deliverables: [{ id: stepID, description: 'Implement and test boundary validation.', path,
+      checks: [{ id: `${stepID}-check`, command: 'npm test', requirement: 'required' }],
+      scenarios: ['S1', 'S2'], decisions: ['D1'], dependsOn: [] }] };
+}
+
+/** Simulated successful singular Verify evidence for explicit new-contract tests. */
+export function structuredVerificationFixture(trace = structuredTraceFixture()) {
+  const assessment = { status: 'verified', checks: ['E1'], assessment: 'Inspected source and the reported test result support this link.' };
+  return { verificationVersion: 1, checks: [{ id: 'E1', command: 'npm test', exit: 0 }], verification: {
+    scenarios: trace.deliverables.flatMap(step => step.scenarios.map(scenarioID => ({
+      requirementID: trace.acceptance.requirements.find(requirement => requirement.scenarios.some(scenario => scenario.id === scenarioID)).id,
+      scenarioID, stepID: step.id, ...assessment }))),
+    steps: trace.deliverables.map(step => ({ stepID: step.id, ...assessment })),
+    decisions: trace.decisions.map(decision => ({ decisionID: decision.id, ...assessment })),
+    changes: 'The planned behavior is implemented.', limits: [],
+    checkResults: trace.deliverables.flatMap(step => step.checks.map(check => ({ checkID: check.id, disposition: 'passed', executions: ['E1'] }))),
+    supplementalChecks: [],
+  } };
+}
+
 export async function memoryServer(t, change = () => {}) {
   const binding = { id: 'ses_parent', project: 'mdd-test', directory: process.cwd() };
   const writes = [];
@@ -161,6 +185,7 @@ export function result(status, outcome = 'passed') {
     outcome,
     evidenceSummary: SUMMARY_TEXT,
     artifact: ARTIFACT_TEXT,
-    ...(status.phase === 'mdd-plan' ? traceFixture() : status.phase === 'mdd-tasks' ? { deliverables: traceFixture().deliverables } : {}),
+    ...(status.phase === 'mdd-plan' ? (status.verificationVersion ? structuredTraceFixture() : traceFixture())
+      : status.phase === 'mdd-tasks' ? { deliverables: (status.verificationVersion ? structuredTraceFixture() : traceFixture()).deliverables } : {}),
   });
 }

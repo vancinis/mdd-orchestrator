@@ -12,7 +12,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { opencodeBinary } from '../dist/model-catalog.js';
 import { defaultSettings } from '../dist/settings.js';
-import { reportDocument, traceFixture } from './adapter-fixture.mjs';
+import { reportDocument, structuredTraceFixture as traceFixture } from './adapter-fixture.mjs';
 
 const formatterBoundary = process.argv.includes('--formatter-boundary');
 const explorationWorkers = process.argv.includes('--exploration-workers');
@@ -69,6 +69,7 @@ const scopedFile = item => join(applyWorkers || item === 'a' ? project : referen
 const applyTrace = traceFixture('a.txt', 'T1');
 applyTrace.deliverables = ['a', 'b'].map((name, index) => ({ ...applyTrace.deliverables[0], id: `T${index + 1}`, path: `${name}.txt`, dependsOn: [],
   parallel: { complete: true, reads: [], writes: [`${name}.txt`] } }));
+for (const step of applyTrace.deliverables) step.checks = [{ id: `${step.id}-check`, command: 'npm test', requirement: 'required' }];
 if (nativeCase === 'dependent') applyTrace.deliverables[1].dependsOn = ['T1'];
 if (nativeCase === 'overlap') applyTrace.deliverables[1].parallel.writes = ['a.txt'];
 if (nativeCase === 'missing-metadata') delete applyTrace.deliverables[1].parallel;

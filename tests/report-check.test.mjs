@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { structuredTraceFixture, structuredVerificationFixture } from './adapter-fixture.mjs';
+import { verifyReport as readVerify } from '../dist/phase-evidence.js';
 import { test } from 'node:test';
 import { checkReportForm, checkRiskReportForm } from '../dist/report-check.js';
 import { reportFormatLines } from '../dist/phase-report.js';
@@ -95,6 +97,29 @@ test('checking is pure: the same document checks the same way every time', () =>
   const first = checkReportForm('mdd-plan', text);
   const second = checkReportForm('mdd-plan', text);
   assert.deepEqual(first, second);
+});
+
+test('SA-2: form checker reads structured execution references and refuses marked legacy downgrade', () => {
+  const data = structuredVerificationFixture();
+  const document = value => reportDocument({ evidenceSummary: 'Verified.', artifact: 'Evidence.', ...value });
+  assert.equal(checkReportForm('mdd-verify', document(data)).ok, true);
+  const missing = structuredClone(data); delete missing.checks[0].id;
+  assert.equal(checkReportForm('mdd-verify', document(missing)).ok, false);
+  const unknown = structuredClone(data); unknown.verification.checkResults[0].executions = ['unknown'];
+  assert.equal(checkReportForm('mdd-verify', document(unknown)).ok, false);
+  assert.equal(checkReportForm('mdd-verify', verifyReport({ verificationVersion: 1 })).ok, false);
+  assert.equal(checkReportForm('mdd-verify', document({ ...data, verificationVersion: 2 })).ok, false);
+});
+
+test('SA-2: form-only applicability is advisory and runner-held requirements remain authoritative', () => {
+  const trace = structuredTraceFixture(); const data = structuredVerificationFixture(trace);
+  data.verification.checkResults[0] = { checkID: 'cli-validation-check', disposition: 'not-applicable', executions: [], reason: 'Actor claims this environment does not need the planned check.' };
+  data.verification.supplementalChecks = [{ id: 'probe', requirement: 'optional', disposition: 'passed', executions: ['E1'] }];
+  const checked = checkReportForm('mdd-verify', reportDocument({ evidenceSummary: 'Checked form.', artifact: 'Applicability claim.', ...data }));
+  assert.equal(checked.ok, true);
+  assert.match(checked.note, /not an acceptance/);
+  assert.throws(() => readVerify(data.checks, data.verification, { accepted: trace.acceptance, choices: trace.decisions,
+    planned: trace.deliverables, verificationVersion: 1 }), /unconditional/);
 });
 
 test('Apply report form requires exactly one stable completed ID without claiming to validate assignment', () => {

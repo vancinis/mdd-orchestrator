@@ -1,11 +1,13 @@
 import { assetText, PACKAGE_ROOT } from './project-assets.js';
-import type { ChangedFile, Check, Delivered } from './phase-evidence.js';
+import type { ChangedFile, Check, Delivered, VerificationVersion } from './phase-evidence.js';
 import { checkTranslations, TranslationError, translationDigest } from './pr-translation.js';
 import type { Translatable, Translation } from './pr-translation.js';
 import { objectWithKeys } from './validation.js';
 
 export type PRFacts = {
   runID: string; goal: string; delivered?: Delivered; verification: string;
+  /** Missing means legacy exit-based reporting; never infer the contract from check IDs. */
+  verificationVersion?: VerificationVersion;
   changedFiles: number; files: ChangedFile[]; checks: Check[]; verified: boolean; uncertain: boolean; limits: string[];
 };
 /**
@@ -151,9 +153,14 @@ export function renderPRBody(root: string, facts: PRFacts, userText: string, val
     return `Lo aportó el usuario, sin verificación independiente: ${safe}`;
   };
   const failed = facts.checks.filter(check => check.exit !== 0).length;
+  // For structured runs, the runner's settled `verified` result already includes required
+  // dispositions and semantic coverage. Historical exits cannot reconstruct that decision.
+  const verificationBlockers = facts.verificationVersion === 1
+    ? (facts.verified ? [] : ['Los requisitos, el plan o las comprobaciones requeridas siguen sin verificarse por completo.'])
+    : (failed ? [`${failed} comando(s) de verificación terminaron con salida distinta de 0.`] : []);
   const blockers = [
     ...(facts.changedFiles ? [] : ['No se registró evidencia de cambios de implementación; puede no haber nada para proponer.']),
-    ...(failed ? [`${failed} comando(s) de verificación terminaron con salida distinta de 0.`] : []),
+    ...verificationBlockers,
     ...(facts.uncertain ? ['La ejecución o la persistencia quedaron inciertas; no reintentes ni declares que está listo.'] : []),
     ...facts.limits.map((_limit, index) => safeCopy(spanish(`limit.${index}`))),
   ];

@@ -162,6 +162,16 @@ test('the form an actor is shown names only its own fields', () => {
   }
 });
 
+test('SA-2: phase report instructions select exactly the recorded verification contract', () => {
+  assert.match(reportFormatLines('mdd-plan', 1).join('\n'), /checks:\[\{id,command,requirement/);
+  assert.match(reportFormatLines('mdd-plan').join('\n'), /path,check,scenarios/);
+  assert.match(reportFormatLines('mdd-verify', 1).join('\n'), /checks:\[executionID\]/);
+  assert.doesNotMatch(reportFormatLines('mdd-verify', 1).join('\n'), /checks:\[command\]/);
+  assert.match(reportFormatLines('mdd-verify').join('\n'), /checks:\[command\]/);
+  assert.doesNotMatch(reportFormatLines('mdd-explore', 1).join('\n'), /verificationVersion|checkResults/);
+  assert.throws(() => reportFormatLines('mdd-verify', 2), /version/);
+});
+
 test('Plan and Tasks describe optional complete scopes with runtime capability and independence checks', () => {
   for (const phase of ['mdd-plan', 'mdd-tasks']) {
     const form = reportFormatLines(phase).join('\n');

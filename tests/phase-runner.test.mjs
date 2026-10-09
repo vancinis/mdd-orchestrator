@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { PhaseRunner, SINGULAR_EXPLORATION } from '../dist/phase-runner.js';
 import { reportFormatLines } from '../dist/phase-report.js';
-import { memoryServer, request, result, reportDocument, riskReport, runtime, call, answers, installCleanup, traceFixture, ARTIFACT_TEXT, SUMMARY_TEXT } from './adapter-fixture.mjs';
-import { validateCheckpoint, CheckpointStore, CheckpointStorageError } from '../dist/checkpoint.js';
+import { memoryServer, request, result, reportDocument, riskReport, runtime, call, answers, installCleanup, structuredTraceFixture as traceFixture, structuredVerificationFixture, traceFixture as legacyTraceFixture, ARTIFACT_TEXT, SUMMARY_TEXT } from './adapter-fixture.mjs';
+import { validateCheckpoint, CheckpointStore, CheckpointStorageError, sealResumeData } from '../dist/checkpoint.js';
 import { ProgressGuard } from '../dist/progress.js';
 import { statusPayload, STATUS_BUDGET_BYTES } from '../dist/status-budget.js';
 import { mkdtemp, rm, stat } from 'node:fs/promises';
@@ -42,6 +42,108 @@ async function fixture(t, fault) {
   const inspect = { parent: async () => {}, result: async (_runtime, _call, _phase, output) => output, stopped: async () => true };
   const runner = new PhaseRunner(inspect);
   return { ...memory, inspect, runner };
+}
+
+test('SA-2: new runs freeze the version before planning and refuse legacy report downgrade', async t => {
+  const { runner, endpoint } = await fixture(t);
+  const started = await runner.start(request(endpoint), runtime);
+  assert.equal(started.verificationVersion, 1);
+  const ready = await toPlan(runner, started);
+  const args = await runner.before(call, ready.task);
+  assert.match(args.prompt, /verificationVersion=1/);
+  await assert.rejects(runner.after(call, args, reportDocument({ evidenceSummary: SUMMARY_TEXT, artifact: ARTIFACT_TEXT, ...legacyTraceFixture() })), /could not read/);
+  const rejected = runner.status(runtime.sessionID);
+  assert.equal(rejected.planned.length, 0);
+  assert.match(rejected.rejected.reason, /check is unknown/);
+});
+
+for (const legacy of [false, true]) {
+  test(`SA-2: restart keeps ${legacy ? 'legacy command' : 'structured execution'} semantics through Verify`, async t => {
+    const root = await mkdtemp(join(tmpdir(), 'mdd-contract-replay-'));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const checkpoint = new CheckpointStore(root); const progress = new ProgressGuard(root);
+    const inspect = { parent: async () => {}, result: async (_r, _c, _p, output) => output, stopped: async () => true };
+    const first = new PhaseRunner(inspect, { checkpoint, progress });
+    await first.start({ preflight: { answers }, requirements: 'Preserve verification contracts.' }, runtime,
+      { requirementsConfirmed: true, userMessageID: 'contract-user' });
+    if (legacy) {
+      // Historical fixture at the pre-planning boundary: no evidence exists to convert.
+      const recorded = checkpoint.read(runtime.sessionID).checkpoint;
+      delete recorded.data.verificationVersion;
+      recorded.dataDigest = sealResumeData(recorded.data, recorded.runID, recorded.parent, recorded.events, recorded.stable);
+      checkpoint.clear(runtime.sessionID);
+      checkpoint.write(runtime.sessionID, recorded);
+    }
+    const runner = new PhaseRunner(inspect, { checkpoint, progress });
+    assert.deepEqual(await runner.restore(runtime), { restored: true });
+    assert.equal(runner.status(runtime.sessionID).verificationVersion, legacy ? undefined : 1);
+    const ready = await toPlan(runner, runner.status(runtime.sessionID));
+    const trace = legacy ? legacyTraceFixture() : traceFixture();
+    const planCall = { ...call, callID: 'contract-plan' };
+    await runner.after(planCall, await runner.before(planCall, ready.task), reportDocument({ evidenceSummary: SUMMARY_TEXT, artifact: ARTIFACT_TEXT, ...trace }));
+    const applyCall = { ...call, callID: 'contract-apply' };
+    await runner.after(applyCall, await runner.before(applyCall, runner.status(runtime.sessionID).task), reportDocument({ evidenceSummary: 'Implemented boundary.', artifact: 'Changed boundary.', completed: ['cli-validation'], changes: ['src/cli.ts'] }));
+    const data = structuredVerificationFixture();
+    if (legacy) {
+      delete data.verificationVersion;
+      delete data.checks[0].id;
+      delete data.verification.checkResults;
+      delete data.verification.supplementalChecks;
+      for (const row of [...data.verification.scenarios, ...data.verification.steps, ...data.verification.decisions]) row.checks = ['npm test'];
+    }
+    const verifyCall = { ...call, callID: 'contract-verify' };
+    const verifyArgs = await runner.before(verifyCall, runner.status(runtime.sessionID).task);
+    assert.equal(/checks:\[executionID\]/.test(verifyArgs.prompt), !legacy);
+    await runner.after(verifyCall, verifyArgs, reportDocument({ evidenceSummary: 'Verified boundary.', artifact: 'Checked all links.', ...data }));
+    const saved = checkpoint.read(runtime.sessionID).checkpoint;
+    assert.deepEqual(saved.data.executedChecks, data.checks);
+    assert.equal(saved.data.verificationVersion, legacy ? undefined : 1);
+    const restored = new PhaseRunner(inspect, { checkpoint, progress });
+    assert.deepEqual(await restored.restore(runtime), { restored: true });
+    assert.equal(restored.status(runtime.sessionID).state, 'complete');
+    assert.deepEqual(restored.status(runtime.sessionID).verification, { ...data.verification, matched: true });
+    if (legacy) {
+      assert.match(restored.status(runtime.sessionID).verificationEvidence, /Legacy command-based/);
+      assert.match(restored.prFacts(runtime.sessionID).limits.join(' '), /Legacy command-based/);
+    }
+    else {
+      const downgraded = structuredClone(saved); delete downgraded.data.verificationVersion;
+      downgraded.dataDigest = sealResumeData(downgraded.data, downgraded.runID, downgraded.parent, downgraded.events, downgraded.stable);
+      assert.throws(() => validateCheckpoint(downgraded), /checks is unknown/);
+    }
+  });
+}
+
+for (const requirement of ['required', 'optional']) {
+  test(`SA-2: runner preserves a ${requirement} failure despite unrelated green evidence`, async t => {
+    const { runner, endpoint } = await fixture(t);
+    const ready = await toPlan(runner, await runner.start(request(endpoint), runtime));
+    const trace = traceFixture(); trace.deliverables[0].checks[0].requirement = requirement;
+    await runner.after(call, await runner.before(call, ready.task), reportDocument({ evidenceSummary: SUMMARY_TEXT, artifact: ARTIFACT_TEXT, ...trace }));
+    const applyCall = { ...call, callID: 'apply' };
+    await runner.after(applyCall, await runner.before(applyCall, runner.status(runtime.sessionID).task), reportDocument({ evidenceSummary: 'Implemented.', artifact: 'Implementation.', completed: ['cli-validation'], changes: ['src/cli.ts'] }));
+    const data = structuredVerificationFixture(trace);
+    data.checks[0].exit = 1;
+    data.checks.push({ id: 'E2', command: 'node semantic-probe.mjs', exit: 0 });
+    data.verification.checkResults[0] = { checkID: 'cli-validation-check', disposition: 'failed', executions: ['E1'], reason: 'The planned test failed.' };
+    data.verification.supplementalChecks = [{ id: 'probe', requirement: 'optional', disposition: 'passed', executions: ['E2'] }];
+    for (const row of [...data.verification.scenarios, ...data.verification.steps, ...data.verification.decisions]) row.checks = ['E2'];
+    const verifyCall = { ...call, callID: 'verify' };
+    const args = await runner.before(verifyCall, runner.status(runtime.sessionID).task);
+    const text = reportDocument({ evidenceSummary: 'Semantic coverage with a failed check.', artifact: 'Check failure retained.', ...data });
+    if (requirement === 'required') {
+      await assert.rejects(runner.after(verifyCall, args, text), /could not read/);
+      assert.match(runner.status(runtime.sessionID).rejected.reason, /not verified/);
+      await runner.submit({ result: reportDocument({ outcome: 'failed', evidenceSummary: 'Required check failed.', artifact: 'Failure remains visible.', ...data }) }, runtime);
+      assert.equal(runner.status(runtime.sessionID).state, 'blocked');
+      assert.equal(runner.status(runtime.sessionID).verification.matched, false);
+      assert.deepEqual(runner.prFacts(runtime.sessionID).checks, data.checks);
+    } else {
+      await runner.after(verifyCall, args, text);
+      assert.equal(runner.status(runtime.sessionID).state, 'complete');
+      assert.deepEqual(runner.prFacts(runtime.sessionID).checks, data.checks);
+    }
+  });
 }
 
 test('runner accepts and holds scoped plans but still exposes only one serial Apply task', async t => {
@@ -564,7 +666,7 @@ test('runner contract: a phase prompt carries only the schema of its own result 
   // The prompt reaches the actor, not the coordinator, so it is read where it is delivered: what
   // `before` returns is exactly what the dispatched subagent receives.
   const dispatched = await runner.before(call, ready.task);
-  assert.match(dispatched.prompt, /exactly these keys: acceptance, decisions, deliverables\./);
+  assert.match(dispatched.prompt, /exactly these keys: acceptance, decisions, deliverables, verificationVersion\./);
   assert.match(dispatched.prompt, /concrete changes, decisions or investigation steps, and the source-grounded reason for each/);
   // The injected mdd-doc guide names verification reports in prose; no verification schema leaks.
   assert.doesNotMatch(dispatched.prompt, /verification=\{|keys: checks, verification/);

@@ -8,6 +8,10 @@ State the A-to-B goal, stable requirements and concrete acceptance scenarios, re
 and ordered implementation steps linked to those scenarios and existing planned checks.
 Include happy/error cases where applicable; explain non-applicability rather than inventing work.
 Supply the dispatch schema's acceptance, decisions and deliverables alongside the single artifact.
+For verificationVersion 1, give each planned check a globally unique ID, exact command,
+required/optional requirement and an appliesWhen condition only when genuinely conditional.
+Declare these before execution; Verify must account for every held check without downgrading it.
+Use the dispatched legacy schema when no version is recorded; never retrofit stronger evidence.
 Declare dependencies explicitly, including [] for no dependencies. Add optional parallel metadata
 only when complete read/write footprints are known: {complete:true,reads:[...],writes:[...]}.
 Include tests/docs and every actual read; different main filenames do not prove independence.

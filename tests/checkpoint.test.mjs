@@ -75,6 +75,21 @@ test('rejects unknown versions, extra keys, invented settlement and oversized hi
   assert.throws(() => validateCheckpoint({ ...checkpoint(workflow, 0), events: Array(513).fill({ kind: 'retry' }) }));
 });
 
+test('SA-2: checkpoint replay preserves version before planning and missing marker stays legacy', () => {
+  const workflow = new Workflow(request);
+  const data = { directory: 'project', worktree: 'project', userMessageID: 'message-1', requirements: 'Goal',
+    context: [], dependencies: [], contexts: [], decisions: [], planned: [],
+    evidence: { requirements: 'unearned', plan: 'unearned', implementation: 'unearned', checks: 'unearned' },
+    executedChecks: [], changedFiles: 0, calls: [], usedMessages: [], proposed: [] };
+  const record = data => ({ ...checkpoint(workflow, 0), version: 2, data,
+    dataDigest: sealResumeData(data, 'run-1', parent, workflow.history()) });
+  assert.deepEqual(validateCheckpoint(record(data)).checkpoint.data, data);
+  const versioned = { ...data, verificationVersion: 1 };
+  assert.deepEqual(validateCheckpoint(record(versioned)).checkpoint.data, versioned);
+  assert.throws(() => validateCheckpoint(record({ ...data, verificationVersion: 2 })), /verification.*version/i);
+  assert.throws(() => validateCheckpoint(record({ ...versioned, executedChecks: [{ id: 'E1', command: 'npm test', exit: 0 }] })), /verification/i);
+});
+
 test('v2 binds every result to complete dependency bytes and rejects corruption or silent omission', () => {
   const preflight = { ...request, explore: true };
   const workflow = new Workflow(preflight);

@@ -10,13 +10,14 @@ import { ProgressGuard } from '../dist/progress.js';
 import { RunOwnershipStore } from '../dist/run-ownership.js';
 import { EngramHttp } from '../dist/engram-http.js';
 import { applyPlan, completeStep, selectedStep, taskIDs } from '../dist/apply-batches.js';
-import { memoryServer, reportDocument, throughRiskStop, traceFixture } from './adapter-fixture.mjs';
+import { memoryServer, reportDocument, throughRiskStop, structuredTraceFixture as traceFixture } from './adapter-fixture.mjs';
 
 const answers = { certainty: 'very-sure', artifactStore: 'none', mode: 'automatic', summary: 'low' };
 const planned = () => {
   const trace = traceFixture('src/first.ts', 'first');
   trace.deliverables[0].scenarios = ['S1'];
-  trace.deliverables.push({ ...trace.deliverables[0], id: 'second', path: 'src/second.ts', scenarios: ['S2'], dependsOn: ['first'] });
+  trace.deliverables.push({ ...trace.deliverables[0], id: 'second', path: 'src/second.ts', scenarios: ['S2'], dependsOn: ['first'],
+    checks: [{ id: 'second-check', command: 'npm test', requirement: 'required' }] });
   return trace;
 };
 const report = data => reportDocument({ evidenceSummary: 'Scoped batch evidence.', artifact: 'Scoped batch artifact.', ...data });
@@ -182,11 +183,12 @@ for (const mode of ['automatic', 'interactive']) {
     const verify = await f.dispatch();
     assert.deepEqual(JSON.parse(verify.args.prompt.match(/^Applicable deliverables: (.*)$/m)[1]).map(step => step.id), ['first', 'second']);
     assert.deepEqual(JSON.parse(verify.args.prompt.match(/^All changed-file evidence from every Apply batch: (.*)$/m)[1]).map(file => file.path), ['src/first.ts', 'src/second.ts']);
-    const assessment = { status: 'verified', checks: ['npm test'], assessment: 'Source and focused checks support the full plan.' };
-    await f.runner.after(verify.call, verify.args, report({ checks: [{ command: 'npm test', exit: 0 }], verification: {
+    const assessment = { status: 'verified', checks: ['E1'], assessment: 'Source and focused checks support the full plan.' };
+    await f.runner.after(verify.call, verify.args, report({ checks: [{ id: 'E1', command: 'npm test', exit: 0 }], verification: {
       scenarios: ['S1', 'S2'].map((scenarioID, i) => ({ requirementID: 'R1', scenarioID, stepID: i ? 'second' : 'first', ...assessment })),
       steps: ['first', 'second'].map(stepID => ({ stepID, ...assessment })), decisions: [{ decisionID: 'D1', ...assessment }],
       changes: 'Both dependent deliverables are implemented.', limits: [],
+      checkResults: ['first-check', 'second-check'].map(checkID => ({ checkID, disposition: 'passed', executions: ['E1'] })), supplementalChecks: [],
     } }));
     assert.equal(f.status().state, 'complete');
     assert.deepEqual(await f.restart(), { restored: true });
@@ -381,6 +383,7 @@ test('explicit rework starts a new epoch without inheriting old completion or lo
   await f.finish({ outcome: 'failed', checks: [], verification: {
     scenarios: ['S1', 'S2'].map((scenarioID, i) => ({ requirementID: 'R1', scenarioID, stepID: i ? 'second' : 'first', ...assessment })),
     steps: ['first', 'second'].map(stepID => ({ stepID, ...assessment })), decisions: [{ decisionID: 'D1', ...assessment }], changes: 'Correction needed.', limits: [],
+    checkResults: ['first-check', 'second-check'].map(checkID => ({ checkID, disposition: 'blocked', executions: [], reason: 'Implementation needs correction before running checks.' })), supplementalChecks: [],
   } });
   const old = f.durable.read(f.runtime.sessionID).workflow.applyProgress();
   f.runner.reset(f.runtime.sessionID, 'rework');

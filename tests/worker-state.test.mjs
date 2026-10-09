@@ -9,7 +9,7 @@ import { validateWorkerState } from '../dist/worker-state.js';
 import { projectTargetTransfer } from '../dist/transfer.js';
 import { RunOwnershipStore } from '../dist/run-ownership.js';
 import { ProgressGuard } from '../dist/progress.js';
-import { answers, reportDocument, throughRiskStop, traceFixture, ARTIFACT_TEXT, SUMMARY_TEXT } from './adapter-fixture.mjs';
+import { answers, reportDocument, throughRiskStop, structuredTraceFixture as traceFixture, ARTIFACT_TEXT, SUMMARY_TEXT } from './adapter-fixture.mjs';
 
 function deferred() { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; }
 async function fixture(t, extra = {}) {
@@ -32,6 +32,7 @@ async function fixture(t, extra = {}) {
     parallel: { complete: true, reads: [], writes: ['src/a.ts'] } });
   if (extra.unsafeThird) delete trace.deliverables.at(-1).parallel;
   if (extra.serialFirst) trace.deliverables.unshift({ ...base, id: 'T0', path: 'src/a.ts', dependsOn: [] });
+  for (const step of trace.deliverables) step.checks = [{ id: `${step.id}-check`, command: 'npm test', requirement: 'required' }];
   await runner.after(planCall, args, reportDocument({ evidenceSummary: SUMMARY_TEXT, artifact: ARTIFACT_TEXT, ...trace }));
   runner.releaseSettled(runtime.sessionID, 'plan');
   const calls = ['one', 'two'].map(callID => ({ sessionID: runtime.sessionID, callID }));
