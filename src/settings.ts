@@ -50,7 +50,7 @@ export function parseModel(value: unknown): string {
 export function defaultSettings(): Settings {
   return {
     version: 1, activeProfile: 'default', profiles: { default: { models: {}, answers: {} } },
-    telemetry: { enabled: true }, workers: { enabled: true }, knowledge: { enabled: false },
+    telemetry: { enabled: true }, workers: { enabled: true }, knowledge: { enabled: true },
   };
 }
 

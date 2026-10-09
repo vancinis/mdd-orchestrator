@@ -59,7 +59,7 @@ test('organic knowledge tools are coordinator-only, disabled without provider ca
   const context = { ...f.runtime, messageID: 'msg_parent', abort: new AbortController().signal };
   const { endpoint, binding, writes } = await memoryServer(t);
   binding.directory = root;
-  const settings = { ...defaultSettings(), engram: { endpoint } };
+  const settings = { ...defaultSettings(), knowledge: { enabled: false }, engram: { endpoint } };
   saveGlobalSettings(settings);
   let hooks = await plugin(f.input);
   for (const name of ['mdd_knowledge', 'mdd_knowledge_record']) {

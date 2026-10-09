@@ -1203,12 +1203,21 @@ for (const route of ['low', 'high']) for (const mode of ['automatic', 'interacti
     const events = (await readFile(join(f.root, '.mdd/telemetry.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
     assert.equal(events.filter(event => event.event === 'phase-start').length, phases.length);
     assert.equal(events.filter(event => event.event === 'preflight').length, 1);
-    // The ledger stays metadata: identities are opaque, everything else is an enum or a number,
-    // and no field exists that could carry requirements, a path or any other text.
+    // Knowledge delivery has bounded metadata without a run ID; workflow events retain their
+    // opaque run identity. These fixtures have no reusable observations or approved catalog.
     for (const event of events) {
-      assert.ok(Object.keys(event).every(key => ['timestamp', 'event', 'phase', 'duration', 'route', 'outcome', 'runID', 'attempt', 'mode', 'failure', 'usage'].includes(key)));
-      assert.equal(event.runID, final.runID);
-      assert.ok(!/[A-Za-z]{2}/.test(event.runID.replaceAll(/[0-9a-f-]/g, '')));
+      if (event.event === 'knowledge-dispatch') {
+        assert.deepEqual(Object.keys(event).sort(), ['event', 'knowledge', 'timestamp']);
+        assert.ok(Number.isSafeInteger(event.timestamp) && event.timestamp >= 0);
+        const { candidates } = event.knowledge;
+        assert.ok(Number.isSafeInteger(candidates) && candidates >= 0 && candidates <= 42);
+        assert.deepEqual(event.knowledge, { candidates, freshHits: 0, staleRejects: 0,
+          selectedReferences: [], selectedSkillIDs: [], selectedBytes: 0, promptByteDelta: 0 });
+      } else {
+        assert.ok(Object.keys(event).every(key => ['timestamp', 'event', 'phase', 'duration', 'route', 'outcome', 'runID', 'attempt', 'mode', 'failure', 'usage'].includes(key)));
+        assert.equal(event.runID, final.runID);
+        assert.ok(!/[A-Za-z]{2}/.test(event.runID.replaceAll(/[0-9a-f-]/g, '')));
+      }
     }
   });
 }
@@ -1590,7 +1599,15 @@ test('a delegated phase records the tokens its own child session reported', asyn
   assert.equal(ended.mode, 'delegate');
   assert.equal(ended.attempt, 1);
   assert.match(ended.runID, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
-  assert.equal(new Set(rows.map(row => row.runID)).size, 1);
+  const knowledgeEvents = rows.filter(row => row.event === 'knowledge-dispatch');
+  assert.ok(knowledgeEvents.length > 0, 'default-on knowledge records delivery diagnostics without a provider');
+  for (const event of knowledgeEvents) {
+    assert.deepEqual(Object.keys(event).sort(), ['event', 'knowledge', 'timestamp']);
+    assert.ok(Number.isSafeInteger(event.timestamp) && event.timestamp >= 0);
+    assert.deepEqual(event.knowledge, { candidates: 0, freshHits: 0, staleRejects: 0,
+      selectedReferences: [], selectedSkillIDs: [], selectedBytes: 0, promptByteDelta: 0 });
+  }
+  assert.deepEqual([...new Set(rows.filter(row => row.event !== 'knowledge-dispatch').map(row => row.runID))], [ended.runID]);
   const rollup = JSON.parse(await readFile(join(f.root, '.mdd/telemetry-rollup.json'), 'utf8'));
   assert.equal(rollup.phases['mdd-plan'].input, 1200);
   assert.equal(rollup.phases['mdd-plan'].cost, 0.0125);

@@ -147,6 +147,29 @@ test('update refuses without an installed package and never asks for memory', as
   assert.deepEqual(fs.readdirSync(root), before);
   assert.equal(io.prompts.length, 0);
 });
+for (const enabled of [undefined, false]) {
+  test(`update preserves raw legacy knowledge enabled=${enabled} without configuring memory`, async t => {
+    const root = fixture(t);
+    const path = join(root, 'mdd/mdd.config.json');
+    const legacy = { version: 1, activeProfile: 'default', profiles: { default: {} },
+      ...(enabled === undefined ? {} : { knowledge: { enabled } }) };
+    const text = `${JSON.stringify(legacy, null, '\t')}\r\n`;
+    fs.writeFileSync(path, text);
+    fs.appendFileSync(join(root, 'mdd/node_modules/my-driven-development/dist/safe-paths.js'), '\n// stale runtime\n');
+    const io = ui(['apply']);
+    const deps = { ...noMemory, detect: () => assert.fail('update must not probe memory'),
+      installPackage: target => { assert.equal(target, root); seedPackage(root); } };
+    t.mock.method(globalThis, 'fetch', () => assert.fail('update must not contact memory'));
+    assert.equal(await runSetupUI(root, io, deps, { mode: 'update' }), 'ready');
+    assert.equal(packageState(root).state, 'matching');
+    assert.equal(io.prompts.length, 1);
+    assert.match(io.output.join(''), /opencode service restart/);
+    assert.deepEqual(loadSettings(root).knowledge, { enabled: enabled ?? true });
+    assert.equal(loadSettings(root).engram, undefined);
+    assert.equal(fs.readFileSync(path, 'utf8'), text);
+    assert.equal(fs.existsSync(join(root, 'mdd/knowledge.json')), false);
+  });
+}
 test('leftover or unsupported owned package is refused by both setup and update', async t => {
   const root = fixture(t, false);
   const owned = join(root, 'mdd'); fs.mkdirSync(owned, { recursive: true });

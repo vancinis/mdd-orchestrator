@@ -87,9 +87,17 @@ const invalid = [
   JSON.parse('{"version":1,"activeProfile":"default","profiles":{"default":{}},"__proto__":{}}'),
 ];
 
-test('knowledge defaults off for legacy settings, round trips explicitly, and rejects unknown configuration', t => {
+test('knowledge defaults on for fresh settings without configuring memory or writing files', t => {
+  const root = fixture(t);
+  assert.deepEqual(defaultSettings().knowledge, { enabled: true });
+  assert.deepEqual(loadSettings(root).knowledge, { enabled: true });
+  assert.equal(loadSettings(root).engram, undefined);
+  assert.deepEqual(fs.readdirSync(root), []);
+});
+
+test('knowledge defaults on for legacy settings, round trips explicitly, and rejects unknown configuration', t => {
   const legacy = { version: 1, activeProfile: 'default', profiles: { default: {} } };
-  assert.deepEqual(parseSettings(legacy).knowledge, { enabled: false });
+  assert.deepEqual(parseSettings(legacy).knowledge, { enabled: true });
   const root = fixture(t);
   for (const enabled of [true, false]) {
     saveSettings(root, { ...defaultSettings(), knowledge: { enabled } });
@@ -99,6 +107,20 @@ test('knowledge defaults off for legacy settings, round trips explicitly, and re
     assert.throws(() => parseSettings({ ...legacy, knowledge }));
   }
 });
+
+for (const enabled of [undefined, false]) {
+  test(`knowledge read preserves raw legacy bytes with enabled=${enabled}`, t => {
+    const root = fixture(t);
+    const legacy = { version: 1, activeProfile: 'default', profiles: { default: {} },
+      ...(enabled === undefined ? {} : { knowledge: { enabled } }) };
+    const text = `${JSON.stringify(legacy, null, '\t')}\r\n`;
+    const path = join(root, 'mdd.config.json');
+    fs.writeFileSync(path, text);
+    assert.deepEqual(loadSettings(root).knowledge, { enabled: enabled ?? true });
+    assert.equal(loadSettings(root).engram, undefined);
+    assert.equal(fs.readFileSync(path, 'utf8'), text);
+  });
+}
 
 test('workers default on for absent and legacy settings without rewriting legacy bytes', t => {
   const root = fixture(t);

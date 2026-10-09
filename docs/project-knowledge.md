@@ -2,15 +2,19 @@
 
 MDD can record candidate coordinator observations learned while handling an ordinary native user
 request, then find their summaries from later sessions in the same project. An explicit checkout
-catalog can also supply relevant approved skill excerpts at child dispatch. This optional feature
-defaults off. Recording grants no policy, approval, execution authority or additional actor permissions.
+catalog can also supply relevant approved skill excerpts at child dispatch. Knowledge is enabled by
+default; an explicit `"knowledge": { "enabled": false }` keeps it off. Recording grants no policy,
+approval, execution authority or additional actor permissions.
 
 ## Quick path
 
-1. In the existing **global** MDD configuration, explicitly set `"knowledge": { "enabled": true }`
-   alongside an already configured `engram` backend for memory, then restart OpenCode. A local catalog
-   can operate without memory. No project setting
-   overrides this preference. Omitted `knowledge` remains disabled without rewriting legacy files.
+1. Update MDD, then restart the OpenCode service (`opencode service restart`) to load the new default.
+   Fresh settings and legacy files that omit `knowledge` enable it; update/read preserves existing
+   configuration bytes. An explicit `"knowledge": { "enabled": false }` in the **global** MDD
+   configuration remains off until you change it and restart. No project setting overrides this preference.
+   Memory requires an already configured `engram` backend: absent Engram stays unconfigured and knowledge
+   memory is unavailable. Update does not configure a provider or create the optional `mdd/knowledge.json`
+   catalog. An explicitly authored local catalog can operate without memory.
 2. Ask for normal project work, for example: “Improve input validation in the settings parser.”
    The user needs no recording command, special syntax or technical metadata.
 3. When the coordinator learns a reusable finding in that context, it can call:
@@ -44,7 +48,7 @@ Recording does not promote a phase/model claim into an authoritative instruction
 
 | Boundary | Current behavior |
 |---|---|
-| Configuration | `knowledge.enabled` is a strict boolean, default `false`, captured at startup. Disabled tools make no provider calls. |
+| Configuration | `knowledge.enabled` is a strict boolean, default `true` when omitted, captured at startup. Explicit `false` remains disabled; disabled tools make no provider calls. |
 | Identity | Existing native runtime binding resolves the Engram project and binds the actual parent session/directory. Tool arguments cannot choose a project or session. |
 | Canonical storage | Engram `POST /observations`, type `mdd-project-knowledge`, project scope. New version-2 envelopes include native dependency digests; version-1 records remain readable but unverified. |
 | Provenance | `kind: "coordinator-observation"`, native session, user and assistant message IDs, SHA-256 of canonical native request and normalized observation, and recording timestamp. The user message identifies task context, never authorship of the finding. |

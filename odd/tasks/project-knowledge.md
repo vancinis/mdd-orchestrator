@@ -9,7 +9,7 @@ Reuse validated project knowledge and relevant skills without filling the coordi
 - User approved implementation of the discussed memory, selective retrieval, contextual routing and measured feedback recommendations on 2026-10-09.
 - Preserve checkpoints, ownership, consent, scope, verification requirements and worker permissions. Stored knowledge is advisory data, never execution authority.
 - No remote operations, publication, installation, global configuration changes or automatic policy adoption are authorized.
-- Use existing configured Engram only. New optional knowledge configuration defaults off for compatibility; tests explicitly enable it. Do not enable the user's memory configuration.
+- Use existing configured Engram only. Follow-up PK-5 is explicitly authorized to make knowledge enabled by default while preserving explicit `knowledge.enabled: false`. Do not edit installed configuration, configure a provider, or create a project catalog. PK-1 through PK-4 originally shipped default-off.
 - Reuse requires target-checkout dependency validation, including dirty and untracked files. A shared project or commit identity alone is insufficient.
 - No second canonical memory database, arbitrary skill discovery, tool installation or unbounded self-improvement loop.
 - Code, tests and documentation are English; user-facing orchestration remains Spanish.
@@ -89,6 +89,19 @@ Reuse validated project knowledge and relevant skills without filling the coordi
   - Risk: high/unassessable due new files; independent verification and bounded recheck completed. RDD off, disabled/unmanaged; no review started.
   - Authored unit: 855 changed lines, tests/docs included, tracking excluded. Kept coherent with real dispatch and lifecycle tests rather than an unused catalog utility. Commit: `f5adb57` (`feat(knowledge): route project skills and measure delivered context`).
 
+## Follow-up
+
+- [ ] **PK-5: Enable knowledge by default without overriding explicit opt-out.**
+  - User explicitly requested default activation after delivery of PK-1 through PK-4. Route: delegated direct because settings, update regression tests and documentation need coordinated edits. Forecast: 50-90 authored changed lines; retain the existing feature identity and local chain strategy.
+  - Surfaces: `src/settings.ts`, `tests/settings.test.mjs`, `tests/opencode-plugin.test.mjs`, `tests/setup-ui.test.mjs`, `docs/project-knowledge.md`, `docs/mdd-config.schema.json`.
+  - User explicitly approved `tests/full-native.test.mjs` telemetry assertion updates after default activation exposed sixteen unknown-field checks and one run-ID accounting assumption. Preserve metadata and per-phase usage validation; do not disable knowledge in the fixtures to hide these failures.
+  - Acceptance: fresh and omitted-field legacy settings default to enabled; explicit false remains disabled; update/read preserves existing configuration bytes; no provider is configured or contacted solely because its setting is absent. Preserve meaningful explicit-disabled test coverage, do not blanket-disable integration fixtures.
+  - TDD/checks: observe RED for fresh/legacy defaults and update preservation, then GREEN. Run `npm run build`; `node --import ./tests/isolate-home.mjs --test tests/settings.test.mjs tests/setup-ui.test.mjs tests/project-knowledge.test.mjs tests/project-knowledge-runtime.test.mjs tests/opencode-plugin.test.mjs tests/opencode-v2.test.mjs tests/full-native.test.mjs tests/optional-memory.test.mjs`; `npm run typecheck`; `npm test`; `git diff --check`.
+  - Rollback: restore previous default and corresponding tests/docs, leaving explicit user settings untouched.
+  - Evidence: deterministic RED 2 passed/4 failed; initial integration 588 passed/17 failed/1 skipped exposed outdated telemetry assertions, corrected only after explicit scope approval. Final focused 605 passed/0 failed/1 skipped; full suite 1,859 passed/0 failed/3 skipped. Build/typecheck/diff-check passed; parent independently repeated typecheck and inspected the actual default/update/telemetry regression diff.
+  - Skips remain two Windows file-symlink privilege tests and optional installed-Engram smoke. Native assessment returned `medium` (`configuration_change`), `under_budget`; writer verification plus parent spot check is the applicable gate. No separate verifier required at this tier; RDD remains off.
+  - Authored unit: 104 changed lines across seven implementation/test/doc files, tracking excluded. Existing installed configuration and provider/catalog setup remain untouched. Commit pending; no new publication is authorized by this follow-up request.
+
 ## Verification and limitations
 
 Tests use existing isolated-home fixtures, temporary files and local fixture HTTP servers. No installed Engram service, real model calls or credentials are needed for these contract tests. Builds write generated `dist` output. Task-level builds and automated checks are recorded above. No real-host smoke has run. Real-host testing, if needed later, requires a separate bounded action and explicit disclosure of its processes and effects.
@@ -97,6 +110,6 @@ Source digest checks validate declared dependencies, not the completeness of a c
 
 ## Progress and next step
 
-All four implementation tasks are complete and independently verified: `2353cbe`, `a3e9d4d`, `487573c`, `f5adb57`. This final tracking-only closure records their identities after the commits; it changes no runtime bytes.
+Initial four tasks are complete and independently verified: `2353cbe`, `a3e9d4d`, `487573c`, `f5adb57`. They were published through `8d329dd`. PK-5 default-on implementation and applicable verification are complete; local commit pending, publication not authorized by this follow-up.
 
-Feature remains opt-in/default-off. No global settings, installation, remote publication or project catalog changed. The next optional step is user-authorized activation and a real-host trial; current proof is automated fixture-based integration, not production or token-savings evidence. Three environment-dependent test skips and the native-fallback post-restart limitation remain documented. Engram's full task mirror remains pending due to session/project mismatch; separate progress observations and session summaries were saved without changing the binding.
+No installed settings, installation or project catalog will be changed by PK-5; only the shipped default changes. Real-host trials and token-savings evidence remain pending. Three environment-dependent test skips and the native-fallback post-restart limitation remain documented. Engram's full task mirror remains pending due to session/project mismatch; separate progress observations and session summaries were saved without changing the binding.
