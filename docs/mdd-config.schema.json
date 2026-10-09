@@ -39,6 +39,13 @@
         }
       }]
     },
+    "knowledge": {
+      "description": "Optional project observation recording and summary lookup through configured Engram. Defaults off; observations are advisory and source freshness is not yet checked.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": { "enabled": { "type": "boolean", "default": false } }
+    },
     "workers": {
       "description": "Global parallel-worker preference, default on when omitted. Captured at startup; dispatch remains sequential until batch execution is supported.",
       "type": "object",

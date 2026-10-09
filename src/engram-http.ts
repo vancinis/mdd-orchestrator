@@ -4,6 +4,15 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 export type MemoryBinding = { id: string; project: string; directory: string };
 class MissingSession extends Error {}
+class MissingObservation extends Error {}
+
+const KNOWLEDGE_TYPE = 'mdd-project-knowledge';
+const KNOWLEDGE_TITLE = 'MDD project knowledge v1';
+export class KnowledgeWriteUnknownError extends Error {
+  constructor(readonly observationID?: number) {
+    super('Knowledge write outcome is unknown; never retry blindly. Inspect canonical memory first.');
+  }
+}
 
 /**
  * Windows resolves paths case-insensitively and Engram stores them lowercased, so comparing the
@@ -107,6 +116,7 @@ export class EngramHttp {
         if (response.status === 404 && path.startsWith('/sessions/')) {
           throw new MissingSession('Engram session is not registered.');
         }
+        if (response.status === 404 && path.startsWith('/observations/')) throw new MissingObservation();
         throw new Error(`Unexpected HTTP status ${response.status}.`);
       }
       const reader = response.body?.getReader();
@@ -128,7 +138,7 @@ export class EngramHttp {
       if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('Invalid response object.');
       return data as Record<string, unknown>;
     } catch (error) {
-      if (error instanceof MissingSession) throw error;
+      if (error instanceof MissingSession || error instanceof MissingObservation) throw error;
       const detail = error instanceof SyntaxError ? 'Invalid JSON response.'
         : error instanceof Error && !controller.signal.aborted ? error.message : 'Request timed out.';
       throw new Error(`Engram: ${detail}`);
@@ -262,6 +272,53 @@ export class EngramHttp {
 
   assertArtifactDirectory(directory: string): void {
     if (!samePath(directory, this.#binding.directory)) throw new Error('Artifact directory binding mismatch.');
+  }
+
+  /** Semantic records deliberately cross sessions; artifacts below retain their original binding. */
+  async saveKnowledge(content: string): Promise<number> {
+    if (Buffer.byteLength(content) > 16384) throw new Error('Knowledge envelope exceeds 16 KiB.');
+    await this.checkBinding();
+    let id: number | undefined;
+    try {
+      const saved = await this.#request('/observations', 201, {
+        session_id: this.#binding.id, project: this.#binding.project, scope: 'project',
+        type: KNOWLEDGE_TYPE, title: KNOWLEDGE_TITLE, content,
+      });
+      if (Number.isSafeInteger(saved.id) && (saved.id as number) > 0) id = saved.id as number;
+      if (id === undefined || saved.status !== 'saved') throw new Error('Unknown outcome.');
+      const readback = await this.readKnowledge(id);
+      if (readback?.content !== content || readback.sessionID !== this.#binding.id) throw new Error('Readback mismatch.');
+      return id;
+    } catch { throw new KnowledgeWriteUnknownError(id); }
+  }
+
+  async readKnowledge(id: number): Promise<{ content: string; sessionID: string } | undefined> {
+    if (!Number.isSafeInteger(id) || id <= 0) throw new Error('Invalid knowledge reference.');
+    await this.checkBinding();
+    let row: Record<string, unknown>;
+    try { row = await this.#request(`/observations/${id}`, 200); }
+    catch (error) { if (error instanceof MissingObservation) return undefined; throw error; }
+    if (row.id !== id || row.project !== this.#binding.project || row.scope !== 'project' || row.deleted_at != null ||
+        row.type !== KNOWLEDGE_TYPE || row.title !== KNOWLEDGE_TITLE || typeof row.content !== 'string' ||
+        Buffer.byteLength(row.content) > 16384 || typeof row.session_id !== 'string' || !row.session_id.trim() || row.session_id.length > 256) return undefined;
+    return { content: row.content, sessionID: row.session_id };
+  }
+
+  async searchKnowledge(query: string, limit: number): Promise<{ id: number; content: string; sessionID: string }[]> {
+    if (typeof query !== 'string' || Buffer.byteLength(query) > 200 || !Number.isInteger(limit) || limit < 1 || limit > 10)
+      throw new Error('Invalid knowledge search.');
+    await this.checkBinding();
+    const params = new URLSearchParams({ q: query || 'MDD', project: this.#binding.project, type: KNOWLEDGE_TYPE, limit: String(limit) });
+    const rows = await this.#requestList(`/search?${params}`);
+    const ids = [...new Set(rows.filter(row => row.project === this.#binding.project && row.type === KNOWLEDGE_TYPE &&
+      row.deleted_at == null && Number.isSafeInteger(row.id) && (row.id as number) > 0).map(row => row.id as number))].slice(0, limit);
+    const result = [];
+    for (const id of ids) {
+      // Search content may be truncated or stale. Only a complete observation can be validated.
+      const item = await this.readKnowledge(id);
+      if (item) result.push({ id, ...item });
+    }
+    return result;
   }
 
   async readArtifact(id: number, title: string): Promise<string> {

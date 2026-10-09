@@ -7,6 +7,17 @@ import { join, resolve } from 'node:path';
 import { EngramHttp, mddDataRoot } from '../dist/engram-http.js';
 import { memoryServer } from './adapter-fixture.mjs';
 
+test('knowledge semantic reads cross sessions without weakening artifact session binding', async t => {
+  const { endpoint, binding } = await memoryServer(t);
+  const first = new EngramHttp(endpoint, binding);
+  const id = await first.saveKnowledge('canonical envelope');
+  const artifact = await first.saveArtifact('MDD artifact v1: original', 'artifact body');
+  binding.id = 'ses_other';
+  const later = new EngramHttp(endpoint, binding);
+  assert.equal((await later.readKnowledge(id)).content, 'canonical envelope');
+  await assert.rejects(later.readArtifact(artifact, 'MDD artifact v1: original'), /binding mismatch/);
+});
+
 // A linked git worktree is deleted the moment its task is done. Everything MDD persists locally is
 // anchored through this, so a worktree's records land in — and outlive it in — the repository.
 test('mddDataRoot anchors a linked worktree at its repository and leaves other checkouts in place', t => {

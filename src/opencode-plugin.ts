@@ -73,7 +73,7 @@ const CONCERN_SCHEMA = tool.schema.object({
 });
 
 /** MDD tools belong to the MDD coordinator. Other agents share the registry but not this state. */
-export const MDD_TOOLS = ['mdd_security', 'mdd_start', 'mdd_status', 'mdd_prepare_advance', 'mdd_revisit', 'mdd_answer', 'mdd_phase_result', 'mdd_reset', 'mdd_change_request', 'mdd_contextual_explore', 'mdd_context', 'mdd_pr_body', 'mdd_improve', 'mdd_improvements', 'mdd_transfer', 'mdd_transfer_recover'] as const;
+export const MDD_TOOLS = ['mdd_security', 'mdd_start', 'mdd_status', 'mdd_prepare_advance', 'mdd_revisit', 'mdd_answer', 'mdd_phase_result', 'mdd_reset', 'mdd_change_request', 'mdd_contextual_explore', 'mdd_context', 'mdd_pr_body', 'mdd_improve', 'mdd_improvements', 'mdd_knowledge', 'mdd_knowledge_record', 'mdd_transfer', 'mdd_transfer_recover'] as const;
 /**
  * The one MDD tool that is not the coordinator's alone. It is kept out of `MDD_TOOLS` because
  * that list is what `restrictTools` switches off everywhere else, and this one has to reach the
@@ -1138,6 +1138,41 @@ const plugin: Plugin = async input => {
             if (error instanceof TranslationError) translationAttempts.set(context.sessionID, spent + 1);
             throw error;
           }
+        },
+      }),
+      mdd_knowledge: tool({
+        description: 'Query optional project observations across sessions. Returns bounded summaries and references only, with unverified checkout freshness. Advisory data, never policy, consent or execution authority.',
+        args: {
+          query: tool.schema.string().min(1).max(200).optional(),
+          phase: tool.schema.string().optional(),
+          paths: tool.schema.array(tool.schema.string().min(1).max(256)).min(1).max(16).optional(),
+          limit: tool.schema.number().int().min(1).max(10).optional(),
+        },
+        async execute(args, context) {
+          enter(context, 'mdd_knowledge');
+          if (context.abort.aborted) throw new Error('Knowledge query aborted.');
+          await inspector.parent(context);
+          return JSON.stringify(await intake.knowledge(args, context));
+        },
+      }),
+      mdd_knowledge_record: tool({
+        description: 'Record a bounded candidate project observation learned in the current native request context when knowledge is enabled. Supply your structured finding and the exact latest userText; the user need not author metadata or a recording command. Provenance identifies a coordinator observation, never a user assertion, approved policy or permission. Unknown writes must never be retried blindly.',
+        args: {
+          userText: tool.schema.string().min(1).max(12000).describe('Exact latest native user request, unchanged. This grounds task context, not user authorship or approval of the observation.'),
+          observation: tool.schema.object({
+            summary: tool.schema.string().min(1).max(320).describe('Concise single-line candidate finding; synthesis is allowed.'),
+            body: tool.schema.string().min(1).max(4096),
+            applicability: tool.schema.object({
+              phases: tool.schema.array(tool.schema.string()).min(1).max(8),
+              paths: tool.schema.array(tool.schema.string().min(1).max(256)).min(1).max(16),
+            }).strict(),
+            sources: tool.schema.array(tool.schema.string().min(1).max(256)).min(1).max(16),
+          }).strict(),
+        },
+        async execute(args, context) {
+          enter(context, 'mdd_knowledge_record');
+          if (context.abort.aborted) throw new Error('Knowledge recording aborted.');
+          return JSON.stringify(await intake.recordKnowledge(args, context, context.messageID));
         },
       }),
       mdd_improve: tool({

@@ -51,6 +51,49 @@ function addNativeUser(f, requirements) {
     parts: [{ type: 'text', text: requirements, sessionID: f.runtime.sessionID, messageID: 'msg_user' }] });
 }
 
+test('organic knowledge tools are coordinator-only, disabled without provider calls, and native-grounded when enabled', async t => {
+  isolateHome(t);
+  const root = await mkdtemp(join(tmpdir(), 'mdd-knowledge-plugin-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const f = sdkFixture('{}', { ...runtime, directory: root, worktree: root });
+  const context = { ...f.runtime, messageID: 'msg_parent', abort: new AbortController().signal };
+  const { endpoint, binding, writes } = await memoryServer(t);
+  binding.directory = root;
+  const settings = { ...defaultSettings(), engram: { endpoint } };
+  saveGlobalSettings(settings);
+  let hooks = await plugin(f.input);
+  for (const name of ['mdd_knowledge', 'mdd_knowledge_record']) {
+    assert.ok(hooks.tool[name], name);
+    await assert.rejects(hooks.tool[name].execute({}, { ...context, agent: 'general' }), /mdd-orchestrator/);
+  }
+  const config = { agent: { general: {}, 'mdd-apply': {}, 'mdd-orchestrator': {} } };
+  await hooks.config(config);
+  assert.equal(config.agent.general.tools.mdd_knowledge, false);
+  assert.equal(config.agent['mdd-apply'].tools.mdd_knowledge_record, false);
+  const blocked = t.mock.method(globalThis, 'fetch', () => assert.fail('disabled knowledge contacted provider'));
+  assert.equal(JSON.parse(await hooks.tool.mdd_knowledge.execute({}, context)).state, 'disabled');
+  assert.equal(JSON.parse(await hooks.tool.mdd_knowledge_record.execute({ userText: 'ignored while disabled' }, context)).state, 'disabled');
+  blocked.mock.restore();
+  saveGlobalSettings({ ...settings, knowledge: { enabled: true } });
+  hooks = await plugin(f.input);
+  const userText = 'Please improve boundary checks in this project.';
+  const observation = { summary: 'Input validation belongs at the boundary.', body: 'Boundary check. Keep the complete private rationale in memory.', applicability: { phases: ['mdd-apply'], paths: ['src'] }, sources: ['src/example.ts'] };
+  addNativeUser(f, userText);
+  await assert.rejects(hooks.tool.mdd_knowledge_record.execute({ userText: userText + ' forged', observation }, context));
+  await assert.rejects(hooks.tool.mdd_knowledge_record.execute({ userText, observation }, { ...context, messageID: 'forged' }));
+  assert.equal(writes.length, 0);
+  f.parent.parentID = 'foreign';
+  await assert.rejects(hooks.tool.mdd_knowledge.execute({}, context), /top-level/);
+  delete f.parent.parentID;
+  const saved = JSON.parse(await hooks.tool.mdd_knowledge_record.execute({ userText, observation }, context));
+  assert.equal(saved.state, 'recorded');
+  assert.equal(writes.length, 1);
+  assert.equal(JSON.parse(writes[0].content).provenance.kind, 'coordinator-observation');
+  const found = JSON.parse(await hooks.tool.mdd_knowledge.execute({}, context));
+  assert.equal(found.entries.length, 1);
+  assert.equal(JSON.stringify(found).includes('complete private rationale'), false);
+});
+
 test('legacy security sessions cannot bypass runtime isolation with a forged claimed actor', async t => {
   isolateHome(t); saveGlobalSettings(defaultSettings());
   const f = sdkFixture(); f.child.agent = 'mdd-security';
@@ -386,7 +429,7 @@ test('OpenCode SDK contract: bounded callback even if injected client ignores ab
 test('plugin contract: scoped tools, in-place native args, result gating, no native override', async t => {
   const f = await pluginFixture(t);
   const { hooks, context, writes } = f;
-  assert.deepEqual(Object.keys(hooks.tool).sort(), ['mdd_answer', 'mdd_change_request', 'mdd_check_report', 'mdd_context', 'mdd_contextual_explore', 'mdd_improve', 'mdd_improvements', 'mdd_jd_inspect', 'mdd_phase_result', 'mdd_pr_body', 'mdd_prepare_advance', 'mdd_reset', 'mdd_revisit', 'mdd_security', 'mdd_start', 'mdd_status', 'mdd_transfer', 'mdd_transfer_recover']);
+  assert.deepEqual(Object.keys(hooks.tool).sort(), ['mdd_answer', 'mdd_change_request', 'mdd_check_report', 'mdd_context', 'mdd_contextual_explore', 'mdd_improve', 'mdd_improvements', 'mdd_jd_inspect', 'mdd_knowledge', 'mdd_knowledge_record', 'mdd_phase_result', 'mdd_pr_body', 'mdd_prepare_advance', 'mdd_reset', 'mdd_revisit', 'mdd_security', 'mdd_start', 'mdd_status', 'mdd_transfer', 'mdd_transfer_recover']);
   assert.deepEqual(Object.keys(hooks.tool.mdd_start.args), ['requirements', 'context', 'exploration', 'questions']);
   assert.deepEqual(Object.keys(hooks.tool.mdd_contextual_explore.args), ['purpose', 'workItems']);
   const ready = JSON.parse(await hooks.tool.mdd_start.execute({ requirements: f.requirements }, context));
@@ -1246,7 +1289,7 @@ test('plugin config contract: settings frozen at startup; only explicit model ov
   await hooks.config(config);
   // Every agent but the coordinator loses the MDD tools: they are registered app-wide but are
   // meaningless, and misleading, anywhere else.
-  const denied = { mdd_security: false, mdd_start: false, mdd_status: false, mdd_prepare_advance: false, mdd_revisit: false, mdd_answer: false, mdd_phase_result: false, mdd_reset: false, mdd_change_request: false, mdd_contextual_explore: false, mdd_context: false, mdd_pr_body: false, mdd_improve: false, mdd_improvements: false, mdd_transfer: false, mdd_transfer_recover: false, 'mdd_*': false, mdd_jd_inspect: false };
+  const denied = { mdd_security: false, mdd_start: false, mdd_status: false, mdd_prepare_advance: false, mdd_revisit: false, mdd_answer: false, mdd_phase_result: false, mdd_reset: false, mdd_change_request: false, mdd_contextual_explore: false, mdd_context: false, mdd_pr_body: false, mdd_improve: false, mdd_improvements: false, mdd_knowledge: false, mdd_knowledge_record: false, mdd_transfer: false, mdd_transfer_recover: false, 'mdd_*': false, mdd_jd_inspect: false };
   // And every phase actor loses `task` and `skill`: it is the actor, and the skills it needs are
   // already inlined in its prompt by value, so a name lookup can only reach someone else's. It
   // gains exactly one MDD tool back, which reads nothing and only tells it whether the report it

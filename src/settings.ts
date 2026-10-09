@@ -27,6 +27,7 @@ export type Settings = {
   engram?: EngramSettings;
   telemetry: { enabled: boolean };
   workers: { enabled: boolean };
+  knowledge: { enabled: boolean };
 };
 
 export function profileName(value: unknown): string {
@@ -49,12 +50,12 @@ export function parseModel(value: unknown): string {
 export function defaultSettings(): Settings {
   return {
     version: 1, activeProfile: 'default', profiles: { default: { models: {}, answers: {} } },
-    telemetry: { enabled: true }, workers: { enabled: true },
+    telemetry: { enabled: true }, workers: { enabled: true }, knowledge: { enabled: false },
   };
 }
 
 export function parseSettings(value: unknown): Settings {
-  const input = objectWithKeys(value, 'settings', ['version', 'activeProfile', 'profiles', 'engram', 'telemetry', 'workers']);
+  const input = objectWithKeys(value, 'settings', ['version', 'activeProfile', 'profiles', 'engram', 'telemetry', 'workers', 'knowledge']);
   if (input.version !== 1) throw new ValidationError('settings.version must be 1.');
   const names = typeof input.profiles === 'object' && input.profiles !== null ? Object.keys(input.profiles) : [];
   if (!names.length || names.length > 64) throw new ValidationError('Settings require 1–64 named profiles.');
@@ -80,6 +81,11 @@ export function parseSettings(value: unknown): Settings {
     const workers = objectWithKeys(input.workers, 'workers', ['enabled']);
     if (typeof workers.enabled !== 'boolean') throw new ValidationError('workers.enabled must be boolean.');
     result.workers.enabled = workers.enabled;
+  }
+  if (Object.hasOwn(input, 'knowledge')) {
+    const knowledge = objectWithKeys(input.knowledge, 'knowledge', ['enabled']);
+    if (typeof knowledge.enabled !== 'boolean') throw new ValidationError('knowledge.enabled must be boolean.');
+    result.knowledge.enabled = knowledge.enabled;
   }
   if (Object.hasOwn(input, 'engram')) {
     const engram = objectWithKeys(input.engram, 'engram', ['mode', 'binary', 'dataDirectory', 'endpoint', 'project']);

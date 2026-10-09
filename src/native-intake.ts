@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import { EngramHttp, LESSON_TITLE_PREFIX, mddDataRoot } from './engram-http.js';
+import { EngramHttp, KnowledgeWriteUnknownError, LESSON_TITLE_PREFIX, mddDataRoot } from './engram-http.js';
+import { KNOWLEDGE_NOTE, knowledgeObservation, knowledgeSummary, parseKnowledgeQuery, parseKnowledgeRequest, queryKnowledge } from './project-knowledge.js';
 import { readLessons, recordLesson, renderLessonsReport } from './lessons.js';
 import type { LessonState } from './lessons.js';
 import { boundedText, nonemptyText, runContext } from './phase-runner.js';
@@ -778,6 +779,46 @@ export class NativeIntake {
     const client = new EngramHttp(endpoint, { id: runtime.sessionID, project: '', directory: runtime.directory });
     await client.bootstrap();
     return client;
+  }
+
+  readonly #knowledgeAttempts = new Set<string>();
+
+  async knowledge(input: unknown, runtime: Runtime): Promise<unknown> {
+    if (!this.#settings.knowledge.enabled) return { state: 'disabled', entries: [] };
+    const query = parseKnowledgeQuery(input);
+    try {
+      const client = await this.#memory(runtime);
+      if (client) return { state: 'available', entries: await queryKnowledge(client, query), note: KNOWLEDGE_NOTE };
+    } catch { /* Optional knowledge has no offline authority or cached fallback. */ }
+    return { state: 'unavailable', entries: [], note: 'Knowledge provider is unavailable or unbound; no observations were returned.' };
+  }
+
+  async recordKnowledge(input: unknown, runtime: Runtime, messageID: string): Promise<unknown> {
+    if (!this.#settings.knowledge.enabled) return { state: 'disabled' };
+    const request = parseKnowledgeRequest(input);
+    const userMessageID = await this.inspect.intake(runtime, request.userText, messageID);
+    if (!userMessageID) throw new Error('Knowledge recording requires a proven native user message.');
+    this.runner.owner?.(runtime.sessionID);
+    const key = JSON.stringify([runtime.sessionID, userMessageID, request.requestDigest, request.observationDigest]);
+    const repeated = { state: 'already-attempted', note: 'This observation already attempted a write for this native request. Inspect canonical memory; never retry blindly.' };
+    if (this.#knowledgeAttempts.has(key)) return repeated;
+    let client: EngramHttp | undefined;
+    try { client = await this.#memory(runtime); } catch { /* No observation POST has been attempted. */ }
+    if (!client) return { state: 'unavailable', note: 'Knowledge provider is unavailable or unbound; nothing was recorded.' };
+    this.runner.owner?.(runtime.sessionID);
+    // Recheck after asynchronous binding so concurrent calls cannot post the same finding twice.
+    if (this.#knowledgeAttempts.has(key)) return repeated;
+    if (this.#knowledgeAttempts.size >= 512) throw new Error('Knowledge recording attempt budget reached; inspect canonical memory.');
+    const entry = knowledgeObservation(request.draft, client.project, runtime.sessionID, userMessageID, messageID, request.requestDigest);
+    this.#knowledgeAttempts.add(key);
+    try {
+      const id = await client.saveKnowledge(JSON.stringify(entry));
+      return { state: 'recorded', entry: knowledgeSummary(id, entry), note: KNOWLEDGE_NOTE };
+    } catch (error) {
+      if (error instanceof KnowledgeWriteUnknownError) return { state: 'write-unknown',
+        ...(error.observationID ? { ref: `engram:${error.observationID}` } : {}), note: error.message };
+      return { state: 'unavailable', note: 'Knowledge binding failed before writing. Inspect canonical memory before any new recording request.' };
+    }
   }
 
   /**
