@@ -19,7 +19,7 @@ Verification truth and permission to continue are separate: retain failed or inc
 
 - Existing phase prompts, check contracts, report/checkpoint/dossier compatibility, explicit failed-Verify continuation, regression tests, and adapter documentation.
 - Preserve independent judges, immutable inspection, worker fences, partial work, exact native user-message proof, and legacy evidence without inventing structured proof.
-- No new execution-evidence service, automatic fail-open, broad orchestrator refactor, remote operation, push, PR, merge, or global installation.
+- No new execution-evidence service, automatic fail-open, broad orchestrator refactor or global installation. After completing SA-1..4, the user explicitly authorized fetching `origin/main`, local integration and normal push to `https://github.com/vancinis/mdd-orchestrator.git` using configured Git authentication. No credential inspection/change, force-push or PR creation.
 - RDD is off, decided by clone-local preference. Keep it off; native risk assessment is informational for delegated verification only.
 - English technical artifacts; Spanish user conversation.
 - One writer at a time, exact task-scoped edit surfaces supplied by the parent.
@@ -58,6 +58,15 @@ Verification truth and permission to continue are separate: retain failed or inc
   - Results: 5 structural assertions RED, then 5 GREEN. Build/typecheck/diff check passed. Focused suite: 227 total, 226 passed/0 failed/1 expected Windows skip. Final full suite: 1,830 total, 1,827 passed/0 failed/3 expected skips. Parent reran the complete 227-test focused suite with identical result.
   - Independent verification: PASS; 5 SA-4 assertions, typecheck/diff check and structural comparison with actual immutable-inspection/security/admission code passed. No live Security/JD execution, model-obedience proof or native approval claimed. Metadata/paths unchanged; registry entries remain valid.
   - Commit: `10f06bb` (`fix(audit): clarify immutable readiness and evidence limits`). Unit: 8 files +155/-2 (157 authored lines). Native risk: high (`security` hot path); independent verification completed with RDD disabled/unmanaged.
+- [ ] **SA-5 — Integrate current main and publish the combined result.** User requested direct push to main and explicitly selected `Autorizar publicación`, permitting configured-Git fetch, local integration, checks and normal push only to the named origin repository.
+  - Route: delegated direct; trigger: two textual conflicts and coordinated semantic integration across runtime/tests. Parent owns all remote operations and final merge commit/push; one bounded writer integrates locally.
+  - Boundaries: local `4b7bb54`, fetched main `8d329dd52d72c7f8eba9b2f148a50b4e8103b005`, common base `1f4b700223b906a816d20d935edba837aecb49f7`. Five commits each side; incoming work adds project-knowledge capture/cache/routing/context delivery.
+  - Acceptance: combine cache and continued-run fixed-path allowances; retain structured-fixture import with incoming memory server; assign unique check IDs in new-run knowledge fixtures; preserve absent packaged skill hints in restricted workers while delivering advisory catalog excerpts; preserve knowledge freshness/reservation/diagnostics isolation across explicit continuation; no verification/ownership/privacy regressions.
+  - Checks: build/typecheck; focused knowledge/runtime/native/checkpoint/dossier/worker/acceptance/PR suites; full `npm test`; conflict-marker/diff checks; independent integration verification; parent spot check; normal push and exact remote-result readback. No package/lock changes expected.
+  - Progress: pinned main integrated locally; both textual conflicts resolved preserving both features. Explicit fixture/unique-ID/scoped-hint corrections plus a continuation/fresh-start knowledge-isolation regression were added. No extra production fix required. Incoming project-knowledge tracking matches pinned main exactly; manifests/lock unchanged.
+  - Evidence: semantic RED 9/142 failed, then targeted GREEN 55 passed. Build/typecheck and focused 766 tests passed. Combined full suite: 1,943 total, 1,940 passed/0 failed/3 expected skips. Independent integration verification: PASS, 206 actual tests passed and all six overlapping files checked against both parents. Parent spot-checked archive/replay ordering and reran typecheck; staged/working diff checks passed, no unmerged entries/markers.
+  - Scope: 26 incoming paths staged, +2,652/-39 against the feature HEAD; hand edits limited to conflict composition and +61/-2 semantic test adaptations. Native risk medium; independent check completed. No live-host/model proof claimed.
+  - Commit/publication: final merge commit and normal push pending. RDD stays disabled/unmanaged.
 
 ## Verification policy
 
@@ -82,10 +91,10 @@ RDD-off delegated work requires native risk assessment and proportional independ
 - Branch: `feat-subagentes-improvements`.
 - Initial boundary: `1f4b700223b906a816d20d935edba837aecb49f7`.
 - Forecast: approximately 1,170–1,890 authored changed lines, excluding generated output and this tracking file.
-- Strategy: `ask-on-risk`; user selected `Integración conjunta (Recommended)`, binding chain strategy to `feature-branch-chain`. Keep local work-unit commit boundaries on the integration branch; prepare child/tracker PRs only after separate publication authorization. Do not deliver structured Verify to main before explicit continuation is ready.
+- Initial strategy: `ask-on-risk` with user-selected `feature-branch-chain`/joint integration. SA-1..4 remain separate local work units. The user's later direct-main push request and explicit publication authorization override PR delivery planning: integrate all completed work with fetched main and publish together by normal push; no PRs. Structured Verify and explicit continuation stay together.
 - Four coherent work units; schema compatibility may naturally exceed the per-task heuristic. Keep related behavior, tests, and docs together rather than splitting artificially or compressing code.
 - Observed authored work-unit changes excluding tracking/generated files: 2,022 committed; net branch diff: 49 files +1,883/-135. Local slices: `1f4b700..bc06e3e` (SA-1), `bc06e3e..e7d6590` (SA-2), `e7d6590..d2a4402` (SA-3), `d2a4402..10f06bb` (SA-4). SA-2/SA-3 exceed the review-size heuristic because schema compatibility and durable continuation/replay tests are coherent units; reassess PR slicing/size exception only if publication is later authorized. Final count exceeds the original upper forecast by 132 lines because necessary compatibility and replay-regression coverage was retained.
-- Push, PR creation and merge remain separate user decisions.
+- Current user authorization permits local integration and normal push to the named origin main through configured Git authentication. PR creation and any force operation remain unauthorized.
 
 ## Progress and recovery
 
@@ -94,5 +103,5 @@ RDD-off delegated work requires native risk assessment and proportional independ
 - Authorized local preparation: `npm ci --offline --ignore-scripts --no-audit --no-fund --cache C:/Users/vanci/AppData/Local/npm-cache`. Do not fall back to network access on failure.
 - Parent spot-checked composed mutation guidance and native reset attestation guards.
 - Feature mirror: complete write attempted under `odd/subagent-improvements/tasks`, rejected with `session_project_mismatch`; pending in the detected project. Do not invent or rebind a session identity. Local document preserves progress.
-- All four units are implemented, independently checked and committed locally. Final required automated checks have no failures; expected full-suite skips are two Windows symlink-privilege cases and optional installed Engram smoke. No live-model smoke, live Security/JD review, global installation, push, PR or merge was performed.
-- Next step: delivery or global installation requires separate user authorization. Named Engram topic mirror remains pending because of the recorded project/session mismatch; local tracking and session summaries retain recovery context.
+- SA-1..4 are implemented, independently checked and committed locally. Their final required automated checks have no failures; expected full-suite skips are two Windows symlink-privilege cases and optional installed Engram smoke. No live-model smoke, live Security/JD review or global installation performed.
+- Next step: commit verified integration and perform authorized normal push with remote identity readback. Named Engram topic mirror remains pending because of the recorded project/session mismatch and current degraded availability; local tracking and session summaries retain recovery context.

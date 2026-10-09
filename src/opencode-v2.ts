@@ -357,11 +357,31 @@ export async function setupV2(ctx: Plugin.Context, createMotor: LegacyPlugin): P
     }
     delete event.tools.mdd_worker_edit;
     const results = new Set(event.messages.flatMap(message => message.content.flatMap(part => part.type === 'tool-result' ? [part.id] : [])));
+    // Native fallback actors are not phase names. Use the motor's existing exact session/call/args
+    // binding via the shared V1 transform rather than treating every explore/general task as MDD.
+    const native = event.messages.flatMap(message => message.role !== 'assistant' ? [] : message.content.flatMap(part => {
+      if (part.type !== 'tool-call' || part.name !== 'subagent' || !results.has(part.id)) return [];
+      try {
+        const args = taskInput(part.input);
+        if (!['explore', 'general'].includes(String(args.subagent_type))) return [];
+        return [{ part, legacy: { type: 'tool', tool: 'task', sessionID: event.sessionID, callID: part.id,
+          state: { status: 'completed', input: args } } }];
+      } catch { return []; } // Malformed unrelated calls cannot acquire MDD dispatch correlation.
+    }));
+    const transformed = { messages: [{ parts: native.map(item => item.legacy) }] };
+    if (native.length) await hooks['experimental.chat.messages.transform']?.({}, transformed as never);
+    const nativePrompts = new Map<unknown, string>();
+    native.forEach((item, index) => {
+      const prompt = transformed.messages[0]!.parts[index]!.state.input.prompt;
+      if (typeof prompt === 'string') nativePrompts.set(item.part, prompt);
+    });
     event.messages = event.messages.map(message => {
       if (message.role !== 'assistant') return message;
       return { ...message, content: message.content.map(part => {
         if (part.type !== 'tool-call' || part.name !== 'subagent' || !results.has(part.id)) return part;
         const args = object(part.input);
+        const nativePrompt = nativePrompts.get(part);
+        if (nativePrompt !== undefined && nativePrompt !== args.prompt) return { ...part, input: { ...args, prompt: nativePrompt } };
         if (typeof args.prompt !== 'string' || typeof args.agent !== 'string' || !PHASES.includes(args.agent as typeof PHASES[number]) ||
           args.prompt.startsWith(DISPATCH_HANDLE_PREFIX) || Buffer.byteLength(args.prompt) <= COLLAPSE_MIN_BYTES) return part;
         return { ...part, input: { ...args, prompt: collapsedPrompt(args.agent, Buffer.byteLength(args.prompt)) } };

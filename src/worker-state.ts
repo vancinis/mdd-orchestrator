@@ -131,7 +131,8 @@ export class ExplorationWorkers {
     return { phase: 'mdd-explore', taskID: member.taskID, ownerEpoch: task.ownerEpoch,
       reads: structuredClone(this.record.items.find(item => item.id === member.taskID)!.reads!) };
   }
-  async before(callID: string, args: unknown, inspect: () => Promise<void>, start: (batchID: string) => void): Promise<ReadTask> {
+  async before(callID: string, args: unknown, inspect: () => Promise<void>, start: (batchID: string) => void,
+    knowledge?: (item: ExplorationWorkItem) => Promise<(prompt: string) => string>): Promise<ReadTask> {
     const record = this.record, batch = record.workerState.batch!;
     const task = record.tasks.find(task => isDeepStrictEqual(args, { ...task.args, prompt: task.token }));
     if (!['ready', 'await-result'].includes(record.state) || batch.blocked || !id(callID) || !task || task.dispatchedArgs ||
@@ -149,6 +150,20 @@ export class ExplorationWorkers {
       record.state = 'await-result'; this.persist();
       await inspect();
       if (!this.assignment(callID)) throw new Error('Exploration admission lost its exact owner.');
+      if (knowledge) {
+        const reservation = this.ownership.read(record.ownerRunID)!;
+        const current = () => {
+          if (record.state !== 'await-result' || batch.blocked || !this.assignment(callID) ||
+              this.ownership.read(record.ownerRunID)?.epoch !== reservation.epoch)
+            throw new Error('Exploration admission changed during knowledge lookup.');
+        };
+        const supplement = await knowledge(record.items.find(item => item.id === task.taskID)!);
+        current();
+        await inspect();
+        current();
+        task.dispatchedArgs.prompt = supplement(task.dispatchedArgs.prompt);
+        this.persist();
+      }
       return structuredClone(task.dispatchedArgs);
     } catch (error) { this.block(error); throw error; }
   }

@@ -39,6 +39,13 @@
         }
       }]
     },
+    "knowledge": {
+      "description": "Optional canonical Engram observations and explicit per-checkout mdd/knowledge.json approved skill catalog. Defaults off. Freshness validates declared bytes, not truth or authority. Child-only excerpts and observations share three entries/8 KiB; delivery metrics use existing telemetry opt-out. Catalogs never grant tools or permissions.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": { "enabled": { "type": "boolean", "default": false } }
+    },
     "workers": {
       "description": "Global parallel-worker preference, default on when omitted. Captured at startup; dispatch remains sequential until batch execution is supported.",
       "type": "object",

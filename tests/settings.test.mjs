@@ -87,6 +87,19 @@ const invalid = [
   JSON.parse('{"version":1,"activeProfile":"default","profiles":{"default":{}},"__proto__":{}}'),
 ];
 
+test('knowledge defaults off for legacy settings, round trips explicitly, and rejects unknown configuration', t => {
+  const legacy = { version: 1, activeProfile: 'default', profiles: { default: {} } };
+  assert.deepEqual(parseSettings(legacy).knowledge, { enabled: false });
+  const root = fixture(t);
+  for (const enabled of [true, false]) {
+    saveSettings(root, { ...defaultSettings(), knowledge: { enabled } });
+    assert.deepEqual(loadSettings(root).knowledge, { enabled });
+  }
+  for (const knowledge of [null, {}, true, { enabled: 'true' }, { enabled: true, policy: true }]) {
+    assert.throws(() => parseSettings({ ...legacy, knowledge }));
+  }
+});
+
 test('workers default on for absent and legacy settings without rewriting legacy bytes', t => {
   const root = fixture(t);
   assert.deepEqual(loadSettings(root).workers, { enabled: true });

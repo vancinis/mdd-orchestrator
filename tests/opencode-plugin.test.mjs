@@ -11,7 +11,7 @@ import { MODEL_ROLES } from '../dist/settings.js';
 import { defaultSettings, saveSettings } from '../dist/settings.js';
 import { saveGlobalSettings } from '../dist/global-settings.js';
 import { installationPaths } from '../dist/installation-paths.js';
-import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -50,6 +50,55 @@ function addNativeUser(f, requirements) {
   f.parentMessages.unshift({ info: { id: 'msg_user', sessionID: f.runtime.sessionID, role: 'user' },
     parts: [{ type: 'text', text: requirements, sessionID: f.runtime.sessionID, messageID: 'msg_user' }] });
 }
+
+test('organic knowledge tools are coordinator-only, disabled without provider calls, and native-grounded when enabled', async t => {
+  isolateHome(t);
+  const root = await mkdtemp(join(tmpdir(), 'mdd-knowledge-plugin-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const f = sdkFixture('{}', { ...runtime, directory: root, worktree: root });
+  const context = { ...f.runtime, messageID: 'msg_parent', abort: new AbortController().signal };
+  const { endpoint, binding, writes } = await memoryServer(t);
+  binding.directory = root;
+  const settings = { ...defaultSettings(), engram: { endpoint } };
+  saveGlobalSettings(settings);
+  let hooks = await plugin(f.input);
+  for (const name of ['mdd_knowledge', 'mdd_knowledge_record']) {
+    assert.ok(hooks.tool[name], name);
+    await assert.rejects(hooks.tool[name].execute({}, { ...context, agent: 'general' }), /mdd-orchestrator/);
+  }
+  const config = { agent: { general: {}, 'mdd-apply': {}, 'mdd-orchestrator': {} } };
+  await hooks.config(config);
+  assert.equal(config.agent.general.tools.mdd_knowledge, false);
+  assert.equal(config.agent['mdd-apply'].tools.mdd_knowledge_record, false);
+  const blocked = t.mock.method(globalThis, 'fetch', () => assert.fail('disabled knowledge contacted provider'));
+  assert.equal(JSON.parse(await hooks.tool.mdd_knowledge.execute({}, context)).state, 'disabled');
+  assert.equal(JSON.parse(await hooks.tool.mdd_knowledge_record.execute({ userText: 'ignored while disabled' }, context)).state, 'disabled');
+  blocked.mock.restore();
+  saveGlobalSettings({ ...settings, knowledge: { enabled: true } });
+  hooks = await plugin(f.input);
+  const userText = 'Please improve boundary checks in this project.';
+  const observation = { summary: 'Input validation belongs at the boundary.', body: 'Boundary check. Keep the complete private rationale in memory.', applicability: { phases: ['mdd-apply'], paths: ['src'] }, sources: ['src/example.ts'] };
+  addNativeUser(f, userText);
+  await assert.rejects(hooks.tool.mdd_knowledge_record.execute({ userText: userText + ' forged', observation }, context));
+  await assert.rejects(hooks.tool.mdd_knowledge_record.execute({ userText, observation }, { ...context, messageID: 'forged' }));
+  assert.equal(writes.length, 0);
+  f.parent.parentID = 'foreign';
+  await assert.rejects(hooks.tool.mdd_knowledge.execute({}, context), /top-level/);
+  delete f.parent.parentID;
+  const saved = JSON.parse(await hooks.tool.mdd_knowledge_record.execute({ userText, observation }, context));
+  assert.equal(saved.state, 'recorded');
+  assert.equal(writes.length, 1);
+  assert.equal(JSON.parse(writes[0].content).provenance.kind, 'coordinator-observation');
+  assert.equal(JSON.parse(writes[0].content).version, 2);
+  assert.deepEqual(JSON.parse(writes[0].content).dependencies, [{ path: 'src/example.ts', digest: 'missing' }]);
+  const found = JSON.parse(await hooks.tool.mdd_knowledge.execute({}, context));
+  assert.equal(found.entries.length, 1);
+  assert.equal(found.entries[0].freshness, 'fresh');
+  assert.equal(JSON.stringify(found).includes('complete private rationale'), false);
+  await mkdir(join(root, 'src'));
+  await writeFile(join(root, 'src/example.ts'), '');
+  assert.equal(JSON.parse(await hooks.tool.mdd_knowledge.execute({}, context)).entries[0].freshness, 'stale');
+});
 
 test('legacy security sessions cannot bypass runtime isolation with a forged claimed actor', async t => {
   isolateHome(t); saveGlobalSettings(defaultSettings());
@@ -386,7 +435,7 @@ test('OpenCode SDK contract: bounded callback even if injected client ignores ab
 test('plugin contract: scoped tools, in-place native args, result gating, no native override', async t => {
   const f = await pluginFixture(t);
   const { hooks, context, writes } = f;
-  assert.deepEqual(Object.keys(hooks.tool).sort(), ['mdd_answer', 'mdd_change_request', 'mdd_check_report', 'mdd_context', 'mdd_contextual_explore', 'mdd_improve', 'mdd_improvements', 'mdd_jd_inspect', 'mdd_phase_result', 'mdd_pr_body', 'mdd_prepare_advance', 'mdd_reset', 'mdd_revisit', 'mdd_security', 'mdd_start', 'mdd_status', 'mdd_transfer', 'mdd_transfer_recover']);
+  assert.deepEqual(Object.keys(hooks.tool).sort(), ['mdd_answer', 'mdd_change_request', 'mdd_check_report', 'mdd_context', 'mdd_contextual_explore', 'mdd_improve', 'mdd_improvements', 'mdd_jd_inspect', 'mdd_knowledge', 'mdd_knowledge_record', 'mdd_phase_result', 'mdd_pr_body', 'mdd_prepare_advance', 'mdd_reset', 'mdd_revisit', 'mdd_security', 'mdd_start', 'mdd_status', 'mdd_transfer', 'mdd_transfer_recover']);
   assert.deepEqual(Object.keys(hooks.tool.mdd_start.args), ['requirements', 'context', 'exploration', 'questions']);
   assert.deepEqual(Object.keys(hooks.tool.mdd_contextual_explore.args), ['purpose', 'workItems']);
   const ready = JSON.parse(await hooks.tool.mdd_start.execute({ requirements: f.requirements }, context));
@@ -404,6 +453,39 @@ test('plugin contract: scoped tools, in-place native args, result gating, no nat
   assert.equal(status.workflow.results.length, 1);
   assert.equal(writes.length, 2);
   await hooks['tool.execute.before']({ tool: 'read', sessionID: 'other', callID: 'other' }, { args: {} });
+});
+
+for (const publication of ['success', 'failure']) test(`PK4 actual plugin ${publication} keeps catalog delivery metrics honest and bodies child-only`, async t => {
+  const f = await pluginFixture(t);
+  f.settings.knowledge.enabled = true;
+  f.settings.telemetry.enabled = false;
+  saveGlobalSettings(f.settings);
+  await mkdir(join(f.root, 'mdd'));
+  await mkdir(join(f.root, 'skills'));
+  await writeFile(join(f.root, 'skills/SKILL.md'), '---\nname: cli\n---\nPRIVATE_PLUGIN_SKILL inspect the CLI.');
+  await writeFile(join(f.root, 'mdd/knowledge.json'), JSON.stringify({ version: 1, skills: [{ id: 'cli', approved: true,
+    path: 'skills/SKILL.md', phases: ['mdd-explore'], terms: ['cli'], paths: [], tools: ['read', 'bash'] }] }));
+  const hooks = await plugin(f.input);
+  const ready = JSON.parse(await hooks.tool.mdd_start.execute({ requirements: f.requirements }, f.context));
+  assert.equal(JSON.stringify(ready).includes('PRIVATE_PLUGIN_SKILL'), false);
+  const output = { args: structuredClone(ready.task) };
+  if (publication === 'failure') {
+    Object.freeze(output.args);
+    await assert.rejects(hooks['tool.execute.before']({ ...call, tool: 'task' }, output), /read only|read-only|extensible|assign/i);
+    assert.equal(JSON.parse(await hooks.tool.mdd_status.execute({}, f.context)).knowledge, undefined);
+    return;
+  }
+  await hooks['tool.execute.before']({ ...call, tool: 'task' }, output);
+  assert.ok(output.args.prompt.includes('PRIVATE_PLUGIN_SKILL'));
+  const status = JSON.parse(await hooks.tool.mdd_status.execute({}, f.context));
+  assert.deepEqual(status.knowledge.selectedSkillIDs, ['cli']);
+  assert.equal(JSON.stringify(status).includes('PRIVATE_PLUGIN_SKILL'), false);
+  const transcript = { messages: [{ info: { role: 'assistant', sessionID: f.runtime.sessionID }, parts: [{
+    type: 'tool', tool: 'task', callID: call.callID, state: { status: 'completed', input: output.args, output: 'Inspected' },
+  }] }] };
+  await hooks['experimental.chat.messages.transform']({}, transcript);
+  assert.equal(JSON.stringify(transcript).includes('PRIVATE_PLUGIN_SKILL'), false);
+  assert.ok(output.args.prompt.includes('PRIVATE_PLUGIN_SKILL'), 'child arguments remain immutable');
 });
 
 test('plugin contract: a phase actor may check its own report, and nobody else may call in', async t => {
@@ -1246,7 +1328,7 @@ test('plugin config contract: settings frozen at startup; only explicit model ov
   await hooks.config(config);
   // Every agent but the coordinator loses the MDD tools: they are registered app-wide but are
   // meaningless, and misleading, anywhere else.
-  const denied = { mdd_security: false, mdd_start: false, mdd_status: false, mdd_prepare_advance: false, mdd_revisit: false, mdd_answer: false, mdd_phase_result: false, mdd_reset: false, mdd_change_request: false, mdd_contextual_explore: false, mdd_context: false, mdd_pr_body: false, mdd_improve: false, mdd_improvements: false, mdd_transfer: false, mdd_transfer_recover: false, 'mdd_*': false, mdd_jd_inspect: false };
+  const denied = { mdd_security: false, mdd_start: false, mdd_status: false, mdd_prepare_advance: false, mdd_revisit: false, mdd_answer: false, mdd_phase_result: false, mdd_reset: false, mdd_change_request: false, mdd_contextual_explore: false, mdd_context: false, mdd_pr_body: false, mdd_improve: false, mdd_improvements: false, mdd_knowledge: false, mdd_knowledge_record: false, mdd_transfer: false, mdd_transfer_recover: false, 'mdd_*': false, mdd_jd_inspect: false };
   // And every phase actor loses `task` and `skill`: it is the actor, and the skills it needs are
   // already inlined in its prompt by value, so a name lookup can only reach someone else's. It
   // gains exactly one MDD tool back, which reads nothing and only tells it whether the report it

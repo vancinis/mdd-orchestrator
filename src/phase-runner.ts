@@ -37,11 +37,14 @@ import { phaseVisual, presentationSettings } from './visual-ux.js';
 import { STATUS_BUDGET_BYTES } from './status-budget.js';
 import type { RunOwnershipStore, RunOwner } from './run-ownership.js';
 import type { WorkerPolicy } from './settings.js';
-import { applyScopeFiles, selectWorkerBatch, explorationItems, independentExploration, type ExplorationWorkItem } from './worker-batch.js';
+import { applyScopeFiles, selectWorkerBatch, explorationFiles, explorationItems, independentExploration, type ExplorationWorkItem } from './worker-batch.js';
 import { workerReport, ExplorationWorkers } from './worker-state.js';
 import type { ReadAssignment } from './worker-fence.js';
 import type { WorkerState } from './worker-state.js';
 import { completeStep, selectedStep, taskIDs } from './apply-batches.js';
+import { relative, resolve } from 'node:path';
+import { supplementKnowledge } from './project-knowledge.js';
+import type { KnowledgeResolution, KnowledgeDiagnostics, KnowledgeSelection } from './project-knowledge.js';
 
 export type Runtime = { sessionID: string; agent: string; directory: string; worktree: string };
 export type TaskCall = { sessionID: string; callID: string };
@@ -485,12 +488,34 @@ export class PhaseRunner {
   readonly #inheritedCalls = new Map<string, string[]>();
   readonly #workerOperations = new Map<string, Promise<unknown>>();
   readonly #explorations = new Map<string, ExplorationWorkers>();
+  readonly #knowledgeDiagnostics = new Map<string, { origin: Runtime | string; value: KnowledgeDiagnostics }>();
   constructor(readonly inspect: Inspect, readonly options: { workers?: WorkerPolicy;
+    knowledge?: (runtime: Runtime, selection: KnowledgeSelection, memory?: EngramHttp) => Promise<KnowledgeResolution>;
     /** Phase-scoped production read fence. confined:true is retained only for legacy synthetic Apply hosts. */
     workerCapability?: Readonly<{ confined: true } | { phase: 'mdd-explore'; readOnly: true; applyEditing?: true }>;
     now?: () => number; progress?: ProgressGuard; dossier?: RunDossierStore; checkpoint?: CheckpointStore; ownership?: RunOwnershipStore; telemetry?: (root: string, value: TelemetryEvent, now: number) => TelemetryResult; lessons?: (root: string, value: LessonInput, now: number) => void; ledger?: (root: string, value: RunLedgerInput, now: number) => void } = {}) {}
 
   #captureWorkers(): WorkerPolicy { return Object.freeze({ enabled: this.options.workers?.enabled ?? true }); }
+
+  async #knowledge(runtime: Runtime, selection: KnowledgeSelection, memory?: EngramHttp): Promise<KnowledgeResolution> {
+    try { return await this.options.knowledge?.(runtime, selection, memory) ?? []; }
+    catch { return []; } // Only optional resolution is fallible here; callers retain every safety check.
+  }
+
+  #knowledgeScope(runtime: Runtime, phase: Phase, objective: string, files: string[]): KnowledgeSelection {
+    const capability = this.options.workerCapability;
+    // The production Apply host installs this editor itself. Native read/grep inventories are
+    // not supplied here, so their availability is not inferred from names or permissions.
+    const availableTools = phase === 'mdd-apply' && capability && 'phase' in capability && capability.applyEditing
+      ? ['mdd_worker_edit'] : [];
+    return { phase, objective, files, availableTools, paths: files.map(file => relative(runtime.directory, file).replaceAll('\\', '/')) };
+  }
+
+  #sameReservation(sessionID: string, before: RunOwner | undefined, callID?: string): void {
+    const after = this.owner(sessionID, callID);
+    if (!!before !== !!after || before && (!after || after.epoch !== before.epoch || after.state !== before.state || after.callID !== before.callID))
+      throw new Error('Dispatch lost its exact reservation during knowledge lookup.');
+  }
 
   #explorationBlocked(sessionID: string): boolean {
     const run = this.#runs.get(sessionID);
@@ -544,7 +569,7 @@ export class PhaseRunner {
     workers.persist(); this.#explorations.set(runtime.sessionID, workers);
   }
 
-  async #explorationBefore(call: TaskCall, args: unknown): Promise<TaskArgs> {
+  async #explorationBefore(call: TaskCall, args: unknown, diagnose: (value: KnowledgeDiagnostics) => void): Promise<TaskArgs> {
     const lane = this.#explorations.get(call.sessionID)!;
     const run = this.#runs.get(call.sessionID);
     if (run?.calls.has(call.callID)) throw new Error('Native exploration call was already consumed.');
@@ -559,7 +584,15 @@ export class PhaseRunner {
         if (!run.side) run.workflow.start('mdd-explore');
         run.state = 'await-result'; run.callID = batchID; run.attemptID = batchID; run.settledCheckpoint = false;
       }
-    });
+    }, this.options.knowledge ? async item => {
+      const selection = this.#knowledgeScope(runtime, 'mdd-explore', item.purpose, explorationFiles(item.reads!));
+      const candidates = await this.#knowledge(runtime, selection, run?.memory);
+      return prompt => {
+        if (this.#explorations.get(call.sessionID) !== lane) throw new Error('Exploration dispatch was replaced during knowledge lookup.');
+        explorationFiles(item.reads!);
+        return supplementKnowledge(prompt, candidates, selection, runtime.directory, 48000, diagnose);
+      };
+    } : undefined);
   }
 
   async #explorationAfter(call: TaskCall, args: unknown, output: unknown): Promise<void> {
@@ -1027,6 +1060,19 @@ export class PhaseRunner {
   }
 
   status(sessionID: string) {
+    const snapshot = this.#knowledgeDiagnostics.get(sessionID);
+    const knowledge = snapshot?.origin === this.#knowledgeOrigin(sessionID) ? snapshot?.value : undefined;
+    return { ...this.#status(sessionID), ...(knowledge ? { knowledge: structuredClone(knowledge) } : {}) };
+  }
+
+  #knowledgeOrigin(sessionID: string): Runtime | string | undefined {
+    const run = this.#runs.get(sessionID), solo = this.#solo.get(sessionID);
+    // Run runtime objects are fresh on start/restore, even if the durable run ID is reused.
+    // Investigation IDs isolate side/standalone work without retaining their prompt bodies.
+    return run ? run.side?.id ?? run.runtime : solo?.state !== 'settled' ? solo?.id : undefined;
+  }
+
+  #status(sessionID: string) {
     const exploration = this.#explorations.get(sessionID);
     if (exploration) return { sessionID, reportDetail: undefined, runID: exploration.record.ownerRunID,
       ...(this.#runs.get(sessionID) ? { workflow: this.#runs.get(sessionID)!.workflow.snapshot() } : {}), ...exploration.status() };
@@ -1688,16 +1734,35 @@ export class PhaseRunner {
     if (moved) throw new ValidationError(movedMessage(moved.runID, moved.targetSessionID));
   }
 
-  async before(call: TaskCall, args: unknown): Promise<TaskArgs | undefined> {
-    if (this.#explorations.has(call.sessionID)) return this.#workerOperation(call.sessionID, () => this.#explorationBefore(call, args));
+  async before(call: TaskCall, args: unknown, publish?: (args: TaskArgs) => void): Promise<TaskArgs | undefined> {
+    const origin = this.#knowledgeOrigin(call.sessionID);
+    let knowledge: KnowledgeDiagnostics | undefined;
+    const sent = await this.#before(call, args, value => { knowledge = value; });
+    if (sent) publish?.(sent);
+    // Only a successfully admitted prompt is delivered. Failed native/checkpoint checks publish
+    // no prediction. Keep one bounded in-memory snapshot; persistence uses existing telemetry opt-out.
+    if (sent && knowledge && origin !== undefined && origin === this.#knowledgeOrigin(call.sessionID)) {
+      this.#knowledgeDiagnostics.delete(call.sessionID);
+      this.#knowledgeDiagnostics.set(call.sessionID, { origin, value: knowledge });
+      if (this.#knowledgeDiagnostics.size > 128) this.#knowledgeDiagnostics.delete(this.#knowledgeDiagnostics.keys().next().value!);
+      const runtime = this.#runs.get(call.sessionID)?.runtime ?? this.#solo.get(call.sessionID)?.runtime;
+      const now = this.#now();
+      try { if (runtime) this.options.telemetry?.(runtime.directory, { timestamp: now, event: 'knowledge-dispatch', knowledge }, now); }
+      catch { /* Optional metrics cannot change a native admission. */ }
+    }
+    return sent;
+  }
+
+  async #before(call: TaskCall, args: unknown, diagnose: (value: KnowledgeDiagnostics) => void): Promise<TaskArgs | undefined> {
+    if (this.#explorations.has(call.sessionID)) return this.#workerOperation(call.sessionID, () => this.#explorationBefore(call, args, diagnose));
     if (this.#explorationBlocked(call.sessionID)) throw new Error('Exploration authority was lost; no native replay.');
     this.#refuseMovedAway(call.sessionID);
     this.owner(call.sessionID);
     const run = this.#runs.get(call.sessionID);
     if (!run && this.options.ownership?.parentClaim(call.sessionID)?.transfer)
       throw new ValidationError('The target has an unresolved transfer claim; no task may dispatch.');
-    if (!run) return this.#soloBefore(call, args);
-    if (run.workerTasks) return this.#workerOperation(call.sessionID, () => this.#workerBefore(run, call, args));
+    if (!run) return this.#soloBefore(call, args, diagnose);
+    if (run.workerTasks) return this.#workerOperation(call.sessionID, () => this.#workerBefore(run, call, args, diagnose));
     if (run.rejected) throw new ValidationError('Only report restatement is pending; do not rerun the work.');
     if (run.state !== 'ready') {
       // A task that arrives while one is already running is a duplicate, not a failure: refusing
@@ -1756,6 +1821,24 @@ export class PhaseRunner {
       }, run.context)));
       this.owner(call.sessionID, call.callID);
       if (run.state !== 'persisting-intent') throw new Error('Dispatch became uncertain during persistence.');
+      if (this.options.knowledge && !this.#risking(run)) {
+        const assigned = !run.side && run.phase === 'mdd-apply'
+          ? run.planned.filter(task => task.id === selectedStep(run.workflow.applyProgress()!)?.id) : run.planned;
+        const selection: KnowledgeSelection = { phase: run.side?.phase ?? run.phase,
+          objective: run.side?.purpose ?? `${run.requirements} ${assigned.map(task => task.description).join(' ')}`,
+          paths: assigned.map(task => relative(run.runtime.directory, resolve(run.runtime.directory, task.path)).replaceAll('\\', '/')) };
+        const reservation = this.owner(call.sessionID, call.callID);
+        const current = () => {
+          this.#sameReservation(call.sessionID, reservation, call.callID);
+          if (this.#runs.get(call.sessionID) !== run || run.state !== 'persisting-intent' || run.callID !== call.callID)
+            throw new Error('Dispatch changed during knowledge lookup.');
+        };
+        const candidates = await this.#knowledge(run.runtime, selection, run.memory);
+        current();
+        await this.inspect.parent(run.runtime, call.callID);
+        current();
+        run.dispatchedArgs.prompt = supplementKnowledge(run.dispatchedArgs.prompt, candidates, selection, run.runtime.directory, PHASE_CONTEXT_MAX_BYTES, diagnose);
+      }
       run.state = 'await-result';
       run.report = { phase: run.phase, summary: this.#risking(run) ? 'Evaluación de riesgo en curso.' : `${phaseLabel(run.phase)} en curso.`, how: ['Con los requisitos acordados y la evidencia de plan disponible.'], status: 'in-progress', evidence: run.evidence };
       run.started = this.#now();
@@ -2731,7 +2814,7 @@ export class PhaseRunner {
     this.#solo.set(runtime.sessionID, solo);
   }
 
-  async #soloBefore(call: TaskCall, args: unknown): Promise<TaskArgs | undefined> {
+  async #soloBefore(call: TaskCall, args: unknown, diagnose: (value: KnowledgeDiagnostics) => void): Promise<TaskArgs | undefined> {
     const solo = this.#solo.get(call.sessionID);
     if (solo?.rejected) throw new ValidationError('Only report restatement is pending; do not rerun the investigation.');
     if (solo?.state === 'blocked') throw new ValidationError('The investigation is blocked; explicit recovery is required.');
@@ -2759,6 +2842,20 @@ export class PhaseRunner {
       solo.dispatchedArgs = { ...solo.args, prompt: `${solo.args.prompt}\nNative callID=${JSON.stringify(call.callID)}` };
       await this.inspect.parent(solo.runtime, call.callID);
       if (solo.state !== 'persisting-intent') throw new Error('Dispatch became uncertain during inspection.');
+      if (this.options.knowledge) {
+        const selection: KnowledgeSelection = { phase: 'mdd-explore', objective: solo.purpose, paths: [] };
+        const reservation = this.owner(call.sessionID);
+        const current = () => {
+          this.#sameReservation(call.sessionID, reservation);
+          if (this.#solo.get(call.sessionID) !== solo || solo.state !== 'persisting-intent' || solo.callID !== call.callID)
+            throw new Error('Investigation changed during knowledge lookup.');
+        };
+        const candidates = await this.#knowledge(solo.runtime, selection);
+        current();
+        await this.inspect.parent(solo.runtime, call.callID);
+        current();
+        solo.dispatchedArgs.prompt = supplementKnowledge(solo.dispatchedArgs.prompt, candidates, selection, solo.runtime.directory, PHASE_CONTEXT_MAX_BYTES, diagnose);
+      }
       solo.state = 'await-result';
       solo.started = this.#now();
       this.#soloEvent(solo, 'phase-start');
@@ -3383,7 +3480,7 @@ export class PhaseRunner {
     this.options.ownership!.settleWorker(run.id, run.runtime.sessionID, run.workerState!.batch!.id, callID, owner.epoch);
   }
 
-  async #workerBefore(run: Run, call: TaskCall, args: unknown): Promise<TaskArgs> {
+  async #workerBefore(run: Run, call: TaskCall, args: unknown, diagnose: (value: KnowledgeDiagnostics) => void): Promise<TaskArgs> {
     this.owner(call.sessionID);
     if (run.checkpointFailed || !['ready', 'await-result'].includes(run.state) || run.workerState?.batch?.blocked)
       throw new ValidationError('Worker batch is blocked or not ready; no dispatch is authorized.');
@@ -3422,6 +3519,22 @@ export class PhaseRunner {
         phase: run.phase, batchID: state.batch.id, taskID: task.taskID, callID: call.callID }));
       this.owner(call.sessionID);
       if (run.state !== 'persisting-intent') throw new Error('Worker admission changed during persistence.');
+      if (this.options.knowledge) {
+        const planned = run.planned.find(item => item.id === task.taskID)!;
+        const selection = this.#knowledgeScope(run.runtime, run.phase, planned.description, applyScopeFiles(run.runtime.directory, planned.parallel).reads);
+        const reservation = this.owner(call.sessionID);
+        const current = () => {
+          this.#sameReservation(call.sessionID, reservation);
+          if (this.#runs.get(call.sessionID) !== run || run.state !== 'persisting-intent' || !this.workerAssignment(call))
+            throw new Error('Worker admission changed during knowledge lookup.');
+        };
+        const candidates = await this.#knowledge(run.runtime, selection, run.memory);
+        current();
+        await this.inspect.parent(run.runtime, call.callID);
+        current();
+        applyScopeFiles(run.runtime.directory, planned.parallel);
+        task.dispatchedArgs.prompt = supplementKnowledge(task.dispatchedArgs.prompt, candidates, selection, run.runtime.directory, PHASE_CONTEXT_MAX_BYTES, diagnose);
+      }
       run.state = 'await-result'; this.#inflight.set(call.sessionID, state.batch.id);
       this.#trackNative(call, task.dispatchedArgs);
       return { ...task.dispatchedArgs };
