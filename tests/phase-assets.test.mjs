@@ -9,6 +9,43 @@ import { PHASES } from '../dist/policy.js';
 import { defaultSettings, freezeProfile, MODEL_ROLES } from '../dist/settings.js';
 import { applyModelOverrides } from '../dist/native-models.js';
 import { PHASE_AGENTS, CHECK_AGENTS, pinPhaseAgents } from '../dist/opencode-plugin.js';
+import { FIELD_SCHEMA } from '../dist/acceptance.js';
+
+test('SA-1: packaged handoffs ground each planning role without new report fields', () => {
+  const expectations = {
+    explore: [/searched scope/, /file paths\s+and symbols or line ranges/, /coverage gaps/, /existing artifact prose/],
+    risk: [/identifiable Explore findings/, /does not validate the truth/],
+    propose: [/Separate observed evidence, constraints and assumptions/, /Do not repeat the exploration/],
+    spec: [/original user request/, /omitted behavior, exclusions and unresolved assumptions/],
+    design: [/existing implementation seams/, /compatibility, security and operational constraints/],
+    plan: [/assigned completion checks/, /deferred integration verification/, /scoped worker cannot run commands/],
+    tasks: [/assigned completion checks/, /deferred integration verification/, /scoped worker cannot run commands/],
+    apply: [/optional packaged mdd-cleanup path/, /integration assumptions/, /deferred integration checks/],
+  };
+  for (const [role, patterns] of Object.entries(expectations)) {
+    const text = fs.readFileSync(`assets/opencode/agents/mdd-${role}.md`, 'utf8');
+    for (const pattern of patterns) assert.match(text, pattern, role);
+  }
+  const apply = fs.readFileSync('assets/opencode/agents/mdd-apply.md', 'utf8');
+  assert.doesNotMatch(apply, /instructions and digest injected/);
+});
+
+test('SA-1: common source, skill and checker rules explicitly honor restricted lanes', () => {
+  const text = fs.readFileSync('assets/opencode/mdd-instructions.md', 'utf8');
+  assert.match(text, /Planning and Verify are read-only for project sources/);
+  assert.match(text, /ordinary generated test\/build outputs/);
+  assert.match(text, /never repair sources/);
+  assert.match(text, /Native fallback skips skill reads and the report checker/);
+  assert.match(text, /Scoped workers receive no packaged skill hints/);
+  assert.match(text, /Otherwise, outside native fallback, before you return it/);
+});
+
+test('SA-1: deliverable guidance keeps conservative eligibility without denying active concurrency', () => {
+  assert.doesNotMatch(FIELD_SCHEMA.deliverables, /concurrency is not active/);
+  assert.match(FIELD_SCHEMA.deliverables, /never guess independence/);
+  assert.match(FIELD_SCHEMA.deliverables, /missing\/incomplete scopes or omitted dependencies remain sequential/);
+  assert.match(FIELD_SCHEMA.deliverables, /runtime selects eligible worker batches/);
+});
 
 test('assets: worker instructions preserve exact grouped dispatch and bounded member authority', () => {
   const coordinator = fs.readFileSync('assets/opencode/agents/mdd-orchestrator.md', 'utf8');

@@ -21,6 +21,45 @@ import { ProgressGuard } from '../dist/progress.js';
 import { projectApprovalTransfer, projectTargetTransfer } from '../dist/transfer.js';
 import { Workflow } from '../dist/workflow.js';
 
+for (const phase of ['mdd-explore', 'mdd-risk', 'mdd-plan', 'mdd-propose', 'mdd-spec', 'mdd-design', 'mdd-tasks', 'mdd-apply', 'mdd-verify']) {
+  test(`SA-1: composed ${phase} prompt keeps phase authority and evidence handoff`, async t => {
+    const route = ['mdd-propose', 'mdd-spec', 'mdd-design', 'mdd-tasks'].includes(phase) ? 'high' : 'low';
+    const f = await fixture(t, { route, memoryEnabled: false });
+    while (true) {
+      const status = await f.status();
+      if ((status.stage ?? status.phase) === phase) break;
+      await f.phase({ only: true });
+    }
+    await f.phase({ only: true });
+    const prompt = f.delivered();
+    assert.doesNotMatch(prompt, /change sources only if the phase genuinely requires it/);
+    const provenance = JSON.parse(prompt.match(/^Packaged MDD actor instructions with provenance, which govern this (?:phase|assessment): (.*)$/m)[1]);
+    assert.equal(provenance.content, fs.readFileSync('assets/opencode/mdd-instructions.md', 'utf8'));
+    assert.equal(provenance.digest, createHash('sha256').update(provenance.content).digest('hex'));
+    if (phase === 'mdd-apply') {
+      assert.match(prompt, /This phase implements: edit the sources the plan calls for/);
+      assert.match(prompt, /integration assumptions and deferred integration checks/);
+    } else if (phase === 'mdd-verify') {
+      assert.match(prompt, /Verify is read-only for project sources/);
+      assert.match(prompt, /ordinary generated test\/build outputs/);
+      assert.match(prompt, /never repair sources/);
+    } else if (!['mdd-explore', 'mdd-risk'].includes(phase)) {
+      assert.match(prompt, /Planning is read-only for project sources/);
+      assert.match(prompt, /never implement or repair sources/);
+    }
+    const expectations = {
+      'mdd-explore': /searched scope, concrete source references and coverage gaps/,
+      'mdd-risk': /identifiable Explore findings/,
+      'mdd-plan': /assigned completion checks from deferred integration verification/,
+      'mdd-propose': /Separate observed evidence, constraints and assumptions/,
+      'mdd-spec': /completeness against the original user request/,
+      'mdd-design': /existing implementation seams and important constraints/,
+      'mdd-tasks': /assigned completion checks from deferred integration verification/,
+    };
+    if (expectations[phase]) assert.match(prompt, expectations[phase]);
+  });
+}
+
 test('opt-in same-parent restart restores ready Verify from validated local dependencies, memory off', async t => {
   const f = await fixture(t, { memoryEnabled: false, store: 'none' });
   await f.hooks.tool.mdd_context.execute({ label: 'Issue context', content: 'The validated input boundary must preserve prior behavior. '.repeat(200) }, f.context);
@@ -823,7 +862,7 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
     // Paths are OS-native and travel JSON-escaped (so a Windows backslash appears doubled in the
     // delivered prompt text); the separator is matched loosely rather than assuming either form.
     const skillPath = name => new RegExp(`skills[\\\\/]+${name}[\\\\/]+SKILL\\.md`);
-    if (phase === 'mdd-apply') {
+    if (phase === 'mdd-apply' && current.mode !== 'native') {
       assert.ok(args.prompt.includes('Optional packaged skills for this phase'), 'mdd-cleanup path hint missing in mdd-apply');
       assert.match(args.prompt, skillPath('mdd-cleanup'), 'mdd-cleanup path missing in mdd-apply');
       assert.ok(!args.prompt.includes('## Hard Rules'), 'mdd-cleanup body leaked into mdd-apply');
@@ -845,7 +884,7 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
     assert.equal(args.prompt.includes('verification={scenarios:'), phase === 'mdd-verify', `verification schema leak in ${phase}`);
     // Prose phases carry the documentation skill paths; structural ones do not pay for them.
     // Neither the mdd-doc nor the cognitive-doc-design body is ever inlined by value.
-    const documentary = !['mdd-tasks', 'mdd-apply'].includes(phase);
+    const documentary = current.mode !== 'native' && !['mdd-tasks', 'mdd-apply'].includes(phase);
     assert.equal(skillPath('mdd-doc').test(args.prompt), documentary, `mdd-doc path for ${phase}`);
     assert.equal(skillPath('cognitive-doc-design').test(args.prompt), documentary, `cognitive-doc-design path for ${phase}`);
     assert.ok(!args.prompt.includes('Trusted local mdd-doc instructions with provenance'), `stale mdd-doc injection wording in ${phase}`);

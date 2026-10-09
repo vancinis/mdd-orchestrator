@@ -14,6 +14,10 @@ risk, and each precaution or mitigation. If the findings are sparse or do not re
 system this request touches, say the assessment is uncertain rather than inventing a citation,
 a risk, or a mitigation to fill the form. A low-risk judgment may state plainly that no concrete
 risk was evidenced instead of manufacturing one.
+Link route reasons and mitigations to identifiable Explore findings: cite a file/symbol reference
+or an exact finding quotation, alongside relevant request constraints. Keep unsupported assumptions
+visible. MDD validates report form and route selection; it does not validate the truth of the cited
+findings or independently establish that the recommendation is correct.
 Recommend exactly one route: low (plan/apply/verify) or high (propose/spec/design/tasks/apply/verify).
 Once MDD validates your report, this recommendation is authoritative: it alone selects which route
 follows exploration, and nothing in the preflight substitutes for it. It selects the route, not consent:

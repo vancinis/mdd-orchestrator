@@ -280,7 +280,8 @@ const CONTROL_CHARACTERS = /[\x00-\x08\x0b-\x1f\x7f]/;
  * usually clear inside three, and a fourth against the same failure is not resilience.
  */
 export const DELEGATION_ATTEMPTS = 3;
-const NATIVE_FALLBACK = 'Native fallback: inspect git status and git diff and preserve partial work before continuing. Do not redo completed work. Do not delegate, load skills, or call any MDD tools, including the report checker. Return the phase report to the parent; the parent checks its form. This is the only native fallback attempt. Native permissions remain in force; shell is not a sandbox.';
+const NATIVE_FALLBACK = 'Native fallback: inspect git status and git diff and preserve partial work before continuing. Do not redo completed work. Do not delegate, load skills, or call any MDD tools, including the report checker. Do not read skill files. This overrides ordinary skill and report-checker guidance; return the phase report directly to the parent, which checks its form. This is the only native fallback attempt. Native permissions and phase source-mutation limits remain in force; shell is not a sandbox.';
+const EXPLORATION_EVIDENCE = 'In existing artifact prose, report searched scope, concrete source references and coverage gaps. Cite file paths with symbols or line ranges for findings; distinguish observed behavior from inference, and name inaccessible or unsearched areas and their impact. A lookup with no matches is evidence about that search, not proof of repository-wide absence.';
 /**
  * One prompt line naming each applicable packaged skill by absolute path. No body, no digest: the
  * actor reads the path itself with its own read tool if the skill turns out to help, and reading
@@ -2581,7 +2582,7 @@ export class PhaseRunner {
       this.#soloStart(runtime, purpose);
       const solo = this.#solo.get(runtime.sessionID)!;
       if (this.#explorationEligible(items, solo.workerPolicy?.enabled))
-        this.#prepareExploration(runtime, solo.id, items, 'contextual', solo.args);
+        this.#prepareExploration(runtime, solo.id, items, 'contextual', this.#soloArgs(solo, true));
       else if (items) solo.args.prompt += `\nExplicit exploration work items (data, not extra permissions; this dispatch stays singular): ${JSON.stringify(items)}`;
       return;
     }
@@ -2598,7 +2599,7 @@ export class PhaseRunner {
     run.attempts = 0; run.mode = 'delegate'; delete run.nativeUsed; delete run.lastFailure;
     delete run.fallbackExhausted; delete run.reason;
     try {
-      const prompts = this.#phasePrompts(run, 'mdd-explore');
+      const prompts = this.#phasePrompts(run, 'mdd-explore', undefined, this.#explorationEligible(items, side.workerPolicy.enabled));
       run.args = prompts.args; run.brief = prompts.brief;
       this.#arm(run);
       run.phase = 'mdd-explore'; run.state = 'ready';
@@ -2762,9 +2763,10 @@ export class PhaseRunner {
     return { description: solo.args.description, subagent_type: solo.args.subagent_type, prompt: solo.token };
   }
 
-  #soloArgs(solo: Solo): TaskArgs {
+  #soloArgs(solo: Solo, scopedWorker = false): TaskArgs {
     const prompt = [
       'Perform only mdd-explore. Inspect relevant files; identify uncertainty, scope, integrations and risks without changing declared inputs.',
+      EXPLORATION_EVIDENCE,
       `Standalone read-only investigation only: ${JSON.stringify(solo.purpose)}. explorationID=${solo.id}.`,
       'No MDD run is accepted: do not plan, implement, propose phases, or imply any approval. Answer the stated purpose from actual project sources in this workspace.',
       'Optional concerns: [{category,evidence,impact}], at most eight, with category objective/integrations/sensitive-data/permissions. These are advisory only; never change the route or the evidence, or request governance for ordinary implementation choices.',
@@ -2775,7 +2777,7 @@ export class PhaseRunner {
       'Return exactly one JSON object, no fences: phase, runID, callID, outcome (passed or failed), evidenceSummary (nonempty), artifact (nonempty). Never emit confidence percentages.',
       `phase=mdd-explore; runID=${solo.id}. Native callID is appended by the hook.`,
       `Investigation purpose data: ${JSON.stringify(solo.purpose)}`,
-      skillHint(PHASE_SKILLS['mdd-explore'])!,
+      ...(!scopedWorker && solo.attempts < DELEGATION_ATTEMPTS ? [skillHint(PHASE_SKILLS['mdd-explore'])!] : []),
     ].join('\n').replaceAll('@', '\\u0040');
     boundedText(prompt, 'combined phase handoff', PHASE_CONTEXT_MAX_BYTES);
     return { description: 'MDD read-only investigation', subagent_type: 'mdd-explore', prompt };
@@ -3165,7 +3167,8 @@ export class PhaseRunner {
     // one three-try exploration used to send the whole rest of the route inline on first contact.
     run.mode = run.nativeUsed && !advanced ? 'native' : 'delegate';
     if (advanced) { run.attempts = 0; delete run.nativeUsed; delete run.executor; }
-    const prompts = this.#phasePrompts(run, phase);
+    const prompts = this.#phasePrompts(run, phase, undefined,
+      phase === 'mdd-explore' && this.#explorationEligible(run.explorationItems, run.workerPolicy?.enabled));
     run.args = prompts.args;
     run.brief = prompts.brief;
     this.#arm(run);
@@ -3447,6 +3450,7 @@ export class PhaseRunner {
       // The preflight's certainty answer is the one signal exploration cannot produce: whether the
       // person asking already knows what they want. It is weighed, never obeyed.
       'Weigh the user\'s stated requirements clarity as a risk signal beside the exploration: requirements the user is unsure of are a reason the work may need a fuller definition. It never overrides what the exploration found, and it is not a route choice.',
+      'Link route reasons, concrete risks and mitigations to identifiable Explore findings (file/symbol references or an exact finding quotation) and the relevant request constraints. Name missing evidence and uncertainty instead of inventing support. Report validation checks form and route selection; it does not validate the truth of those findings.',
       'Once MDD validates this report, its route alone selects how this run continues; nothing in the preflight substitutes for it. It selects the route, not consent: it never skips a question or an approval the workflow still requires.',
       ...(run.nativeUsed ? [NATIVE_FALLBACK] : []),
       ISOLATION,
@@ -3487,20 +3491,20 @@ export class PhaseRunner {
    * differs: a delegated phase answers through its task, a phase the coordinator carries out
    * answers through mdd_phase_result.
    */
-  #phasePrompts(run: Run, phase: Phase, assignedID?: string): { args: TaskArgs; brief: string } {
+  #phasePrompts(run: Run, phase: Phase, assignedID?: string, scopedWorker = false): { args: TaskArgs; brief: string } {
     // At the risk stop the run's own prompt is mdd-risk's, whichever caller recomposes it.
     if (this.#risking(run) && phase === run.phase) return this.#riskPrompts(run);
     const roles: Record<Phase, string> = {
-      'mdd-explore': 'Inspect relevant files; identify uncertainty, scope, integrations and risks without changing declared inputs.',
-      'mdd-plan': 'Produce ONE compact plan: A-to-B goal, concrete acceptance scenarios, relevant decisions, linked implementation steps and existing planned checks. Supply acceptance, decisions (empty if none), and deliverables. Do not add phases or process questions.',
-      'mdd-propose': 'Use exploration to define intent, scope, exclusions and acceptance criteria.',
-      'mdd-spec': 'Supply acceptance with a concise A-to-B goal and stable requirement/scenario IDs reflecting the user request. Include concrete happy/error scenarios where applicable. Supply domain="project", the fixed storage namespace.',
-      'mdd-design': 'Use held acceptance IDs to define only relevant decisions, boundaries and test seams. Supply decisions; do not redefine requirements or invent extra process.',
-      'mdd-tasks': 'Supply ordered deliverables linked to held scenarios and decisions. Keep check commands applicable to acceptance; no extra unrelated checks. Preserve ID and dependency consistency.',
-      'mdd-apply': 'Implement exactly the ONE assigned deliverable, not the full plan. Dependencies and prior results are context, not additional assignments. Supply completed=[assignedStepID] only when it is fully finished; partial, failed or interrupted work must report outcome failed, never fabricated completion. Supply changes as [{path,reason}], one entry per file you changed, where reason says why it had to change. A bare path is accepted when there is nothing to add. Use noChangeReason when nothing needed changing. Report only checks you ran as checks [{command,exit}]; an empty list is honest when you ran none.',
+      'mdd-explore': `Inspect relevant files; identify uncertainty, scope, integrations and risks without changing declared inputs. ${EXPLORATION_EVIDENCE}`,
+      'mdd-plan': 'Produce ONE compact plan: A-to-B goal, concrete acceptance scenarios, relevant decisions, linked implementation steps and existing planned checks. Distinguish assigned completion checks from deferred integration verification in the artifact: say what each Apply actor must establish and what singular Verify must check across batches. A scoped worker cannot run commands; assign source evidence there and defer execution explicitly. Supply acceptance, decisions (empty if none), and deliverables. Do not add phases or process questions.',
+      'mdd-propose': 'Use exploration to define intent, scope, exclusions and acceptance criteria. Separate observed evidence, constraints and assumptions in the artifact. Reference exploration findings rather than repeating the investigation; investigate further only to close a proposal-relevant gap.',
+      'mdd-spec': 'Supply acceptance with a concise A-to-B goal and stable requirement/scenario IDs reflecting the user request. Check completeness against the original user request, not only the proposal: identify omitted behavior, exclusions and unresolved assumptions in the artifact. Include concrete happy/error scenarios where applicable. Supply domain="project", the fixed storage namespace.',
+      'mdd-design': 'Use held acceptance IDs to define only relevant decisions, boundaries and test seams. Anchor decisions to existing implementation seams and important constraints with concrete source references; explain compatibility, security and operational tradeoffs where relevant. Supply decisions; do not redefine requirements or invent extra process.',
+      'mdd-tasks': 'Supply ordered deliverables linked to held scenarios and decisions. Distinguish assigned completion checks from deferred integration verification in the artifact, including who runs each check and what remains unknown until singular Verify. A scoped worker cannot run commands; require source evidence and defer execution explicitly. Keep check commands applicable to acceptance; no extra unrelated checks. Preserve ID and dependency consistency.',
+      'mdd-apply': 'Implement exactly the ONE assigned deliverable, not the full plan. Dependencies and prior results are context, not additional assignments. Supply completed=[assignedStepID] only when it is fully finished; partial, failed or interrupted work must report outcome failed, never fabricated completion. Supply changes as [{path,reason}], one entry per file you changed, where reason says why it had to change. A bare path is accepted when there is nothing to add. Use noChangeReason when nothing needed changing. Report only checks you ran as checks [{command,exit}]; an empty list is honest when you ran none. Report integration assumptions and deferred integration checks in the artifact so later actors know what this batch has not established.',
       'mdd-verify': 'Check requirements, design decisions AND the held plan against the implementation. Run applicable tests and build checks as appropriate, including planned checks when applicable; if a check is inapplicable or cannot run, explain why, its impact and what remains unknown. Supply checks [{command,exit}] for what you actually ran and verification for EVERY scenario-step pair, step and decision. Give source-based semantic assessments naming the check they rely on; use not-verified/deviation and outcome failed for gaps. Explain any deviation or failed/unrun check, its impact, and the next choices (improve, reject or request implementation rework) so the user can decide. An exit code is not semantic proof; never report a check you did not run.',
     };
-    const hint = skillHint(PHASE_SKILLS[phase]);
+    const hint = run.nativeUsed || scopedWorker || assignedID !== undefined ? undefined : skillHint(PHASE_SKILLS[phase]);
     const instructions = [
       `Perform only ${phase}. ${roles[phase]}`,
       ...(run.nativeUsed ? [NATIVE_FALLBACK] : []),
@@ -3523,7 +3527,9 @@ export class PhaseRunner {
       'Report in English — summary, artifact, concerns and data — whatever language the requirements, the repository or the conversation use. This report is read by MDD and by the coordinator, never by the user directly; the coordinator translates it for them. Reproduce quoted requirements, error messages, file names and identifiers exactly as they are.',
       ...(run.lastFailure ? [`A previous attempt at this exact phase did not complete: ${JSON.stringify(run.lastFailure)}. This attempt is a retry, not a repeat: where that is what failed, take a different route to the same outcome, and do not redo work whose result is already listed below.`] : []),
       phase === 'mdd-apply' ? 'This phase implements: edit the sources the plan calls for.' : phase === 'mdd-explore'
-        ? 'This phase is read-only: never change sources or declared inputs.' : 'This phase produces understanding or a plan, so change sources only if the phase genuinely requires it.',
+        ? 'This phase is read-only: never change sources or declared inputs.' : phase === 'mdd-verify'
+        ? 'Verify is read-only for project sources: run applicable checks and allow ordinary generated test/build outputs, but never repair sources, tests, fixtures, snapshots, configuration or dependencies to make checks pass. Report failures and request implementation rework.'
+        : 'Planning is read-only for project sources: never implement or repair sources, tests, fixtures, snapshots, configuration or dependencies. Investigative checks may produce ordinary generated test/build outputs; report findings and gaps without changing declared inputs.',
       ...(phase === 'mdd-explore' ? [SINGULAR_EXPLORATION] : []),
       ...(phase === 'mdd-apply' && run.rework ? [`This is a correction pass: ${run.rework.after} reported failure and the user chose to fix the implementation. Its artifact is the newest dependency artifact below and lists every deviation and missing check; its summary was ${JSON.stringify(run.rework.summary)}. The changes already applied are in the working tree: keep them, correct what verification found, and add the tests it named as missing. Report in changes only the files this pass touched; earlier ones are kept.`] : []),
       ...reportFormatLines(phase),

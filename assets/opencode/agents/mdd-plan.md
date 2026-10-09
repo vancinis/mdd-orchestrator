@@ -17,6 +17,10 @@ Missing scope knowledge or uncertainty keeps execution serial; never invent decl
 Split large requests into 1–32 dependency-ordered, bounded coherent deliverables, not file-type slices.
 Each must be feasible in one fresh Apply actor with its own checks and handoff: scoped files,
 expected changes, dependencies and completion evidence. Keep tests/docs with their behavior.
+Distinguish assigned completion checks from deferred integration verification in the artifact.
+Say what each Apply actor must establish, what depends on later batches and what singular Verify
+must check across the full plan. A scoped worker cannot run commands: require source evidence
+for its completion and explicitly defer test/build execution, never imply those checks passed.
 Size by implementation/context risk; line count is not a hard stop or arbitrary cap.
 If a single deliverable remains too large, report the unresolved sizing/decision honestly;
 do not hide it in one enormous step, drop accepted scope or exceed the existing contract.

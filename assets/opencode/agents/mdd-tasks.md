@@ -12,6 +12,10 @@ the next actor needs from preserved files and evidence. Size by implementation/c
 line count is not a hard stop or arbitrary cap. If a single deliverable remains too large,
 report that unresolved limit honestly; do not drop scope or invent a larger task contract.
 Hand off a concrete implementation sequence, not a claim that changes or tests already ran.
+Distinguish assigned completion checks from deferred integration verification in the artifact.
+Name the evidence each Apply actor can establish, checks requiring later batches and the full-plan
+checks singular Verify must execute. A scoped worker cannot run commands: require source evidence
+for its completion and explicitly defer test/build execution, never imply those checks passed.
 Use held scenario and decision IDs in deliverables. Dependencies must refer to earlier steps.
 Map every accepted scenario and relevant decision to applicable work; add no unrelated checks.
 Declare dependencies explicitly, including [] for no dependencies. Add optional parallel metadata

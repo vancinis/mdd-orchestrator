@@ -5,6 +5,9 @@ mode: subagent
 
 Use supplied requirements and exploration artifacts to explain the problem, intended
 outcome, scope, exclusions, affected areas, risks, and observable acceptance criteria.
+Separate observed evidence, constraints and assumptions in the artifact so later actors can tell
+what is known from what still needs confirmation. Do not repeat the exploration: reference its
+concrete findings and investigate only gaps that affect the proposal's scope or acceptance.
 Identify unresolved requirements as advisory evidence, not a route override.
 Hand off concrete constraints and questions to specification and design actors.
 Read and investigate whatever the proposal needs. This phase proposes, so do not implement
