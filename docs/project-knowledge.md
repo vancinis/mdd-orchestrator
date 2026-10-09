@@ -96,6 +96,52 @@ warm reads do not write recency metadata. Concurrent writers merge under the exi
 Corruption, loss or write failure cannot block canonical retrieval. A cold lookup or later cache
 miss rebuilds disposable storage when safe; linked or otherwise unsafe storage is left untouched.
 
+## Selected knowledge at dispatch
+
+With knowledge enabled, the runtime resolves observations for ordinary workflow phases, standalone
+or contextual exploration, and each scoped Apply/exploration member. It uses the configured,
+session-bound Engram adapter and the same canonical validation/cache path. Risk assessment remains
+grounded in its existing requirements and exploration evidence; knowledge does not choose a route.
+
+1. After admitting the native call, derive its phase, objective and actual assignment paths. Query
+   at most ten canonical candidates using up to four distinct lowercase ASCII objective terms,
+   with common task words removed and quoted `OR` alternatives. The entire objective is never sent
+   as an implicit FTS `AND` expression. No meaningful terms means no selection.
+2. Require matching phase, applicable paths when known, and at least one exact objective-term
+   overlap in the summary/body. Rank by overlap count descending, then numeric observation ID.
+   Legacy, stale and malformed candidates are omitted. Scoped members additionally require **all**
+   declared dependencies inside that member's exact authorized footprint. Existing footprint
+   validation rejects globs; knowledge introduces no new pattern or permission semantics.
+3. After lookup, recheck the exact owner/reservation and pending state, inspect native parent
+   authority again, then recheck state and source bytes synchronously before final dispatch.
+   Optional provider failure supplies no knowledge; native authority failures still refuse dispatch.
+4. Append at most three complete observations in an explicitly untrusted advisory section. Its
+   entire UTF-8 size, including framing, references, source names and JSON escaping, is at most
+   8 KiB and must fit the remaining prompt budget (96,000 bytes normally; 48,000 for exploration
+   members). Never trim task, acceptance or verification context to fit optional knowledge.
+
+Bodies are added only to actual child arguments inside the native hook. Prepared handles, status,
+coordinator query results and phase telemetry contain no selected bodies; the existing transcript
+collapse removes dispatched prompts from subsequent coordinator context. Do not copy observations
+into `mdd_context`. This limits adapter-supplied context; it cannot prevent an actor from quoting a
+finding in its own report.
+
+Native `explore` and `general` fallbacks use the same bound-dispatch collapse check in V2 and the
+shared V1 transform: parent session, native call and exact dispatched arguments must match. Settled
+fallback prompts are replaced only in outgoing context; child arguments remain immutable. Unrelated,
+altered or unsettled native tasks remain untouched. Native fallback correlation is process-local;
+unbound historical native prompts after a restart are not inferred to belong to MDD.
+
+Each admission resolves once; duplicate admission cannot repeat the lookup. A newly authorized
+retry or restored ready phase resolves again instead of reusing a prepared supplement. Final
+`dispatchedArgs` retain exact result correlation. Exploration checkpoints retain those dispatched
+arguments through their existing fields; ordinary/Apply checkpoints retain their existing pending
+call fences. Unconfirmed work is never replayed after restart, and retained exploration authority
+remains subject to its existing recovery restrictions. No resumable knowledge state is added.
+
+Matching recorded absence can be `fresh` and selected for an otherwise eligible assignment. It
+proves only that the declared file remains absent, not that the observation's assertion is true.
+
 ## Bounds and outcomes
 
 | Field | Limit |
@@ -109,6 +155,7 @@ miss rebuilds disposable storage when safe; linked or otherwise unsafe storage i
 | Transport reads | Each complete HTTP response is capped at 128 KiB, including JSON encoding and provider metadata; a search list accepts at most 200 rows before selecting at most the requested number of distinct IDs |
 | Attempt guard | At most 512 attempted request/observation keys per plugin instance; no eviction or durable replay ledger |
 | Cache | At most 100 entries and 512 KiB serialized JSON, including metadata and escaping; each validated body remains at most 4,096 UTF-8 bytes |
+| Dispatch supplement | At most 3 entries and 8,192 UTF-8 bytes including framing, subordinate to the existing total prompt limit |
 
 Field limits measure UTF-8 content bytes; the envelope and transport caps independently measure
 serialized bytes, including escaping. Therefore a combination of individually valid fields can
@@ -130,11 +177,12 @@ Never rephrase an uncertain write to bypass the guard.
 
 ## Current limitations
 
-- Freshness covers only declared dependencies at the time of checking. Files can change after a
-  result returns; later dispatch integration must revalidate before use. This is not an atomic
+- Freshness covers only declared dependencies at the time of checking. Files can change after the
+  final dispatch check. This is not an atomic
   filesystem snapshot, and source-name exclusions cannot identify every possible embedded secret.
-- Automatic dispatch injection, per-worker selection, approved skill catalogs, routing and metrics
-  are later work. These tools neither change phase prompts nor accumulate bodies in `mdd_context`.
+- Approved skill catalogs, skill routing and feedback metrics remain later work. Selection is bounded
+  lexical matching, not semantic search: non-ASCII objectives or candidates outside the provider's
+  first ten matches can be missed. No extra search attempts are made to fill the supplement.
 - Engram remains trusted canonical storage, not a cryptographic authority. Envelopes validate shape
   and binding; they cannot prove a claim is correct or that declared dependencies are complete.
 - Tests use isolated homes and loopback fixture HTTP servers. They establish adapter contracts,

@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { EngramHttp, KnowledgeWriteUnknownError, LESSON_TITLE_PREFIX, mddDataRoot } from './engram-http.js';
-import { KNOWLEDGE_NOTE, captureKnowledgeDependencies, knowledgeFreshness, knowledgeObservation, knowledgeSummary, parseKnowledgeQuery, parseKnowledgeRequest, queryKnowledge } from './project-knowledge.js';
+import { KNOWLEDGE_NOTE, captureKnowledgeDependencies, knowledgeFreshness, knowledgeObservation, knowledgeSummary, parseKnowledgeQuery, parseKnowledgeRequest, queryKnowledge, selectKnowledge } from './project-knowledge.js';
+import type { KnowledgeCandidate, KnowledgeSelection } from './project-knowledge.js';
 import { KnowledgeCache } from './knowledge-cache.js';
 import { readLessons, recordLesson, renderLessonsReport } from './lessons.js';
 import type { LessonState } from './lessons.js';
@@ -784,6 +785,18 @@ export class NativeIntake {
 
   readonly #knowledgeAttempts = new Set<string>();
   #knowledgeCache?: { root: string; store: KnowledgeCache };
+
+  /** Internal resolver: optional provider failure cannot change native dispatch authority. */
+  async resolveKnowledge(selection: KnowledgeSelection, runtime: Runtime, bound?: EngramHttp): Promise<KnowledgeCandidate[]> {
+    if (!this.#settings.knowledge.enabled) return [];
+    try {
+      const client = bound ?? await this.#memory(runtime);
+      if (!client) return [];
+      const root = mddDataRoot(runtime.directory);
+      if (this.#knowledgeCache?.root !== root) this.#knowledgeCache = { root, store: new KnowledgeCache(root) };
+      return await selectKnowledge(client, selection, runtime.directory, this.#knowledgeCache.store);
+    } catch { return []; }
+  }
 
   async knowledge(input: unknown, runtime: Runtime): Promise<unknown> {
     if (!this.#settings.knowledge.enabled) return { state: 'disabled', entries: [] };

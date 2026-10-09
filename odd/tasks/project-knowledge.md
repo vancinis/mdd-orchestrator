@@ -20,10 +20,10 @@ Reuse validated project knowledge and relevant skills without filling the coordi
 - Feature branch: `feat/project-knowledge`.
 - Delivery strategy: `ask-on-risk`; user selected `feature-branch-chain`. Keep four reviewable work-unit boundaries on the local feature line; publication, PR branches and merges remain separate user decisions.
 - Forecast: 1,850-2,900 authored changed lines across four cohesive units; generated output excluded. This is an estimate, not a size limit. Keep tests and documentation with behavior; do not compress or omit them to meet a line target.
-- Running authored changes: PK-1 650 implementation/test/doc lines, plus 85 tracking lines. First slice: `1f4b700..2353cbe`. No PRs published.
+- Running authored changes: PK-1 650 plus PK-2 571 = 1,221 implementation/test/doc lines, tracking excluded. Slices: `1f4b700..2353cbe`, `2353cbe..a3e9d4d`. No PRs published.
 - RDD: off, decided by `clone_local`; do not start reviews or change the switch.
 - Verification: assess each writer diff with native risk assessment only. High/unassessable requires writer checks plus independent verification. Parent repeats one reported command before delivery.
-- TDD: no explicit strict repository setting found. Apply the ODD default: observe deterministic RED, implement GREEN, then refactor. No RED/GREEN evidence exists yet.
+- TDD: no explicit strict repository setting found. Apply the ODD default: observe deterministic RED, implement GREEN, then refactor. Observed evidence is recorded per completed unit below.
 - Engram mirror: pending. Full-document save under `odd/project-knowledge/tasks` was refused with `session_project_mismatch`: detected project is `mdd-orchestrator`, but the registered session belongs to `mdd`. No mirror was created or alternate project selected. Local tracking remains authoritative until synchronization succeeds.
 
 ## Tasks
@@ -42,7 +42,7 @@ Reuse validated project knowledge and relevant skills without filling the coordi
   - Native assessment: high/unassessable due to new untracked files; independent verification performed. RDD off, disabled/unmanaged; no review started.
   - Authored unit: 650 changed lines (including tests/docs, excluding tracking). Kept cohesive rather than separating security checks or tests merely to meet an advisory line count. Commit: `2353cbe` (`feat(knowledge): record and query project observations`).
 
-- [ ] **PK-2: Cache knowledge with checkout-specific freshness.**
+- [x] **PK-2: Cache knowledge with checkout-specific freshness.**
   - Route: delegated direct; persistent bounded cache, validation and multiple test surfaces.
   - Add one bounded, rebuildable `.mdd/knowledge-cache.json` using existing safe persistence. Validate declared dependency bytes against the target checkout, not the shared cache root.
   - Initial budget targets: 100 entries, 512 KiB total, 4 KiB per body; tighten if existing envelope limits require it. Missing files differ from empty files. Reject traversal and unsafe linked/nonregular source files.
@@ -54,18 +54,24 @@ Reuse validated project knowledge and relevant skills without filling the coordi
   - Proof: observed RED 1 passed/10 failed, final focused suite 174 passed, full suite 1,786 passed/0 failed/3 skipped; build/typecheck/diff-check passed. Independent verification repeated all 174 focused tests with no blockers. Parent repeated typecheck successfully.
   - Limits: freshness means declared source dependencies match, not semantic truth; cache avoids repeated envelope parsing but still requires canonical fetch and current source hashing. Tests simulate linked-worktree Git metadata; real-provider interoperability remains unverified. Same three documented environment-dependent skips as PK-1.
   - Risk: native assessment high/unassessable due new files; independent verifier completed. RDD remains off, disabled/unmanaged.
-  - Authored unit: 571 changed lines, tests/docs included, tracking excluded. Commit pending after verified task update.
+  - Authored unit: 571 changed lines, tests/docs included, tracking excluded. Commit: `a3e9d4d` (`feat(knowledge): validate checkout sources before cache reuse`).
 
 - [ ] **PK-3: Deliver selected knowledge at real dispatch boundaries.**
   - Route: delegated direct; stateful single/parallel dispatch integration and regression coverage.
   - Resolve by objective, phase and actual assignment paths. Revalidate state/ownership after asynchronous retrieval and source freshness before dispatch. Keep parent output compact and preserve mandatory scope/acceptance/verification context.
   - Cover ordinary phases, Apply workers and exploration workers. Scoped workers receive only knowledge within their declared footprint; do not expand their tools or file access.
   - Initial supplemental budget: at most three entries and 8 KiB, subordinate to existing prompt limits. Do not route selected bodies through accumulating `mdd_context`.
-  - Intended surfaces: `src/project-knowledge.ts`, `src/native-intake.ts`, `src/opencode-plugin.ts`, `src/phase-runner.ts`, `src/worker-state.ts`; `tests/project-knowledge-runtime.test.mjs` (new), `tests/opencode-v2.test.mjs`, `tests/worker-state.test.mjs`, `tests/workers-native.test.mjs`, `tests/checkpoint.test.mjs`; `docs/project-knowledge.md`.
+  - Intended surfaces: `src/project-knowledge.ts`, `src/native-intake.ts`, `src/opencode-plugin.ts`, `src/phase-runner.ts`, `src/worker-state.ts`; `tests/project-knowledge-runtime.test.mjs` (new), `tests/project-knowledge.test.mjs`, `tests/opencode-v2.test.mjs`, `tests/worker-state.test.mjs`, `tests/workers-native.test.mjs`, `tests/checkpoint.test.mjs`, `tests/adapter-fixture.mjs`; `docs/project-knowledge.md`, `assets/opencode/agents/mdd-orchestrator.md`. Worker fences and checkpoint schemas are not authorized edit surfaces.
+  - Confirmed correction surfaces: `src/opencode-v2.ts`, and if required the existing `src/dispatch-transcript.ts` / `tests/dispatch-transcript.test.mjs`, only to close MDD-bound native-fallback transcript leakage. Preserve unrelated native tasks' context.
   - Acceptance: actual child prompts contain relevant fresh bodies; parent does not; assignments filter separately; stale/provider-failed retrieval is omitted; resume and dispatch correlation remain correct; worker restrictions remain unchanged.
   - Checks: `npm run build`; `node --import ./tests/isolate-home.mjs --test tests/project-knowledge-runtime.test.mjs tests/opencode-v2.test.mjs tests/worker-state.test.mjs tests/workers-native.test.mjs tests/checkpoint.test.mjs tests/worker-fence.test.mjs tests/full-native.test.mjs`; `npm run typecheck`; `npm test`.
   - Rollback: remove optional dispatch resolver while retaining original phase context and execution semantics.
-  - Commit, assessed risk and proof: pending.
+  - Writer proof before independent check: retained RED 0 passed/3 failed; focused 408 passed; full 1,813 passed/0 failed/3 skips; build/typecheck/diff-check passed. Parent repeated typecheck. An earlier focused attempt timed out after 240 seconds; resumed identical command completed with timeout disabled.
+  - Independent verification: 408 focused tests passed but an added actual-hook reproduction failed (0 passed/1 failed): native `explore` fallback receives the supplement and V2 parent transcript fails to collapse it because only named phase actors are handled. Acceptance blocked pending one scoped correction and fresh proof; no commit yet.
+  - Correction resolved: exact parent/call/dispatched-argument correlation now collapses native `explore` and `general` fallbacks without changing unrelated/altered/unsettled prompts. Observed RED 4 passed/2 failed; GREEN 6 passed. Final focused 412 passed, shared transcript 8 passed, full 1,819 passed/0 failed/3 skips; build/typecheck/diff-check passed. Independent recheck repeated 412+8 tests and two actual-hook reproductions with eight negative controls; no residual blocker. Parent repeated typecheck after correction.
+  - Limits: native fallback transcript correlation is process-local; restart without live binding does not infer ownership of historical prompts. This limitation is documented. Real-host/provider behavior and actual token savings remain unmeasured.
+  - Authored unit: 690 changed lines, tests/docs included, tracking excluded. Commit pending after verified task update.
+  - Risk: high/unassessable due new test; independent verification required. RDD remains off.
 
 - [ ] **PK-4: Route approved skills and expose measurable feedback.**
   - Route: delegated direct; catalog parsing, prompt selection, metrics and integration tests.
@@ -80,10 +86,10 @@ Reuse validated project knowledge and relevant skills without filling the coordi
 
 ## Verification and limitations
 
-Tests use existing isolated-home fixtures, temporary files and local fixture HTTP servers. No installed Engram service, real model calls or credentials are needed for these contract tests. Builds write generated `dist` output. No test, build or runtime smoke has run for this feature yet. Real-host testing, if needed later, requires a separate bounded action and explicit disclosure of its processes and effects.
+Tests use existing isolated-home fixtures, temporary files and local fixture HTTP servers. No installed Engram service, real model calls or credentials are needed for these contract tests. Builds write generated `dist` output. Task-level builds and automated checks are recorded above. No real-host smoke has run. Real-host testing, if needed later, requires a separate bounded action and explicit disclosure of its processes and effects.
 
 Source digest checks validate declared dependencies, not the completeness of a claim. Reused text remains untrusted advisory data and cannot override actor instructions. Actual token savings require actual usage measurements; byte-volume diagnostics alone are not token counts.
 
 ## Progress and next step
 
-PK-1 committed as `2353cbe`. PK-2 source freshness/cache implemented and independently verified; commit next, then PK-3 dispatch integration. Skills and metrics remain pending. Engram mirror remains pending due to session/project mismatch.
+PK-1 committed as `2353cbe`; PK-2 committed as `a3e9d4d`. PK-3 passed independent verification after one scoped native-fallback correction; commit next. PK-4 skills and metrics remain pending. Engram mirror remains pending due to session/project mismatch.

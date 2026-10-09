@@ -9,7 +9,7 @@ import { legacyHistory, v2Payload, contentText } from '../dist/opencode-v2.js';
 import { defaultSettings } from '../dist/settings.js';
 import { saveGlobalSettings } from '../dist/global-settings.js';
 import { RunOwnershipStore } from '../dist/run-ownership.js';
-import { isolateHome, answers, reportDocument, riskReport, traceFixture } from './adapter-fixture.mjs';
+import { isolateHome, answers, memoryServer, reportDocument, riskReport, traceFixture } from './adapter-fixture.mjs';
 
 test('plural task payloads map native arguments without a wrapper or single-member instruction', () => {
   const tasks = ['one', 'two'].map(prompt => ({ description: prompt, subagent_type: 'mdd-apply', prompt }));
@@ -79,10 +79,96 @@ async function fixture(t, completeProfile = true, workersEnabled = true, version
     current.content.push({ type: 'tool', id, name, time: { created: count }, state: { status: 'running', input: structuredClone(input), metadata: {} } });
     return { sessionID, agent: 'mdd-orchestrator', messageID: current.id, id, tool: name, input: structuredClone(input) };
   };
-  return { root, ctx, tools, agents, toolHooks, sessionHooks, sessions, messages, sessionID, user, call, begin,
+  return { root, settings, ctx, tools, agents, toolHooks, sessionHooks, sessions, messages, sessionID, user, call, begin,
     restart: async () => { await cleanup(); cleanup = await plugin.setup(ctx); },
     emit: event => new Promise(resolve => { queue.push({ event, resolve }); wake?.(); }) };
 }
+
+for (const lane of ['ordinary', 'exploration', 'apply', 'fallback-explore', 'fallback-general']) test(`PK3 V2 plugin injects child-only knowledge at actual ${lane} dispatch`, async t => {
+  const f = await fixture(t);
+  const provider = await memoryServer(t);
+  provider.binding.directory = f.root;
+  f.settings.knowledge.enabled = true;
+  f.settings.engram = { endpoint: provider.endpoint };
+  saveGlobalSettings(f.settings); await f.restart();
+  const objective = 'Inspect parser validation boundaries';
+  f.user(objective);
+  for (const name of ['one', 'two']) {
+    await writeFile(join(f.root, `${name}.txt`), `parser ${name}`);
+    const result = await f.call('mdd_knowledge_record', { userText: objective, observation: {
+      summary: `Parser validation ${name}`, body: `PRIVATE_${name}_BODY parser validation details.`,
+      applicability: { phases: ['mdd-explore', 'mdd-plan', 'mdd-apply'], paths: [`${name}.txt`] }, sources: [`${name}.txt`],
+    } });
+    assert.equal(result.state, 'recorded');
+    assert.equal(JSON.stringify(result).includes('PRIVATE_'), false);
+  }
+  const workItems = ['one', 'two'].map(id => ({ id, purpose: `Inspect parser validation ${id}`,
+    complete: true, independent: true, dependsOn: [], reads: [{ root: f.root, files: [`${id}.txt`] }] }));
+  await f.call('mdd_start', { requirements: objective, ...(lane === 'exploration' ? { exploration: { workItems } } : {}) });
+  if (lane.startsWith('fallback-')) {
+    if (lane === 'fallback-general') await settleExploreAndRisk(f);
+    await f.call('mdd_phase_result', { result: 'Select native execution instead of coordinator work.' });
+  }
+  if (lane === 'apply') {
+    await settleExploreAndRisk(f);
+    const ready = await f.call('mdd_status', {}), call = f.begin('subagent', ready.task);
+    await f.toolHooks.get('execute.before')(call);
+    const trace = traceFixture('one.txt', 'one');
+    trace.deliverables = ['one', 'two'].map(id => ({ ...trace.deliverables[0], id,
+      description: `Implement parser validation ${id}`, path: `${id}.txt`,
+      parallel: { complete: true, reads: [], writes: [`${id}.txt`] } }));
+    const text = reportDocument({ phase: 'mdd-plan', runID: ready.runID, callID: call.id, outcome: 'passed',
+      evidenceSummary: 'Independent parser tasks', artifact: 'Two parser boundaries.', ...trace });
+    await f.toolHooks.get('execute.after')({ ...call, status: 'completed', result: {
+      output: { sessionID: 'plan-child', status: 'completed', output: text },
+      content: `<subagent sessionID="plan-child" state="completed">\n${text}\n</subagent>`,
+    } });
+  }
+  const ready = await f.call('mdd_status', {});
+  assert.equal(JSON.stringify(ready).includes('PRIVATE_'), false);
+  const tasks = ready.tasks ?? [ready.task];
+  const scoped = lane === 'exploration' || lane === 'apply';
+  assert.equal(tasks.length, scoped ? 2 : 1);
+  if (lane.startsWith('fallback-')) assert.equal(ready.task.agent, lane.slice('fallback-'.length));
+  for (const [i, task] of tasks.entries()) {
+    const call = f.begin('subagent', task);
+    await f.toolHooks.get('execute.before')(call);
+    assert.ok(call.input.prompt.includes(`PRIVATE_${i ? 'two' : 'one'}_BODY`));
+    if (scoped) assert.equal(call.input.prompt.includes(`PRIVATE_${i ? 'one' : 'two'}_BODY`), false);
+    const original = call.input.prompt;
+    const context = { sessionID: f.sessionID, agent: 'mdd-orchestrator', messages: [
+      { role: 'assistant', content: [{ type: 'tool-call', id: call.id, name: 'subagent', input: call.input }] },
+      { role: 'tool', content: [{ type: 'tool-result', id: call.id, name: 'subagent', result: { type: 'text', value: 'Done' } }] },
+    ], tools: {} };
+    if (lane.startsWith('fallback-')) {
+      for (const mismatch of ['call', 'input', 'extra-input', 'unsettled']) {
+        const unrelated = structuredClone(context);
+        if (mismatch === 'call') for (const message of unrelated.messages) message.content[0].id = 'not-admitted';
+        if (mismatch === 'input') unrelated.messages[0].content[0].input.prompt += ' unrelated';
+        if (mismatch === 'extra-input') unrelated.messages[0].content[0].input.extra = 'not-admitted';
+        if (mismatch === 'unsettled') unrelated.messages.pop();
+        const before = structuredClone(unrelated.messages);
+        await f.sessionHooks.get('context')(unrelated);
+        assert.deepEqual(unrelated.messages, before, `${mismatch} cannot claim an admitted MDD fallback`);
+      }
+    }
+    await f.sessionHooks.get('context')(context);
+    assert.equal(JSON.stringify(context).includes('PRIVATE_'), false);
+    assert.equal(call.input.prompt, original, 'context collapse does not mutate admitted child bytes');
+  }
+  assert.equal(JSON.stringify(await f.call('mdd_status', { detail: 'full' })).includes('PRIVATE_'), false);
+});
+
+for (const agent of ['explore', 'general']) test(`PK3 unrelated native ${agent} transcript retains its original prompt`, async t => {
+  const f = await fixture(t);
+  const input = { agent, description: 'Unrelated native work', prompt: 'Original unrelated prompt. '.repeat(150) };
+  const event = { sessionID: f.sessionID, agent: 'mdd-orchestrator', messages: [
+    { role: 'assistant', content: [{ type: 'tool-call', id: 'unrelated', name: 'subagent', input }] },
+    { role: 'tool', content: [{ type: 'tool-result', id: 'unrelated', name: 'subagent', result: { type: 'text', value: 'Done' } }] },
+  ], tools: {} };
+  await f.sessionHooks.get('context')(event);
+  assert.deepEqual(event.messages[0].content[0].input, input);
+});
 
 async function auditFixture(t, text = 'Run mdd-security', securityModel) {
   const f = await fixture(t, true, true, '2.0.22', securityModel);

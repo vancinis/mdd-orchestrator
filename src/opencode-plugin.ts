@@ -787,6 +787,7 @@ const plugin: Plugin = async input => {
   const ownership = new RunOwnershipStore(dataRoot);
   const dossier = new RunDossierStore(dataRoot);
   const runner = new PhaseRunner(inspector, {
+    ...(settings.knowledge.enabled ? { knowledge: (runtime, selection, memory) => intake.resolveKnowledge(selection, runtime, memory) } : {}),
     workers: profile.workers,
     ...(workerHost ? { workerCapability: { phase: 'mdd-explore' as const, readOnly: true as const,
       ...(workerHost.applyEditing ? { applyEditing: true as const } : {}) } } : {}),
