@@ -5,10 +5,12 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { PhaseRunner } from '../dist/phase-runner.js';
 import { NativeIntake } from '../dist/native-intake.js';
-import { CheckpointStore } from '../dist/checkpoint.js';
+import { CheckpointStore, sealResumeData } from '../dist/checkpoint.js';
 import { RunOwnershipStore } from '../dist/run-ownership.js';
 import { ProgressGuard } from '../dist/progress.js';
 import { defaultSettings } from '../dist/settings.js';
+import { saveGlobalSettings } from '../dist/global-settings.js';
+import { recordTelemetry } from '../dist/telemetry.js';
 import { captureKnowledgeDependencies, knowledgeObservation, selectKnowledge, supplementKnowledge } from '../dist/project-knowledge.js';
 import { answers, memoryServer, throughRiskStop, traceFixture, reportDocument } from './adapter-fixture.mjs';
 
@@ -135,7 +137,7 @@ for (const lane of ['ordinary', 'exploration', 'apply']) test(`PK3 ${lane} drops
   else await f.runner.explore({ purpose: objective, workItems: f.items }, f.runtime);
   let retrieved = false;
   const resolve = f.options.knowledge;
-  f.options.knowledge = async (...args) => { const found = await resolve(...args); assert.equal(found.length, 1); retrieved = true; return found; };
+  f.options.knowledge = async (...args) => { const found = await resolve(...args); assert.equal(found.observations.length, 1); retrieved = true; return found; };
   f.inspect.parent = async () => { if (retrieved) fs.writeFileSync(join(f.root, 'src/a.ts'), 'dirty change'); };
   const ready = f.runner.status(f.runtime.sessionID);
   const sent = await f.runner.before({ sessionID: f.runtime.sessionID, callID: 'stale' }, ready.task ?? ready.tasks[0]);
@@ -196,10 +198,10 @@ test('PK3 deterministic selection excludes unrelated phase, paths and objective 
     ({ id: i + 1, content: row.content, sessionID: row.session_id })) };
   assert.deepEqual((await selectKnowledge(ignoringProvider, { phase: 'mdd-explore', objective, paths: [] }, f.root)).map(row => row.id), [1]);
   const selected = await f.intake.resolveKnowledge({ phase: 'mdd-explore', objective, paths: ['src/a.ts'], files: [join(f.root, 'src/a.ts')] }, f.runtime);
-  assert.equal(selected.length, 1);
-  assert.ok(selected[0].entry.body.startsWith('VALID'));
-  assert.deepEqual(await f.intake.resolveKnowledge({ phase: 'mdd-explore', objective, paths: ['other/file.ts'] }, f.runtime), []);
-  assert.deepEqual(await f.intake.resolveKnowledge({ phase: 'mdd-explore', objective: 'the and please', paths: [] }, f.runtime), []);
+  assert.equal(selected.observations.length, 1);
+  assert.ok(selected.observations[0].entry.body.startsWith('VALID'));
+  assert.deepEqual((await f.intake.resolveKnowledge({ phase: 'mdd-explore', objective, paths: ['other/file.ts'] }, f.runtime)).observations, []);
+  assert.deepEqual((await f.intake.resolveKnowledge({ phase: 'mdd-explore', objective: 'the and please', paths: [] }, f.runtime)).observations, []);
 });
 
 for (const bodySize of [50, 4000]) test(`PK3 actual dispatch obeys three-entry and encoded 8 KiB budgets (${bodySize})`, async t => {
@@ -317,4 +319,228 @@ test('PK3 optional bodies never enter phase telemetry or status after dispatch',
   assert.ok(events.length > 0);
   assert.equal(JSON.stringify(events).includes(secretBody), false);
   assert.equal(JSON.stringify(f.runner.status(call.sessionID)).includes(secretBody), false);
+});
+
+function catalog(f, paths = ['src/a.ts']) {
+  fs.mkdirSync(join(f.root, 'mdd'));
+  fs.mkdirSync(join(f.root, 'skills'));
+  fs.writeFileSync(join(f.root, 'skills/SKILL.md'), '---\nname: parser\n---\nPRIVATE_CATALOG_BODY parser validation guidance.');
+  fs.writeFileSync(join(f.root, 'mdd/knowledge.json'), JSON.stringify({ version: 1, skills: [{ id: 'parser',
+    path: 'skills/SKILL.md', approved: true, phases: ['mdd-explore', 'mdd-apply'], terms: ['parser'], paths,
+    tools: ['mdd_worker_edit', 'bash', 'invented'] }] }));
+}
+
+for (const lane of ['ordinary', 'exploration', 'apply']) test(`PK4 actual ${lane} dispatch adds catalog excerpts and exact body-free metrics`, async t => {
+  const f = await fixture(t); catalog(f, lane === 'ordinary' ? [] : ['src/a.ts']); f.seed();
+  const events = [];
+  f.options.telemetry = (_root, value) => { events.push(value); return { ok: true }; };
+  if (lane === 'ordinary') await f.start();
+  else if (lane === 'apply') await prepareApply(f);
+  else await f.runner.explore({ purpose: objective, workItems: f.items }, f.runtime);
+  const ready = f.runner.status(f.runtime.sessionID);
+  const sent = await f.runner.before({ sessionID: f.runtime.sessionID, callID: 'catalog' }, ready.task ?? ready.tasks[0]);
+  assert.ok(sent.prompt.includes('PRIVATE_CATALOG_BODY'));
+  const status = f.runner.status(f.runtime.sessionID);
+  assert.equal(JSON.stringify(status).includes('PRIVATE_CATALOG_BODY'), false);
+  assert.deepEqual(status.knowledge.selectedSkillIDs, ['parser']);
+  assert.deepEqual(status.knowledge.selectedReferences, ['engram:1']);
+  const supplement = sent.prompt.slice(sent.prompt.indexOf('\n\nBEGIN UNTRUSTED ADVISORY'));
+  assert.equal(status.knowledge.promptByteDelta, Buffer.byteLength(supplement));
+  assert.equal(status.knowledge.selectedBytes, Buffer.byteLength(supplement.split('\n').filter(line => line.startsWith('{')).join('\n') + '\n'));
+  assert.ok(supplement.length <= 8192);
+  assert.equal(JSON.stringify(events).includes('PRIVATE_'), false);
+  assert.deepEqual(events.findLast(event => event.event === 'knowledge-dispatch').knowledge, status.knowledge);
+  const skill = JSON.parse(supplement.split('\n').find(line => line.startsWith('{') && line.includes('"skill"')));
+  assert.deepEqual(skill.tools, lane === 'apply' ? ['mdd_worker_edit'] : undefined);
+  assert.ok(sent.prompt.includes(lane === 'apply' ? 'mdd-cleanup' : 'mdd-doc'), 'packaged phase skills remain mandatory');
+  if (lane !== 'ordinary') {
+    assert.equal(JSON.stringify(f.runner.workerAssignment({ sessionID: f.runtime.sessionID, callID: 'catalog' })).includes('skills'), false);
+    const second = await f.runner.before({ sessionID: f.runtime.sessionID, callID: 'other-member' }, ready.tasks[1]);
+    assert.equal(second.prompt.includes('PRIVATE_CATALOG_BODY'), false);
+    assert.deepEqual(f.runner.status(f.runtime.sessionID).knowledge.selectedSkillIDs, []);
+  }
+});
+
+test('PK4 catalog and observations share three slots and measured query freshness', async t => {
+  const f = await fixture(t); catalog(f, []);
+  for (let i = 0; i < 3; i++) f.seed();
+  f.seed(['src/b.ts']); fs.writeFileSync(join(f.root, 'src/b.ts'), 'changed');
+  await f.start();
+  const sent = await f.runner.before({ sessionID: f.runtime.sessionID, callID: 'shared-budget' }, f.runner.status(f.runtime.sessionID).task);
+  const metrics = f.runner.status(f.runtime.sessionID).knowledge;
+  assert.equal(metrics.candidates, 5); assert.equal(metrics.freshHits, 4); assert.equal(metrics.staleRejects, 1);
+  assert.deepEqual(metrics.selectedSkillIDs, ['parser']); assert.deepEqual(metrics.selectedReferences, ['engram:1', 'engram:2']);
+  assert.equal(sent.prompt.split('\n').filter(line => line.startsWith('{') && /"skill"|"ref":"engram:/.test(line)).length, 3);
+});
+
+test('PK4 standalone exploration uses explicit catalog and reports zero selection for irrelevant entries', async t => {
+  const f = await fixture(t); catalog(f, []);
+  await f.runner.explore({ purpose: objective }, f.runtime);
+  const sent = await f.runner.before({ sessionID: f.runtime.sessionID, callID: 'standalone-catalog' }, f.runner.status(f.runtime.sessionID).task);
+  assert.ok(sent.prompt.includes('PRIVATE_CATALOG_BODY'));
+  const other = await fixture(t); catalog(other, []);
+  await other.runner.explore({ purpose: 'Inspect billing workflows' }, other.runtime);
+  await other.runner.before({ sessionID: other.runtime.sessionID, callID: 'irrelevant-catalog' }, other.runner.status(other.runtime.sessionID).task);
+  assert.deepEqual(other.runner.status(other.runtime.sessionID).knowledge, { candidates: 1, freshHits: 0, staleRejects: 0,
+    selectedSkillIDs: [], selectedReferences: [], selectedBytes: 0, promptByteDelta: 0 });
+});
+
+for (const changed of ['skill', 'catalog']) for (const lane of ['ordinary', 'exploration', 'apply'])
+test(`PK4 ${lane} final boundary rejects ${changed} mutations with exact stale metrics`, async t => {
+  const f = await fixture(t); catalog(f, lane === 'ordinary' ? [] : ['src/a.ts']);
+  if (lane === 'ordinary') await f.start();
+  else if (lane === 'apply') await prepareApply(f);
+  else await f.runner.explore({ purpose: objective, workItems: f.items }, f.runtime);
+  let retrieved = false;
+  const lookup = f.options.knowledge;
+  f.options.knowledge = async (...args) => { const result = await lookup(...args); retrieved = true; return result; };
+  f.inspect.parent = async () => { if (retrieved) fs.appendFileSync(join(f.root, changed === 'skill' ? 'skills/SKILL.md' : 'mdd/knowledge.json'), '\nchanged'); };
+  const ready = f.runner.status(f.runtime.sessionID);
+  const sent = await f.runner.before({ sessionID: f.runtime.sessionID, callID: 'catalog-stale' }, ready.task ?? ready.tasks[0]);
+  assert.equal(sent.prompt.includes('PRIVATE_CATALOG_BODY'), false);
+  assert.deepEqual(f.runner.status(f.runtime.sessionID).knowledge, { candidates: 1, freshHits: 1, staleRejects: 1,
+    selectedReferences: [], selectedSkillIDs: [], selectedBytes: 0, promptByteDelta: 0 });
+});
+
+test('PK4 unavailable canonical provider retains safe explicit catalog, disabled feature reads neither', async t => {
+  const f = await fixture(t); catalog(f, []); f.seed(); await f.start();
+  f.provider.binding.id = 'foreign-session';
+  const sent = await f.runner.before({ sessionID: f.runtime.sessionID, callID: 'catalog-only' }, f.runner.status(f.runtime.sessionID).task);
+  assert.ok(sent.prompt.includes('PRIVATE_CATALOG_BODY'));
+  assert.equal(sent.prompt.includes(secretBody), false);
+  assert.deepEqual(f.runner.status(f.runtime.sessionID).knowledge.selectedReferences, []);
+  const disabled = await fixture(t, false); catalog(disabled, []); await disabled.start();
+  const untouched = await disabled.runner.before({ sessionID: disabled.runtime.sessionID, callID: 'disabled-catalog' }, disabled.runner.status(disabled.runtime.sessionID).task);
+  assert.equal(untouched.prompt.includes('PRIVATE_CATALOG_BODY'), false);
+  assert.equal(disabled.queries.length, 0);
+});
+
+test('PK4 failed final native admission records no delivered metrics', async t => {
+  const f = await fixture(t); catalog(f, []); await f.start();
+  const events = [];
+  f.options.telemetry = (_root, value) => { events.push(value); return { ok: true }; };
+  const lookup = f.options.knowledge;
+  f.options.knowledge = async (...args) => {
+    const found = await lookup(...args);
+    f.inspect.parent = async () => { throw new Error('native authority revoked'); };
+    return found;
+  };
+  await assert.rejects(f.runner.before({ sessionID: f.runtime.sessionID, callID: 'failed-catalog' }, f.runner.status(f.runtime.sessionID).task), /native authority/);
+  assert.equal(f.runner.status(f.runtime.sessionID).knowledge, undefined);
+  assert.equal(events.some(event => event.event === 'knowledge-dispatch'), false);
+});
+
+test('PK4 failed host publication after supplementation records no delivered metrics', async t => {
+  const f = await fixture(t); catalog(f, []); await f.start();
+  const events = [];
+  f.options.telemetry = (_root, value) => { events.push(value); return { ok: true }; };
+  await assert.rejects(f.runner.before({ sessionID: f.runtime.sessionID, callID: 'failed-publication' },
+    f.runner.status(f.runtime.sessionID).task, args => {
+      assert.ok(args.prompt.includes('PRIVATE_CATALOG_BODY'));
+      throw new Error('host admission failed');
+    }), /host admission failed/);
+  assert.equal(f.runner.status(f.runtime.sessionID).knowledge, undefined);
+  assert.equal(events.some(event => event.event === 'knowledge-dispatch'), false);
+});
+
+test('PK4 telemetry off retains only in-memory delivery metrics and no persistent counters', async t => {
+  const f = await fixture(t); catalog(f, []);
+  saveGlobalSettings({ ...defaultSettings(), telemetry: { enabled: false } });
+  f.options.telemetry = (root, value, now) => recordTelemetry(root, value, now);
+  await f.start();
+  await f.runner.before({ sessionID: f.runtime.sessionID, callID: 'private-metrics' }, f.runner.status(f.runtime.sessionID).task);
+  assert.deepEqual(f.runner.status(f.runtime.sessionID).knowledge.selectedSkillIDs, ['parser']);
+  const files = fs.readdirSync(join(f.root, '.mdd'));
+  assert.equal(files.some(name => /telemetry|stats|metrics/.test(name)), false);
+  assert.equal(files.includes('knowledge-cache.json'), false, 'no observations means no cache, and no covert counters');
+});
+
+async function settleKnowledgeTask(f, callID, runtime = f.runtime) {
+  const call = { sessionID: runtime.sessionID, callID };
+  const sent = await f.runner.before(call, f.runner.status(call.sessionID).task);
+  assert.deepEqual(f.runner.status(call.sessionID).knowledge.selectedSkillIDs, ['parser']);
+  await f.runner.after(call, sent, reportDocument({ evidenceSummary: 'Inspected parser.', artifact: 'Parser boundaries inspected.' }));
+  f.runner.releaseSettled(call.sessionID, callID);
+}
+
+for (const boundary of ['reset', 'new-objective', 'replacement']) test(`PK4 lifecycle isolates ${boundary} from prior delivered metrics`, async t => {
+  const f = await fixture(t); catalog(f, []); await f.start();
+  await settleKnowledgeTask(f, 'old-parser');
+  if (boundary !== 'replacement') f.runner.reset(f.runtime.sessionID, 'run');
+  if (boundary === 'reset') assert.equal(f.runner.status(f.runtime.sessionID).state, 'not-started');
+  else {
+    await f.runner.start({ requirements: 'Inspect billing workflows', preflight: { answers } }, f.runtime,
+      { requirementsConfirmed: true, userMessageID: 'billing-user', ...(boundary === 'replacement' ? { replace: true } : {}) });
+    assert.equal(f.runner.status(f.runtime.sessionID).state, 'ready');
+  }
+  assert.equal(f.runner.status(f.runtime.sessionID).knowledge, undefined);
+});
+
+test('PK4 lifecycle isolates successive standalone investigations', async t => {
+  const f = await fixture(t); catalog(f, []);
+  await f.runner.explore({ purpose: objective }, f.runtime);
+  await settleKnowledgeTask(f, 'solo-parser');
+  await f.runner.explore({ purpose: 'Inspect billing workflows' }, f.runtime);
+  assert.equal(f.runner.status(f.runtime.sessionID).knowledge, undefined);
+});
+
+test('PK4 lifecycle isolates contextual investigation from its held workflow in both directions', async t => {
+  const f = await fixture(t); catalog(f, []); await f.start();
+  await settleKnowledgeTask(f, 'main-parser');
+  await f.runner.explore({ purpose: objective }, f.runtime);
+  assert.equal(f.runner.status(f.runtime.sessionID).knowledge, undefined, 'new contextual work has not received the workflow supplement');
+  await settleKnowledgeTask(f, 'context-parser');
+  assert.equal(f.runner.status(f.runtime.sessionID).knowledge, undefined, 'contextual delivery does not describe the restored main workflow');
+});
+
+test('PK4 lifecycle restored workflow cannot inherit earlier standalone metrics in the same runner', async t => {
+  const f = await fixture(t); catalog(f, []);
+  await f.runner.explore({ purpose: objective }, f.runtime);
+  await settleKnowledgeTask(f, 'before-restore');
+  const writer = new PhaseRunner(f.inspect, f.options);
+  await writer.start({ requirements: 'Inspect billing workflows', preflight: { answers } }, f.runtime,
+    { requirementsConfirmed: true, userMessageID: 'billing-user' });
+  assert.equal((await f.runner.restore(f.runtime)).restored, true);
+  assert.equal(f.runner.status(f.runtime.sessionID).knowledge, undefined);
+});
+
+test('PK4 lifecycle transfer evicts source metrics and excludes the target prior investigation', async t => {
+  const f = await fixture(t); catalog(f, []);
+  const targetRuntime = { ...f.runtime, sessionID: 'knowledge-target' };
+  await f.runner.explore({ purpose: objective }, targetRuntime);
+  await settleKnowledgeTask(f, 'target-parser', targetRuntime);
+  await f.start(); await settleKnowledgeTask(f, 'source-parser');
+  const sourceID = f.runtime.sessionID, targetID = targetRuntime.sessionID;
+  const saved = f.checkpoint.read(sourceID).checkpoint, runID = saved.runID;
+  const intent = { operationID: 'knowledge-transfer', nativeUserMessageID: 'transfer-user', requestDigest: 'b'.repeat(64) };
+  const reserved = f.ownership.reserveVerifiedTransfer(runID, sourceID, targetRuntime,
+    { sequence: saved.sequence, digest: saved.dataDigest }, f.ownership.read(runID).epoch, intent);
+  const data = { ...saved.data, userMessageID: 'transfer-user', usedMessages: ['transfer-user'], proposed: [] };
+  const target = { ...saved, parent: targetID, sequence: 0, data,
+    dataDigest: sealResumeData(data, runID, targetID, saved.events, saved.stable) };
+  f.checkpoint.write(targetID, target);
+  f.options.progress.write(targetID, { ...f.options.progress.read(sourceID), userMessageID: 'transfer-user' });
+  f.ownership.finishVerifiedTransfer(runID, sourceID, targetID, reserved.epoch,
+    { sourceSequence: saved.sequence, sourceDigest: saved.dataDigest, targetSequence: target.sequence, targetDigest: target.dataDigest }, intent);
+  assert.equal(f.runner.movedAway(sourceID).targetSessionID, targetID);
+  assert.equal(f.runner.status(sourceID).knowledge, undefined);
+  f.inspect.confirmTransfer = async () => {};
+  assert.equal((await f.runner.restore(targetRuntime)).restored, true);
+  assert.equal(f.runner.status(targetID).knowledge, undefined);
+});
+
+test('PK4 lifecycle preserves active member diagnostics across refused resets and unrelated parents', async t => {
+  const f = await fixture(t); catalog(f);
+  await f.runner.explore({ purpose: objective, workItems: f.items }, f.runtime);
+  const ready = f.runner.status(f.runtime.sessionID);
+  await f.runner.before({ sessionID: f.runtime.sessionID, callID: 'active-member' }, ready.tasks[0]);
+  const metrics = f.runner.status(f.runtime.sessionID).knowledge;
+  assert.deepEqual(metrics.selectedSkillIDs, ['parser']);
+  assert.throws(() => f.runner.reset(f.runtime.sessionID, 'run'), /running/);
+  await f.runner.explore({ purpose: 'Inspect billing workflows' }, { ...f.runtime, sessionID: 'unrelated-parent' });
+  assert.deepEqual(f.runner.status(f.runtime.sessionID).knowledge, metrics);
+  await assert.rejects(f.runner.before({ sessionID: f.runtime.sessionID, callID: 'failed-sibling' }, ready.tasks[1], () => {
+    throw new Error('Sibling host publication refused');
+  }), /Sibling/);
+  assert.deepEqual(f.runner.status(f.runtime.sessionID).knowledge, metrics);
 });

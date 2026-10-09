@@ -1534,19 +1534,20 @@ const plugin: Plugin = async input => {
       // Exact runner-issued arguments authorize a fallback, never the native agent name alone.
       runner.owner(input.sessionID);
       intake.guardTask(input.sessionID);
-      const args = await runner.before(input, output.args);
-      const assignment = workerHost?.assignment?.(input.sessionID, input.callID);
-      if (assignment && workerHost) {
-        const messageID = (input as typeof input & { messageID?: string }).messageID;
-        if (!messageID) throw new Error('Native worker needs its exact assistant message identity.');
-        workerHost.fence.admit(input.sessionID, messageID, input.callID, assignment, () => {
-          try {
-            const current = workerHost.assignment?.(input.sessionID, input.callID);
-            return !!current && isDeepStrictEqual(current, assignment);
-          } catch { return false; }
-        });
-      }
-      if (args) Object.assign(output.args, args);
+      await runner.before(input, output.args, args => {
+        const assignment = workerHost?.assignment?.(input.sessionID, input.callID);
+        if (assignment && workerHost) {
+          const messageID = (input as typeof input & { messageID?: string }).messageID;
+          if (!messageID) throw new Error('Native worker needs its exact assistant message identity.');
+          workerHost.fence.admit(input.sessionID, messageID, input.callID, assignment, () => {
+            try {
+              const current = workerHost.assignment?.(input.sessionID, input.callID);
+              return !!current && isDeepStrictEqual(current, assignment);
+            } catch { return false; }
+          });
+        }
+        Object.assign(output.args, args);
+      });
     },
     'tool.execute.after': async (input, output) => {
       const standalone = standaloneCalls.get(standaloneKey(input.sessionID, input.callID));

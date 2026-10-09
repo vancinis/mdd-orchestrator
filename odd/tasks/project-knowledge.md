@@ -20,7 +20,7 @@ Reuse validated project knowledge and relevant skills without filling the coordi
 - Feature branch: `feat/project-knowledge`.
 - Delivery strategy: `ask-on-risk`; user selected `feature-branch-chain`. Keep four reviewable work-unit boundaries on the local feature line; publication, PR branches and merges remain separate user decisions.
 - Forecast: 1,850-2,900 authored changed lines across four cohesive units; generated output excluded. This is an estimate, not a size limit. Keep tests and documentation with behavior; do not compress or omit them to meet a line target.
-- Running authored changes: PK-1 650 plus PK-2 571 = 1,221 implementation/test/doc lines, tracking excluded. Slices: `1f4b700..2353cbe`, `2353cbe..a3e9d4d`. No PRs published.
+- Running authored changes: PK-1 650 plus PK-2 571 plus PK-3 690 = 1,911 implementation/test/doc lines, tracking excluded. Slices: `1f4b700..2353cbe`, `2353cbe..a3e9d4d`, `a3e9d4d..487573c`. No PRs published.
 - RDD: off, decided by `clone_local`; do not start reviews or change the switch.
 - Verification: assess each writer diff with native risk assessment only. High/unassessable requires writer checks plus independent verification. Parent repeats one reported command before delivery.
 - TDD: no explicit strict repository setting found. Apply the ODD default: observe deterministic RED, implement GREEN, then refactor. Observed evidence is recorded per completed unit below.
@@ -56,7 +56,7 @@ Reuse validated project knowledge and relevant skills without filling the coordi
   - Risk: native assessment high/unassessable due new files; independent verifier completed. RDD remains off, disabled/unmanaged.
   - Authored unit: 571 changed lines, tests/docs included, tracking excluded. Commit: `a3e9d4d` (`feat(knowledge): validate checkout sources before cache reuse`).
 
-- [ ] **PK-3: Deliver selected knowledge at real dispatch boundaries.**
+- [x] **PK-3: Deliver selected knowledge at real dispatch boundaries.**
   - Route: delegated direct; stateful single/parallel dispatch integration and regression coverage.
   - Resolve by objective, phase and actual assignment paths. Revalidate state/ownership after asynchronous retrieval and source freshness before dispatch. Keep parent output compact and preserve mandatory scope/acceptance/verification context.
   - Cover ordinary phases, Apply workers and exploration workers. Scoped workers receive only knowledge within their declared footprint; do not expand their tools or file access.
@@ -67,10 +67,10 @@ Reuse validated project knowledge and relevant skills without filling the coordi
   - Checks: `npm run build`; `node --import ./tests/isolate-home.mjs --test tests/project-knowledge-runtime.test.mjs tests/opencode-v2.test.mjs tests/worker-state.test.mjs tests/workers-native.test.mjs tests/checkpoint.test.mjs tests/worker-fence.test.mjs tests/full-native.test.mjs`; `npm run typecheck`; `npm test`.
   - Rollback: remove optional dispatch resolver while retaining original phase context and execution semantics.
   - Writer proof before independent check: retained RED 0 passed/3 failed; focused 408 passed; full 1,813 passed/0 failed/3 skips; build/typecheck/diff-check passed. Parent repeated typecheck. An earlier focused attempt timed out after 240 seconds; resumed identical command completed with timeout disabled.
-  - Independent verification: 408 focused tests passed but an added actual-hook reproduction failed (0 passed/1 failed): native `explore` fallback receives the supplement and V2 parent transcript fails to collapse it because only named phase actors are handled. Acceptance blocked pending one scoped correction and fresh proof; no commit yet.
+  - Initial independent verification: 408 focused tests passed but an added actual-hook reproduction failed (0 passed/1 failed): native `explore` fallback receives the supplement and V2 parent transcript fails to collapse it because only named phase actors were handled. This blocked acceptance until the scoped correction below.
   - Correction resolved: exact parent/call/dispatched-argument correlation now collapses native `explore` and `general` fallbacks without changing unrelated/altered/unsettled prompts. Observed RED 4 passed/2 failed; GREEN 6 passed. Final focused 412 passed, shared transcript 8 passed, full 1,819 passed/0 failed/3 skips; build/typecheck/diff-check passed. Independent recheck repeated 412+8 tests and two actual-hook reproductions with eight negative controls; no residual blocker. Parent repeated typecheck after correction.
   - Limits: native fallback transcript correlation is process-local; restart without live binding does not infer ownership of historical prompts. This limitation is documented. Real-host/provider behavior and actual token savings remain unmeasured.
-  - Authored unit: 690 changed lines, tests/docs included, tracking excluded. Commit pending after verified task update.
+  - Authored unit: 690 changed lines, tests/docs included, tracking excluded. Commit: `487573c` (`feat(knowledge): deliver scoped context at child dispatch`).
   - Risk: high/unassessable due new test; independent verification required. RDD remains off.
 
 - [ ] **PK-4: Route approved skills and expose measurable feedback.**
@@ -78,11 +78,16 @@ Reuse validated project knowledge and relevant skills without filling the coordi
   - Support an optional explicit, versioned per-checkout `mdd/knowledge.json` catalog with exact relative skill references and bounded deterministic applicability rules. Preserve packaged phase skills; do not crawl or install global skills.
   - Advisory tool choices may only reference capabilities available to that execution lane. Unknown tools are omitted; catalog content cannot grant permissions.
   - Expose compact candidates/fresh hits/stale rejects/selection and byte-volume diagnostics. Respect telemetry preference for persistent counters. Distinguish candidate observations, validated recommendations and explicit project policy; never auto-promote or rewrite policy.
-  - Intended surfaces: `src/knowledge-catalog.ts` (new), `src/project-knowledge.ts`, `src/knowledge-cache.ts`, `src/phase-assets.ts`, `src/phase-runner.ts`, `src/local-files.ts`; `tests/knowledge-catalog.test.mjs` (new), `tests/project-knowledge-runtime.test.mjs`, `tests/phase-assets.test.mjs`; `docs/project-knowledge.md`.
+  - Intended surfaces: `src/knowledge-catalog.ts` (new), `src/project-knowledge.ts`, `src/knowledge-cache.ts`, `src/phase-assets.ts`, `src/phase-runner.ts`, `src/local-files.ts`, `src/native-intake.ts`, `src/opencode-plugin.ts`, `src/worker-state.ts`, `src/telemetry.ts`; `tests/knowledge-catalog.test.mjs` (new), `tests/project-knowledge-runtime.test.mjs`, `tests/phase-assets.test.mjs`, `tests/project-knowledge.test.mjs`, `tests/knowledge-cache.test.mjs`, `tests/opencode-plugin.test.mjs`, `tests/telemetry.test.mjs`, `tests/adapter-fixture.mjs`; `docs/project-knowledge.md`, `docs/mdd-config.schema.json`, `assets/opencode/agents/mdd-orchestrator.md`. Additional intake/worker/telemetry paths connect compact diagnostics to actual dispatch, not a standalone unused module; permissions remain unchanged.
   - Acceptance: appropriate skills selected deterministically; unrelated/missing/unsafe entries excluded; no parent skill-body duplication; counters reflect observed retrieval/bytes without claiming token or productivity savings.
   - Checks: `npm run build`; `node --import ./tests/isolate-home.mjs --test tests/knowledge-catalog.test.mjs tests/project-knowledge-runtime.test.mjs tests/phase-assets.test.mjs`; `npm run typecheck`; `npm test`.
   - Rollback: remove optional catalog/routing/diagnostics while retaining canonical observations and operational state.
-  - Commit, assessed risk and proof: pending.
+  - Implementation: explicit checkout catalog routes bounded skill excerpts to real child dispatch, sharing the three-entry/8-KiB budget with observations. Only proven available tool preferences are emitted; production currently proves `mdd_worker_edit` for scoped Apply, omitting unproven ordinary/exploration preferences. No catalog installed into this repository.
+  - Initial proof: observed RED 0 passed/10 failed; focused 292 passed, compatibility 200 passed, full 1,846 passed/0 failed/3 skips. Independent verifier reproduced stale prior-task diagnostics across reset/new objective despite passing suites.
+  - Correction: diagnostics bind to workflow-instance/investigation identity, not only session. Observed lifecycle RED 1 passed/7 failed, GREEN 8 passed. Final focused 300 passed, compatibility 200 passed, full 1,854 passed/0 failed/3 skips; build/typecheck/diff-check passed. Independent recheck repeated 300+200 tests and original reset/new-objective reproduction, with no residual findings. Parent repeated typecheck after correction.
+  - Metrics represent latest successful delivery within the current workflow, not model consumption or delivery to an undispatched next phase. Persistent diagnostics follow telemetry opt-out; no knowledge/skill bodies in metrics. Existing real-host/token-savings limits remain.
+  - Risk: high/unassessable due new files; independent verification and bounded recheck completed. RDD off, disabled/unmanaged; no review started.
+  - Authored unit: 855 changed lines, tests/docs included, tracking excluded. Kept coherent with real dispatch and lifecycle tests rather than an unused catalog utility. Commit pending after verified task update.
 
 ## Verification and limitations
 
@@ -92,4 +97,4 @@ Source digest checks validate declared dependencies, not the completeness of a c
 
 ## Progress and next step
 
-PK-1 committed as `2353cbe`; PK-2 committed as `a3e9d4d`. PK-3 passed independent verification after one scoped native-fallback correction; commit next. PK-4 skills and metrics remain pending. Engram mirror remains pending due to session/project mismatch.
+PK-1 committed as `2353cbe`; PK-2 as `a3e9d4d`; PK-3 as `487573c`. PK-4 passed independent verification after one scoped metrics-lifecycle correction; commit next, then final tracking closure. Feature remains opt-in/default-off; no global settings, installation, remote publication or project catalog changed. Engram mirror remains pending due to session/project mismatch.

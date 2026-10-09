@@ -1,13 +1,15 @@
-# Record advisory project observations
+# Reuse advisory project knowledge and approved skills
 
 MDD can record candidate coordinator observations learned while handling an ordinary native user
-request, then find their summaries from later sessions in the same project. This optional feature
+request, then find their summaries from later sessions in the same project. An explicit checkout
+catalog can also supply relevant approved skill excerpts at child dispatch. This optional feature
 defaults off. Recording grants no policy, approval, execution authority or additional actor permissions.
 
 ## Quick path
 
 1. In the existing **global** MDD configuration, explicitly set `"knowledge": { "enabled": true }`
-   alongside an already configured `engram` backend, then restart OpenCode. No project setting
+   alongside an already configured `engram` backend for memory, then restart OpenCode. A local catalog
+   can operate without memory. No project setting
    overrides this preference. Omitted `knowledge` remains disabled without rewriting legacy files.
 2. Ask for normal project work, for example: “Improve input validation in the settings parser.”
    The user needs no recording command, special syntax or technical metadata.
@@ -114,8 +116,10 @@ grounded in its existing requirements and exploration evidence; knowledge does n
    validation rejects globs; knowledge introduces no new pattern or permission semantics.
 3. After lookup, recheck the exact owner/reservation and pending state, inspect native parent
    authority again, then recheck state and source bytes synchronously before final dispatch.
-   Optional provider failure supplies no knowledge; native authority failures still refuse dispatch.
-4. Append at most three complete observations in an explicitly untrusted advisory section. Its
+   Optional provider failure omits observations but can retain safe explicit catalog recommendations;
+   native authority failures still refuse dispatch.
+4. Append at most three combined entries (catalog recommendations first, then complete observations)
+   in an explicitly untrusted advisory section. Its
    entire UTF-8 size, including framing, references, source names and JSON escaping, is at most
    8 KiB and must fit the remaining prompt budget (96,000 bytes normally; 48,000 for exploration
    members). Never trim task, acceptance or verification context to fit optional knowledge.
@@ -141,6 +145,81 @@ remains subject to its existing recovery restrictions. No resumable knowledge st
 
 Matching recorded absence can be `fresh` and selected for an otherwise eligible assignment. It
 proves only that the declared file remains absent, not that the observation's assertion is true.
+
+## Explicit approved skill catalog
+
+When knowledge is enabled, the runtime optionally reads **this checkout's** `mdd/knowledge.json`.
+Maintainers author and approve this policy explicitly. MDD never creates it, changes approvals,
+crawls skill directories or installs tools. The following is an example, not repository policy:
+
+```json
+{
+  "version": 1,
+  "skills": [{
+    "id": "parser-validation",
+    "path": "skills/parser-validation/SKILL.md",
+    "approved": true,
+    "phases": ["mdd-explore", "mdd-apply"],
+    "terms": ["parser", "validation"],
+    "paths": ["src/parser"],
+    "tools": ["read", "mdd_worker_edit"]
+  }]
+}
+```
+
+- Require a listed phase, at least one lowercase ASCII literal term found in the lowercased objective
+  (substring matching, no expressions), and an assigned path equal to or beneath a listed path prefix.
+  `paths: []` explicitly removes the path filter. A nonempty filter cannot match unknown assignment
+  paths, such as an initial ordinary exploration. Matching skills sort by ASCII ID ascending.
+- Require `approved: true`, a unique lowercase ID and exact relative `SKILL.md` path, and plain
+  frontmatter `name: <id>`. Unknown fields, invalid versions, unapproved entries, duplicate IDs/paths
+  or malformed schema omit the catalog. Missing, unsafe or invalid skill sources omit that entry.
+- The catalog is at most 32 KiB and 32 entries; each source is at most 64 KiB. Each entry has 1–8
+  phases, 1–8 distinct terms of at most 64 ASCII characters, 0–16 path prefixes and 0–16 tool names.
+  IDs/tool names are at most 64 characters. Shared source validation rejects private paths, traversal,
+  links/junctions, hardlinks, nonregular files and observable read races. Both catalog and skill
+  digests must still match at final dispatch; deletion or policy edits invalidate prior selections.
+- Deliver at most the first 4 KiB of each skill, on a UTF-8 boundary, plus a truncation marker when
+  needed. JSON escaping, excerpts, tool preferences and framing all share the existing three-entry,
+  8 KiB supplement budget with memory. No separate unbounded skill allowance exists.
+- Scoped members receive excerpts by value, including when the skill source lies outside their
+  footprint. They receive no skill read instruction or extra file rights. Applicability uses the
+  receiving member's assignment. Packaged `PHASE_SKILLS` and mandatory instructions remain intact.
+- Advisory tools must intersect both known lane-supported tools and adapter-proven availability.
+  The current production adapter proves only its installed `mdd_worker_edit` for scoped Apply.
+  Ordinary and exploration preferences are omitted because no native tool inventory is supplied;
+  even a catalog `read` name or a permission rule is not proof of availability. Unknown tools are
+  ignored. Tools cannot be installed, executed or authorized by this catalog.
+
+## Measured dispatch feedback
+
+After a successful adapter admission/publication, `mdd_status.knowledge` exposes the latest snapshot
+for the current workflow incarnation or investigation in that parent. It contains no bodies,
+objectives or source paths. Snapshots are bound to that origin: reset, replacement, restoration,
+transfer eviction and new standalone/contextual work cannot inherit another origin's delivery.
+Returning from contextual work does not report its metrics as main-workflow delivery. Within one
+workflow, the snapshot describes its latest successful delivery, not an undispatched next phase.
+Rejected resets and unsuccessful sibling publication preserve the current origin's snapshot.
+Snapshots are process-local,
+bounded to 128 parents, replaced rather than accumulated, and not checkpointed. Failed native,
+checkpoint or host-publication checks publish no delivery snapshot for that attempt.
+
+| Metric | Measurement |
+|---|---|
+| `candidates` | Canonical search rows received (at most 10) plus structurally valid catalog entries (at most 32), before applicability filtering. |
+| `freshHits` | Applicable candidates passing source checks during retrieval; these are eligible hits, not delivered entries. |
+| `staleRejects` | Applicable candidates rejected for stale/unverified/unsafe sources at retrieval, plus previously fresh candidates invalidated at final dispatch. A late invalidation can also have counted as a fresh hit earlier. |
+| `selectedReferences`, `selectedSkillIDs` | Only entries actually emitted, sharing at most three slots. |
+| `selectedBytes` | UTF-8 bytes of emitted JSON entry lines, including escaping and line separators. |
+| `promptByteDelta` | Exact added UTF-8 bytes, including the shared framing; zero when nothing fits or matches. |
+
+The same bounded metadata is a `knowledge-dispatch` event in existing telemetry, under its existing
+retention and opt-out. With telemetry disabled, only in-memory/per-response diagnostics remain;
+there is no persistent metrics store or cache counter. A dispatch measurement means the adapter
+published arguments, not that a model consumed them or achieved a useful outcome. Byte counts are
+not token savings. Native observations, source-validated skill recommendations and explicit catalog
+policy remain distinct. Record useful outcomes through the existing `mdd_knowledge_record` tool;
+it still creates observations and never rewrites or self-approves project policy.
 
 ## Bounds and outcomes
 
@@ -180,8 +259,7 @@ Never rephrase an uncertain write to bypass the guard.
 - Freshness covers only declared dependencies at the time of checking. Files can change after the
   final dispatch check. This is not an atomic
   filesystem snapshot, and source-name exclusions cannot identify every possible embedded secret.
-- Approved skill catalogs, skill routing and feedback metrics remain later work. Selection is bounded
-  lexical matching, not semantic search: non-ASCII objectives or candidates outside the provider's
+- Selection is bounded lexical matching, not semantic search: non-ASCII objectives or candidates outside the provider's
   first ten matches can be missed. No extra search attempts are made to fill the supplement.
 - Engram remains trusted canonical storage, not a cryptographic authority. Envelopes validate shape
   and binding; they cannot prove a claim is correct or that declared dependencies are complete.

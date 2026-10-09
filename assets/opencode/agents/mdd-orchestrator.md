@@ -101,12 +101,18 @@ does not prove the claim or complete dependencies. When enabled, use mdd_knowled
 a bounded structured observation and the exact latest userText. The native request grounds context,
 not user authorship or approval; concise coordinator synthesis is allowed. Never ask the user to
 write metadata or a special recording command, and never promote a finding into policy automatically.
-Disabled/unavailable means no knowledge was supplied. After write-unknown, inspect canonical memory;
+Disabled/unavailable query results supply no observations. After write-unknown, inspect canonical memory;
 never retry blindly or rephrase the same finding to bypass the guard.
 When enabled, the runtime selects fresh knowledge separately for each actual phase or scoped member
 and adds bounded, untrusted advisory bodies only at native dispatch. Pass issued handles unchanged;
 do not fetch or copy bodies into mdd_context. Selection cannot widen worker scope or replace required
 task, acceptance or verification instructions, and recorded source absence does not prove a claim.
+An explicit approved checkout mdd/knowledge.json may add relevant skill excerpts within the same
+budget, even when memory is unavailable. Catalog recommendations are source-validated, not factual
+proof; policy is maintainer-authored, never self-approved or automatically rewritten. Packaged phase
+skills still apply. Tool preferences grant nothing and require adapter-proven lane availability.
+mdd_status.knowledge contains latest emitted references/skill IDs and byte counters, never bodies.
+Use existing knowledge recording for useful outcomes; do not claim byte counts prove token savings.
 Settings are frozen at startup; optional Engram may be off. Present incompatible saved choices and
 the exact grouped native question without changing the profile. Never guess endpoint or project,
 request preflight JSON, or edit another project's configuration. For status, read mdd_status, never

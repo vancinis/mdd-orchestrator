@@ -4,6 +4,7 @@ import type { InstallationEnvironment } from './installation-paths.js';
 import { PHASES } from './policy.js';
 import type { Phase } from './policy.js';
 import { objectWithKeys, ValidationError } from './validation.js';
+import type { KnowledgeDiagnostics } from './project-knowledge.js';
 
 export const RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const LIMIT = 1024 * 1024;
@@ -50,7 +51,8 @@ export type TelemetryEvent = {
    * was invisible until now, which is why the cost of an oversized phase handoff was only ever
    * argued about rather than measured.
    */
-  event: 'preflight' | 'phase-start' | 'phase-end' | 'approval' | 'report' | 'retry' | 'handover' | 'reset' | 'compaction';
+  event: 'preflight' | 'phase-start' | 'phase-end' | 'approval' | 'report' | 'retry' | 'handover' | 'reset' | 'compaction' | 'knowledge-dispatch';
+  knowledge?: KnowledgeDiagnostics;
   phase?: Phase;
   duration?: number;
   route?: 'low' | 'high';
@@ -102,15 +104,32 @@ function parseUsage(value: unknown): TelemetryUsage {
   return usage;
 }
 
+function parseKnowledge(value: unknown): KnowledgeDiagnostics {
+  const input = objectWithKeys(value, 'knowledge diagnostics', ['candidates', 'freshHits', 'staleRejects', 'selectedReferences', 'selectedSkillIDs', 'selectedBytes', 'promptByteDelta']);
+  const ids = (value: unknown, pattern: RegExp): string[] => {
+    if (!Array.isArray(value) || value.length > 3 || value.some(id => typeof id !== 'string' || !pattern.test(id)) || new Set(value).size !== value.length)
+      throw new ValidationError('Invalid knowledge references.');
+    return [...value];
+  };
+  const result = { candidates: counter(input.candidates, 42), freshHits: counter(input.freshHits, 42), staleRejects: counter(input.staleRejects, 42),
+    selectedReferences: ids(input.selectedReferences, /^engram:[1-9][0-9]{0,15}$/), selectedSkillIDs: ids(input.selectedSkillIDs, /^[a-z][a-z0-9-]{0,63}$/),
+    selectedBytes: counter(input.selectedBytes, 8192), promptByteDelta: counter(input.promptByteDelta, 8192) };
+  if (result.selectedReferences.length + result.selectedSkillIDs.length > 3 || result.selectedBytes > result.promptByteDelta)
+    throw new ValidationError('Invalid knowledge delivery budget.');
+  return result;
+}
+
 function parseEvent(value: unknown): TelemetryEvent {
-  const input = objectWithKeys(value, 'event', ['timestamp', 'event', 'phase', 'duration', 'route', 'outcome', 'runID', 'attempt', 'mode', 'executor', 'failure', 'usage']);
+  const input = objectWithKeys(value, 'event', ['timestamp', 'event', 'phase', 'duration', 'route', 'outcome', 'runID', 'attempt', 'mode', 'executor', 'failure', 'usage', 'knowledge']);
   // Model configuration also includes standalone actors; it grants no phase telemetry membership.
   if (input.executor !== undefined && ![...PHASES, 'explore', 'general', 'coordinator'].includes(input.executor as string)) throw new ValidationError('Invalid executor.');
   if (!Number.isSafeInteger(input.timestamp) || (input.timestamp as number) < 0 || (input.timestamp as number) > 8640000000000000 ||
-      !['preflight', 'phase-start', 'phase-end', 'approval', 'report', 'retry', 'handover', 'reset', 'compaction'].includes(input.event as string)) {
+      !['preflight', 'phase-start', 'phase-end', 'approval', 'report', 'retry', 'handover', 'reset', 'compaction', 'knowledge-dispatch'].includes(input.event as string)) {
     throw new ValidationError('Invalid telemetry event.');
   }
   const result: TelemetryEvent = { timestamp: input.timestamp as number, event: input.event as TelemetryEvent['event'] };
+  if (input.event === 'knowledge-dispatch') result.knowledge = parseKnowledge(input.knowledge);
+  else if (input.knowledge !== undefined) throw new ValidationError('Knowledge metrics require a dispatch event.');
   if (input.executor !== undefined) result.executor = input.executor as NonNullable<TelemetryEvent['executor']>;
   if (Object.hasOwn(input, 'phase')) {
     // Standalone model roles are not phases; admission must match the rollup's phase domain.

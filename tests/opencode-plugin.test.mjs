@@ -455,6 +455,39 @@ test('plugin contract: scoped tools, in-place native args, result gating, no nat
   await hooks['tool.execute.before']({ tool: 'read', sessionID: 'other', callID: 'other' }, { args: {} });
 });
 
+for (const publication of ['success', 'failure']) test(`PK4 actual plugin ${publication} keeps catalog delivery metrics honest and bodies child-only`, async t => {
+  const f = await pluginFixture(t);
+  f.settings.knowledge.enabled = true;
+  f.settings.telemetry.enabled = false;
+  saveGlobalSettings(f.settings);
+  await mkdir(join(f.root, 'mdd'));
+  await mkdir(join(f.root, 'skills'));
+  await writeFile(join(f.root, 'skills/SKILL.md'), '---\nname: cli\n---\nPRIVATE_PLUGIN_SKILL inspect the CLI.');
+  await writeFile(join(f.root, 'mdd/knowledge.json'), JSON.stringify({ version: 1, skills: [{ id: 'cli', approved: true,
+    path: 'skills/SKILL.md', phases: ['mdd-explore'], terms: ['cli'], paths: [], tools: ['read', 'bash'] }] }));
+  const hooks = await plugin(f.input);
+  const ready = JSON.parse(await hooks.tool.mdd_start.execute({ requirements: f.requirements }, f.context));
+  assert.equal(JSON.stringify(ready).includes('PRIVATE_PLUGIN_SKILL'), false);
+  const output = { args: structuredClone(ready.task) };
+  if (publication === 'failure') {
+    Object.freeze(output.args);
+    await assert.rejects(hooks['tool.execute.before']({ ...call, tool: 'task' }, output), /read only|read-only|extensible|assign/i);
+    assert.equal(JSON.parse(await hooks.tool.mdd_status.execute({}, f.context)).knowledge, undefined);
+    return;
+  }
+  await hooks['tool.execute.before']({ ...call, tool: 'task' }, output);
+  assert.ok(output.args.prompt.includes('PRIVATE_PLUGIN_SKILL'));
+  const status = JSON.parse(await hooks.tool.mdd_status.execute({}, f.context));
+  assert.deepEqual(status.knowledge.selectedSkillIDs, ['cli']);
+  assert.equal(JSON.stringify(status).includes('PRIVATE_PLUGIN_SKILL'), false);
+  const transcript = { messages: [{ info: { role: 'assistant', sessionID: f.runtime.sessionID }, parts: [{
+    type: 'tool', tool: 'task', callID: call.callID, state: { status: 'completed', input: output.args, output: 'Inspected' },
+  }] }] };
+  await hooks['experimental.chat.messages.transform']({}, transcript);
+  assert.equal(JSON.stringify(transcript).includes('PRIVATE_PLUGIN_SKILL'), false);
+  assert.ok(output.args.prompt.includes('PRIVATE_PLUGIN_SKILL'), 'child arguments remain immutable');
+});
+
 test('plugin contract: a phase actor may check its own report, and nobody else may call in', async t => {
   const f = await pluginFixture(t);
   const { hooks, context } = f;

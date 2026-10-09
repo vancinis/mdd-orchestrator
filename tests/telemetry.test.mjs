@@ -25,6 +25,24 @@ const rollupOf = root => JSON.parse(fs.readFileSync(rollupFile(root), 'utf8'));
 const runID = '9f1c2b3a-4d5e-4f60-8a1b-2c3d4e5f6071';
 const usage = () => ({ input: 1200, output: 340, reasoning: 20, cacheRead: 90, cacheWrite: 10, cost: 0.0125, messages: 3 });
 
+test('PK4 knowledge delivery telemetry preserves exact bounded metadata and respects opt-out', t => {
+  const root = fixture(t);
+  const knowledge = { candidates: 3, freshHits: 2, staleRejects: 1, selectedReferences: ['engram:7'],
+    selectedSkillIDs: ['parser'], selectedBytes: 120, promptByteDelta: 650 };
+  const dispatch = { timestamp: now, event: 'knowledge-dispatch', knowledge };
+  assert.equal(recordTelemetry(root, dispatch, now).ok, true);
+  assert.deepEqual(JSON.parse(fs.readFileSync(log(root), 'utf8')), dispatch);
+  for (const invalid of [{ ...knowledge, body: 'PRIVATE_BODY' }, { ...knowledge, candidates: 43 },
+    { ...knowledge, selectedSkillIDs: ['../private'] }, { ...knowledge, promptByteDelta: 8193 },
+    { ...knowledge, selectedReferences: ['engram:1', 'engram:2', 'engram:3'] }])
+    assert.equal(recordTelemetry(root, { ...dispatch, knowledge: invalid }, now).ok, false);
+  const before = fs.readFileSync(log(root), 'utf8'), rollup = fs.readFileSync(rollupFile(root), 'utf8');
+  saveGlobalSettings({ ...defaultSettings(), telemetry: { enabled: false } });
+  assert.equal(recordTelemetry(root, dispatch, now).enabled, false);
+  assert.equal(fs.readFileSync(log(root), 'utf8'), before);
+  assert.equal(fs.readFileSync(rollupFile(root), 'utf8'), rollup);
+});
+
 test('status and clear on absent telemetry do not create files; writes happen only on API use', t => {
   const root = fixture(t);
   assert.deepEqual(telemetryStatus(root, now), { ok: true, enabled: true, count: 0, retentionDays: 30 });

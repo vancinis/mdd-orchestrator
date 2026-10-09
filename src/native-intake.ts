@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { EngramHttp, KnowledgeWriteUnknownError, LESSON_TITLE_PREFIX, mddDataRoot } from './engram-http.js';
 import { KNOWLEDGE_NOTE, captureKnowledgeDependencies, knowledgeFreshness, knowledgeObservation, knowledgeSummary, parseKnowledgeQuery, parseKnowledgeRequest, queryKnowledge, selectKnowledge } from './project-knowledge.js';
-import type { KnowledgeCandidate, KnowledgeSelection } from './project-knowledge.js';
+import { emptyKnowledgeLookup, type KnowledgeLookup, type KnowledgeSelection } from './project-knowledge.js';
+import { readKnowledgeCatalog } from './knowledge-catalog.js';
 import { KnowledgeCache } from './knowledge-cache.js';
 import { readLessons, recordLesson, renderLessonsReport } from './lessons.js';
 import type { LessonState } from './lessons.js';
@@ -787,15 +788,18 @@ export class NativeIntake {
   #knowledgeCache?: { root: string; store: KnowledgeCache };
 
   /** Internal resolver: optional provider failure cannot change native dispatch authority. */
-  async resolveKnowledge(selection: KnowledgeSelection, runtime: Runtime, bound?: EngramHttp): Promise<KnowledgeCandidate[]> {
-    if (!this.#settings.knowledge.enabled) return [];
+  async resolveKnowledge(selection: KnowledgeSelection, runtime: Runtime, bound?: EngramHttp): Promise<KnowledgeLookup> {
+    const result = emptyKnowledgeLookup();
+    if (!this.#settings.knowledge.enabled) return result;
+    result.skills = readKnowledgeCatalog(runtime.directory, selection, result.metrics);
     try {
       const client = bound ?? await this.#memory(runtime);
-      if (!client) return [];
+      if (!client) return result;
       const root = mddDataRoot(runtime.directory);
       if (this.#knowledgeCache?.root !== root) this.#knowledgeCache = { root, store: new KnowledgeCache(root) };
-      return await selectKnowledge(client, selection, runtime.directory, this.#knowledgeCache.store);
-    } catch { return []; }
+      result.observations = await selectKnowledge(client, selection, runtime.directory, this.#knowledgeCache.store, result.metrics);
+    } catch { /* Explicit local catalog remains available when canonical observations are unavailable. */ }
+    return result;
   }
 
   async knowledge(input: unknown, runtime: Runtime): Promise<unknown> {
