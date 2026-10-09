@@ -20,7 +20,7 @@ Reuse validated project knowledge and relevant skills without filling the coordi
 - Feature branch: `feat/project-knowledge`.
 - Delivery strategy: `ask-on-risk`; user selected `feature-branch-chain`. Keep four reviewable work-unit boundaries on the local feature line; publication, PR branches and merges remain separate user decisions.
 - Forecast: 1,850-2,900 authored changed lines across four cohesive units; generated output excluded. This is an estimate, not a size limit. Keep tests and documentation with behavior; do not compress or omit them to meet a line target.
-- Running authored changes: PK-1 650 plus PK-2 571 plus PK-3 690 = 1,911 implementation/test/doc lines, tracking excluded. Slices: `1f4b700..2353cbe`, `2353cbe..a3e9d4d`, `a3e9d4d..487573c`. No PRs published.
+- Completed authored work units: PK-1 650 + PK-2 571 + PK-3 690 + PK-4 855 = 2,766 changed implementation/test/doc lines, tracking excluded. Net branch diff is 2,491 additions + 39 deletions = 2,530 lines. Slices: `1f4b700..2353cbe`, `2353cbe..a3e9d4d`, `a3e9d4d..487573c`, `487573c..f5adb57`. No PRs published.
 - RDD: off, decided by `clone_local`; do not start reviews or change the switch.
 - Verification: assess each writer diff with native risk assessment only. High/unassessable requires writer checks plus independent verification. Parent repeats one reported command before delivery.
 - TDD: no explicit strict repository setting found. Apply the ODD default: observe deterministic RED, implement GREEN, then refactor. Observed evidence is recorded per completed unit below.
@@ -73,7 +73,7 @@ Reuse validated project knowledge and relevant skills without filling the coordi
   - Authored unit: 690 changed lines, tests/docs included, tracking excluded. Commit: `487573c` (`feat(knowledge): deliver scoped context at child dispatch`).
   - Risk: high/unassessable due new test; independent verification required. RDD remains off.
 
-- [ ] **PK-4: Route approved skills and expose measurable feedback.**
+- [x] **PK-4: Route approved skills and expose measurable feedback.**
   - Route: delegated direct; catalog parsing, prompt selection, metrics and integration tests.
   - Support an optional explicit, versioned per-checkout `mdd/knowledge.json` catalog with exact relative skill references and bounded deterministic applicability rules. Preserve packaged phase skills; do not crawl or install global skills.
   - Advisory tool choices may only reference capabilities available to that execution lane. Unknown tools are omitted; catalog content cannot grant permissions.
@@ -87,7 +87,7 @@ Reuse validated project knowledge and relevant skills without filling the coordi
   - Correction: diagnostics bind to workflow-instance/investigation identity, not only session. Observed lifecycle RED 1 passed/7 failed, GREEN 8 passed. Final focused 300 passed, compatibility 200 passed, full 1,854 passed/0 failed/3 skips; build/typecheck/diff-check passed. Independent recheck repeated 300+200 tests and original reset/new-objective reproduction, with no residual findings. Parent repeated typecheck after correction.
   - Metrics represent latest successful delivery within the current workflow, not model consumption or delivery to an undispatched next phase. Persistent diagnostics follow telemetry opt-out; no knowledge/skill bodies in metrics. Existing real-host/token-savings limits remain.
   - Risk: high/unassessable due new files; independent verification and bounded recheck completed. RDD off, disabled/unmanaged; no review started.
-  - Authored unit: 855 changed lines, tests/docs included, tracking excluded. Kept coherent with real dispatch and lifecycle tests rather than an unused catalog utility. Commit pending after verified task update.
+  - Authored unit: 855 changed lines, tests/docs included, tracking excluded. Kept coherent with real dispatch and lifecycle tests rather than an unused catalog utility. Commit: `f5adb57` (`feat(knowledge): route project skills and measure delivered context`).
 
 ## Verification and limitations
 
@@ -97,4 +97,6 @@ Source digest checks validate declared dependencies, not the completeness of a c
 
 ## Progress and next step
 
-PK-1 committed as `2353cbe`; PK-2 as `a3e9d4d`; PK-3 as `487573c`. PK-4 passed independent verification after one scoped metrics-lifecycle correction; commit next, then final tracking closure. Feature remains opt-in/default-off; no global settings, installation, remote publication or project catalog changed. Engram mirror remains pending due to session/project mismatch.
+All four implementation tasks are complete and independently verified: `2353cbe`, `a3e9d4d`, `487573c`, `f5adb57`. This final tracking-only closure records their identities after the commits; it changes no runtime bytes.
+
+Feature remains opt-in/default-off. No global settings, installation, remote publication or project catalog changed. The next optional step is user-authorized activation and a real-host trial; current proof is automated fixture-based integration, not production or token-savings evidence. Three environment-dependent test skips and the native-fallback post-restart limitation remain documented. Engram's full task mirror remains pending due to session/project mismatch; separate progress observations and session summaries were saved without changing the binding.
