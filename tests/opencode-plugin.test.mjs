@@ -386,7 +386,7 @@ test('OpenCode SDK contract: bounded callback even if injected client ignores ab
 test('plugin contract: scoped tools, in-place native args, result gating, no native override', async t => {
   const f = await pluginFixture(t);
   const { hooks, context, writes } = f;
-  assert.deepEqual(Object.keys(hooks.tool).sort(), ['mdd_change_request', 'mdd_check_report', 'mdd_context', 'mdd_contextual_explore', 'mdd_improve', 'mdd_improvements', 'mdd_jd_inspect', 'mdd_phase_result', 'mdd_pr_body', 'mdd_prepare_advance', 'mdd_reset', 'mdd_revisit', 'mdd_security', 'mdd_start', 'mdd_status', 'mdd_transfer', 'mdd_transfer_recover']);
+  assert.deepEqual(Object.keys(hooks.tool).sort(), ['mdd_answer', 'mdd_change_request', 'mdd_check_report', 'mdd_context', 'mdd_contextual_explore', 'mdd_improve', 'mdd_improvements', 'mdd_jd_inspect', 'mdd_phase_result', 'mdd_pr_body', 'mdd_prepare_advance', 'mdd_reset', 'mdd_revisit', 'mdd_security', 'mdd_start', 'mdd_status', 'mdd_transfer', 'mdd_transfer_recover']);
   assert.deepEqual(Object.keys(hooks.tool.mdd_start.args), ['requirements', 'context', 'exploration', 'questions']);
   assert.deepEqual(Object.keys(hooks.tool.mdd_contextual_explore.args), ['purpose', 'workItems']);
   const ready = JSON.parse(await hooks.tool.mdd_start.execute({ requirements: f.requirements }, context));
@@ -803,6 +803,62 @@ test('native plugin contract: question error event blocks only matching intake w
   assert.equal(f.writes.length, 0);
 });
 
+// The history after an interrupted question: the assistant message that showed it, then what the
+// user wrote, then the current caller. `beforeQuestion` placed the call in the caller; it moves
+// back to the message that actually showed it.
+function answeredAfterQuestion(f, text, { before = false } = {}) {
+  const caller = f.parentMessages.at(-1);
+  const shown = { info: { ...caller.info, id: 'msg_question' },
+    parts: caller.parts.map(part => ({ ...part, messageID: 'msg_question', state: { ...part.state, status: 'error' } })) };
+  const user = { info: { id: 'msg_user_answer', sessionID: f.runtime.sessionID, role: 'user' },
+    parts: [{ type: 'text', text, sessionID: f.runtime.sessionID, messageID: 'msg_user_answer' }] };
+  caller.parts = [];
+  f.parentMessages.splice(-1, 0, ...(before ? [user, shown] : [shown, user]));
+}
+
+const PREFLIGHT_TEXT = '1. algo seguro 2. ninguno 3. automatico 4. medio 5. nada que agregar.';
+const PREFLIGHT_READING = [{ labels: ['Algo seguro'] }, { labels: ['Ninguno'] }, { labels: ['Automático'] }, { labels: ['Medio'] }, { labels: ['Nada que agregar'] }];
+
+// 2026-10-08: the preflight form was interrupted, OpenCode restarted, and the user typed the
+// answers. The new process refused to start again ("Native intake reservation is unconfirmed")
+// because the ended question still held its durable claim, and the typed answers were refused.
+test('native plugin contract: an interrupted preflight survives a restart and is answered in the user\'s own words', async t => {
+  const f = await pluginFixture(t, {});
+  const pending = JSON.parse(await f.hooks.tool.mdd_start.execute({ requirements: f.requirements }, f.context));
+  const call = questionCall(f, pending.question);
+  await f.hooks['tool.execute.before'](call, { args: pending.question });
+  await f.hooks.event({ event: { type: 'message.part.updated', properties: { part: { ...call, type: 'tool', state: { status: 'error' } } } } });
+  assert.equal(JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context)).state, 'stopped');
+  assert.equal(new RunOwnershipStore(f.root).intake(f.runtime.sessionID).state, 'retired', 'an ended preflight holds no claim');
+  answeredAfterQuestion(f, PREFLIGHT_TEXT);
+  const restarted = await plugin(f.input);
+  const again = JSON.parse(await restarted.tool.mdd_start.execute({ requirements: f.requirements }, f.context));
+  assert.equal(again.state, 'question-ready');
+  const started = JSON.parse(await restarted.tool.mdd_answer.execute({ userText: PREFLIGHT_TEXT, answers: PREFLIGHT_READING }, f.context));
+  assert.equal(started.provenance.preflight, 'typed-answer');
+  assert.deepEqual(started.questionReceipts.at(-1).typed, { source: 'chat', userMessageID: 'msg_user_answer' });
+  assert.equal(started.workflow.answers.mode, 'automatic');
+  assert.equal(started.workflow.answers.summary, 'medium');
+  assert.equal(new RunOwnershipStore(f.root).intake(f.runtime.sessionID).state, 'settled');
+});
+
+test('native plugin contract: a written answer must be the user\'s exact latest message, written after the question', async t => {
+  const f = await pluginFixture(t, {});
+  const pending = JSON.parse(await f.hooks.tool.mdd_start.execute({ requirements: f.requirements }, f.context));
+  const call = questionCall(f, pending.question);
+  await f.hooks['tool.execute.before'](call, { args: pending.question });
+  await f.hooks.event({ event: { type: 'message.part.updated', properties: { part: { ...call, type: 'tool', state: { status: 'error' } } } } });
+  answeredAfterQuestion(f, PREFLIGHT_TEXT, { before: true });
+  await assert.rejects(f.hooks.tool.mdd_answer.execute({ userText: PREFLIGHT_TEXT, answers: PREFLIGHT_READING }, f.context), /before the question was shown/);
+  // Moved after the question, but not what the user wrote.
+  const user = f.parentMessages.splice(f.parentMessages.findIndex(message => message.info.id === 'msg_user_answer'), 1)[0];
+  f.parentMessages.splice(-1, 0, user);
+  await assert.rejects(f.hooks.tool.mdd_answer.execute({ userText: `${PREFLIGHT_TEXT} (sic)`, answers: PREFLIGHT_READING }, f.context), /exact latest message/);
+  assert.equal(JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context)).state, 'stopped');
+  const started = JSON.parse(await f.hooks.tool.mdd_answer.execute({ userText: PREFLIGHT_TEXT, answers: PREFLIGHT_READING }, f.context));
+  assert.equal(started.provenance.preflight, 'typed-answer');
+});
+
 // Drives a fresh run (already past preflight) through exploration and a mdd-risk assessment that
 // settles at blocked-risk, through the real plugin hooks, in whichever mode `ready` was started
 // in. Used by the recovery tests below for both automatic and interactive runs.
@@ -1190,7 +1246,7 @@ test('plugin config contract: settings frozen at startup; only explicit model ov
   await hooks.config(config);
   // Every agent but the coordinator loses the MDD tools: they are registered app-wide but are
   // meaningless, and misleading, anywhere else.
-  const denied = { mdd_security: false, mdd_start: false, mdd_status: false, mdd_prepare_advance: false, mdd_revisit: false, mdd_phase_result: false, mdd_reset: false, mdd_change_request: false, mdd_contextual_explore: false, mdd_context: false, mdd_pr_body: false, mdd_improve: false, mdd_improvements: false, mdd_transfer: false, mdd_transfer_recover: false, 'mdd_*': false, mdd_jd_inspect: false };
+  const denied = { mdd_security: false, mdd_start: false, mdd_status: false, mdd_prepare_advance: false, mdd_revisit: false, mdd_answer: false, mdd_phase_result: false, mdd_reset: false, mdd_change_request: false, mdd_contextual_explore: false, mdd_context: false, mdd_pr_body: false, mdd_improve: false, mdd_improvements: false, mdd_transfer: false, mdd_transfer_recover: false, 'mdd_*': false, mdd_jd_inspect: false };
   // And every phase actor loses `task` and `skill`: it is the actor, and the skills it needs are
   // already inlined in its prompt by value, so a name lookup can only reach someone else's. It
   // gains exactly one MDD tool back, which reads nothing and only tells it whether the report it

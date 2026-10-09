@@ -433,7 +433,10 @@ test('assets: the coordinator asks approval natively, delegates fallback and dra
   const text = fs.readFileSync('assets/opencode/agents/mdd-orchestrator.md', 'utf8');
   assert.match(text, /Never end a phase report with an approval question of your own/);
   assert.match(text, /only approval is the native question[\s\S]*same turn as the report/);
-  assert.match(text, /affirmative typed in the\nchat approves nothing/);
+  assert.match(text, /A message the\s+user wrote before the question was shown approves nothing/);
+  // A person who answered the shown question in their own words has answered it; MDD checks it.
+  assert.match(text, /Record that with mdd_answer/);
+  assert.match(text, /Never use it to skip asking/);
   assert.match(text, /one tracked fallback: explore for/);
   assert.match(text, /Never do\n  substantive phase work in this conversation/);
   assert.match(text, /call mdd_pr_body with the user's exact latest text; do not hand-write one/);

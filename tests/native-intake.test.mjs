@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { NativeIntake, approvalEnvelope, routeEnvelope, riskRecoveryEnvelope, nativeQuestionAnswers, CLARIFICATION_LABELS, APPROVAL_LABELS, ROUTE_LABELS, RISK_RECOVERY_LABELS, UnselectedAnswer } from '../dist/native-intake.js';
+import { NativeIntake, approvalEnvelope, routeEnvelope, riskRecoveryEnvelope, nativeQuestionAnswers, CLARIFICATION_LABELS, APPROVAL_LABELS, CHANGE_LABELS, ROUTE_LABELS, RISK_RECOVERY_LABELS, UnselectedAnswer } from '../dist/native-intake.js';
 import { QuestionCheckpointStore } from '../dist/question-checkpoint.js';
 import { Workflow } from '../dist/workflow.js';
 import { defaultSettings } from '../dist/settings.js';
@@ -825,7 +825,7 @@ function routeFixture(t, mode) {
     block() { blocked = true; },
     approvalStopped() {},
   };
-  const inspect = { async intake() {}, async question() {} };
+  const inspect = { async intake() {}, async question() {}, async typed() { return 'msg-route-answer'; } };
   const settings = defaultSettings();
   settings.profiles.default.answers = { ...answers, mode };
   const gate = new NativeIntake(runner, inspect, settings);
@@ -925,7 +925,8 @@ test('route question (S6): automatic mode asks no route question and keeps the s
 });
 
 // D3/S5: a cancelled route receipt authorizes nothing and leaves the route question re-askable,
-// exactly like a cancelled generic approval — no phase is approved and no force happens.
+// exactly like a cancelled generic approval — no phase is approved and no force happens. It pauses
+// like that approval too: stopping used to block the run and discard the evidence it was about.
 test('route question (S5): a cancelled native call authorizes neither continue nor force', async t => {
   const f = routeFixture(t, 'interactive');
   await f.start();
@@ -938,7 +939,9 @@ test('route question (S5): a cancelled native call authorizes neither continue n
   assert.equal(f.workflow().nextAction().kind, 'approve');
   assert.equal(f.workflow().snapshot().routeOrigin, 'suggested');
   assert.equal(f.forced(), 0);
-  assert.equal(f.gate.status(runtime.sessionID).state, 'stopped');
+  assert.equal(f.gate.status(runtime.sessionID).state, 'paused');
+  f.gate.prepareAdvance({ questions: [] }, runtime);
+  assert.equal(f.gate.status(runtime.sessionID).question.questions[0].header, 'Ruta');
 });
 
 // D3/S5: once a route call has already answered, that exact callID cannot answer again — the
@@ -995,7 +998,7 @@ function riskRecoveryFixture(t, mode, faults = {}) {
     // blocked-risk, nothing authorized, so the recovery question can be reopened from it.
     reset() { return { scope: 'phase' }; },
   };
-  const inspect = { async intake() {}, async question() {} };
+  const inspect = { async intake() {}, async question() {}, async typed() { return 'msg-recovery-answer'; } };
   const settings = defaultSettings();
   settings.profiles.default.answers = { ...answers, mode };
   const gate = new NativeIntake(runner, inspect, settings);
@@ -1189,3 +1192,183 @@ for (const [label, faults, act] of [
     assert.deepEqual(f.manualRoutes(), []);
   });
 }
+
+// ── Written answers ─────────────────────────────────────────────────────────────────────────────
+// The form is how MDD asks, but a person who answered in their own words has answered. These cover
+// both places those words can be (the form's own text box, and a chat message after the form was
+// closed), every kind of question, and what is refused: an option the user did not write, a message
+// already used, an answer to a question the user never saw.
+
+// A call to the native question tool that the user closes, or that is interrupted.
+async function dismiss(gate, callID) {
+  const args = gate.status(runtime.sessionID).question;
+  const call = { sessionID: runtime.sessionID, callID };
+  await gate.beforeQuestion(call, args);
+  gate.nativeError(call);
+  return { args, call };
+}
+
+function written(f, userMessageID = 'msg_written') {
+  const proofs = [];
+  f.inspect.typed = async (_runtime, text, messageID, after) => { proofs.push({ text, messageID, after: [...after] }); return userMessageID; };
+  return proofs;
+}
+
+test('written answers: an interrupted preflight answered in the chat starts the run without asking again', async t => {
+  const f = await fixture(t, {});
+  f.inspect.intake = async () => 'msg_start';
+  await f.start();
+  const { call } = await dismiss(f.gate, 'interrupted-preflight');
+  assert.equal(f.gate.status(runtime.sessionID).state, 'stopped');
+  assert.match(f.gate.status(runtime.sessionID).reason, /mdd_answer/);
+  const proofs = written(f);
+  const userText = '1. algo seguro 2. engram 3. automatico 4. medio 5. nada que agregar.';
+  await f.gate.answer({ userText, answers: [{ labels: ['Algo seguro'] }, { labels: ['Engram'] }, { labels: ['Automático'] }, { labels: ['Medio'] }, { labels: [CLARIFICATION_LABELS.nothing] }] }, runtime, 'msg_caller');
+  assert.equal(f.starts(), 1);
+  assert.deepEqual(f.workflow().snapshot().answers, { ...f.workflow().snapshot().answers, certainty: 'somewhat-sure', artifactStore: 'engram', mode: 'automatic', summary: 'medium' });
+  const status = f.gate.status(runtime.sessionID);
+  assert.equal(status.provenance.preflight, 'typed-answer');
+  assert.deepEqual(status.questionReceipts.at(-1).typed, { source: 'chat', userMessageID: 'msg_written' });
+  // The proof was asked for the user's exact words, after the call that showed them the question.
+  assert.deepEqual(proofs, [{ text: userText, messageID: 'msg_caller', after: [call.callID] }]);
+});
+
+test('written answers: the request that started the run never answers its own preflight', async t => {
+  const f = await fixture(t, {});
+  f.inspect.intake = async () => 'msg_start';
+  await f.start();
+  await dismiss(f.gate, 'closed-preflight');
+  written(f, 'msg_start');
+  await assert.rejects(f.gate.answer({ userText: 'Muy seguro, Ninguno, Automático, Bajo', answers: [{ labels: ['Muy seguro'] }, { labels: ['Ninguno'] }, { labels: ['Automático'] }, { labels: ['Bajo'] }, { labels: [] }] }, runtime, 'msg_caller'), /already used/);
+  assert.equal(f.starts(), 0);
+  assert.equal(f.gate.status(runtime.sessionID).state, 'stopped');
+});
+
+test('written answers: a closed approval is approved by the user\'s next message, recorded like the form', async t => {
+  const f = await fixture(t, { ...answers, mode: 'interactive' });
+  await f.start(); f.pass();
+  f.gate.prepareAdvance({ questions: [] }, runtime);
+  await dismiss(f.gate, 'closed-approval');
+  assert.equal(f.gate.status(runtime.sessionID).state, 'paused');
+  written(f);
+  await f.gate.answer({ userText: 'Continuar', answers: [{ labels: [APPROVAL_LABELS.proceed] }] }, runtime, 'msg_caller');
+  assert.equal(f.workflow().nextAction().kind, 'execute');
+  const receipt = f.gate.status(runtime.sessionID).questionReceipts.at(-1);
+  assert.equal(receipt.kind, 'approval');
+  assert.deepEqual(receipt.answers, [[APPROVAL_LABELS.proceed]]);
+  assert.match(receipt.callID, /^typed-/);
+  // The same message cannot approve the next phase as well.
+  f.pass();
+  f.gate.prepareAdvance({ questions: [] }, runtime);
+  await dismiss(f.gate, 'closed-approval-2');
+  await assert.rejects(f.gate.answer({ userText: 'Continuar', answers: [{ labels: [APPROVAL_LABELS.proceed] }] }, runtime, 'msg_caller'), /already used/);
+  assert.equal(f.workflow().nextAction().kind, 'approve');
+});
+
+test('written answers: a reading the user\'s words do not support records nothing and checks no history', async t => {
+  const f = await fixture(t, { ...answers, mode: 'interactive' });
+  await f.start(); f.pass();
+  f.gate.prepareAdvance({ questions: [] }, runtime);
+  await dismiss(f.gate, 'closed-approval');
+  const proofs = written(f);
+  const before = f.gate.status(runtime.sessionID).questionReceipts.length;
+  await assert.rejects(f.gate.answer({ userText: 'sí, dale', answers: [{ labels: [APPROVAL_LABELS.proceed] }] }, runtime, 'msg_caller'), /did not write "Continuar"/);
+  await assert.rejects(f.gate.answer({ userText: 'pausar no, continuar', answers: [{ labels: [APPROVAL_LABELS.proceed] }] }, runtime, 'msg_caller'), /ambiguous/);
+  const status = f.gate.status(runtime.sessionID);
+  assert.equal(status.state, 'paused');
+  assert.equal(status.questionReceipts.length, before);
+  assert.equal(f.workflow().nextAction().kind, 'approve');
+  assert.equal(proofs.length, 0);
+});
+
+test('written answers: a question the user never saw cannot be answered in the chat', async t => {
+  const f = await fixture(t, { ...answers, mode: 'interactive' });
+  await f.start(); f.pass();
+  f.gate.prepareAdvance({ questions: [] }, runtime);
+  written(f);
+  await assert.rejects(f.gate.answer({ userText: 'Continuar', answers: [{ labels: [APPROVAL_LABELS.proceed] }] }, runtime, 'msg_caller'), /not shown/);
+  assert.equal(f.gate.status(runtime.sessionID).state, 'question-ready');
+  assert.equal(f.workflow().nextAction().kind, 'approve');
+});
+
+test('written answers: a host that cannot prove the user\'s message records nothing', async t => {
+  const f = await fixture(t, { ...answers, mode: 'interactive' });
+  await f.start(); f.pass();
+  f.gate.prepareAdvance({ questions: [] }, runtime);
+  await dismiss(f.gate, 'closed-approval');
+  f.inspect.typed = async () => { throw new Error('userText must be the user\'s exact latest message in this conversation, unchanged. Nothing was recorded.'); };
+  await assert.rejects(f.gate.answer({ userText: 'Continuar', answers: [{ labels: [APPROVAL_LABELS.proceed] }] }, runtime, 'msg_caller'), /exact latest message/);
+  assert.equal(f.gate.status(runtime.sessionID).state, 'paused');
+  assert.equal(f.workflow().nextAction().kind, 'approve');
+});
+
+test('written answers: words typed inside the form are recorded once the option is read from them', async t => {
+  const f = await fixture(t, { ...answers, mode: 'interactive' });
+  await f.start(); f.pass();
+  await f.answer([['continuar, dale']]);
+  const stalled = f.gate.status(runtime.sessionID);
+  assert.equal(stalled.state, 'question-ready');
+  assert.match(stalled.notice, /mdd_answer \(omit userText\)/);
+  await assert.rejects(f.gate.answer({ answers: [{ labels: [APPROVAL_LABELS.pause] }] }, runtime, 'msg_caller'), /did not write "Pausar"/);
+  await f.gate.answer({ answers: [{ labels: [APPROVAL_LABELS.proceed], quote: 'continuar' }] }, runtime, 'msg_caller');
+  assert.equal(f.workflow().nextAction().kind, 'execute');
+  assert.deepEqual(f.gate.status(runtime.sessionID).questionReceipts.at(-1).typed, { source: 'form' });
+});
+
+test('written answers: form words belong to the showing they were typed in', async t => {
+  const f = await fixture(t, { ...answers, mode: 'interactive' });
+  await f.start(); f.pass();
+  // Nothing was typed into this form at all.
+  f.gate.prepareAdvance({ questions: [] }, runtime);
+  await assert.rejects(f.gate.answer({ answers: [{ labels: [APPROVAL_LABELS.proceed] }] }, runtime, 'msg_caller'), /typed nothing/);
+  await f.answer([['continuar, dale']]);
+  // Asked again, the form is answered afresh; what was typed into the earlier one no longer counts.
+  await dismiss(f.gate, 'asked-again');
+  await assert.rejects(f.gate.answer({ answers: [{ labels: [APPROVAL_LABELS.proceed] }] }, runtime, 'msg_caller'), /typed nothing/);
+  assert.equal(f.workflow().nextAction().kind, 'approve');
+});
+
+test('written answers: a closed route question is answered in the chat, including forcing the other route', async t => {
+  const f = routeFixture(t, 'interactive');
+  await f.start();
+  f.pass('low');
+  f.gate.prepareAdvance({ questions: [] }, runtime);
+  await dismiss(f.gate, 'closed-route');
+  assert.equal(f.gate.status(runtime.sessionID).state, 'paused');
+  await f.gate.answer({ userText: 'Mejor forzar la otra ruta.', answers: [{ labels: [ROUTE_LABELS.force] }] }, runtime, 'msg_caller');
+  assert.equal(f.forced(), 1);
+  assert.equal(f.workflow().snapshot().routeOrigin, 'override');
+});
+
+test('written answers: a stopped risk recovery is resolved by the user\'s message', async t => {
+  const f = riskRecoveryFixture(t, 'interactive');
+  await f.start();
+  f.failRisk();
+  await dismiss(f.gate, 'closed-recovery');
+  assert.equal(f.gate.status(runtime.sessionID).state, 'stopped');
+  await f.gate.answer({ userText: 'ruta high', answers: [{ labels: [RISK_RECOVERY_LABELS.high] }] }, runtime, 'msg_caller');
+  assert.deepEqual(f.manualRoutes(), ['high']);
+  assert.equal(f.retries(), 0);
+});
+
+test('written answers: a change confirmation typed into the form stays open and is then confirmed', async t => {
+  const f = await fixture(t, { ...answers, mode: 'interactive' });
+  f.inspect.intake = async () => 'msg_start';
+  await f.start(); f.pass();
+  f.inspect.intake = async () => 'msg_change';
+  await f.gate.changeRequest({ kind: 'material', userText: 'Cambiemos el alcance', requirements: 'Human requirements, now with exports' }, runtime, 'msg_caller');
+  await f.answer([['confirmar el cambio!']]);
+  const open = f.gate.status(runtime.sessionID);
+  assert.equal(open.state, 'question-ready');
+  assert.equal(open.question.questions[0].header, 'Cambio');
+  await f.gate.answer({ answers: [{ labels: [CHANGE_LABELS.confirm] }] }, runtime, 'msg_caller');
+  // Confirmed: the single grouped preflight of the new run is what is asked next.
+  assert.deepEqual(f.gate.status(runtime.sessionID).question.questions.map(question => question.header), ['Certeza', 'Artefactos', 'Modo', 'Resumen', 'Notas']);
+});
+
+test('written answers: nothing can be answered when no MDD question waits', async t => {
+  const f = await fixture(t);
+  await f.start();
+  written(f);
+  await assert.rejects(f.gate.answer({ userText: 'Continuar', answers: [{ labels: [APPROVAL_LABELS.proceed] }] }, runtime, 'msg_caller'), /No MDD question is waiting/);
+});

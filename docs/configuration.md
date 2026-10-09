@@ -408,8 +408,11 @@ memory automatically bootstraps the actual native parent. Unavailable configured
 Interactive phase approval uses one native Proceed/Stop question bound to the run and exact
 next phase. No public approval setter exists. `mdd_status.question` is the exact question
 argument object, and `questionReceipts` retains consumed native call IDs and labels. Pending,
-failed, dismissed, stale, or duplicate calls cannot authorize work. Automatic mode adds no
-phase approval questions. Valid approval prepares only the corresponding next task.
+failed, dismissed, stale, or duplicate calls cannot authorize work. When the user answers in
+their own words instead (typed inside the form, or in a chat message after the form was shown and
+closed), `mdd_answer` records it only after checking every chosen option against their actual
+text; its receipt is marked `typed`. Automatic mode adds no phase approval questions. Valid
+approval prepares only the corresponding next task.
 
 ### Evidence reporting (`reporting.ts`)
 

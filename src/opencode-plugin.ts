@@ -73,7 +73,7 @@ const CONCERN_SCHEMA = tool.schema.object({
 });
 
 /** MDD tools belong to the MDD coordinator. Other agents share the registry but not this state. */
-export const MDD_TOOLS = ['mdd_security', 'mdd_start', 'mdd_status', 'mdd_prepare_advance', 'mdd_revisit', 'mdd_phase_result', 'mdd_reset', 'mdd_change_request', 'mdd_contextual_explore', 'mdd_context', 'mdd_pr_body', 'mdd_improve', 'mdd_improvements', 'mdd_transfer', 'mdd_transfer_recover'] as const;
+export const MDD_TOOLS = ['mdd_security', 'mdd_start', 'mdd_status', 'mdd_prepare_advance', 'mdd_revisit', 'mdd_answer', 'mdd_phase_result', 'mdd_reset', 'mdd_change_request', 'mdd_contextual_explore', 'mdd_context', 'mdd_pr_body', 'mdd_improve', 'mdd_improvements', 'mdd_transfer', 'mdd_transfer_recover'] as const;
 /**
  * The one MDD tool that is not the coordinator's alone. It is kept out of `MDD_TOOLS` because
  * that list is what `restrictTools` switches off everywhere else, and this one has to reach the
@@ -650,6 +650,33 @@ export function createInspector(input: PluginInput, timeout = 5000, now: () => n
           : 'Requirements must exactly match the latest native user text; do not rewrite or invent them.') + detail);
       }
       return boundedText(record(matches[0]!.info, 'message').id, 'native user message ID', 256);
+    },
+    /**
+     * Proves a written answer is the user's own: exactly their latest message, as they wrote it
+     * (host-added parts excluded, like every other proof here), and, when `after` names the calls
+     * that showed the question, written after one of them. An answer typed before the user could
+     * see the question is not an answer to it, however well its words happen to fit.
+     */
+    async typed(runtime, text, messageID, after) {
+      await inspector.parent(runtime);
+      const history = await messages(runtime.sessionID, runtime.directory);
+      const caller = history.at(-1);
+      if (!caller || record(caller.info, 'caller message').id !== messageID || record(caller.info, 'caller message').role !== 'assistant')
+        throw new Error('The answer does not come from the actual native caller message. Nothing was recorded.');
+      let latest = -1;
+      for (let index = history.length - 2; index >= 0; index--) if (record(history[index]!.info, 'message').role === 'user') { latest = index; break; }
+      const refuse = 'userText must be the user\'s exact latest message in this conversation, unchanged. Nothing was recorded.';
+      if (latest < 0) throw new Error(refuse);
+      const info = record(history[latest]!.info, 'message');
+      let written: string | undefined;
+      try { written = authoredNativeText(list(history[latest]!.parts, 'message parts', PARTS_MAX).filter(part => part.type === 'text'), runtime.sessionID, String(info.id)); }
+      catch { written = undefined; }
+      if (info.sessionID !== runtime.sessionID || written === undefined || canonicalNativeText(written) !== canonicalNativeText(text)) throw new Error(refuse);
+      if (after.length && !history.slice(0, latest).some(message => record(message.info, 'message').role === 'assistant' &&
+          list(message.parts, 'message parts', PARTS_MAX).some(part => part.type === 'tool' && part.tool === 'question' && after.includes(String(part.callID))))) {
+        throw new Error('The user wrote this before the question was shown, or the question is no longer in the readable history. Ask it again with the native question tool. Nothing was recorded.');
+      }
+      return boundedText(info.id, 'native user message ID', 256);
     },
     async question(runtime, call, args) {
       if (call.sessionID !== runtime.sessionID) throw new Error('Native question parent mismatch.');
@@ -1295,6 +1322,21 @@ const plugin: Plugin = async input => {
         async execute(_args, context) {
           enter(context, 'mdd_revisit');
           return reply(intake.revisit(context));
+        },
+      }),
+      mdd_answer: tool({
+        description: 'Record the user\'s answer to the pending MDD question when they gave it in their own words instead of choosing in the form: typed into the form\'s own text box (the question output shows it), or written in a chat message after the form was shown and then closed or interrupted. The form stays the way MDD asks: never use this to skip asking, and never for words that do not answer the question. You read their words; MDD checks your reading. Give one entry per question, in order: labels are the exact offered option labels they chose (empty for an open question answered in their own words, or left unanswered), and quote is the exact part of their text that answers that question. Every label must be written in its quote (case, accents and punctuation aside) and no other option of the same question may be; each fixed-choice question needs exactly one. Anything short of that records nothing; then respond to the user and ask the form again.',
+        args: {
+          userText: tool.schema.string().min(1).optional().describe('Only for an answer written in the chat: the user\'s exact latest message, unchanged. Omit it when they typed the answer inside the form.'),
+          answers: tool.schema.array(tool.schema.object({
+            labels: tool.schema.array(tool.schema.string()).describe('Exact offered option labels the user chose for this question, as listed in the question.'),
+            quote: tool.schema.string().optional().describe('The exact part of the user\'s text that answers this question. Quote only that part when one message answers several questions.'),
+          })).min(1).max(24).describe('One entry per question of the pending MDD question, in the same order.'),
+        },
+        async execute(args, context) {
+          enter(context, 'mdd_answer');
+          if (context.abort.aborted) throw new Error('The answer was aborted. Nothing was recorded.');
+          return reply(await intake.answer(args, context, context.messageID));
         },
       }),
       mdd_phase_result: tool({

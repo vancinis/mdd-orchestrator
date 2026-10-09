@@ -56,7 +56,10 @@ Run the single [setup wizard](setup.md): `npm run setup` from trusted source, or
    question the user answers in their own words. Genuine doubts about the request that the
    coordinator passes as `mdd_start({ requirements, questions })` join that same interaction; with
    a complete profile they are asked alone, before the first phase. Submit it once to `question`.
-   No typed JSON preflight or model-supplied answer override is accepted.
+   No typed JSON preflight or model-supplied answer override is accepted. When the user answers
+   in their own words instead, typed inside the form or written in a chat message after the form
+   was closed, the coordinator records it with `mdd_answer` and MDD checks it against their text
+   (see [Written answers](#written-answers)).
 6. After the question, read `mdd_status`. It returns `nextAction`: the single call to make now,
    with ready-to-dispatch `args` whenever the call is dispatchable as written. Submit exactly the
     returned `task` arguments (`agent`, `description`, `prompt`), once, using native `subagent`
@@ -567,10 +570,34 @@ question replies arrive through OpenCode's service; that local service and insta
 remain trusted infrastructure, not a cryptographic proof of who operated the UI.
 
 `mdd_status` returns the exact `question` or executable `task`, provenance only after accepted
-intake, and retained `questionReceipts`. `await-answer` means wait, never reprompt. Dismissal,
-errors, changed/stale/duplicate callbacks, or a task before consent block the intake. `Stop`
-records refusal without fabricating a failed phase result. A missed after hook remains
-pending; no automated recovery is attempted. Unrelated sessions remain unaffected.
+intake, and retained `questionReceipts`. `await-answer` means wait, never reprompt. Errors,
+changed/stale/duplicate callbacks, or a task before consent block the intake. A dismissed or
+interrupted form records nothing: a phase approval, clarification or route question pauses the
+run, a preflight or risk recovery stops it, and a change confirmation keeps the current plan. A
+stopped preflight also releases its durable intake claim, so a fresh start after a restart is not
+refused by a question that already ended. `Stop` records refusal without fabricating a failed phase
+result. A missed after hook remains pending; no automated recovery is attempted. Unrelated
+sessions remain unaffected.
+
+### Written answers
+
+The form is how MDD asks, and it stays the main channel. A person who answers in their own words
+anyway has still answered, and throwing that away used to cost whole runs: an interrupted preflight
+answered as "1. algo seguro 2. engram 3. automatico 4. medio 5. nada que agregar." could only be
+restarted from scratch. `mdd_answer({ userText?, answers })` records such an answer for every
+question kind, with the same transitions, receipts and records as a native callback. The
+coordinator reads the words; MDD checks the reading and records nothing unless every check passes.
+
+| Check | Rule |
+|---|---|
+| Which question | The pending MDD question, or the one whose form was just closed without an answer (paused approval, clarification or route; stopped preflight or risk recovery). A closed change confirmation already kept the plan and has nothing left to confirm. |
+| Whose words | In the form: the text the user typed into that question's own box, kept from the native callback while the same question stays open. In the chat: `userText` must be exactly the user's latest message (host-added parts excluded), unused by MDD, and written after a native call showed this exact question. A preflight only has to be past the request that started it, which MDD already marks as used. |
+| What they chose | One entry per question, in order: `labels` are exact offered labels, `quote` the part of the text that answers that question. Each label must be written in the quote, ignoring case, accents and punctuation, on whole words. No other option of the same question may be written there, after setting aside the chosen ones, so "no quiero engram, mejor openspec" is ambiguous. A fixed-choice question takes exactly one label; an open one may take its options, the quoted words, or nothing. |
+| Record | The answer is persisted `pending`, `answered` and `settled` exactly like a native one, under a fresh `typed-<uuid>` call ID. The receipt carries `typed: { source: "form" \| "chat", userMessageID? }`; a chat message is then marked used. An accepted preflight reports provenance `typed-answer`. |
+
+This widens who may answer, not what an answer may do: the coordinator cannot supply text the user
+did not write, and an option the user did not write cannot be recorded. An answer whose words name
+no offered option is still refused; the coordinator responds to them and asks the form again.
 
 ## On-demand security audit
 
@@ -619,7 +646,7 @@ for corrections through `mdd-apply`**. Nothing grants fix, commit, publication o
 | Capabilities | Ordinary serial phase actors ship no permission map; the user's native permissions decide what they may do. The coordinator adds only `question: allow`, the consent channel OpenCode otherwise denies it. Scoped workers are the explicit exception: the [bounded worker fence](#bounded-worker-authority-internal-host-capability) restricts tools and paths, and Apply uses only the formatter-free `mdd_worker_edit` primitive. |
 | Correlation | Confirms the conversation is a top-level `mdd-orchestrator` session in this workspace, and that a native question is the exact running call being answered. Phase results are bound by phase, runID and, when delegated, callID. |
 | Models | Configured per role through the startup profile and applied to the agent config. Runtime model identity is not policed. |
-| Consent | Complete startup profile or exact correlated native preflight answers; later interactive Proceed/Stop applies only to the currently waiting phase. No repeat preflight or implicit approval. An answer that names nothing on offer selects nothing: the user wrote their own words, or a host reordered the result, and MDD cannot tell those apart. Neither is consent, so the receipt is recorded as cancelled and the same question stays open to be asked again. A question MDD did not compose is the coordinator's own and touches no MDD state, except while an MDD question is pending, when it is the only question that may run. |
+| Consent | Complete startup profile or exact correlated native preflight answers; later interactive Proceed/Stop applies only to the currently waiting phase. No repeat preflight or implicit approval. An answer that names nothing on offer selects nothing: the user wrote their own words, or a host reordered the result, and MDD cannot tell those apart. Neither is consent, so the receipt is recorded as cancelled and the same question stays open to be asked again. When those words do name an option, the coordinator records them with `mdd_answer`, checked against the text the user actually typed ([Written answers](#written-answers)). A question MDD did not compose is the coordinator's own and touches no MDD state, except while an MDD question is pending, when it is the only question that may run. |
 | Persistence | HTTP only to a literal IPv4 loopback origin, no credentials/path/query/redirects, no retries. Each HTTP/SDK read has a maximum five-second timeout. HTTP responses are bounded to 128 KiB. |
 | Failure | Infrastructure failures never fabricate phase results. Read-only phases may retry with failure context, then use one tracked native fallback after `DELEGATION_ATTEMPTS` (3). Apply is different: uncertain writes, failed native results or interrupted actors block with pending recovery protection, never automatic redispatch. Unknown child termination remains `await-result`. A malformed completed report permits only bounded report restatement, not substantive work. A reported phase failure blocks until explicit recovery. `mdd_status` never grants approval or dispatches by itself. |
 | Recovery | No MDD state is terminal. `mdd_reset` releases the current attempt (`scope: phase`) or forgets the run for this conversation (`scope: run`), clearing the local progress marker. Scope `phase` also covers work waiting on a person rather than on an actor: a run stopped at an approval returns to `await-approval` with that question re-armed, and an intake stopped before any run re-opens its pending question. Neither prepares a phase nobody authorized. When Verify reports failure, status names `reworkable: "mdd-apply"` and `scope: rework` sends the run back to Apply to correct what it found, instead of re-checking the unchanged implementation or filing a material change. It needs `userText`, the user's exact latest message choosing the correction; the failed verification becomes Apply's newest dependency artifact, earlier changes are kept, and Verify follows through the route's ordinary approval. Recorded artifacts, memory and `previousRuns` are never deleted by a reset, and `scope: run` sets the preserved record aside under a discarded name rather than destroying it. |
@@ -663,7 +690,9 @@ single bare object, because host tool bridges and models deliver all three; ever
 validated strictly. No keyword scoring or automatic route replacement occurs.
 
 The existing native gate shows one exact confirmation. Keeping the current plan or dismissing
-the change leaves its answers, artifacts and pending approval unchanged. Confirmation leads
+the change leaves its answers, artifacts and pending approval unchanged. Words typed into the
+form instead keep the confirmation open, unchanged, until the user chooses; when they name one
+of its options, `mdd_answer` records it. Confirmation leads
 to **one grouped question containing every preflight field and the optional note**, even with a complete profile. Only
 accepted answers create the new planned run. Prior runs remain in `previousRuns` for live
 inspection; no artifact or general-memory record is deleted. Identical proposals are not

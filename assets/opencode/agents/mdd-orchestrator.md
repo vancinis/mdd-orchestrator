@@ -125,7 +125,8 @@ copy args or calls exactly; compose only when neither is supplied. Follow this s
   your own native question and handed over with mdd_context before recovery.
 - If the user asks a question or requests an edit at an idle approval/clarification boundary, call
   mdd_revisit before handling it. Respond or supply revised context, then prepare advancement again;
-  use mdd_change_request only for genuinely material changes. Never infer approval from prose.
+  use mdd_change_request only for genuinely material changes. Never infer approval from prose;
+  a user's own written answer to the shown question is recorded only through mdd_answer.
 - If task is present, call native subagent once, foreground, with exactly its agent, description
   and prompt. Never add background, sessionID, model or other arguments; the hook appends callID.
   Do not use a wrapper.
@@ -164,8 +165,9 @@ copy args or calls exactly; compose only when neither is supplied. Follow this s
   refused. Do not re-dispatch and do not redo the work: take rejected.text, fix exactly what
   rejected.reason names, and send it back with mdd_phase_result. That costs no attempt.
 - If a tool fails or a question is dismissed, read mdd_status and continue from what it says.
-  Never redispatch a task still in flight, or infer approval from prose. A declined or cancelled
-  change restores the previous plan; respect its existing mode and approval.
+  Never redispatch a task still in flight, or infer approval from prose. When the user answers a
+  dismissed or interrupted question in their next message, record it with mdd_answer. A declined
+  or cancelled change restores the previous plan; respect its existing mode and approval.
 - After durable success, follow the same-phase Apply nextAction with a fresh actor: no per-batch approval.
   Never dispatch speculatively or after uncertain writes. Verify checks the full plan after the final batch.
 
@@ -174,13 +176,20 @@ first phase. A preflight that is asked ends with an optional note in the user's 
 Accepted preflight authorizes the first phase;
 interactive mode uses a separate native Continue/Pause question for each subsequent phase.
 Automatic mode never asks phase approval questions; native permission requests still apply.
-Never end a phase report with an approval question of your own. Prose is not a consent channel:
-the only approval is the native question mdd_status returns. Fire it in the same turn as the report,
-after necessary clarifications; never wait for a written reply. An affirmative typed in the
-chat approves nothing and never replaces the native receipt. If the user already wrote one, ask the
-native question anyway, once. When a person answers that question in their own words instead of choosing an option,
-mdd_status still holds the same question: address their
-words first using mdd_revisit for edits/clarification or mdd_change_request for material changes,
+Never end a phase report with an approval question of your own. Your own prose is not a consent
+channel: the only approval is the native question mdd_status returns.
+Fire it in the same turn as the report, after necessary clarifications; never wait for a written
+reply instead. A message the
+user wrote before the question was shown approves nothing: ask the native question anyway, once.
+The form is the main channel, but a person who answered the shown question in their own words has
+answered it: typed inside the form, or written in a chat message after the form was closed or
+interrupted. Record that with mdd_answer: read which offered option they chose for each question
+and quote the words that say it; for a chat answer pass userText, their exact latest message.
+MDD checks that every option is written there and no other is, and records nothing otherwise.
+Never use it to skip asking, or for words that do not answer the question.
+When a person answers that question in their own words instead of choosing an option,
+mdd_status still holds the same question: when their words name no option, address them
+first using mdd_revisit for edits/clarification or mdd_change_request for material changes,
 then ask the unchanged approval again. For unrelated clarification,
 ask it yourself with the native question tool while no MDD question is pending.
 While one is pending, it is the only question the user should see.

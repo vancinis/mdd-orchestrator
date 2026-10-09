@@ -17,11 +17,18 @@ import type { CheckpointStore } from './checkpoint.js';
 import { CLARIFICATION_ANSWERS_MAX, CLARIFICATIONS_MAX } from './question-checkpoint.js';
 import type { Clarification, QuestionCheckpointStore, QuestionRecord } from './question-checkpoint.js';
 import type { RunOwnershipStore } from './run-ownership.js';
+import { typedSelections } from './typed-answer.js';
+import type { TypedEvidence } from './typed-answer.js';
 
 export type IntakeInspect = {
   setupPending?(runtime: Runtime, requirements?: string, messageID?: string): Promise<{ requirements: string; userMessageID: string } | undefined>;
   intake(runtime: Runtime, requirements: string, messageID: string, scope?: 'latest' | 'objective'): Promise<void | string>;
   question(runtime: Runtime, call: TaskCall, args: QuestionEnvelope): Promise<void>;
+  /**
+   * Proves `text` is exactly the user's latest message and, when `after` names question calls,
+   * that it was written after one of them was shown. Returns that message's ID.
+   */
+  typed?(runtime: Runtime, text: string, messageID: string, after: readonly string[]): Promise<string>;
   transferLiveness?(runtime: Runtime, sourceSessionID: string, runID: string, requestDigest: string,
     assistantMessageID?: string): Promise<'running' | 'stopped' | 'unknown'>;
 };
@@ -30,13 +37,19 @@ type Runner = Pick<PhaseRunner, 'start' | 'status' | 'approveNative' | 'block'> 
 type Reservation = NonNullable<QuestionRecord['reservation']>;
 /** `fields` counts a preflight envelope's leading field questions; the rest are its clarifications. */
 type Slot = { kind: 'preflight' | 'approval' | 'change' | 'clarification' | 'route' | 'risk-recovery'; args: QuestionEnvelope; phase?: Phase; callID?: string; requirements?: string; fields?: number };
+/** An answer the user gave in their own words: typed inside the form, or in a chat message. */
+type Written = { source: 'form' | 'chat'; userMessageID?: string };
 type Intake = {
   runtime: Runtime; requirements: string;
   intakeToken?: string;
   state: 'starting' | 'question-ready' | 'review-ready' | 'paused' | 'await-answer' | 'accepting' | 'active' | 'blocked' | 'stopped';
   slot?: Slot; reason?: string;
-  provenance?: { requirements: 'native-user'; preflight: 'startup-profile' | 'native-question'; profile: string };
-  receipts: { kind: Slot['kind']; phase?: Phase; callID: string; answers: string[][]; cancelled?: true }[];
+  provenance?: { requirements: 'native-user'; preflight: 'startup-profile' | 'native-question' | 'typed-answer'; profile: string };
+  receipts: { kind: Slot['kind']; phase?: Phase; callID: string; answers: string[][]; cancelled?: true; typed?: Written }[];
+  /** The native calls that showed exactly this envelope. A chat answer counts only after one of them. */
+  shown?: { args: QuestionEnvelope; calls: string[] };
+  /** What the user typed inside the form for each question, kept while the same question stays open. */
+  typed?: { args: QuestionEnvelope; given: string[][] };
   known: Partial<Answers>; userMessageID?: string; usedMessages: Set<string>; proposed: Set<string>; replacing?: true; notice?: string;
   restore?: { state: Intake['state']; slot?: Slot; requirements: string; known: Partial<Answers>; userMessageID?: string; clarifications: Clarification[]; deferred: Clarification[]; clarificationAnswers: { question: string; answer: string; phase: Phase; disposition: 'answered' | 'deferred' }[] };
   memory?: { endpoint: string; project: string }; context?: { label: string; content: string };
@@ -176,7 +189,8 @@ function parseClarifications(value: unknown): Clarification[] {
  * keep the run alive and deal with what was actually said.
  */
 export class UnselectedAnswer extends Error {
-  constructor(readonly text: string) {
+  /** `answers` is everything the form returned, so the user's words can still be read as an answer. */
+  constructor(readonly text: string, readonly answers: readonly string[][] = []) {
     super('The user answered with their own text instead of choosing one of the offered options.');
   }
 }
@@ -209,7 +223,7 @@ export function nativeQuestionAnswers(args: QuestionEnvelope, raw: unknown, open
   // Only an envelope that agrees with itself can have its labels read as what the user chose, so
   // an unlisted one is their own words here, rather than a result that was rewritten on the way.
   const unlisted = args.questions.findIndex((question, index) => index < openFrom && !question.options.some(option => option.label === given[index]![0]));
-  if (unlisted >= 0) throw new UnselectedAnswer(given[unlisted]![0]!);
+  if (unlisted >= 0) throw new UnselectedAnswer(given[unlisted]![0]!, given.map(selected => [...selected]));
   return given.map((selected, index) => index < openFrom ? [selected[0]!] : selected.filter(entry => entry.trim()));
 }
 
@@ -466,8 +480,7 @@ export class NativeIntake {
         entry.memory = { endpoint, project: client.project };
       }
       if (entry.state !== 'starting') throw new Error('Intake became uncertain during initialization.');
-      if (previous?.intakeToken && ['blocked', 'stopped'].includes(previous.state))
-        this.durable.ownership?.retireIntake(runtime.sessionID, previous.intakeToken);
+      if (previous && ['blocked', 'stopped'].includes(previous.state)) this.#releaseIntake(previous);
       const slot = this.#preflightSlot(entry, startup, 'intake');
       if (slot) this.#slot(entry, slot);
       else await this.#startRunner(entry, [], 'startup-profile');
@@ -582,6 +595,93 @@ export class NativeIntake {
       entry.clarificationAnswers.findLast(answer => answer.question === item.question)?.disposition === 'deferred');
     entry.state = 'review-ready';
     entry.notice = 'The phase question was withdrawn without approval. Answer the user or edit the plan, then prepare advancement again.';
+    return this.status(runtime.sessionID);
+  }
+
+  /**
+   * The user answered an MDD question in their own words instead of choosing in the form: typed
+   * inside the form itself, or written in a chat message after the form was shown and then closed
+   * or interrupted. The form is still how MDD asks; this only keeps a real answer from being thrown
+   * away and asked again. The coordinator reads the words and `typedSelections` checks that reading
+   * against what the user actually wrote. A chat message must also be provably theirs: their exact
+   * latest message, not used by MDD before, and written after this question was shown (a preflight
+   * only needs to be past the request that started it, which MDD already marks as used). Anything
+   * short of that records nothing.
+   */
+  async answer(value: unknown, runtime: Runtime, messageID: string): Promise<unknown> {
+    if (runtime.agent !== 'mdd-orchestrator') throw new Error('Only the coordinator may record an answer.');
+    if (this.runner.movedAway?.(runtime.sessionID)) throw new Error('This conversation\'s run moved to another conversation; nothing can be answered here.');
+    const input = objectWithKeys(value, 'written answer', ['userText', 'answers']);
+    const entry = this.#sessions.get(runtime.sessionID);
+    const slot = entry?.slot;
+    // An open question, or one whose form was closed without recording anything. A change
+    // confirmation that was closed already kept the plan, so there is nothing left to confirm.
+    const closed = !!entry && !!slot?.callID && entry.receipts.some(receipt => receipt.callID === slot.callID && receipt.cancelled) &&
+      ((entry.state === 'paused' && ['approval', 'clarification', 'route'].includes(slot.kind)) ||
+       (entry.state === 'stopped' && ['preflight', 'risk-recovery'].includes(slot.kind)));
+    if (!entry || !slot || (entry.state !== 'question-ready' && !closed)) {
+      throw new Error('No MDD question is waiting for an answer in this conversation. Nothing was recorded.');
+    }
+    const status = this.runner.status(runtime.sessionID);
+    if ('contextual' in status && status.contextual) throw new Error('Wait for the contextual exploration before answering the main question. Nothing was recorded.');
+    const openFrom = slot.kind === 'clarification' ? 0 : slot.kind === 'preflight' ? slot.fields ?? slot.args.questions.length : slot.args.questions.length;
+    if (slot.args.questions.length - openFrom !== (slot.kind === 'clarification' || slot.kind === 'preflight' ? entry.clarifications.length : 0)) {
+      throw new Error('The pending clarifications no longer match the issued question. Nothing was recorded.');
+    }
+    let evidence: (index: number) => TypedEvidence;
+    let userText: string | undefined;
+    if (input.userText !== undefined) {
+      userText = boundedText(input.userText, 'the user\'s written answer', 12000);
+      evidence = () => ({ text: userText!, own: false });
+    } else {
+      const typed = entry.typed;
+      if (!typed || !isDeepStrictEqual(typed.args, slot.args)) {
+        throw new Error('The user typed nothing of their own into this question\'s form. When they answered in a chat message, pass userText with their exact latest message. Nothing was recorded.');
+      }
+      evidence = index => ({ text: typed.given[index]!.join('\n'), own: true });
+    }
+    // The reading is checked first: it needs nothing but the text, and a wrong reading has to be
+    // refused before anything is inspected, reserved or written.
+    const selections = typedSelections(slot.args, openFrom, input.answers, evidence);
+    let userMessageID: string | undefined;
+    if (userText !== undefined) {
+      const shown = entry.shown && isDeepStrictEqual(entry.shown.args, slot.args) ? entry.shown.calls : [];
+      if (slot.kind !== 'preflight' && !shown.length) {
+        throw new Error('This question was not shown to the user yet. Ask it with the native question tool first; a written answer counts only once they have seen the question. Nothing was recorded.');
+      }
+      if (!this.inspect.typed) throw new Error('This host cannot prove a written answer. Ask the question with the native question tool. Nothing was recorded.');
+      userMessageID = await this.inspect.typed(entry.runtime, userText, boundedText(messageID, 'native messageID', 256), shown);
+      this.runner.owner?.(runtime.sessionID);
+      if (this.#sessions.get(runtime.sessionID) !== entry || entry.slot !== slot) throw new Error('The question changed while the answer was checked. Read mdd_status. Nothing was recorded.');
+      if (entry.usedMessages.has(userMessageID)) {
+        throw new Error('MDD already used this message for something else. A written answer has to be a new message from the user. Nothing was recorded.');
+      }
+    }
+    // A closed form is reopened first, so the answer follows the same record transitions as a
+    // fresh native one: prepared, pending, answered, settled.
+    if (entry.state !== 'question-ready') {
+      const reopened: Slot = { ...slot };
+      delete reopened.callID;
+      delete entry.reason;
+      this.#slot(entry, reopened, true);
+    }
+    const current = entry.slot!;
+    if (current.kind === 'preflight') this.#assertIntake(entry);
+    const callID = `typed-${randomUUID()}`;
+    entry.state = 'accepting';
+    current.callID = callID;
+    try {
+      this.#persistQuestion(entry, 'pending');
+      if (userMessageID) entry.usedMessages.add(userMessageID);
+      await this.#accept(entry, current, selections, callID, { source: userMessageID ? 'chat' : 'form', ...(userMessageID ? { userMessageID } : {}) });
+      delete entry.typed;
+    } catch (error) {
+      try {
+        const record = this.durable.questions?.read(runtime.sessionID);
+        if (record?.callID === callID && record.state === 'pending') this.durable.questions!.write(runtime.sessionID, { ...record, state: 'cancelled', sequence: record.sequence + 1 });
+      } catch { /* An unconfirmed record keeps fencing; reset needs the user's word. */ }
+      this.#fail(entry, error);
+    }
     return this.status(runtime.sessionID);
   }
 
@@ -819,6 +919,13 @@ export class NativeIntake {
       this.runner.owner?.(call.sessionID, call.callID);
       if (entry.state !== 'accepting') throw new Error('Question became uncertain before execution.');
       entry.state = 'await-answer';
+      // The user has now seen exactly this question, so an answer they write afterwards can be
+      // read against it. Words typed into an earlier showing belong to that showing only.
+      const args = entry.slot!.args;
+      entry.shown = entry.shown && isDeepStrictEqual(entry.shown.args, args)
+        ? { args: entry.shown.args, calls: [...entry.shown.calls, call.callID] }
+        : { args: structuredClone(args), calls: [call.callID] };
+      delete entry.typed;
     } catch (error) { this.runner.release?.(call.sessionID, call.callID); delete entry.reserved; this.#fail(entry, error); }
   }
 
@@ -865,107 +972,117 @@ export class NativeIntake {
         throw new Error('The pending clarifications no longer match the issued question.');
       }
       const selections = nativeQuestionAnswers(slot.args, output, openFrom);
-      // A native callback is evidence of an answer, not replayable consent. Persist its exact
-      // selections before any approval or plan transition; an incomplete write blocks the route.
-      this.#persistQuestion(entry, 'answered', selections);
-      if (slot.kind === 'change') {
-        if (selections[0]![0] === CHANGE_LABELS.keep) this.#restore(entry, 'Kept the current plan, answers and approval unchanged.');
-        else {
-          // A material change replaces the objective, so context gathered for the old one is no
-          // longer trustworthy data. A plain preflight rerun keeps the same objective and its context.
-          if (slot.requirements!.trim() !== entry.requirements.trim()) delete entry.context;
-          entry.requirements = slot.requirements!; entry.known = {}; entry.replacing = true;
-          this.#slot(entry, this.#preflightSlot(entry, [], 're-preflight')!);
-        }
-      } else if (slot.kind === 'preflight') {
-        const fields = openFrom;
-        const startup = entry.clarifications;
-        await this.#startRunner(entry, selections.slice(0, fields), fields ? 'native-question' : 'startup-profile');
-        // The run exists now, so the answers ride with its first phase like any later clarification.
-        if (startup.length) this.#settleClarifications(entry, startup, selections.slice(fields), this.#boundaryPhase(entry));
-        entry.clarifications = [];
-      } else if (slot.kind === 'clarification') {
-        this.#settleClarifications(entry, entry.clarifications, selections, slot.phase!);
-        entry.clarifications = [];
-        this.#nextReviewQuestion(entry);
-      } else if (slot.kind === 'route') {
-        const answer = selections[0]![0];
-        if (answer === ROUTE_LABELS.stop) {
-          entry.state = 'paused';
-          entry.reason = 'The user stopped before either route was authorized. No phase was authorized or rejected.';
-          this.runner.approvalStopped?.(call.sessionID);
-        } else if (answer === ROUTE_LABELS.force) {
-          this.runner.forceRoute?.(call.sessionID);
-          entry.state = 'active';
-          delete entry.notice;
-        } else {
-          this.runner.approveNative(call.sessionID, slot.phase!);
-          entry.state = 'active';
-          delete entry.notice;
-        }
-      } else if (slot.kind === 'risk-recovery') {
-        const answer = selections[0]![0];
-        if (answer === RISK_RECOVERY_LABELS.stop) {
-          entry.state = 'paused';
-          entry.reason = 'The user stopped without retrying the risk assessment or choosing a route. The run remains blocked at blocked-risk.';
-          this.runner.approvalStopped?.(call.sessionID);
-        } else if (answer === RISK_RECOVERY_LABELS.retry) {
-          this.runner.retryRisk?.(call.sessionID);
-          entry.state = 'active';
-          delete entry.notice;
-        } else if (answer === RISK_RECOVERY_LABELS.low) {
-          this.runner.chooseManualRoute?.(call.sessionID, 'low');
-          entry.state = 'active';
-          delete entry.notice;
-        } else {
-          this.runner.chooseManualRoute?.(call.sessionID, 'high');
-          entry.state = 'active';
-          delete entry.notice;
-        }
-      } else if (selections[0]![0] === APPROVAL_LABELS.pause) {
-        entry.state = 'paused';
-        entry.reason = 'The user paused before the next phase. No phase was authorized or rejected.';
-        this.runner.approvalStopped?.(call.sessionID);
-      } else if (selections[0]![0] === APPROVAL_LABELS.detail) {
-        const current = this.runner.status(call.sessionID);
-        if (!('runID' in current) || !slot.phase) throw new Error('Phase detail is no longer available.');
-        this.#slot(entry, { kind: 'approval', phase: slot.phase, args: approvalEnvelope(current.runID, slot.phase) });
-        entry.notice = 'Show expandedReport, the full phase report with every narrative section the actor wrote, and the relevant artifact from mdd_status(detail="full") before asking this approval again. Nothing was approved.';
-      } else {
-        this.runner.approveNative(call.sessionID, slot.phase!);
-        entry.state = 'active';
-        delete entry.notice;
-      }
-      entry.receipts.push({ kind: slot.kind, ...(slot.phase ? { phase: slot.phase } : {}), callID: call.callID, answers: selections });
-      this.#recordConsent(entry);
-      if (entry.slot === slot) this.#persistQuestion(entry, 'settled');
+      await this.#accept(entry, slot, selections, call.callID);
       this.runner.release?.(call.sessionID, call.callID);
       delete entry.reserved;
     } catch (error) {
-      if (error instanceof UnselectedAnswer) { this.#unanswered(entry, slot, call); this.runner.release?.(call.sessionID, call.callID); delete entry.reserved; return; }
+      if (error instanceof UnselectedAnswer) { this.#unanswered(entry, slot, call, error.answers); this.runner.release?.(call.sessionID, call.callID); delete entry.reserved; return; }
       this.#abandonQuestion(entry, call);
       this.#fail(entry, error);
     }
   }
 
   /**
+   * Applies an answer the user gave, whichever way they gave it. A native callback and a written
+   * answer that passed its checks reach exactly the same transitions, receipts and records: the
+   * channel changes how the answer was proven, never what it is allowed to do.
+   */
+  async #accept(entry: Intake, slot: Slot, selections: string[][], callID: string, typed?: Written): Promise<void> {
+    const sessionID = entry.runtime.sessionID;
+    // An answer is evidence of what the user chose, not replayable consent. Persist its exact
+    // selections before any approval or plan transition; an incomplete write blocks the route.
+    this.#persistQuestion(entry, 'answered', selections);
+    if (slot.kind === 'change') {
+      if (selections[0]![0] === CHANGE_LABELS.keep) this.#restore(entry, 'Kept the current plan, answers and approval unchanged.');
+      else {
+        // A material change replaces the objective, so context gathered for the old one is no
+        // longer trustworthy data. A plain preflight rerun keeps the same objective and its context.
+        if (slot.requirements!.trim() !== entry.requirements.trim()) delete entry.context;
+        entry.requirements = slot.requirements!; entry.known = {}; entry.replacing = true;
+        this.#slot(entry, this.#preflightSlot(entry, [], 're-preflight')!);
+      }
+    } else if (slot.kind === 'preflight') {
+      const fields = slot.fields ?? slot.args.questions.length;
+      const startup = entry.clarifications;
+      await this.#startRunner(entry, selections.slice(0, fields), !fields ? 'startup-profile' : typed ? 'typed-answer' : 'native-question');
+      // The run exists now, so the answers ride with its first phase like any later clarification.
+      if (startup.length) this.#settleClarifications(entry, startup, selections.slice(fields), this.#boundaryPhase(entry));
+      entry.clarifications = [];
+    } else if (slot.kind === 'clarification') {
+      this.#settleClarifications(entry, entry.clarifications, selections, slot.phase!);
+      entry.clarifications = [];
+      this.#nextReviewQuestion(entry);
+    } else if (slot.kind === 'route') {
+      const answer = selections[0]![0];
+      if (answer === ROUTE_LABELS.stop) {
+        entry.state = 'paused';
+        entry.reason = 'The user stopped before either route was authorized. No phase was authorized or rejected.';
+        this.runner.approvalStopped?.(sessionID);
+      } else if (answer === ROUTE_LABELS.force) {
+        this.runner.forceRoute?.(sessionID);
+        entry.state = 'active';
+        delete entry.notice;
+      } else {
+        this.runner.approveNative(sessionID, slot.phase!);
+        entry.state = 'active';
+        delete entry.notice;
+      }
+    } else if (slot.kind === 'risk-recovery') {
+      const answer = selections[0]![0];
+      if (answer === RISK_RECOVERY_LABELS.stop) {
+        entry.state = 'paused';
+        entry.reason = 'The user stopped without retrying the risk assessment or choosing a route. The run remains blocked at blocked-risk.';
+        this.runner.approvalStopped?.(sessionID);
+      } else if (answer === RISK_RECOVERY_LABELS.retry) {
+        this.runner.retryRisk?.(sessionID);
+        entry.state = 'active';
+        delete entry.notice;
+      } else if (answer === RISK_RECOVERY_LABELS.low) {
+        this.runner.chooseManualRoute?.(sessionID, 'low');
+        entry.state = 'active';
+        delete entry.notice;
+      } else {
+        this.runner.chooseManualRoute?.(sessionID, 'high');
+        entry.state = 'active';
+        delete entry.notice;
+      }
+    } else if (selections[0]![0] === APPROVAL_LABELS.pause) {
+      entry.state = 'paused';
+      entry.reason = 'The user paused before the next phase. No phase was authorized or rejected.';
+      this.runner.approvalStopped?.(sessionID);
+    } else if (selections[0]![0] === APPROVAL_LABELS.detail) {
+      const current = this.runner.status(sessionID);
+      if (!('runID' in current) || !slot.phase) throw new Error('Phase detail is no longer available.');
+      this.#slot(entry, { kind: 'approval', phase: slot.phase, args: approvalEnvelope(current.runID, slot.phase) });
+      entry.notice = 'Show expandedReport, the full phase report with every narrative section the actor wrote, and the relevant artifact from mdd_status(detail="full") before asking this approval again. Nothing was approved.';
+    } else {
+      this.runner.approveNative(sessionID, slot.phase!);
+      entry.state = 'active';
+      delete entry.notice;
+    }
+    entry.receipts.push({ kind: slot.kind, ...(slot.phase ? { phase: slot.phase } : {}), callID, answers: selections, ...(typed ? { typed } : {}) });
+    this.#recordConsent(entry);
+    if (entry.slot === slot) this.#persistQuestion(entry, 'settled');
+  }
+
+  /**
    * Nothing was selected, so nothing is approved, accepted or changed and the same question stays
    * open. The coordinator still receives the user's actual words in the question output, so it can
    * answer them and ask again. Ending the run here instead used to throw away a whole route, its
-   * evidence and its approvals over one sentence typed in place of a click.
+   * evidence and its approvals over one sentence typed in place of a click. What they typed is kept
+   * with the reopened question: when their words name one of its options, mdd_answer records it
+   * without asking them again.
    */
-  #unanswered(entry: Intake, slot: Slot, call: TaskCall): void {
+  #unanswered(entry: Intake, slot: Slot, call: TaskCall, given: readonly string[][]): void {
     this.#persistQuestion(entry, 'cancelled');
     entry.receipts.push({ kind: slot.kind, ...(slot.phase ? { phase: slot.phase } : {}), callID: call.callID, answers: [], cancelled: true });
     this.#recordConsent(entry);
-    if (slot.kind === 'change' && entry.restore) {
-      this.#restore(entry, 'The user did not confirm the change in their answer, so the current run, its answers and its approval are unchanged. Read what they actually said before proposing anything again.');
-      return;
-    }
     const pending: Slot = { ...slot };
     delete pending.callID;
     this.#slot(entry, pending, true);
-    entry.notice = slot.kind === 'approval'
+    if (given.length === slot.args.questions.length) entry.typed = { args: structuredClone(entry.slot!.args), given: given.map(selected => [...selected]) };
+    const written = ' When their words name one of the offered options, record that with mdd_answer (omit userText) instead of asking again.';
+    entry.notice = (slot.kind === 'approval'
       ? 'The user answered in their own words instead of choosing an option, so no phase was approved and nothing was recorded. Read what they actually said and respond to it; when the phase should still go ahead, ask the same approval question again exactly as mdd_status returns it. If their message changes the objective, use mdd_change_request instead.'
       : slot.kind === 'route'
       ? 'The user answered in their own words instead of choosing continue, force or stop, so no route decision was made and nothing was recorded. Read what they actually said and respond to it; when a route choice is still needed, ask the same route question again exactly as mdd_status returns it.'
@@ -973,7 +1090,9 @@ export class NativeIntake {
       ? 'The user answered in their own words instead of choosing retry, a route, or stop, so no risk recovery decision was made and nothing was recorded. Read what they actually said and respond to it; when a recovery choice is still needed, ask the same risk-recovery question again exactly as mdd_status returns it.'
       : slot.kind === 'clarification'
       ? 'The phase was not approved. Read the user\'s words and respond to them; this clarification remains pending. Ask the same clarification question again exactly as mdd_status returns it.'
-      : 'The user answered in their own words instead of choosing an option, so the run has not started and no answer was recorded. Respond to what they said, then ask the same preflight question again exactly as mdd_status returns it.';
+      : slot.kind === 'change'
+      ? 'The user answered the change confirmation in their own words instead of choosing an option, so nothing changed yet: the current run, its answers and its approval stay as they are while the confirmation stays open. Read what they actually said and respond to it; ask the same confirmation again exactly as mdd_status returns it.'
+      : 'The user answered in their own words instead of choosing an option, so the run has not started and no answer was recorded. Respond to what they said, then ask the same preflight question again exactly as mdd_status returns it.') + written;
   }
 
   phaseRecorded(sessionID: string): void {
@@ -1043,13 +1162,20 @@ export class NativeIntake {
     this.runner.release?.(call.sessionID, call.callID);
     delete entry.reserved;
     if (entry.restore) { this.#restore(entry, 'Change cancelled; the current plan and approval are unchanged.'); return; }
-    if (['approval', 'clarification'].includes(entry.slot.kind)) {
+    // A closed form is not a refusal, and the user may answer it in their next message instead.
+    const written = ' If the user answers it in a message of their own, record that with mdd_answer and their exact message.';
+    // The route question stands in for the phase approval, so closing it pauses exactly like an
+    // approval does. Stopping here used to block the run and discard the evidence it was about.
+    if (['approval', 'clarification', 'route'].includes(entry.slot.kind)) {
       entry.state = 'paused';
-      entry.reason = 'The native phase question was dismissed. The run and unresolved questions remain; no phase was authorized.';
+      entry.reason = `The native phase question was dismissed. The run and unresolved questions remain; no phase was authorized.${written}`;
       return;
     }
     entry.state = 'stopped';
-    entry.reason = 'The native question failed or was dismissed. No approval was recorded; do not repeat or dispatch.';
+    entry.reason = `The native question failed or was dismissed. No approval was recorded; do not repeat or dispatch.${written}`;
+    // A preflight nobody is answering any more owns nothing: its durable claim is let go, so a
+    // fresh start in a restarted process is not refused by a question that already ended.
+    if (entry.slot.kind === 'preflight') this.#releaseIntake(entry);
     this.runner.block(call.sessionID, entry.reason);
   }
 
@@ -1223,7 +1349,7 @@ export class NativeIntake {
     entry.deferred.push(...deferrals);
   }
 
-  async #startRunner(entry: Intake, selections: unknown, source: 'startup-profile' | 'native-question'): Promise<void> {
+  async #startRunner(entry: Intake, selections: unknown, source: NonNullable<Intake['provenance']>['preflight']): Promise<void> {
     const expectedState = entry.state;
     const engram = entry.memory;
     // Handed over before the run exists, so the record the runner writes at start already carries
@@ -1250,9 +1376,25 @@ export class NativeIntake {
     entry.notice = notice;
   }
 
+  /**
+   * An intake that stopped or failed exposes nothing any more, so the durable claim it took for its
+   * preflight is released. Only this intake's own pending claim is touched; one another process
+   * holds keeps fencing. Best effort: an unreadable claim stays, and an explicit reset clears it.
+   */
+  #releaseIntake(entry: Intake): void {
+    const token = entry.intakeToken;
+    if (!token || !this.durable.ownership) return;
+    try {
+      const current = this.durable.ownership.intake(entry.runtime.sessionID);
+      if (current?.state === 'pending' && current.token === token) this.durable.ownership.retireIntake(entry.runtime.sessionID, token);
+    } catch { /* The claim cannot be confirmed; it keeps fencing until an explicit reset. */ }
+  }
+
   #fail(entry: Intake, error: unknown): never {
     entry.state = 'blocked';
     entry.reason = error instanceof Error ? error.message : 'Unknown native intake outcome.';
+    // "Nothing is locked" below has to be true across a restart too.
+    this.#releaseIntake(entry);
     this.runner.block(entry.runtime.sessionID, entry.reason);
     throw new Error(`MDD intake stopped: ${entry.reason} Nothing is locked: read mdd_status, then use mdd_reset to start over, or send a fresh request.`);
   }

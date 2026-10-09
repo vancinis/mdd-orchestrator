@@ -17,6 +17,12 @@
  * that refused a call before refuses it still. A coordinator that ignores it is not broken, only
  * slower. But a coordinator whose conversation was just compacted now has one field to read.
  */
+/**
+ * The form is how MDD asks; a person who answered in their own words anyway has still answered.
+ * Said wherever an MDD question is waiting, closed or not, so that answer is recorded, not asked again.
+ */
+const WRITTEN = 'If the user already answered it in their own words, typed inside the form or written in a message after it was shown, record that with mdd_answer instead of asking again.';
+
 export type NextAction = {
   tool: 'question' | 'task' | 'mdd_start' | 'mdd_status' | 'mdd_prepare_advance' | 'mdd_phase_result' | 'mdd_reset';
   args?: Record<string, unknown>;
@@ -48,13 +54,13 @@ export function nextAction(status: unknown): NextAction | undefined {
   const question = object(value.question);
   if (question) {
     return { tool: 'question', args: question,
-      why: 'A native question is pending. Ask it once, exactly as it is here, and answer nothing on the user\'s behalf. While it is pending it is the only question the user should see.' };
+      why: `A native question is pending. Ask it once, exactly as it is here, and answer nothing on the user's behalf. While it is pending it is the only question the user should see. ${WRITTEN}` };
   }
 
   if (state === 'review-ready') return { tool: 'mdd_prepare_advance',
     why: `Present the finished phase and identify all necessary uncertainties before asking to advance.${Array.isArray(object(value.openQuestions)?.questions) ? ' Include every openQuestions entry the phase reported, translated into Spanish.' : ''} Submit them all in one call; MDD asks them together. Give each a short header, why it matters, detailed choices with a recommendation, multiple when several can apply, and deferral only when safe; free text and agent delegation are always offered. Pass [] only once none remain. This call approves nothing.` };
   if (state === 'paused') return { tool: 'mdd_prepare_advance',
-    why: 'The user paused without rejecting the phase. Wait for their request to resume, then prepare remaining clarifications (or []); interactive mode then asks for a fresh native approval. Never advance automatically.' };
+    why: `The user paused without rejecting the phase. Wait for their request to resume, then prepare remaining clarifications (or []); interactive mode then asks for a fresh native approval. Never advance automatically. When the question was closed without an answer: ${WRITTEN}` };
 
   // A failed verification is the one stop whose useful next step is not the same phase again:
   // re-checking an unchanged implementation reproduces the same failure. It outranks the exhausted
@@ -124,7 +130,7 @@ export function nextAction(status: unknown): NextAction | undefined {
 
   if (state === 'blocked' || state === 'stopped') {
     return { tool: 'mdd_reset', args: { scope: 'phase' },
-      why: 'This run stopped without finishing. Scope phase releases the current attempt, and re-opens the exact question when it stopped at one, so reach for it before scope run, which throws the run away. Nothing is locked and read-only investigation stays available.' };
+      why: `This run stopped without finishing. Scope phase releases the current attempt, and re-opens the exact question when it stopped at one, so reach for it before scope run, which throws the run away. Nothing is locked and read-only investigation stays available.${state === 'stopped' ? ` When it stopped at a question whose form was closed: ${WRITTEN}` : ''}` };
   }
 
   if (state === 'await-result' || state === 'await-answer') {

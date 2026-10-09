@@ -36,7 +36,9 @@ export const DOSSIER_MAX_BYTES = 400000;
 /** Discarded on purpose. Each entry names why restoring it would be wrong, not merely costly. */
 export type PriorArtifact = { ref: ArtifactRef; content?: string };
 export type PriorContext = { explorationID: string; outcome: 'passed' | 'failed'; summary: string; concerns: Concern[]; artifact: PriorArtifact };
-export type PriorReceipt = { kind: 'preflight' | 'approval' | 'change' | 'clarification' | 'route' | 'risk-recovery'; phase?: Phase; callID: string; answers: string[][]; cancelled?: true };
+/** `typed` marks an answer the user gave in their own words (in the form, or in a chat message), checked against them. */
+export type PriorReceipt = { kind: 'preflight' | 'approval' | 'change' | 'clarification' | 'route' | 'risk-recovery'; phase?: Phase; callID: string; answers: string[][]; cancelled?: true;
+  typed?: { source: 'form' | 'chat'; userMessageID?: string } };
 
 export type RunDossier = {
   version: typeof DOSSIER_VERSION;
