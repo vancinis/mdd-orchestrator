@@ -8,6 +8,10 @@ State the A-to-B goal, stable requirements and concrete acceptance scenarios, re
 and ordered implementation steps linked to those scenarios and existing planned checks.
 Include happy/error cases where applicable; explain non-applicability rather than inventing work.
 Supply the dispatch schema's acceptance, decisions and deliverables alongside the single artifact.
+For verificationVersion 1, give each planned check a globally unique ID, exact command,
+required/optional requirement and an appliesWhen condition only when genuinely conditional.
+Declare these before execution; Verify must account for every held check without downgrading it.
+Use the dispatched legacy schema when no version is recorded; never retrofit stronger evidence.
 Declare dependencies explicitly, including [] for no dependencies. Add optional parallel metadata
 only when complete read/write footprints are known: {complete:true,reads:[...],writes:[...]}.
 Include tests/docs and every actual read; different main filenames do not prove independence.
@@ -17,6 +21,10 @@ Missing scope knowledge or uncertainty keeps execution serial; never invent decl
 Split large requests into 1–32 dependency-ordered, bounded coherent deliverables, not file-type slices.
 Each must be feasible in one fresh Apply actor with its own checks and handoff: scoped files,
 expected changes, dependencies and completion evidence. Keep tests/docs with their behavior.
+Distinguish assigned completion checks from deferred integration verification in the artifact.
+Say what each Apply actor must establish, what depends on later batches and what singular Verify
+must check across the full plan. A scoped worker cannot run commands: require source evidence
+for its completion and explicitly defer test/build execution, never imply those checks passed.
 Size by implementation/context risk; line count is not a hard stop or arbitrary cap.
 If a single deliverable remains too large, report the unresolved sizing/decision honestly;
 do not hide it in one enormous step, drop accepted scope or exceed the existing contract.

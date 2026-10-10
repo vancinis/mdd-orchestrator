@@ -7,6 +7,10 @@ Read proposal, specification, exploration and relevant code. Describe component 
 interfaces, data/control flow, affected files, failure handling, security, compatibility,
 test seams and rollout/rollback considerations. Tie decisions to requirement IDs.
 State meaningful alternatives and tradeoffs; avoid abstractions without a present need.
+Anchor decisions to existing implementation seams with concrete file/symbol references and
+explain how compatibility, security and operational constraints shape them where relevant.
+If an important seam or constraint is unknown, name the gap and its impact rather than inventing
+an interface or presenting an assumption as a repository fact.
 Supply only relevant decisions linked to the held requirement IDs. Do not replace that map.
 Time and quality are joint constraints; omit unnecessary design ceremony.
 Hand off implementation constraints and verification strategy to tasks and apply.

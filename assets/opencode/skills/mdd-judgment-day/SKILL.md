@@ -19,6 +19,9 @@ preflight run, refuter or RDD dependency; no receipt or delivery authority.
 - Freeze the complete committed target, base, exact file inventory, criteria and relevant standards.
   For dirty/untracked target material, stop for a separately authorized immutable snapshot;
   never silently exclude it or create a commit from review consent.
+- Complete parent readiness before paired dispatch using the reference: local commit objects,
+  supported paths, existing source sides and known size/output bounds. For known unavailable
+  material or unconfirmable readiness, escalate without launching judges; readiness is not proof.
 - Load matching project skills in the parent; provide identical standards by value with path
   provenance to both judges. Judges inspect only through mdd_jd_inspect, never load skills or run tests.
 - Issue two native foreground subagent calls in one response with identical prompts except actor
@@ -42,7 +45,7 @@ preflight run, refuter or RDD dependency; no receipt or delivery authority.
 
 ## Execution Steps
 
-1. Follow the reference's freeze, skill-loading, native dispatch and strict validation contracts.
+1. Follow the reference's freeze, readiness, skill-loading, native dispatch and strict validation contracts.
 2. Merge both blind results into a stable ledger; corroborate proof and ask before correction.
 3. Dispatch mdd-jd-fix only when authorized and ownership permits; freeze the complete corrected target.
 4. Rejudge with both fresh judges, then obtain separate ordinary functional verification from the

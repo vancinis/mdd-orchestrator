@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { createLegacyPlugin as plugin } from '../dist/opencode-plugin.js';
 import { defaultSettings, MODEL_ROLES } from '../dist/settings.js';
 import { saveGlobalSettings } from '../dist/global-settings.js';
-import { memoryServer, installCleanup, isolateHome, answers, traceFixture, reportDocument, riskReport } from './adapter-fixture.mjs';
+import { memoryServer, installCleanup, isolateHome, answers, structuredTraceFixture as traceFixture, reportDocument, riskReport } from './adapter-fixture.mjs';
 import { traceArtifact } from '../dist/acceptance.js';
 import { ManagedMemory } from '../dist/managed-memory.js';
 import { STATUS_BUDGET_BYTES, STATUS_COMPACT_KEEP, STATUS_DROP_ORDER, STATUS_PROTECTED_FIELDS } from '../dist/status-budget.js';
@@ -18,8 +18,48 @@ import { QuestionCheckpointStore } from '../dist/question-checkpoint.js';
 import { RunOwnershipStore } from '../dist/run-ownership.js';
 import { CheckpointStore } from '../dist/checkpoint.js';
 import { ProgressGuard } from '../dist/progress.js';
+import { RunDossierStore } from '../dist/run-dossier.js';
 import { projectApprovalTransfer, projectTargetTransfer } from '../dist/transfer.js';
 import { Workflow } from '../dist/workflow.js';
+
+for (const phase of ['mdd-explore', 'mdd-risk', 'mdd-plan', 'mdd-propose', 'mdd-spec', 'mdd-design', 'mdd-tasks', 'mdd-apply', 'mdd-verify']) {
+  test(`SA-1: composed ${phase} prompt keeps phase authority and evidence handoff`, async t => {
+    const route = ['mdd-propose', 'mdd-spec', 'mdd-design', 'mdd-tasks'].includes(phase) ? 'high' : 'low';
+    const f = await fixture(t, { route, memoryEnabled: false });
+    while (true) {
+      const status = await f.status();
+      if ((status.stage ?? status.phase) === phase) break;
+      await f.phase({ only: true });
+    }
+    await f.phase({ only: true });
+    const prompt = f.delivered();
+    assert.doesNotMatch(prompt, /change sources only if the phase genuinely requires it/);
+    const provenance = JSON.parse(prompt.match(/^Packaged MDD actor instructions with provenance, which govern this (?:phase|assessment): (.*)$/m)[1]);
+    assert.equal(provenance.content, fs.readFileSync('assets/opencode/mdd-instructions.md', 'utf8'));
+    assert.equal(provenance.digest, createHash('sha256').update(provenance.content).digest('hex'));
+    if (phase === 'mdd-apply') {
+      assert.match(prompt, /This phase implements: edit the sources the plan calls for/);
+      assert.match(prompt, /integration assumptions and deferred integration checks/);
+    } else if (phase === 'mdd-verify') {
+      assert.match(prompt, /Verify is read-only for project sources/);
+      assert.match(prompt, /ordinary generated test\/build outputs/);
+      assert.match(prompt, /never repair sources/);
+    } else if (!['mdd-explore', 'mdd-risk'].includes(phase)) {
+      assert.match(prompt, /Planning is read-only for project sources/);
+      assert.match(prompt, /never implement or repair sources/);
+    }
+    const expectations = {
+      'mdd-explore': /searched scope, concrete source references and coverage gaps/,
+      'mdd-risk': /identifiable Explore findings/,
+      'mdd-plan': /assigned completion checks from deferred integration verification/,
+      'mdd-propose': /Separate observed evidence, constraints and assumptions/,
+      'mdd-spec': /completeness against the original user request/,
+      'mdd-design': /existing implementation seams and important constraints/,
+      'mdd-tasks': /assigned completion checks from deferred integration verification/,
+    };
+    if (expectations[phase]) assert.match(prompt, expectations[phase]);
+  });
+}
 
 test('opt-in same-parent restart restores ready Verify from validated local dependencies, memory off', async t => {
   const f = await fixture(t, { memoryEnabled: false, store: 'none' });
@@ -823,7 +863,7 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
     // Paths are OS-native and travel JSON-escaped (so a Windows backslash appears doubled in the
     // delivered prompt text); the separator is matched loosely rather than assuming either form.
     const skillPath = name => new RegExp(`skills[\\\\/]+${name}[\\\\/]+SKILL\\.md`);
-    if (phase === 'mdd-apply') {
+    if (phase === 'mdd-apply' && current.mode !== 'native') {
       assert.ok(args.prompt.includes('Optional packaged skills for this phase'), 'mdd-cleanup path hint missing in mdd-apply');
       assert.match(args.prompt, skillPath('mdd-cleanup'), 'mdd-cleanup path missing in mdd-apply');
       assert.ok(!args.prompt.includes('## Hard Rules'), 'mdd-cleanup body leaked into mdd-apply');
@@ -833,6 +873,7 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
     const standalone = args.prompt.includes('Standalone read-only investigation only');
     const own = { 'mdd-explore': [], 'mdd-propose': [], 'mdd-plan': ['acceptance', 'decisions', 'deliverables'], 'mdd-spec': ['domain', 'acceptance'],
       'mdd-design': ['decisions'], 'mdd-tasks': ['deliverables'], 'mdd-apply': ['changes', 'noChangeReason', 'checks', 'delivered', 'completed'], 'mdd-verify': ['checks', 'verification'] }[phase];
+    if (own.length && current.verificationVersion === 1) own.push('verificationVersion');
     if (!standalone) {
       assert.equal(args.prompt.includes(own.length ? `exactly these keys: ${own.join(', ')}.` : 'This phase reports no structured data'), true, `own field list in ${phase}`);
       // The report is prose with one structured block, never a serialized object.
@@ -845,7 +886,7 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
     assert.equal(args.prompt.includes('verification={scenarios:'), phase === 'mdd-verify', `verification schema leak in ${phase}`);
     // Prose phases carry the documentation skill paths; structural ones do not pay for them.
     // Neither the mdd-doc nor the cognitive-doc-design body is ever inlined by value.
-    const documentary = !['mdd-tasks', 'mdd-apply'].includes(phase);
+    const documentary = current.mode !== 'native' && !['mdd-tasks', 'mdd-apply'].includes(phase);
     assert.equal(skillPath('mdd-doc').test(args.prompt), documentary, `mdd-doc path for ${phase}`);
     assert.equal(skillPath('cognitive-doc-design').test(args.prompt), documentary, `cognitive-doc-design path for ${phase}`);
     assert.ok(!args.prompt.includes('Trusted local mdd-doc instructions with provenance'), `stale mdd-doc injection wording in ${phase}`);
@@ -903,7 +944,7 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
         const command = 'npm test';
         const text = '1 test passed';
         await tool('bash', { command, workdir: root, description: 'Run scoped tests' }, { output: text, metadata: { output: text, exit: options.exit === undefined ? 0 : options.exit, truncated: false } });
-        result.checks = [{ command, exit: options.exit === undefined ? 0 : options.exit }];
+        result.checks = [{ id: 'E1', command, exit: options.exit === undefined ? 0 : options.exit }];
       } else result.checks = [];
     } else await tool('read', { filePath: join(root, 'feature.txt') }, { output: 'Inspected project context.', metadata: { truncated: false } });
     const trace = traceFixture(join(root, 'feature.txt'), 'feature');
@@ -912,9 +953,12 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
     if (phase === 'mdd-design') result.decisions = trace.decisions;
     if (phase === 'mdd-tasks') result.deliverables = trace.deliverables;
     if (phase === 'mdd-verify') {
-      const assessment = { status: 'verified', checks: ['npm test'], assessment: 'The inspected boundary and planned check output support the expected behavior.' };
+      const assessment = { status: 'verified', checks: ['E1'], assessment: 'The inspected boundary and planned check output support the expected behavior.' };
       result.verification = { scenarios: ['S1', 'S2'].map(scenarioID => ({ requirementID: 'R1', scenarioID, stepID: 'feature', ...assessment })),
-        steps: [{ stepID: 'feature', ...assessment }], decisions: [{ decisionID: 'D1', ...assessment }], changes: options.noChange ? 'No implementation change was needed.' : 'The requested input handling is implemented.', limits: [] };
+        steps: [{ stepID: 'feature', ...assessment }], decisions: [{ decisionID: 'D1', ...assessment }], changes: options.noChange ? 'No implementation change was needed.' : 'The requested input handling is implemented.', limits: [],
+        checkResults: [{ checkID: 'feature-check', disposition: options.noChecks ? 'blocked' : options.exit === null ? 'ran' : options.exit ? 'failed' : 'passed',
+          executions: options.noChecks ? [] : ['E1'], reason: options.noChecks ? 'Checks unavailable.' : 'Observed fixture execution.' }], supplementalChecks: [] };
+      if (options.unverified) for (const row of [...result.verification.scenarios, ...result.verification.steps, ...result.verification.decisions]) row.status = 'not-verified';
       if (options.coverageFault === 'missing') result.verification.scenarios.pop();
       if (options.coverageFault === 'invented') result.verification.scenarios[0].requirementID = 'invented';
       if (options.coverageFault === 'drift' || options.coverageFault === 'partial') {
@@ -1370,6 +1414,281 @@ test('rework is refused where there is no failed verification to correct', async
   assert.equal(blocked.reworkable, undefined);
   await assert.rejects(f.hooks.tool.mdd_reset.execute({ scope: 'rework', userText: f.parent[0].parts[0].text }, f.context), /only after mdd-verify reported failure/);
   assert.deepEqual((await f.status()).workflow, blocked.workflow);
+});
+
+async function failedVerification(t) {
+  const f = await fixture(t, { memoryEnabled: false });
+  await f.phase(); await f.phase();
+  await f.phase({ outcome: 'failed', exit: 1, unverified: true });
+  return f;
+}
+
+for (const restart of [false, true]) {
+  test(`SA-3: explicit continuation archives failure without PASS or new work (restart=${restart})`, async t => {
+    const f = await failedVerification(t);
+    const failed = await f.status();
+    const hooks = restart ? await plugin(f.input) : f.hooks;
+    const text = 'Seguí de todos modos; conservo el resultado fallido.';
+    f.user(text);
+    const result = JSON.parse(await hooks.tool.mdd_reset.execute({ scope: 'continue', runID: failed.runID, userText: text }, f.context));
+    assert.equal(result.state, 'continued-with-failed-verification');
+    assert.equal(result.task, undefined);
+    assert.equal(result.priorRun.lastState, 'blocked');
+    assert.equal(result.priorRun.results.at(-1).outcome, 'failed');
+    assert.equal(result.priorRun.verification.matched, false);
+    assert.equal(result.priorRun.verificationVersion, 1);
+    assert.equal(result.priorRun.continuation.userMessageID, f.parent[0].info.id);
+    assert.equal(result.priorRun.continuation.userText, text);
+    assert.equal(new RunOwnershipStore(f.root).parent(f.runtime.sessionID), undefined);
+    const fresh = await plugin(f.input);
+    const retained = JSON.parse(await fresh.tool.mdd_status.execute({ detail: 'full' }, f.context));
+    assert.equal(retained.state, result.state);
+    assert.deepEqual(retained.priorRun.verification, result.priorRun.verification);
+    f.user('Draft the preserved failed run evidence.');
+    const request = JSON.parse(await fresh.tool.mdd_pr_body.execute({ runID: failed.runID, userText: f.parent[0].parts[0].text }, f.context));
+    assert.ok(request.entries.some(item => /input handling/.test(item.text)), JSON.stringify(request));
+    const translations = request.entries.map(entry => ({ key: entry.key, text: entry.key === 'limit.0'
+      ? 'El usuario continuó después de la verificación fallida; el resultado fallido no se aceptó como PASS.'
+      : PR_SPANISH[entry.key] ?? entry.text }));
+    const draft = JSON.parse(await fresh.tool.mdd_pr_body.execute({ runID: failed.runID, userText: f.parent[0].parts[0].text, digest: request.digest, translations }, f.context));
+    assert.match(draft.body, /salida 1/);
+    assert.match(draft.body, /no están verificados del todo/);
+    assert.doesNotMatch(draft.body.split('## Bloqueos')[1], /^\s*No aplica\./);
+  });
+}
+
+for (const restart of [false, true]) {
+  test(`SA-3: explicit new objective replaces failed Verify through normal intake (restart=${restart})`, async t => {
+    const f = await failedVerification(t); const failed = await f.status();
+    const hooks = restart ? await plugin(f.input) : f.hooks;
+    const requirements = 'Implement a separate export boundary.';
+    f.user(requirements);
+    const result = JSON.parse(await hooks.tool.mdd_start.execute({ requirements }, f.context));
+    assert.equal(result.state, 'ready');
+    assert.equal(result.phase, 'mdd-explore');
+    assert.notEqual(result.runID, failed.runID);
+    const archive = new RunDossierStore(f.root).readContinued(f.runtime.sessionID, failed.runID);
+    assert.equal(archive.lastState, 'blocked');
+    assert.equal(archive.continuation.kind, 'new-task');
+    assert.equal(archive.continuation.userText, requirements);
+    assert.equal(archive.executedChecks[0].exit, 1);
+    const owner = new RunOwnershipStore(f.root).parent(f.runtime.sessionID);
+    await assert.rejects(hooks.tool.mdd_reset.execute({ scope: 'continue', runID: failed.runID, userText: requirements }, f.context));
+    assert.equal(new RunOwnershipStore(f.root).parent(f.runtime.sessionID), owner, 'stale continuation cannot retire the later run');
+  });
+}
+
+test('SA-3: continuation requires fresh exact text and target, and status never continues automatically', async t => {
+  const f = await failedVerification(t); const failed = await f.status();
+  for (const args of [
+    { scope: 'continue', runID: failed.runID },
+    { scope: 'continue', runID: failed.runID, userText: 'Invented consent.' },
+    { scope: 'continue', runID: failed.runID, userText: f.requirements },
+  ]) await assert.rejects(f.hooks.tool.mdd_reset.execute(args, f.context));
+  f.user('Continue despite the failure.');
+  for (const runID of [undefined, 'another-run']) await assert.rejects(f.hooks.tool.mdd_reset.execute({ scope: 'continue', runID, userText: f.parent[0].parts[0].text }, f.context));
+  const after = await f.status();
+  assert.equal(after.state, 'blocked');
+  assert.deepEqual(after.workflow, failed.workflow);
+  assert.equal(new RunOwnershipStore(f.root).parent(f.runtime.sessionID), failed.runID);
+});
+
+test('SA-3: archival error leaves failed state, checkpoint and ownership intact', async t => {
+  const f = await failedVerification(t); const failed = await f.status();
+  const before = new CheckpointStore(f.root).read(f.runtime.sessionID).checkpoint;
+  const original = RunDossierStore.prototype.archiveContinuation;
+  RunDossierStore.prototype.archiveContinuation = () => { throw new Error('Injected archival failure'); };
+  t.after(() => { RunDossierStore.prototype.archiveContinuation = original; });
+  f.user('Continue despite the failed checks.');
+  await assert.rejects(f.hooks.tool.mdd_reset.execute({ scope: 'continue', runID: failed.runID, userText: f.parent[0].parts[0].text }, f.context), /archival failure/);
+  assert.equal(new RunOwnershipStore(f.root).parent(f.runtime.sessionID), failed.runID);
+  assert.deepEqual(new CheckpointStore(f.root).read(f.runtime.sessionID).checkpoint, before);
+  assert.deepEqual((await f.status()).workflow, failed.workflow);
+});
+
+test('SA-3: continuation never invokes stopped-child recovery for a pending actor', async t => {
+  const f = await fixture(t, { memoryEnabled: false });
+  const ready = await f.status(); const args = structuredClone(ready.task);
+  const call = { sessionID: f.runtime.sessionID, callID: 'pending-before-continue', tool: 'task' };
+  f.parent[1].parts = [{ type: 'tool', tool: 'task', callID: call.callID, state: { status: 'running', input: structuredClone(args) } }];
+  await f.hooks['tool.execute.before'](call, { args });
+  let aborted = 0;
+  f.input.client.session.abort = async () => { aborted++; return { data: true }; };
+  f.user('Continue anyway despite verification.');
+  await assert.rejects(f.hooks.tool.mdd_reset.execute({ scope: 'continue', runID: ready.runID, userText: f.parent[0].parts[0].text }, f.context));
+  assert.equal(aborted, 0);
+  assert.equal(new ProgressGuard(f.root).read(f.runtime.sessionID).state, 'pending');
+  assert.equal(new RunOwnershipStore(f.root).parent(f.runtime.sessionID), ready.runID);
+});
+
+test('SA-3: a new objective still needs latest text and ordinary preflight; archival failure cannot replace the failed run', async t => {
+  const f = await failedVerification(t); const failed = await f.status();
+  f.user('Implement a new export boundary.');
+  await assert.rejects(f.hooks.tool.mdd_start.execute({ requirements: 'A model rewrite of that request.' }, f.context));
+  assert.deepEqual((await f.status()).workflow, failed.workflow);
+  const original = RunDossierStore.prototype.archiveContinuation;
+  t.mock.method(RunDossierStore.prototype, 'archiveContinuation', () => { throw new Error('Archive refused'); });
+  await assert.rejects(f.hooks.tool.mdd_start.execute({ requirements: f.parent[0].parts[0].text }, f.context), /Archive refused/);
+  assert.equal(new RunOwnershipStore(f.root).parent(f.runtime.sessionID), failed.runID);
+  assert.deepEqual((await f.status()).workflow, failed.workflow);
+  RunDossierStore.prototype.archiveContinuation = original;
+  delete f.settings.profiles.default.answers.mode;
+  saveGlobalSettings(f.settings);
+  const restarted = await plugin(f.input);
+  const result = JSON.parse(await restarted.tool.mdd_start.execute({ requirements: f.parent[0].parts[0].text }, f.context));
+  assert.equal(result.state, 'question-ready');
+  assert.equal(result.task, undefined);
+  assert.equal(result.question.questions[0].header, 'Modo');
+  assert.equal(new RunDossierStore(f.root).readContinued(f.runtime.sessionID, failed.runID).results.at(-1).outcome, 'failed');
+});
+
+for (const issued of [false, true]) test(`SA-3: ${issued ? 'pending' : 'prepared'} native question cannot be retired by continuation or a fresh objective`, async t => {
+  const f = await failedVerification(t); const failed = await f.status();
+  f.user('Reconsider the plan.');
+  await f.change();
+  if (issued) {
+    const args = (await f.status()).question;
+    const call = { sessionID: f.runtime.sessionID, callID: 'question-before-continuation', tool: 'question' };
+    f.parent[1].parts = [{ type: 'tool', tool: 'question', callID: call.callID, sessionID: f.runtime.sessionID, messageID: f.context.messageID,
+      state: { status: 'running', input: structuredClone(args) } }];
+    await f.hooks['tool.execute.before'](call, { args });
+  }
+  const questions = new QuestionCheckpointStore(f.root);
+  const before = questions.read(f.runtime.sessionID);
+  assert.equal(before.state, issued ? 'pending' : 'prepared');
+  f.user('Continue despite the failed verification.');
+  for (const hooks of [f.hooks, await plugin(f.input)]) {
+    await assert.rejects(hooks.tool.mdd_reset.execute({ scope: 'continue', runID: failed.runID, userText: f.parent[0].parts[0].text }, f.context), /question|intake/i);
+    await assert.rejects(hooks.tool.mdd_start.execute({ requirements: f.parent[0].parts[0].text }, f.context), /question|intake|owner/i);
+  }
+  assert.deepEqual(questions.read(f.runtime.sessionID), before);
+  assert.equal(new RunOwnershipStore(f.root).parent(f.runtime.sessionID), failed.runID);
+});
+
+test('SA-3: archive readback failure and pre-retirement interruption preserve the failed owner', async t => {
+  const f = await failedVerification(t); const failed = await f.status();
+  const checkpoints = new CheckpointStore(f.root); const saved = checkpoints.read(f.runtime.sessionID).checkpoint;
+  f.user('Proceed despite the failure.');
+  const args = { scope: 'continue', runID: failed.runID, userText: f.parent[0].parts[0].text };
+  const read = t.mock.method(RunDossierStore.prototype, 'readContinued', () => undefined);
+  await assert.rejects(f.hooks.tool.mdd_reset.execute(args, f.context), /readback/);
+  read.mock.restore();
+  assert.deepEqual(checkpoints.read(f.runtime.sessionID).checkpoint, saved);
+  assert.equal(new RunOwnershipStore(f.root).parent(f.runtime.sessionID), failed.runID);
+  const retire = t.mock.method(RunOwnershipStore.prototype, 'retireParent', () => { throw new Error('Interrupted before retirement'); });
+  await assert.rejects(f.hooks.tool.mdd_reset.execute(args, f.context), /Interrupted before retirement/);
+  retire.mock.restore();
+  const restarted = await plugin(f.input);
+  const status = JSON.parse(await restarted.tool.mdd_status.execute({ detail: 'full' }, f.context));
+  assert.equal(status.state, 'blocked', 'an archived request without retired ownership is not completed continuation');
+  assert.deepEqual(status.verification, failed.verification);
+  assert.equal(new RunOwnershipStore(f.root).parent(f.runtime.sessionID), failed.runID);
+});
+
+test('SA-3: reported open questions do not force a new consent ritual after an explicit continuation', async t => {
+  const f = await fixture(t, { memoryEnabled: false });
+  await f.phase(); await f.phase();
+  await f.phase({ outcome: 'failed', exit: 1, unverified: true, narrative: {
+    questions: [{ question: 'Should this optional integration be redesigned?', why: 'The behavior remains unsupported.' }],
+  } });
+  const failed = await f.status();
+  assert.ok(failed.openQuestions);
+  f.user('Continue despite those unresolved findings.');
+  const result = JSON.parse(await f.hooks.tool.mdd_reset.execute({ scope: 'continue', runID: failed.runID, userText: f.parent[0].parts[0].text }, f.context));
+  assert.equal(result.state, 'continued-with-failed-verification');
+  assert.equal(result.priorRun.results.at(-1).outcome, 'failed');
+});
+
+test('SA-3: a transfer fence cannot be released by continuation or a new objective', async t => {
+  const f = await failedVerification(t); const failed = await f.status();
+  const owners = new RunOwnershipStore(f.root);
+  const source = new CheckpointStore(f.root).read(f.runtime.sessionID).checkpoint;
+  const target = { sessionID: 'waiting-target', directory: f.root, worktree: f.root };
+  const intent = { operationID: 'pending-transfer', nativeUserMessageID: 'target-consent', requestDigest: 'a'.repeat(64) };
+  owners.reserveVerifiedTransfer(failed.runID, f.runtime.sessionID, target,
+    { sequence: source.sequence, digest: source.dataDigest }, owners.read(failed.runID).epoch, intent);
+  const before = owners.read(failed.runID);
+  f.user('Continue despite verification.');
+  await assert.rejects(f.hooks.tool.mdd_reset.execute({ scope: 'continue', runID: failed.runID, userText: f.parent[0].parts[0].text }, f.context));
+  await assert.rejects(f.hooks.tool.mdd_start.execute({ requirements: f.parent[0].parts[0].text }, f.context));
+  assert.deepEqual(owners.read(failed.runID), before);
+});
+
+for (const restart of [false, true]) test(`SA-3: replayed continuation cannot retire a later failed run, even with its new runID (restart=${restart})`, async t => {
+  const f = await failedVerification(t); const first = await f.status();
+  f.user('Continue despite verification.');
+  const consentUser = structuredClone(f.parent[0]);
+  const consent = { scope: 'continue', runID: first.runID, userText: f.parent[0].parts[0].text };
+  await f.hooks.tool.mdd_reset.execute(consent, f.context);
+  f.user('Implement the next independent objective.');
+  await f.hooks.tool.mdd_start.execute({ requirements: f.parent[0].parts[0].text }, f.context);
+  f.visited.splice(0);
+  await f.phase(); await f.phase(); await f.phase({ outcome: 'failed', exit: 1, unverified: true });
+  const second = await f.status();
+  const saved = new CheckpointStore(f.root).read(f.runtime.sessionID).checkpoint;
+  assert.ok(saved.data.usedMessages.includes(consentUser.info.id));
+  const hooks = restart ? await plugin(f.input) : f.hooks;
+  f.parent[0] = consentUser;
+  for (const runID of [first.runID, second.runID]) await assert.rejects(hooks.tool.mdd_reset.execute({ ...consent, runID }, f.context));
+  assert.equal(new RunOwnershipStore(f.root).parent(f.runtime.sessionID), second.runID);
+  assert.deepEqual(new CheckpointStore(f.root).read(f.runtime.sessionID).checkpoint, saved);
+  assert.deepEqual(JSON.parse(await hooks.tool.mdd_status.execute({ detail: 'full' }, f.context)).workflow, second.workflow);
+});
+
+test('SA-3: fresh continuation after restart preserves all previously consumed native identities', async t => {
+  const f = await failedVerification(t); const first = await f.status();
+  f.user('Continue despite verification.');
+  const consumedID = f.parent[0].info.id;
+  await f.hooks.tool.mdd_reset.execute({ scope: 'continue', runID: first.runID, userText: f.parent[0].parts[0].text }, f.context);
+  f.user('Implement the next independent objective.');
+  await f.hooks.tool.mdd_start.execute({ requirements: f.parent[0].parts[0].text }, f.context);
+  f.visited.splice(0);
+  await f.phase(); await f.phase(); await f.phase({ outcome: 'failed', exit: 1, unverified: true });
+  const saved = new CheckpointStore(f.root).read(f.runtime.sessionID).checkpoint;
+  assert.ok(saved.data.usedMessages.includes(consumedID));
+  const hooks = await plugin(f.input);
+  f.user('Proceed despite the second failed verification.');
+  const freshID = f.parent[0].info.id;
+  const result = JSON.parse(await hooks.tool.mdd_reset.execute({ scope: 'continue', runID: saved.runID, userText: f.parent[0].parts[0].text }, f.context));
+  assert.equal(result.state, 'continued-with-failed-verification');
+  const archive = new RunDossierStore(f.root).readContinued(f.runtime.sessionID, saved.runID);
+  assert.deepEqual(new Set(archive.usedMessages), new Set([...saved.data.usedMessages, saved.data.userMessageID, freshID]));
+  assert.deepEqual(archive.verification, saved.data.verification);
+  assert.deepEqual(archive.executedChecks, saved.data.executedChecks);
+  assert.equal(archive.verificationVersion, saved.data.verificationVersion);
+  assert.equal(archive.results.at(-1).outcome, 'failed');
+  assert.deepEqual(archive.questionReceipts, [], 'historical receipts must not become live consent after restore');
+});
+
+test('SA-3: explicit retry keeps the failed run and does not implicitly continue', async t => {
+  const f = await failedVerification(t); const failed = await f.status();
+  f.user('Retry the verification.');
+  const retry = JSON.parse(await f.hooks.tool.mdd_reset.execute({ scope: 'phase' }, f.context));
+  assert.equal(retry.runID, failed.runID);
+  assert.equal(retry.phase, 'mdd-verify');
+  assert.equal(retry.state, 'ready');
+  assert.equal(new RunDossierStore(f.root).readContinued(f.runtime.sessionID, failed.runID), undefined);
+  await f.phase();
+  assert.equal((await f.status()).state, 'complete');
+});
+
+test('SA-3: continuation retires only after archival and leaves the durable failed checkpoint as data', async t => {
+  const f = await failedVerification(t); const failed = await f.status();
+  const saved = new CheckpointStore(f.root).read(f.runtime.sessionID).checkpoint;
+  const progress = new ProgressGuard(f.root).read(f.runtime.sessionID);
+  f.user('Proceed despite the failed checks.');
+  await f.hooks.tool.mdd_reset.execute({ scope: 'continue', runID: failed.runID, userText: f.parent[0].parts[0].text }, f.context);
+  assert.deepEqual(new CheckpointStore(f.root).read(f.runtime.sessionID).checkpoint, saved);
+  assert.deepEqual(new ProgressGuard(f.root).read(f.runtime.sessionID), progress);
+  const restarted = await plugin(f.input);
+  const status = JSON.parse(await restarted.tool.mdd_status.execute({ detail: 'full' }, f.context));
+  assert.equal(status.state, 'continued-with-failed-verification');
+  assert.equal(status.task, undefined);
+  f.user('Implement a new boundary after the continued run.');
+  const next = JSON.parse(await restarted.tool.mdd_start.execute({ requirements: f.parent[0].parts[0].text }, f.context));
+  assert.equal(next.state, 'ready');
+  assert.notEqual(next.runID, saved.runID);
+  assert.equal(new RunDossierStore(f.root).readContinued(f.runtime.sessionID, saved.runID).results.at(-1).outcome, 'failed');
 });
 
 // Seven phases of maximum-size artifacts outgrow the handoff budget, and the route used to die

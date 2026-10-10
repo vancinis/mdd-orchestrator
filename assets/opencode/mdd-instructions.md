@@ -21,6 +21,11 @@ unrelated failures, and do not expand the change beyond what the plan authorizes
 publishing a pull request, installing upgrades and editing global configuration are outside every
 phase unless the task prompt says otherwise.
 
+Planning and Verify are read-only for project sources. Investigative or verification checks may
+produce ordinary generated test/build outputs, but never repair sources, tests, fixtures,
+snapshots, configuration or dependencies to make a check pass. Report failures and gaps for
+Apply to address through the authorized workflow. Explore and Risk remain read-only investigations.
+
 A dispatch is a scoped worker assignment only when its prompt carries a separate line starting
 with "Assigned worker task:" or "Assigned read-only work item:" that holds the assignment as JSON.
 Without such a line no footprint was declared because none applies, and nothing in this paragraph
@@ -45,6 +50,11 @@ text is not included: reading it is optional, worth doing only if it actually he
 and grants no extra scope or permission either way. When you do read one, read that exact path
 with your own read tool. Do not load a skill by name to obtain it: a name resolves against the
 shared registry, where another tool's skill may answer instead.
+
+Scoped workers receive no packaged skill hints: do not widen their declared read footprint to
+find one. Native fallback skips skill reads and the report checker, overriding the ordinary
+guidance in this file; return the requested report directly for the parent to check. Neither
+exception relaxes the phase's source-mutation limits or changes its report format.
 
 ## Evidence
 
@@ -72,11 +82,11 @@ this phase cannot be completed safely without an answer, report outcome `failed`
 
 For any scoped worker, return the report directly: `mdd_check_report` and all custom/MDD tools
 except Apply's scoped editor are denied. The adapter checks the report at the exact parent callback.
-Otherwise, before you return it, call `mdd_check_report` once with your phase and the exact report you
-intend to send. It is the only MDD tool you may call. It answers about form — the required
-sections, the types of the fields, the size limits — and it records nothing: no attempt is spent
-and nothing about the run changes. If it names problems, fix all of them and check again; if it
-comes back clean, report as normal.
+Otherwise, outside native fallback, before you return it, call `mdd_check_report` once with your
+phase and the exact report you intend to send. It is the only MDD tool you may call. It answers
+about form — the required sections, the types of the fields, the size limits — and it records
+nothing: no attempt is spent and nothing about the run changes. If it names problems, fix all
+of them and check again; if it comes back clean, report as normal.
 
 Do this because your session is the last place the report can be fixed cheaply. MDD reads it
 after you have finished, and a report it cannot read has to be restated by the coordinator

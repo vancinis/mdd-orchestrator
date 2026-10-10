@@ -11,6 +11,11 @@ point at earlier work (an issue number, "continue") are a lead: look it up, do n
 This is an investigation, so do not change the project to answer it. Do not claim tests were
 executed or invent evidence; unknowns stay visible as unknowns.
 
+In the existing artifact prose, state the searched scope and concrete findings with file paths
+and symbols or line ranges. Distinguish observed behavior from inference. Name coverage gaps,
+inaccessible sources and unsearched areas with their impact on the request; a no-match lookup
+does not establish repository-wide absence. Keep this in existing prose, not new report fields.
+
 Only a scoped worker lane is limited further. A dispatch is a lane only when its prompt carries a
 separate line starting with "Assigned read-only work item:" that holds the item as JSON. Without
 that line no read footprint applies, nothing was "declared" to you, and none of this paragraph

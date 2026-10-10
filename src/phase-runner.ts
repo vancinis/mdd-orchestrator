@@ -11,7 +11,7 @@ import { mddInstructions, packagedSkillPath, PHASE_SKILLS } from './phase-assets
 import type { PackagedSkillName } from './phase-assets.js';
 import type { LessonInput } from './lessons.js';
 import type { RunLedgerInput } from './run-ledger.js';
-import { changed, deliverables, delivered, executed, verifyReport } from './phase-evidence.js';
+import { changed, deliverables, delivered, executed, VERIFICATION_VERSION, verificationVersion, verifyReport, type VerificationVersion } from './phase-evidence.js';
 import type { ChangedFile, Check, Deliverable, Delivered } from './phase-evidence.js';
 import { emptyEvidence, invalidateEvidence, renderReport, renderClosure, phaseLabel, evidenceCoverage } from './reporting.js';
 import type { Evidence, EvidenceFlag, PhaseReport } from './reporting.js';
@@ -210,6 +210,7 @@ type Run = {
   history: ArtifactResult[]; calls: Set<string>; planned: Deliverable[]; evidence: Evidence;
   report: PhaseReport; started?: number; readyAt?: number; telemetryDiagnostic?: string;
   acceptance?: Acceptance; decisions: Decision[]; verification?: Verification; executedChecks: Check[]; changedFiles: number;
+  verificationVersion?: VerificationVersion;
   /** What Apply reported it changed and why, kept so a PR body can say more than a file count. */
   changedList: ChangedFile[];
   /** Apply's own summary of the finished change, for the reader of the pull request it becomes. */
@@ -283,7 +284,8 @@ const CONTROL_CHARACTERS = /[\x00-\x08\x0b-\x1f\x7f]/;
  * usually clear inside three, and a fourth against the same failure is not resilience.
  */
 export const DELEGATION_ATTEMPTS = 3;
-const NATIVE_FALLBACK = 'Native fallback: inspect git status and git diff and preserve partial work before continuing. Do not redo completed work. Do not delegate, load skills, or call any MDD tools, including the report checker. Return the phase report to the parent; the parent checks its form. This is the only native fallback attempt. Native permissions remain in force; shell is not a sandbox.';
+const NATIVE_FALLBACK = 'Native fallback: inspect git status and git diff and preserve partial work before continuing. Do not redo completed work. Do not delegate, load skills, or call any MDD tools, including the report checker. Do not read skill files. This overrides ordinary skill and report-checker guidance; return the phase report directly to the parent, which checks its form. This is the only native fallback attempt. Native permissions and phase source-mutation limits remain in force; shell is not a sandbox.';
+const EXPLORATION_EVIDENCE = 'In existing artifact prose, report searched scope, concrete source references and coverage gaps. Cite file paths with symbols or line ranges for findings; distinguish observed behavior from inference, and name inaccessible or unsearched areas and their impact. A lookup with no matches is evidence about that search, not proof of repository-wide absence.';
 /**
  * One prompt line naming each applicable packaged skill by absolute path. No body, no digest: the
  * actor reads the path itself with its own read tool if the skill turns out to help, and reading
@@ -625,6 +627,7 @@ export class PhaseRunner {
 
   /** The durable owner of one specific in-memory run (or, with none, of the parent's checkpoint). */
   #ownerOf(sessionID: string, run: Run | undefined, callID?: string): RunOwner | undefined {
+    if (!run && this.#continuedRetirement(sessionID)) return undefined;
     const active = this.#operation.getStore();
     const effectiveCallID = callID ?? (active?.sessionID === sessionID ? active.callID : undefined);
     const checkpoint = run ? undefined : this.options.checkpoint?.read(sessionID)?.checkpoint;
@@ -775,6 +778,7 @@ export class PhaseRunner {
   }
 
   #resetSource(sessionID: string, tolerant = false): { owner: RunOwner; sequence: number; digest: string } | undefined {
+    if (this.#continuedRetirement(sessionID)) return undefined;
     let saved;
     try { saved = this.options.checkpoint?.read(sessionID)?.checkpoint; }
     catch (error) { if (!tolerant) throw error; return undefined; }
@@ -906,6 +910,7 @@ export class PhaseRunner {
 
   /** Opt-in, same-parent recovery of a fully settled ready phase. No saved ref is a capability. */
   async restore(runtime: Runtime, bindMemory?: (project: string) => Promise<EngramHttp>): Promise<{ restored: boolean; reason?: string }> {
+    if (this.#continuedRetirement(runtime.sessionID)) return { restored: false };
     if (!this.#explorations.has(runtime.sessionID) && this.#explorationBlocked(runtime.sessionID))
       return { restored: false, reason: 'Exploration progress authority was lost; retained member evidence must not automatically replay.' };
     if (this.#runs.has(runtime.sessionID)) { this.owner(runtime.sessionID); return { restored: true }; }
@@ -998,6 +1003,7 @@ export class PhaseRunner {
         ...(data.acceptance ? { acceptance: structuredClone(data.acceptance) } : {}),
         decisions: structuredClone(data.decisions), ...(data.verification ? { verification: structuredClone(data.verification) } : {}),
         executedChecks: structuredClone(data.executedChecks), changedFiles: data.changedFiles,
+        ...(data.verificationVersion ? { verificationVersion: data.verificationVersion } : {}),
         changedList: structuredClone(stable.changedList), ...(stable.delivered ? { delivered: { ...stable.delivered } } : {}),
         concerns: structuredClone(stable.concerns), context: structuredClone(data.context),
         ...(data.rework ? { rework: { ...data.rework } } : {}),
@@ -1092,12 +1098,15 @@ export class PhaseRunner {
         // along, because blocking a restart is no reason to hide what the last 40 minutes produced.
         if (marker && marker.state === 'pending') return { state: 'recovery-blocked', sessionID, ...investigation, ...preserved, recoverable: true, reason: 'A previous attempt in this conversation never reported an outcome, so it is not resumed automatically. Its evidence was preserved. Use mdd_reset to release it and start new work here, or open a new conversation. Read-only investigation remains available. ' + ATTEST_HINT };
       } catch (error) { return { state: 'recovery-blocked', sessionID, ...investigation, ...preserved, recoverable: true, reason: `${error instanceof Error ? error.message : 'Progress is unavailable.'} Use mdd_reset to clear the local marker.` }; }
+      if (this.#continuedRetirement(sessionID))
+        return { state: 'continued-with-failed-verification', sessionID, ...investigation, ...preserved,
+          reason: 'The user released the failed verification stop. Its evidence remains failed; no next phase or new work was authorized.' };
       if (preserved.priorRun) return { state: 'recoverable', sessionID, ...investigation, ...preserved, recoverable: true, recovery: 'data-only', reason: RECOVERY_REASON };
       return { state: 'not-started', sessionID, ...investigation, ...preserved };
     }
     const risking = this.#risking(run);
     const blockedRisk = risking && run.state === 'blocked' && run.workflow.nextAction().kind === 'blocked-risk';
-    const resultFormat = risking ? riskReportFormatLines() : reportFormatLines(run.phase);
+    const resultFormat = risking ? riskReportFormatLines() : reportFormatLines(run.phase, run.verificationVersion);
     return {
       runID: run.id, sessionID, phase: run.phase, state: run.state,
       // `phase` stays the last real phase; `stage` names the risk stop the task, attempt or
@@ -1138,6 +1147,8 @@ export class PhaseRunner {
       ...(blockedRisk ? { expandedReport: `${this.#visualFrame(run)}${this.#riskRecoveryReport(run)}` } : {}),
       visual: phaseVisual({ phase: run.phase, state: run.state, workflow: run.workflow.snapshot() }, presentationSettings().ascii),
       acceptance: structuredClone(run.acceptance), decisions: structuredClone(run.decisions), planned: structuredClone(run.planned), verification: structuredClone(run.verification),
+      ...(run.verificationVersion ? { verificationVersion: run.verificationVersion } : {}),
+      verificationEvidence: run.verificationVersion ? 'Structured actor-reported evidence; execution is not independently attested.' : 'Legacy command-based evidence; requiredness and execution identity were not recorded.',
       uncertain: run.uncertain, attempts: run.attempts, runAttempts: run.spent, recoverable: true, mode: run.mode,
       ...(run.fallbackExhausted ? { fallbackExhausted: true } : {}),
       ...(run.reportRepairExhausted ? { reportRepairExhausted: true } : {}),
@@ -1484,7 +1495,7 @@ export class PhaseRunner {
       args: { description: '', subagent_type: first.phase, prompt: '' }, state: 'starting',
       history: [], calls: new Set(previous?.calls ?? inherited), planned: [], evidence: { ...emptyEvidence(), requirements: trusted?.requirementsConfirmed ? 'confirmed' : 'unearned' },
       uncertain: false, userMessageID: trusted?.userMessageID ?? '', concerns: [], contexts: [], context, malformed: 0,
-      decisions: [], executedChecks: [], changedFiles: 0, changedList: [], attempts: 0, spent: 0, mode: 'delegate', brief: '',
+      decisions: [], executedChecks: [], verificationVersion: VERIFICATION_VERSION, changedFiles: 0, changedList: [], attempts: 0, spent: 0, mode: 'delegate', brief: '',
       report: { phase: first.phase, summary: `Preparando ${phaseLabel(first.phase).toLowerCase()}.`, how: [], status: 'in-progress', evidence: emptyEvidence() },
     };
     this.#runs.set(runtime.sessionID, run);
@@ -2020,15 +2031,17 @@ export class PhaseRunner {
       // The traceability fields are still validated link by link, and a mistake in them is still a
       // report that has to be restated. It is not a reason to re-run the phase that produced them.
       try {
+        if (result.verificationVersion !== undefined && verificationVersion(result.verificationVersion) !== run.verificationVersion)
+          throw new Error('Report verification version contradicts the frozen run contract.');
         if (run.phase === 'mdd-spec' && result.domain !== 'project') throw new MalformedReport('Specification domain must match the dispatched project storage namespace.');
         if (run.phase === 'mdd-verify') {
           if (!accepted) throw new Error('Verification has no held requirement map.');
           // The checks and the verification that cites them are read as one report, so every problem
           // in either reaches the restatement together instead of one rejection per round trip.
-          const read = verifyReport(result.checks, result.verification, { accepted, choices, planned });
+          const read = verifyReport(result.checks, result.verification, { accepted, choices, planned, verificationVersion: run.verificationVersion });
           ran = read.ran;
+          if (outcome === 'passed' && !read.verification!.matched) throw new MalformedReport(UNMATCHED_PASS);
           run.verification = read.verification!;
-          if (outcome === 'passed' && !run.verification.matched) throw new MalformedReport(UNMATCHED_PASS);
         }
         if (outcome === 'passed') {
           if (run.phase === 'mdd-plan' || run.phase === 'mdd-spec') accepted = acceptance(result.acceptance);
@@ -2038,7 +2051,7 @@ export class PhaseRunner {
           }
           if (run.phase === 'mdd-plan' || run.phase === 'mdd-tasks') {
             if (!accepted) throw new Error('Planning has no held requirement map.');
-            planned = deliverables(result.deliverables);
+            planned = deliverables(result.deliverables, run.verificationVersion);
             validatePlan(accepted, choices, planned);
             nextEvidence.plan = 'confirmed';
           }
@@ -2051,7 +2064,7 @@ export class PhaseRunner {
             if (applied.paths.length) nextEvidence.implementation = 'confirmed';
             // Apply may report the checks it ran; they are its claim and are shown as one. Only
             // Verify's checks earn the evidence flag, so reporting them here proves nothing extra.
-            ran = executed(result.checks);
+            ran = executed(result.checks, run.verificationVersion);
             // The phase that did the work is the one that can say what the work delivered. A
             // malformed summary is named back to it rather than failing the implementation.
             summary = delivered(result.delivered);
@@ -2435,7 +2448,14 @@ export class PhaseRunner {
     return workflow.evaluation.phases.includes('mdd-apply') ? 'mdd-apply' : undefined;
   }
 
-  reset(sessionID: string, scope: 'phase' | 'run' | 'rework'): { scope: 'phase' | 'run' | 'rework'; phase?: Phase; approval?: true; preserved?: { file: string; runID: string } } {
+  failedVerification(sessionID: string): string | undefined {
+    const run = this.#runs.get(sessionID);
+    return run && this.#reworkTarget(run) ? run.id : undefined;
+  }
+
+  reset(sessionID: string, scope: 'phase' | 'run' | 'rework' | 'continue', consent?: {
+    runID: string; userMessageID: string; userText: string; kind: 'continue' | 'new-task';
+  }): { scope: 'phase' | 'run' | 'rework' | 'continue'; phase?: Phase; approval?: true; preserved?: { file: string; runID: string } } {
     if (this.#workerOperations.has(sessionID)) throw new ValidationError('Wait for pending worker persistence before resetting.');
     if (this.#inflight.has(sessionID)) throw new ValidationError(`The child may still be running: OpenCode has not confirmed it stopped. ${ATTEST_HINT}`);
     const run = this.#runs.get(sessionID);
@@ -2446,6 +2466,39 @@ export class PhaseRunner {
     const pending = run ?? this.#solo.get(sessionID);
     if (!pending && this.options.progress?.read(sessionID)?.state === 'pending') throw new ValidationError(`A previous child has unconfirmed liveness: OpenCode has not confirmed it stopped. ${ATTEST_HINT}`);
     if (pending && ['persisting-intent', 'persisting-result'].includes(pending.state)) throw new ValidationError('Wait for the current persistence operation before resetting.');
+    if (scope === 'continue') {
+      const saved = this.options.checkpoint?.read(sessionID)?.checkpoint;
+      const marker = this.options.progress?.read(sessionID);
+      const owner = this.owner(sessionID);
+      const operation = this.#operation.getStore();
+      if (!run || !this.#reworkTarget(run) || !consent || consent.runID !== run.id ||
+          !consent.userMessageID.trim() || !consent.userText.trim() ||
+          run.userMessageID === consent.userMessageID || this.#consent.get(sessionID)?.usedMessages.includes(consent.userMessageID) ||
+          run.uncertain || run.checkpointDegraded || run.rejected || run.side ||
+          (this.#solo.has(sessionID) && !['settled', 'blocked'].includes(this.#solo.get(sessionID)!.state)) ||
+          this.readOnlyWorkers(sessionID) || !this.options.dossier || !this.options.ownership ||
+          !owner || owner.state !== 'reserved' || operation?.sessionID !== sessionID || owner.callID !== operation.callID ||
+          saved?.version !== STABLE_CHECKPOINT_VERSION || saved.runID !== run.id || saved.stable.state !== 'blocked' ||
+          saved.data.usedMessages.includes(consent.userMessageID) ||
+          saved.stable.phase !== 'mdd-verify' || saved.stable.rejected || saved.attempt?.state !== 'settled' ||
+          marker?.runID !== run.id || marker.state !== 'settled' || marker.userMessageID !== run.userMessageID ||
+          marker.attemptID !== saved.attempt.id ||
+          !isDeepStrictEqual(saved.data.verification, run.verification) || !isDeepStrictEqual(saved.data.executedChecks, run.executedChecks))
+        throw new ValidationError('Continue requires a fresh native request bound to this durably settled failed Verify; pending or uncertain work cannot be released.');
+      const dossier = this.#dossier(run);
+      // Persisted identities remain replay guards after restart, not restored live consent receipts.
+      dossier.usedMessages = [...new Set([...saved.data.usedMessages, ...dossier.usedMessages, run.userMessageID, consent.userMessageID])];
+      dossier.continuation = { kind: consent.kind, userMessageID: consent.userMessageID, userText: consent.userText,
+        checkpointSequence: saved.sequence, checkpointDigest: saved.dataDigest, timestamp: this.#now() };
+      const preserved = this.options.dossier.archiveContinuation(sessionID, dossier);
+      if (owner.receipt) this.options.ownership.retireTransferredParent(sessionID, run.id, operation.callID, owner.epoch);
+      else this.options.ownership.retireParent(sessionID, run.id);
+      // Retirement is the final durable mutation: leave checkpoint/progress as failed data.
+      // A later authenticated objective clears these under the existing fresh-start path.
+      this.#runs.delete(sessionID);
+      this.#consent.delete(sessionID);
+      return { scope, preserved };
+    }
     if (scope === 'rework' && (!run || !this.#reworkTarget(run))) {
       throw new ValidationError('Rework is available only after mdd-verify reported failure in a route that includes mdd-apply. Use scope phase to run the current phase again.');
     }
@@ -2529,17 +2582,30 @@ export class PhaseRunner {
 
   approvalStopped(sessionID: string): void { const run = this.#runs.get(sessionID); if (run) this.#event(run, 'approval', 'cancelled'); }
 
-  prFacts(sessionID: string): PRFacts {
+  prFacts(sessionID: string, runID?: string): PRFacts {
     const run = this.#runs.get(sessionID);
+    if (!run || (runID !== undefined && runID !== run.id)) {
+      const prior = runID ? this.options.dossier?.readContinued(sessionID, runID) : this.#prior(sessionID);
+      if (!prior?.continuation) throw new Error('No recorded MDD run is available for this parent or retained failed verification target. A draft cannot claim implementation evidence.');
+      return { runID: prior.runID, goal: prior.acceptance?.goal ?? prior.requirements,
+        ...(prior.verificationVersion ? { verificationVersion: prior.verificationVersion } : {}),
+        ...(prior.delivered ? { delivered: { ...prior.delivered } } : {}),
+        verification: prior.verification?.changes ?? 'Verification failed.', changedFiles: prior.changedFiles,
+        files: structuredClone(prior.changedList ?? []), checks: structuredClone(prior.executedChecks), verified: false, uncertain: false,
+        limits: [...(prior.verification?.limits ?? []), 'The user continued after failed verification; the failed result was not accepted as PASS.',
+          ...(!prior.verificationVersion ? ['Legacy command-based evidence; requiredness and execution identity were not recorded.'] : [])] };
+    }
     if (!run) throw new Error('No recorded MDD run is available for this parent. A draft cannot claim implementation evidence.');
     return { runID: run.id, goal: run.acceptance?.goal ?? 'Unverified: a requested outcome has not been recorded.',
+      ...(run.verificationVersion ? { verificationVersion: run.verificationVersion } : {}),
       ...(run.delivered ? { delivered: { ...run.delivered } } : {}),
       // Verify's own account of what it found. It belongs under the verification heading: printed
       // under Cambios it read as a description of the change, which is what it is not.
       verification: run.verification?.changes ?? 'Implementation details remain unverified; inspect the recorded artifact.',
       changedFiles: run.changedFiles, files: run.changedList.map(file => ({ ...file })), checks: run.executedChecks.map(check => ({ ...check })),
       verified: run.state === 'complete' && run.verification?.matched === true && run.evidence.checks === 'confirmed',
-      uncertain: run.uncertain, limits: [...(run.verification?.limits ?? [])] };
+      uncertain: run.uncertain, limits: [...(run.verification?.limits ?? []),
+        ...(!run.verificationVersion && run.verification ? ['Legacy command-based evidence; requiredness and execution identity were not recorded.'] : [])] };
   }
 
   /**
@@ -2603,6 +2669,8 @@ export class PhaseRunner {
   #closableClaim(sessionID: string): { runID: string; finished: boolean; moved?: true } | undefined {
     const ownership = this.options.ownership;
     if (!ownership || this.#runs.has(sessionID)) return undefined;
+    const continued = this.#continuedRetirement(sessionID);
+    if (continued) return { runID: continued.runID, finished: true };
     // A run that finished a transfer away left this parent nothing to protect.
     const moved = ownership.movedAway(sessionID);
     if (moved) return { runID: moved.runID, finished: true, moved: true };
@@ -2630,6 +2698,11 @@ export class PhaseRunner {
     const closable = this.#closableClaim(sessionID);
     if (!closable) return;
     if (closable.moved) { this.retireMovedAway(sessionID); return; }
+    if (this.#continuedRetirement(sessionID)) {
+      this.options.checkpoint?.clear(sessionID);
+      this.options.progress?.clear(sessionID);
+      return;
+    }
     const calls = this.#prior(sessionID)?.calls;
     this.options.ownership!.retireParent(sessionID, closable.runID);
     if (calls?.length) this.#inheritedCalls.set(sessionID, [...calls]);
@@ -2664,7 +2737,7 @@ export class PhaseRunner {
       this.#soloStart(runtime, purpose);
       const solo = this.#solo.get(runtime.sessionID)!;
       if (this.#explorationEligible(items, solo.workerPolicy?.enabled))
-        this.#prepareExploration(runtime, solo.id, items, 'contextual', solo.args);
+        this.#prepareExploration(runtime, solo.id, items, 'contextual', this.#soloArgs(solo, true));
       else if (items) solo.args.prompt += `\nExplicit exploration work items (data, not extra permissions; this dispatch stays singular): ${JSON.stringify(items)}`;
       return;
     }
@@ -2681,7 +2754,7 @@ export class PhaseRunner {
     run.attempts = 0; run.mode = 'delegate'; delete run.nativeUsed; delete run.lastFailure;
     delete run.fallbackExhausted; delete run.reason;
     try {
-      const prompts = this.#phasePrompts(run, 'mdd-explore');
+      const prompts = this.#phasePrompts(run, 'mdd-explore', undefined, this.#explorationEligible(items, side.workerPolicy.enabled));
       run.args = prompts.args; run.brief = prompts.brief;
       this.#arm(run);
       run.phase = 'mdd-explore'; run.state = 'ready';
@@ -2859,9 +2932,10 @@ export class PhaseRunner {
     return { description: solo.args.description, subagent_type: solo.args.subagent_type, prompt: solo.token };
   }
 
-  #soloArgs(solo: Solo): TaskArgs {
+  #soloArgs(solo: Solo, scopedWorker = false): TaskArgs {
     const prompt = [
       'Perform only mdd-explore. Inspect relevant files; identify uncertainty, scope, integrations and risks without changing declared inputs.',
+      EXPLORATION_EVIDENCE,
       `Standalone read-only investigation only: ${JSON.stringify(solo.purpose)}. explorationID=${solo.id}.`,
       'No MDD run is accepted: do not plan, implement, propose phases, or imply any approval. Answer the stated purpose from actual project sources in this workspace.',
       'Optional concerns: [{category,evidence,impact}], at most eight, with category objective/integrations/sensitive-data/permissions. These are advisory only; never change the route or the evidence, or request governance for ordinary implementation choices.',
@@ -2872,7 +2946,7 @@ export class PhaseRunner {
       'Return exactly one JSON object, no fences: phase, runID, callID, outcome (passed or failed), evidenceSummary (nonempty), artifact (nonempty). Never emit confidence percentages.',
       `phase=mdd-explore; runID=${solo.id}. Native callID is appended by the hook.`,
       `Investigation purpose data: ${JSON.stringify(solo.purpose)}`,
-      skillHint(PHASE_SKILLS['mdd-explore'])!,
+      ...(!scopedWorker && solo.attempts < DELEGATION_ATTEMPTS ? [skillHint(PHASE_SKILLS['mdd-explore'])!] : []),
     ].join('\n').replaceAll('@', '\\u0040');
     boundedText(prompt, 'combined phase handoff', PHASE_CONTEXT_MAX_BYTES);
     return { description: 'MDD read-only investigation', subagent_type: 'mdd-explore', prompt };
@@ -2984,6 +3058,7 @@ export class PhaseRunner {
     const settled = ['ready', 'blocked', 'await-approval', 'complete'] as const;
     return {
       version: DOSSIER_VERSION, runID: run.id,
+      ...(run.verificationVersion ? { verificationVersion: run.verificationVersion } : {}),
       parent: { sessionID: run.runtime.sessionID, directory: run.runtime.directory, worktree: run.runtime.worktree },
       userMessageID: run.userMessageID, requirements: run.requirements, context: structuredClone(run.context),
       answers: snapshot.answers, route: [...snapshot.evaluation.phases], phase: run.phase,
@@ -2992,7 +3067,7 @@ export class PhaseRunner {
       ...(run.acceptance ? { acceptance: structuredClone(run.acceptance) } : {}),
       decisions: structuredClone(run.decisions), planned: structuredClone(run.planned),
       ...(run.verification ? { verification: structuredClone(run.verification) } : {}),
-      executedChecks: structuredClone(run.executedChecks), changedFiles: run.changedFiles,
+      executedChecks: structuredClone(run.executedChecks), changedFiles: run.changedFiles, changedList: structuredClone(run.changedList),
       ...(run.delivered ? { delivered: { ...run.delivered } } : {}), concerns: structuredClone(run.concerns),
       artifacts: run.history.map(item => ({ ref: structuredClone(item.ref), content: item.content })),
       contexts: run.contexts.map(item => ({ explorationID: item.explorationID, outcome: item.outcome, summary: item.summary,
@@ -3041,6 +3116,22 @@ export class PhaseRunner {
 
   #prior(sessionID: string): RunDossier | undefined {
     try { return this.options.dossier?.read(sessionID); } catch { return undefined; }
+  }
+
+  /** Existing retirement tombstone plus matching archive makes the old checkpoint data-only. */
+  #continuedRetirement(sessionID: string): RunDossier | undefined {
+    const claim = this.options.ownership?.parentClaim(sessionID);
+    if (!claim?.retired) return undefined;
+    const prior = this.options.dossier?.read(sessionID);
+    if (!prior?.continuation || prior.runID !== claim.runID) return undefined;
+    const archive = this.options.dossier!.readContinued(sessionID, claim.runID);
+    const saved = this.options.checkpoint?.read(sessionID)?.checkpoint;
+    const marker = this.options.progress?.read(sessionID);
+    if (!isDeepStrictEqual(archive, prior) ||
+        (saved && (saved.version !== STABLE_CHECKPOINT_VERSION || saved.runID !== claim.runID || saved.dataDigest !== prior.continuation.checkpointDigest)) ||
+        (marker && (marker.runID !== claim.runID || marker.state !== 'settled' || marker.userMessageID !== prior.userMessageID)))
+      throw new Error('Continued verification archive and retired ownership disagree; no work may resume.');
+    return prior;
   }
 
   /**
@@ -3172,6 +3263,7 @@ export class PhaseRunner {
       const body = (item: ArtifactResult) => ({ phase: item.ref.phase as Phase, ...(item.ref.batchID ? { batchID: item.ref.batchID } : {}), content: item.content,
         digest: createHash('sha256').update(item.content).digest('hex') });
       const data: ResumeData = {
+        ...(run.verificationVersion ? { verificationVersion: run.verificationVersion } : {}),
         ...(run.workerPolicy ? { workerPolicy: { ...run.workerPolicy } } : {}),
         ...(run.workerState ? { workerState: structuredClone(run.workerState) } : {}),
         directory: run.runtime.directory, worktree: run.runtime.worktree, userMessageID: run.userMessageID,
@@ -3262,7 +3354,8 @@ export class PhaseRunner {
     // one three-try exploration used to send the whole rest of the route inline on first contact.
     run.mode = run.nativeUsed && !advanced ? 'native' : 'delegate';
     if (advanced) { run.attempts = 0; delete run.nativeUsed; delete run.executor; }
-    const prompts = this.#phasePrompts(run, phase);
+    const prompts = this.#phasePrompts(run, phase, undefined,
+      phase === 'mdd-explore' && this.#explorationEligible(run.explorationItems, run.workerPolicy?.enabled));
     run.args = prompts.args;
     run.brief = prompts.brief;
     this.#arm(run);
@@ -3560,6 +3653,7 @@ export class PhaseRunner {
       // The preflight's certainty answer is the one signal exploration cannot produce: whether the
       // person asking already knows what they want. It is weighed, never obeyed.
       'Weigh the user\'s stated requirements clarity as a risk signal beside the exploration: requirements the user is unsure of are a reason the work may need a fuller definition. It never overrides what the exploration found, and it is not a route choice.',
+      'Link route reasons, concrete risks and mitigations to identifiable Explore findings (file/symbol references or an exact finding quotation) and the relevant request constraints. Name missing evidence and uncertainty instead of inventing support. Report validation checks form and route selection; it does not validate the truth of those findings.',
       'Once MDD validates this report, its route alone selects how this run continues; nothing in the preflight substitutes for it. It selects the route, not consent: it never skips a question or an approval the workflow still requires.',
       ...(run.nativeUsed ? [NATIVE_FALLBACK] : []),
       ISOLATION,
@@ -3600,20 +3694,20 @@ export class PhaseRunner {
    * differs: a delegated phase answers through its task, a phase the coordinator carries out
    * answers through mdd_phase_result.
    */
-  #phasePrompts(run: Run, phase: Phase, assignedID?: string): { args: TaskArgs; brief: string } {
+  #phasePrompts(run: Run, phase: Phase, assignedID?: string, scopedWorker = false): { args: TaskArgs; brief: string } {
     // At the risk stop the run's own prompt is mdd-risk's, whichever caller recomposes it.
     if (this.#risking(run) && phase === run.phase) return this.#riskPrompts(run);
     const roles: Record<Phase, string> = {
-      'mdd-explore': 'Inspect relevant files; identify uncertainty, scope, integrations and risks without changing declared inputs.',
-      'mdd-plan': 'Produce ONE compact plan: A-to-B goal, concrete acceptance scenarios, relevant decisions, linked implementation steps and existing planned checks. Supply acceptance, decisions (empty if none), and deliverables. Do not add phases or process questions.',
-      'mdd-propose': 'Use exploration to define intent, scope, exclusions and acceptance criteria.',
-      'mdd-spec': 'Supply acceptance with a concise A-to-B goal and stable requirement/scenario IDs reflecting the user request. Include concrete happy/error scenarios where applicable. Supply domain="project", the fixed storage namespace.',
-      'mdd-design': 'Use held acceptance IDs to define only relevant decisions, boundaries and test seams. Supply decisions; do not redefine requirements or invent extra process.',
-      'mdd-tasks': 'Supply ordered deliverables linked to held scenarios and decisions. Keep check commands applicable to acceptance; no extra unrelated checks. Preserve ID and dependency consistency.',
-      'mdd-apply': 'Implement exactly the ONE assigned deliverable, not the full plan. Dependencies and prior results are context, not additional assignments. Supply completed=[assignedStepID] only when it is fully finished; partial, failed or interrupted work must report outcome failed, never fabricated completion. Supply changes as [{path,reason}], one entry per file you changed, where reason says why it had to change. A bare path is accepted when there is nothing to add. Use noChangeReason when nothing needed changing. Report only checks you ran as checks [{command,exit}]; an empty list is honest when you ran none.',
-      'mdd-verify': 'Check requirements, design decisions AND the held plan against the implementation. Run applicable tests and build checks as appropriate, including planned checks when applicable; if a check is inapplicable or cannot run, explain why, its impact and what remains unknown. Supply checks [{command,exit}] for what you actually ran and verification for EVERY scenario-step pair, step and decision. Give source-based semantic assessments naming the check they rely on; use not-verified/deviation and outcome failed for gaps. Explain any deviation or failed/unrun check, its impact, and the next choices (improve, reject or request implementation rework) so the user can decide. An exit code is not semantic proof; never report a check you did not run.',
+      'mdd-explore': `Inspect relevant files; identify uncertainty, scope, integrations and risks without changing declared inputs. ${EXPLORATION_EVIDENCE}`,
+      'mdd-plan': 'Produce ONE compact plan: A-to-B goal, concrete acceptance scenarios, relevant decisions, linked implementation steps and existing planned checks. Distinguish assigned completion checks from deferred integration verification in the artifact: say what each Apply actor must establish and what singular Verify must check across batches. A scoped worker cannot run commands; assign source evidence there and defer execution explicitly. Supply acceptance, decisions (empty if none), and deliverables. Do not add phases or process questions.',
+      'mdd-propose': 'Use exploration to define intent, scope, exclusions and acceptance criteria. Separate observed evidence, constraints and assumptions in the artifact. Reference exploration findings rather than repeating the investigation; investigate further only to close a proposal-relevant gap.',
+      'mdd-spec': 'Supply acceptance with a concise A-to-B goal and stable requirement/scenario IDs reflecting the user request. Check completeness against the original user request, not only the proposal: identify omitted behavior, exclusions and unresolved assumptions in the artifact. Include concrete happy/error scenarios where applicable. Supply domain="project", the fixed storage namespace.',
+      'mdd-design': 'Use held acceptance IDs to define only relevant decisions, boundaries and test seams. Anchor decisions to existing implementation seams and important constraints with concrete source references; explain compatibility, security and operational tradeoffs where relevant. Supply decisions; do not redefine requirements or invent extra process.',
+      'mdd-tasks': 'Supply ordered deliverables linked to held scenarios and decisions. Distinguish assigned completion checks from deferred integration verification in the artifact, including who runs each check and what remains unknown until singular Verify. A scoped worker cannot run commands; require source evidence and defer execution explicitly. Keep check commands applicable to acceptance; no extra unrelated checks. Preserve ID and dependency consistency.',
+      'mdd-apply': 'Implement exactly the ONE assigned deliverable, not the full plan. Dependencies and prior results are context, not additional assignments. Supply completed=[assignedStepID] only when it is fully finished; partial, failed or interrupted work must report outcome failed, never fabricated completion. Supply changes as [{path,reason}], one entry per file you changed, where reason says why it had to change. A bare path is accepted when there is nothing to add. Use noChangeReason when nothing needed changing. Report only checks you ran using the dispatched checks schema; an empty list is honest when you ran none. Report integration assumptions and deferred integration checks in the artifact so later actors know what this batch has not established.',
+      'mdd-verify': 'Check requirements, design decisions AND the held plan against the implementation. Run applicable tests and build checks as appropriate, including planned checks when applicable; if a check is inapplicable or cannot run, explain why, its impact and what remains unknown. Supply checks using the dispatched execution schema for what you actually ran and verification for EVERY scenario-step pair, step and decision. Give source-based semantic assessments naming the check they rely on; use not-verified/deviation and outcome failed for gaps. Explain any deviation or failed/unrun check, its impact, and the next choices (improve, reject or request implementation rework) so the user can decide. An exit code is not semantic proof; never report a check you did not run.',
     };
-    const hint = skillHint(PHASE_SKILLS[phase]);
+    const hint = run.nativeUsed || scopedWorker || assignedID !== undefined ? undefined : skillHint(PHASE_SKILLS[phase]);
     const instructions = [
       `Perform only ${phase}. ${roles[phase]}`,
       ...(run.nativeUsed ? [NATIVE_FALLBACK] : []),
@@ -3636,10 +3730,12 @@ export class PhaseRunner {
       'Report in English — summary, artifact, concerns and data — whatever language the requirements, the repository or the conversation use. This report is read by MDD and by the coordinator, never by the user directly; the coordinator translates it for them. Reproduce quoted requirements, error messages, file names and identifiers exactly as they are.',
       ...(run.lastFailure ? [`A previous attempt at this exact phase did not complete: ${JSON.stringify(run.lastFailure)}. This attempt is a retry, not a repeat: where that is what failed, take a different route to the same outcome, and do not redo work whose result is already listed below.`] : []),
       phase === 'mdd-apply' ? 'This phase implements: edit the sources the plan calls for.' : phase === 'mdd-explore'
-        ? 'This phase is read-only: never change sources or declared inputs.' : 'This phase produces understanding or a plan, so change sources only if the phase genuinely requires it.',
+        ? 'This phase is read-only: never change sources or declared inputs.' : phase === 'mdd-verify'
+        ? 'Verify is read-only for project sources: run applicable checks and allow ordinary generated test/build outputs, but never repair sources, tests, fixtures, snapshots, configuration or dependencies to make checks pass. Report failures and request implementation rework.'
+        : 'Planning is read-only for project sources: never implement or repair sources, tests, fixtures, snapshots, configuration or dependencies. Investigative checks may produce ordinary generated test/build outputs; report findings and gaps without changing declared inputs.',
       ...(phase === 'mdd-explore' ? [SINGULAR_EXPLORATION] : []),
       ...(phase === 'mdd-apply' && run.rework ? [`This is a correction pass: ${run.rework.after} reported failure and the user chose to fix the implementation. Its artifact is the newest dependency artifact below and lists every deviation and missing check; its summary was ${JSON.stringify(run.rework.summary)}. The changes already applied are in the working tree: keep them, correct what verification found, and add the tests it named as missing. Report in changes only the files this pass touched; earlier ones are kept.`] : []),
-      ...reportFormatLines(phase),
+      ...reportFormatLines(phase, run.verificationVersion),
     ];
     const data = (handoff: readonly unknown[], compacted: readonly ArtifactRef[]) => [
       `Requirements data: ${JSON.stringify(run.requirements)}`,

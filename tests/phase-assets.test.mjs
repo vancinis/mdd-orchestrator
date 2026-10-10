@@ -9,6 +9,43 @@ import { PHASES } from '../dist/policy.js';
 import { defaultSettings, freezeProfile, MODEL_ROLES } from '../dist/settings.js';
 import { applyModelOverrides } from '../dist/native-models.js';
 import { PHASE_AGENTS, CHECK_AGENTS, pinPhaseAgents } from '../dist/opencode-plugin.js';
+import { FIELD_SCHEMA } from '../dist/acceptance.js';
+
+test('SA-1: packaged handoffs ground each planning role without new report fields', () => {
+  const expectations = {
+    explore: [/searched scope/, /file paths\s+and symbols or line ranges/, /coverage gaps/, /existing artifact prose/],
+    risk: [/identifiable Explore findings/, /does not validate the truth/],
+    propose: [/Separate observed evidence, constraints and assumptions/, /Do not repeat the exploration/],
+    spec: [/original user request/, /omitted behavior, exclusions and unresolved assumptions/],
+    design: [/existing implementation seams/, /compatibility, security and operational constraints/],
+    plan: [/assigned completion checks/, /deferred integration verification/, /scoped worker cannot run commands/],
+    tasks: [/assigned completion checks/, /deferred integration verification/, /scoped worker cannot run commands/],
+    apply: [/optional packaged mdd-cleanup path/, /integration assumptions/, /deferred integration checks/],
+  };
+  for (const [role, patterns] of Object.entries(expectations)) {
+    const text = fs.readFileSync(`assets/opencode/agents/mdd-${role}.md`, 'utf8');
+    for (const pattern of patterns) assert.match(text, pattern, role);
+  }
+  const apply = fs.readFileSync('assets/opencode/agents/mdd-apply.md', 'utf8');
+  assert.doesNotMatch(apply, /instructions and digest injected/);
+});
+
+test('SA-1: common source, skill and checker rules explicitly honor restricted lanes', () => {
+  const text = fs.readFileSync('assets/opencode/mdd-instructions.md', 'utf8');
+  assert.match(text, /Planning and Verify are read-only for project sources/);
+  assert.match(text, /ordinary generated test\/build outputs/);
+  assert.match(text, /never repair sources/);
+  assert.match(text, /Native fallback skips skill reads and the report checker/);
+  assert.match(text, /Scoped workers receive no packaged skill hints/);
+  assert.match(text, /Otherwise, outside native fallback, before you return it/);
+});
+
+test('SA-1: deliverable guidance keeps conservative eligibility without denying active concurrency', () => {
+  assert.doesNotMatch(FIELD_SCHEMA.deliverables, /concurrency is not active/);
+  assert.match(FIELD_SCHEMA.deliverables, /never guess independence/);
+  assert.match(FIELD_SCHEMA.deliverables, /missing\/incomplete scopes or omitted dependencies remain sequential/);
+  assert.match(FIELD_SCHEMA.deliverables, /runtime selects eligible worker batches/);
+});
 
 test('assets: worker instructions preserve exact grouped dispatch and bounded member authority', () => {
   const coordinator = fs.readFileSync('assets/opencode/agents/mdd-orchestrator.md', 'utf8');
@@ -207,6 +244,62 @@ const jdSkillPath = 'assets/opencode/skills/mdd-judgment-day/SKILL.md';
 const jdReferencePath = 'assets/opencode/skills/mdd-judgment-day/references/prompts-and-formats.md';
 const jdText = () => fs.readFileSync(jdSkillPath, 'utf8');
 const jdReference = () => fs.readFileSync(jdReferencePath, 'utf8');
+
+// These assertions verify shipped instruction contracts, not model compliance or review execution.
+test('SA-4: security treats redaction as an assessment limit rather than credential-exposure proof', () => {
+  const text = fs.readFileSync('assets/opencode/agents/mdd-security.md', 'utf8');
+  assert.match(text, /redaction marker alone is not proof of credential exposure/);
+  assert.match(text, /unredacted, runtime-bound evidence/);
+  assert.match(text, /redaction or access limits prevent assessment[\s\S]*inconclusive/);
+  assert.match(text, /Never claim omitted or redacted material was inspected/);
+  assert.match(text, /do not reconstruct secrets or widen live access/);
+});
+
+test('SA-4: parent readiness precedes paired dispatch and remains a protocol obligation', () => {
+  const skill = jdText(); const reference = jdReference();
+  const readiness = reference.slice(reference.indexOf('## Parent readiness before paired dispatch'), reference.indexOf('## Blind foreground dispatch'));
+  assert.ok(readiness.length > 0, 'readiness must precede either judge launch');
+  for (const pattern of [/local commit objects/, /40 or 64 lowercase/, /1024/, /base-only deletions/, /target-only additions/,
+    /all existing relevant sides/, /128 KiB/, /five-second/, /binary/, /invalid UTF-8/, /diff.*output/s,
+    /Do not launch either judge/, /never truncate/, /fetch/, /create snapshots/, /execute target code/,
+    /parent must not call mdd_jd_inspect/, /already authorized/, /not inspection evidence or approval/,
+    /cannot guarantee.*timeout/s, /no structured target input/, /no new manifest or runtime gate/]) assert.match(readiness, pattern);
+  assert.match(skill, /Complete parent readiness before paired dispatch/);
+  assert.match(skill, /known unavailable.*[\s\S]*escalate/i);
+  const prompt = reference.match(/```text\nPerform one blind[\s\S]*?```/)?.[0];
+  assert.match(prompt, /Parent readiness is not inspection evidence/);
+  assert.match(prompt, /Independently inspect/);
+  assert.match(prompt, /residual unavailability/);
+});
+
+test('SA-4: identical judges independently report residual unavailable evidence', () => {
+  const bodies = ['a', 'b'].map(role => fs.readFileSync(`assets/opencode/agents/mdd-jd-judge-${role}.md`, 'utf8').split('---').slice(2).join('---'));
+  assert.equal(bodies[0], bodies[1]);
+  for (const pattern of [/Parent readiness is not inspection evidence/, /independently inspect/, /timeout/, /binary/,
+    /invalid UTF-8/, /oversized/, /incomplete or unavailable/, /only successful reads/, /never partial output/,
+    /commit, path, side and failed operation/, /Do not substitute live reads/]) assert.match(bodies[0], pattern);
+});
+
+test('SA-4: fix instructions separate runtime admission from ledger, path and consent obligations', () => {
+  const fix = fs.readFileSync('assets/opencode/agents/mdd-jd-fix.md', 'utf8');
+  for (const text of [fix, jdReference()]) {
+    for (const pattern of [/Runtime admission/, /tool categories/, /protocol obligations/,
+      /consent, severe ledger IDs, allowed edit paths and the two-round limit/,
+      /not mechanically validated/, /not a path sandbox/]) assert.match(text, pattern);
+  }
+  assert.match(fix, /Do not interpret admission or native tool permission as correction consent/);
+  assert.match(fix, /return a blocked handoff/);
+});
+
+test('SA-4: adapter guide discloses readiness and redaction limits without promising model behavior', () => {
+  const text = fs.readFileSync('docs/opencode-adapter.md', 'utf8');
+  assert.match(text, /Redaction alone does not prove credential exposure/);
+  assert.match(text, /Parent readiness before paired dispatch/);
+  assert.match(text, /no structured target input/);
+  assert.match(text, /not inspection evidence or approval/);
+  assert.match(text, /protocol obligations,\s+not mechanically validated/);
+  assert.match(text, /not live-model behavior/);
+});
 
 test('Judgment Day routing is explicit, namespaced and precedes generic phase routing within the size cap', () => {
   const text = fs.readFileSync('assets/opencode/agents/mdd-orchestrator.md', 'utf8');

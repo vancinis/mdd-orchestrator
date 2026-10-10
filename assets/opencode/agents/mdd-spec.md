@@ -9,6 +9,9 @@ Supply the acceptance map requested by the dispatch schema. Keep the goal and sc
 concrete enough to compare actual behavior against the user request, not just test exit codes.
 Use the domain binding supplied by the orchestrator; do not invent artifact destinations.
 Map scenarios to requirements and identify unresolved assumptions without claiming approval.
+Check completeness against the original user request, not only the proposal. Account for each
+requested behavior and constraint; name omitted behavior, exclusions and unresolved assumptions
+in the artifact rather than silently narrowing scope or treating an earlier artifact as approval.
 Hand off acceptance evidence needed by design, tasks and verification.
 Read and investigate whatever the specification needs. This phase specifies, so do not
 implement the change here.

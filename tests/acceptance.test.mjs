@@ -15,6 +15,134 @@ function fixture() {
   const reported = ['npm test'];
   return { data, accepted, choices, steps, result, reported };
 }
+
+function structuredFixture() {
+  const f = fixture();
+  const planned = f.data.deliverables.map(({ check, ...step }) => ({ ...step,
+    checks: [{ id: 'C1', command: check, requirement: 'required' }] }));
+  const report = structuredClone(f.result);
+  for (const row of [...report.scenarios, ...report.steps, ...report.decisions]) row.checks = ['E1'];
+  report.checkResults = [{ checkID: 'C1', disposition: 'passed', executions: ['E1'] }];
+  report.supplementalChecks = [];
+  const checks = [{ id: 'E1', command: 'npm test', exit: 0 }];
+  const held = { accepted: f.accepted, choices: f.choices, planned, verificationVersion: 1 };
+  return { planned, report, checks, held, read: () => verifyReport(checks, report, held, 1) };
+}
+
+test('SA-2: structured checks preserve IDs and require complete held accounting', () => {
+  const f = structuredFixture();
+  assert.deepEqual(deliverables(f.planned, 1), f.planned);
+  const read = f.read();
+  assert.equal(read.verification.matched, true);
+  assert.deepEqual(read.ran, f.checks);
+  assert.deepEqual(read.verification.checkResults, f.report.checkResults);
+});
+
+for (const [name, mutate, error] of [
+  ['missing disposition', f => { f.report.checkResults = []; }, /omits planned check C1/],
+  ['duplicate disposition', f => { f.report.checkResults.push(f.report.checkResults[0]); }, /more than once/],
+  ['unknown check', f => { f.report.checkResults[0].checkID = 'invented'; }, /unknown planned check/],
+  ['unknown execution', f => { f.report.checkResults[0].executions = ['missing']; }, /unknown execution/],
+  ['duplicate execution ID', f => { f.checks.push({ ...f.checks[0] }); }, /execution ID.*more than once/],
+  ['missing execution ID', f => { delete f.checks[0].id; }, /execution ID/],
+  ['contradictory exit', f => { f.checks[0].exit = 1; }, /passed.*exit/],
+  ['unconditional waiver', f => { f.report.checkResults[0] = { checkID: 'C1', disposition: 'not-applicable', executions: [], reason: 'Not needed.' }; }, /unconditional/],
+  ['unsupported replacement', f => { f.report.checkResults[0].disposition = 'replaced'; f.report.checkResults[0].reason = 'The script was renamed.'; }, /equivalence/],
+  ['unaccounted supplemental failure', f => { f.checks.push({ id: 'E2', command: 'other', exit: 1 }); }, /unaccounted execution E2/],
+  ['held requirement downgrade', f => { f.report.checkResults[0].requirement = 'optional'; }, /requirement is unknown/],
+  ['command substitution without replacement', f => { f.checks[0].command = 'unrelated green check'; }, /replacement/],
+]) {
+  test(`SA-2: structured verification rejects ${name}`, () => {
+    const f = structuredFixture(); mutate(f);
+    assert.throws(f.read, error);
+  });
+}
+
+test('SA-2: required failure cannot hide behind unrelated green semantic assessments', () => {
+  const f = structuredFixture();
+  f.checks[0].exit = 1;
+  f.report.checkResults[0] = { checkID: 'C1', disposition: 'failed', executions: ['E1'], reason: 'Required test failed.' };
+  f.checks.push({ id: 'E2', command: 'semantic probe', exit: 0 });
+  f.report.supplementalChecks.push({ id: 'extra', requirement: 'optional', disposition: 'passed', executions: ['E2'] });
+  for (const row of [...f.report.scenarios, ...f.report.steps, ...f.report.decisions]) row.checks = ['E2'];
+  assert.equal(f.read().verification.matched, false);
+  f.held.planned[0].checks[0].requirement = 'optional';
+  assert.equal(f.read().verification.matched, true, 'optional failure stays visible without blocking independent semantic coverage');
+  f.report.steps[0].checks = ['E1'];
+  assert.throws(f.read, /did not pass/);
+});
+
+test('SA-2: blocked and interrupted required checks remain incomplete', () => {
+  for (const disposition of ['blocked', 'ran']) {
+    const f = structuredFixture();
+    f.report.checkResults[0] = { checkID: 'C1', disposition, executions: disposition === 'ran' ? ['E1'] : [], reason: 'Environment unavailable.' };
+    if (disposition === 'ran') f.checks[0].exit = null;
+    else f.checks.length = 0;
+    for (const row of [...f.report.scenarios, ...f.report.steps, ...f.report.decisions]) { row.status = 'not-verified'; row.checks = []; }
+    assert.equal(f.read().verification.matched, false);
+  }
+});
+
+test('SA-2: conditional waiver and executed equivalent replacement are explicit', () => {
+  const f = structuredFixture();
+  f.held.planned[0].checks.push({ id: 'C2', command: 'windows check', requirement: 'required', appliesWhen: 'Target is Windows.' });
+  f.report.checkResults.push({ checkID: 'C2', disposition: 'not-applicable', executions: [], reason: 'Target configuration is Linux-only, as defined in deployment.yaml.' });
+  assert.equal(f.read().verification.matched, true);
+  f.report.checkResults[0] = { checkID: 'C1', disposition: 'replaced', executions: ['E1'], reason: 'The package script was renamed.', equivalence: 'The renamed script runs the same test files and assertions.' };
+  f.checks[0].command = 'npm run renamed-test';
+  assert.equal(f.read().verification.matched, true);
+  f.checks[0].exit = null;
+  assert.throws(f.read, /replaced.*exit/);
+});
+
+test('SA-2: retries retain failed executions and use the final result without command ambiguity', () => {
+  const f = structuredFixture();
+  f.checks.unshift({ id: 'E0', command: 'npm test', exit: 1 });
+  f.report.checkResults[0].executions = ['E0', 'E1'];
+  f.report.checkResults[0].reason = 'Retried after the external test service recovered.';
+  assert.equal(f.read().verification.matched, true);
+  assert.equal(f.read().ran[0].exit, 1);
+  f.report.checkResults[0].executions.reverse();
+  assert.throws(f.read, /execution order/);
+});
+
+test('SA-2: one actual integration execution can answer multiple held checks without fabrication', () => {
+  const f = structuredFixture();
+  f.held.planned[0].checks.push({ id: 'C2', command: 'npm test', requirement: 'required' });
+  f.report.checkResults.push({ checkID: 'C2', disposition: 'passed', executions: ['E1'] });
+  assert.equal(f.read().verification.matched, true);
+  assert.equal(f.read().ran.length, 1);
+});
+
+test('SA-2: a latest failed retry cannot borrow an earlier green execution for acceptance', () => {
+  const f = structuredFixture();
+  f.checks.push({ id: 'E2', command: 'npm test', exit: 1 });
+  f.report.checkResults[0] = { checkID: 'C1', disposition: 'failed', executions: ['E1', 'E2'], reason: 'The repeat exposed a failure.' };
+  assert.throws(f.read, /did not pass/);
+  for (const row of [...f.report.scenarios, ...f.report.steps, ...f.report.decisions]) row.status = 'not-verified';
+  assert.equal(f.read().verification.matched, false);
+});
+
+test('SA-2: supplemental failures are explicit and cannot share held execution evidence', () => {
+  const f = structuredFixture();
+  f.checks.push({ id: 'E2', command: 'additional probe', exit: 1 });
+  f.report.supplementalChecks.push({ id: 'extra', requirement: 'optional', disposition: 'failed', executions: ['E2'], reason: 'Optional probe failed.' });
+  assert.equal(f.read().verification.matched, true);
+  f.report.supplementalChecks[0].requirement = 'required';
+  assert.equal(f.read().verification.matched, false);
+  f.report.supplementalChecks[0].executions = ['E1'];
+  assert.throws(f.read, /more than once/);
+});
+
+test('SA-2: plan IDs are globally unique and versioned plans cannot downgrade', () => {
+  const f = structuredFixture();
+  assert.throws(() => deliverables(traceFixture().deliverables, 1), /checks/);
+  assert.throws(() => deliverables([...f.planned, { ...f.planned[0], id: 'second' }], 1), /planned check ID.*more than once/);
+  assert.throws(() => deliverables(f.planned), /checks is unknown/);
+  const legacy = fixture();
+  assert.throws(() => verifyReport([{ command: 'npm test', exit: 0 }], legacy.result,
+    { accepted: legacy.accepted, choices: legacy.choices, planned: f.planned, verificationVersion: 1 }, 1), /execution ID|checkResults/);
+});
 test('compact acceptance map validates scenario/decision/dependency applicability', () => {
   const f = fixture(); validatePlan(f.accepted, f.choices, f.steps);
   assert.equal(verification(f.result, f.accepted, f.choices, f.steps, f.reported).matched, true);

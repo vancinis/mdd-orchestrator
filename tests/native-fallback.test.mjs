@@ -51,6 +51,8 @@ test('three settled attempts select one native explore and advance into the risk
   const args = await runner.before(call, runner.status(runtime.sessionID).task);
   assert.match(args.prompt, /inspect git status and git diff and preserve partial work/);
   assert.match(args.prompt, /Do not delegate, load skills, or call any MDD tools/);
+  assert.doesNotMatch(args.prompt, /^Optional packaged skills for this phase/m);
+  assert.match(args.prompt, /overrides ordinary skill and report-checker guidance/);
   assert.doesNotMatch(args.prompt, /report it with mdd_phase_result/);
   await runner.after(call, args, result(fallback));
   const next = runner.status(runtime.sessionID);
@@ -80,6 +82,8 @@ test('three settled attempts select one native general and reset at the next pha
   const args = await runner.before(call, runner.status(runtime.sessionID).task);
   assert.match(args.prompt, /inspect git status and git diff and preserve partial work/);
   assert.match(args.prompt, /Do not delegate, load skills, or call any MDD tools/);
+  assert.doesNotMatch(args.prompt, /^Optional packaged skills for this phase/m);
+  assert.match(args.prompt, /Planning is read-only for project sources/);
   assert.doesNotMatch(args.prompt, /report it with mdd_phase_result/);
   await runner.after(call, args, result(fallback));
   const next = runner.status(runtime.sessionID);
@@ -167,6 +171,17 @@ test('standalone investigation has a bounded native explore fallback and report-
   assert.equal(nextAction(runner.status(runtime.sessionID)).tool, 'mdd_phase_result');
   await runner.submit({ result: result({ phase: 'mdd-explore' }) }, runtime);
   assert.equal(runner.status(runtime.sessionID).state, 'not-started');
+});
+
+test('SA-1: standalone fallback preserves its JSON envelope and omits inaccessible skills', async () => {
+  const runner = new PhaseRunner({ parent: async () => {}, result: async (_r, _c, _p, output) => output, stopped: async () => true });
+  await runner.explore({ purpose: 'Inspect the CLI' }, runtime);
+  for (let i = 0; i < 3; i++) await fail(runner, i);
+  const args = await runner.before({ sessionID: runtime.sessionID, callID: 'fallback-contract' }, runner.status(runtime.sessionID).task);
+  assert.match(args.prompt, /Return exactly one JSON object, no fences/);
+  assert.doesNotMatch(args.prompt, /^Optional packaged skills for this phase/m);
+  assert.match(args.prompt, /searched scope, concrete source references and coverage gaps/);
+  assert.match(args.prompt, /overrides ordinary skill and report-checker guidance/);
 });
 
 test('only owned native prompts are collapsed; unrelated native sessions are untouched', async t => {

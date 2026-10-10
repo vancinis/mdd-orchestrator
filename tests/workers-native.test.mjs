@@ -33,6 +33,13 @@ for (const contextual of [false, true]) test(`independent exploration overlaps a
   assert.equal(ready.tasks?.length, 2);
   const calls = ['one', 'two'].map(callID => ({ sessionID: 'parent', callID }));
   const args = await Promise.all(ready.tasks.map((task, index) => f.runner.before(calls[index], task)));
+  for (const [index, task] of args.entries()) {
+    assert.doesNotMatch(task.prompt, /^Optional packaged skills for this phase/m);
+    assert.match(task.prompt, /searched scope, concrete source references and coverage gaps/);
+    assert.deepEqual(JSON.parse(task.prompt.match(/^Assigned read-only work item: (.*)$/m)[1]), f.items[index]);
+    assert.match(task.prompt, /Read\/grep only; no mutations, commands, custom\/MCP tools/);
+    assert.equal(task.prompt.includes('Return exactly one JSON object, no fences'), contextual);
+  }
   assert.equal(f.runner.workerAssignment(calls[0]).phase, 'mdd-explore');
   await f.runner.after(calls[1], args[1], reportDocument({ evidenceSummary: 'Second findings', artifact: 'Second component findings.' }));
   assert.equal(f.runner.status('parent').phase, 'mdd-explore');
@@ -58,6 +65,7 @@ for (const contextual of [false, true]) test(`ineligible exploration stays singu
     assert.equal(f.runner.status('parent').tasks, undefined);
     assert.equal(f.runner.status('parent').task.subagent_type, 'mdd-explore');
     const args = await f.runner.before({ sessionID: 'parent', callID: 'serial' }, f.runner.status('parent').task);
+    assert.match(args.prompt, /^Optional packaged skills for this phase/m);
     if (workItems) assert.ok(args.prompt.includes(JSON.stringify(workItems)));
   }
 });
@@ -119,6 +127,12 @@ test('contextual exploration on an accepted run leaves the main plan and approva
   const ready = f.runner.status('parent');
   const calls = ['one', 'two'].map(callID => ({ sessionID: 'parent', callID }));
   const args = await Promise.all(ready.tasks.map((task, index) => f.runner.before(calls[index], task)));
+  for (const task of args) {
+    assert.doesNotMatch(task.prompt, /^Optional packaged skills for this phase/m);
+    assert.match(task.prompt, /Contextual exploration only/);
+    assert.match(task.prompt, /This phase reports no structured data/);
+    assert.doesNotMatch(task.prompt, /Return exactly one JSON object/);
+  }
   for (const index of [1, 0]) await f.runner.after(calls[index], args[index], reportDocument({ evidenceSummary: 'Findings', artifact: 'Contextual findings.' }));
   assert.deepEqual(f.runner.status('parent').workflow, initial);
   // Every run opens with its own main exploration; a contextual one never consumes or moves it.

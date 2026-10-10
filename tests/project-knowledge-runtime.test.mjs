@@ -7,12 +7,13 @@ import { PhaseRunner } from '../dist/phase-runner.js';
 import { NativeIntake } from '../dist/native-intake.js';
 import { CheckpointStore, sealResumeData } from '../dist/checkpoint.js';
 import { RunOwnershipStore } from '../dist/run-ownership.js';
+import { RunDossierStore } from '../dist/run-dossier.js';
 import { ProgressGuard } from '../dist/progress.js';
 import { defaultSettings } from '../dist/settings.js';
 import { saveGlobalSettings } from '../dist/global-settings.js';
 import { recordTelemetry } from '../dist/telemetry.js';
 import { captureKnowledgeDependencies, knowledgeObservation, selectKnowledge, supplementKnowledge } from '../dist/project-knowledge.js';
-import { answers, memoryServer, throughRiskStop, traceFixture, reportDocument } from './adapter-fixture.mjs';
+import { answers, memoryServer, throughRiskStop, structuredTraceFixture as traceFixture, structuredVerificationFixture, reportDocument } from './adapter-fixture.mjs';
 
 const objective = 'Inspect parser validation boundaries';
 const secretBody = 'PRIVATE_REUSABLE_BODY: parser validation rejects unknown fields.';
@@ -63,6 +64,7 @@ async function prepareApply(f) {
   await f.start(); await throughRiskStop(f.runner, f.runtime.sessionID, 'low', { release: true });
   const trace = traceFixture(), base = trace.deliverables[0];
   trace.deliverables = ['a', 'b'].map((name, i) => ({ ...base, id: `T${i + 1}`, description: `Implement parser validation ${name}`,
+    checks: base.checks.map(check => ({ ...check, id: `${name}-check` })),
     path: `src/${name}.ts`, parallel: { complete: true, reads: [], writes: [`src/${name}.ts`] } }));
   const planCall = { sessionID: f.runtime.sessionID, callID: 'plan' };
   await f.runner.after(planCall, await f.runner.before(planCall, f.runner.status(planCall.sessionID).task),
@@ -352,7 +354,8 @@ for (const lane of ['ordinary', 'exploration', 'apply']) test(`PK4 actual ${lane
   assert.deepEqual(events.findLast(event => event.event === 'knowledge-dispatch').knowledge, status.knowledge);
   const skill = JSON.parse(supplement.split('\n').find(line => line.startsWith('{') && line.includes('"skill"')));
   assert.deepEqual(skill.tools, lane === 'apply' ? ['mdd_worker_edit'] : undefined);
-  assert.ok(sent.prompt.includes(lane === 'apply' ? 'mdd-cleanup' : 'mdd-doc'), 'packaged phase skills remain mandatory');
+  if (lane === 'ordinary') assert.ok(sent.prompt.includes('mdd-doc'), 'ordinary lanes retain packaged phase skill hints');
+  else assert.doesNotMatch(sent.prompt, /mdd-doc|cognitive-doc-design|mdd-cleanup/, 'scoped workers receive advisory excerpts without skill-reading instructions');
   if (lane !== 'ordinary') {
     assert.equal(JSON.stringify(f.runner.workerAssignment({ sessionID: f.runtime.sessionID, callID: 'catalog' })).includes('skills'), false);
     const second = await f.runner.before({ sessionID: f.runtime.sessionID, callID: 'other-member' }, ready.tasks[1]);
@@ -482,6 +485,61 @@ test('PK4 lifecycle isolates successive standalone investigations', async t => {
   await settleKnowledgeTask(f, 'solo-parser');
   await f.runner.explore({ purpose: 'Inspect billing workflows' }, f.runtime);
   assert.equal(f.runner.status(f.runtime.sessionID).knowledge, undefined);
+});
+
+test('PK4 lifecycle isolates explicit failed-Verify continuation and fresh start from prior diagnostics', async t => {
+  const f = await fixture(t), sessionID = f.runtime.sessionID;
+  f.options.dossier = new RunDossierStore(f.root);
+  f.seed(['src/a.ts'], secretBody, ['mdd-explore', 'mdd-verify']);
+  await f.start(); await throughRiskStop(f.runner, sessionID, 'low', { release: true });
+  const settle = async (callID, data) => {
+    const call = { sessionID, callID };
+    const sent = await f.runner.before(call, f.runner.status(sessionID).task);
+    await f.runner.after(call, sent, reportDocument({ evidenceSummary: 'Recorded parser evidence.', artifact: 'Parser validation boundaries.', ...data }));
+    f.runner.releaseSettled(sessionID, callID);
+    return sent;
+  };
+  const trace = traceFixture('src/a.ts', 'parser');
+  await settle('plan-parser', trace);
+  await settle('apply-parser', { completed: ['parser'], changes: ['src/a.ts'] });
+  const evidence = structuredVerificationFixture(trace);
+  evidence.checks[0].exit = 1;
+  evidence.verification.checkResults[0].disposition = 'failed';
+  evidence.verification.checkResults[0].reason = 'The required parser check failed.';
+  for (const row of [...evidence.verification.scenarios, ...evidence.verification.steps, ...evidence.verification.decisions]) row.status = 'not-verified';
+  const dispatched = await settle('verify-parser', { ...evidence, outcome: 'failed' });
+  assert.ok(dispatched.prompt.includes(secretBody));
+  const failed = f.runner.status(sessionID);
+  assert.equal(failed.state, 'blocked');
+  assert.equal(failed.verification.matched, false);
+  assert.deepEqual(failed.knowledge.selectedReferences, ['engram:1']);
+  const queryCount = f.queries.length;
+  await f.runner.withReset(sessionID, async () => f.runner.reset(sessionID, 'continue', {
+    runID: failed.runID, userMessageID: 'continue-parser', userText: 'Continue despite the failed parser check.', kind: 'continue',
+  }));
+  assert.equal(f.runner.status(sessionID).state, 'continued-with-failed-verification');
+  assert.equal(f.runner.status(sessionID).knowledge, undefined);
+  assert.equal(f.runner.prFacts(sessionID, failed.runID).verified, false);
+  assert.deepEqual(f.options.dossier.readContinued(sessionID, failed.runID).executedChecks, evidence.checks);
+  f.settings.profiles.default.answers = { ...answers };
+  const intake = new NativeIntake(f.runner, { intake: async (_runtime, requirements) => {
+    assert.equal(requirements, objective);
+    return 'fresh-parser';
+  } }, f.settings);
+  await intake.start({ requirements: objective }, f.runtime, 'fresh-assistant');
+  const fresh = f.runner.status(sessionID);
+  assert.equal(fresh.state, 'ready');
+  assert.equal(fresh.verificationVersion, 1);
+  assert.equal(fresh.knowledge, undefined);
+  assert.equal(f.queries.length, queryCount, 'continuation and start do not reuse or resolve dispatch knowledge');
+  fs.writeFileSync(join(f.root, 'src/a.ts'), 'changed after failed verification');
+  const next = await f.runner.before({ sessionID, callID: 'fresh-explore' }, fresh.task);
+  assert.equal(f.queries.length, queryCount + 1, 'fresh dispatch resolves knowledge again');
+  assert.equal(next.prompt.includes(secretBody), false);
+  assert.deepEqual(f.runner.status(sessionID).knowledge.selectedReferences, []);
+  assert.equal(f.runner.status(sessionID).knowledge.staleRejects, 1);
+  assert.ok(dispatched.prompt.includes(secretBody), 'historical dispatched bytes remain unchanged');
+  assert.equal(f.runner.prFacts(sessionID, failed.runID).verified, false);
 });
 
 test('PK4 lifecycle isolates contextual investigation from its held workflow in both directions', async t => {

@@ -6,7 +6,21 @@ mode: subagent
 Compare requirements and applicable plan/specification/design/tasks against apply evidence
 and project code. Run the planned tests and checks. Record each command you actually ran,
 its exit outcome, the relevant evidence, and every skipped check with its reason.
-Report checks as [{command,exit}]; never report a command you did not run.
+Follow the dispatched contract version; never report a command you did not run.
+For verificationVersion 1, give each actual execution its own ID, command and exit (null when
+interrupted). Assessments reference execution IDs, not command names. Account once for each held
+check in checkResults, and account for all additional executions in supplementalChecks with
+explicit requiredness. Preserve failed attempts; explain retries and use the final result.
+Use passed/failed/ran/blocked/not-applicable/replaced consistently with actual execution evidence.
+Required applicable failed, interrupted, blocked or missing checks cannot support PASS. Optional
+failures remain visible and cannot support verified rows; semantic acceptance coverage is separate.
+Non-applicability needs the held condition and a source-based reason. An unconditional check
+cannot be waived. Replacement needs an actually executed successful check and an equivalence
+rationale, never a chain or a fabricated execution. Shared integration evidence keeps the same
+complete attempt history across held checks; supplemental evidence cannot downgrade the plan.
+Without a version, preserve the legacy command-based schema and its weaker evidence strength;
+never synthesize IDs, requiredness or proof for historical evidence. Runtime validation checks
+consistency of your report, not independent execution attestation or truth of applicability.
 Never infer passing tests from intent, prior summaries or missing output. Report uncovered
 requirements, failures, limitations and blockers; do not invent coverage, and state a
 confidence level only as far as the checks you ran support it.

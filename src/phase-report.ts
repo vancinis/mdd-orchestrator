@@ -1,4 +1,5 @@
-import { PHASE_RESULT_FIELDS, FIELD_SCHEMA } from './acceptance.js';
+import { PHASE_RESULT_FIELDS, FIELD_SCHEMA, STRUCTURED_FIELD_SCHEMA } from './acceptance.js';
+import { verificationVersion, type VerificationVersion } from './phase-evidence.js';
 import type { Phase } from './policy.js';
 import { parseNarrative } from './reporting.js';
 import type { Narrative } from './reporting.js';
@@ -231,8 +232,9 @@ function jsonDocument(text: string): Record<string, unknown> | undefined {
 }
 
 /** The instructions an actor is given for this phase, in the order the document is written. */
-export function reportFormatLines(phase: Phase): string[] {
-  const fields = PHASE_RESULT_FIELDS[phase];
+export function reportFormatLines(phase: Phase, version?: VerificationVersion): string[] {
+  verificationVersion(version);
+  const fields = [...PHASE_RESULT_FIELDS[phase], ...(version && PHASE_RESULT_FIELDS[phase].length ? ['verificationVersion'] : [])];
   return [
     'Report this phase as a short markdown document, not as a JSON object. Use these exact headings, each once:',
     '"## MDD Outcome" holding exactly passed or failed.',
@@ -246,7 +248,7 @@ export function reportFormatLines(phase: Phase): string[] {
     `"## MDD Artifact" holding the actual deliverable of this phase, in ordinary markdown. ${fields.length ? 'MDD appends its own links section to this text. ' : ''}Headings inside it must not reuse an "MDD ..." name.`,
     ...(fields.length
       ? [`"## MDD Data" holding ONE fenced json block with exactly these keys: ${fields.join(', ')}. No other key is accepted.`,
-         ...fields.map(field => `  ${FIELD_SCHEMA[field]!}`)]
+         ...fields.map(field => `  ${(version ? STRUCTURED_FIELD_SCHEMA[field] : undefined) ?? FIELD_SCHEMA[field]!}`)]
       : [`This phase reports no structured data, so omit "## MDD Data" entirely.`]),
     'Optional "## MDD Concerns" holding a fenced json array of at most eight {category,evidence,impact} entries, category objective/integrations/sensitive-data/permissions. Advisory only: concerns never change the route or the evidence and never request governance for ordinary implementation choices.',
     'Optional "## MDD Questions" holding a fenced json array of at most eight {question,why,options:[{label,description,recommended?}],multiple?,deferrable?} entries: decisions only the user can make that the work genuinely needs, instead of guessing them. "why" states what depends on the answer. Leave options empty for an open-ended answer; set multiple when several options can apply together, and deferrable only when a later phase can safely decide. Never ask what reading the request or the repository answers, and never ask for approval. The coordinator asks the user and hands the answers to the next phase.',

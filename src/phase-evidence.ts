@@ -1,23 +1,49 @@
 import { objectWithKeys } from './validation.js';
-import { raise, readVerification, references, shortText } from './acceptance.js';
+import { evidenceID, raise, readVerification, references, shortText } from './acceptance.js';
 import type { HeldPlan, Verification } from './acceptance.js';
 import { parseParallelScope } from './worker-batch.js';
 import type { ParallelScope } from './worker-batch.js';
 
-export type Deliverable = { id: string; description: string; path: string; check: string; scenarios: string[]; decisions: string[]; dependsOn: string[]; parallel?: ParallelScope };
-export type Check = { command: string; exit: number | null };
+export type VerificationVersion = 1;
+export const VERIFICATION_VERSION: VerificationVersion = 1;
+/** Absence is the recorded legacy contract, never an invitation to upgrade old evidence. */
+export function verificationVersion(value: unknown): VerificationVersion | undefined {
+  if (value === undefined || value === VERIFICATION_VERSION) return value;
+  throw new Error('Unsupported verification contract version.');
+}
+export type PlannedCheck = { id: string; command: string; requirement: 'required' | 'optional'; appliesWhen?: string };
+export type Deliverable = { id: string; description: string; path: string; scenarios: string[]; decisions: string[]; dependsOn: string[]; parallel?: ParallelScope } &
+  ({ check: string; checks?: never } | { checks: PlannedCheck[]; check?: never });
+export type Check = { id?: string; command: string; exit: number | null };
 
-export function deliverables(value: unknown): Deliverable[] {
+function plannedChecks(value: unknown, seen: Set<string>): PlannedCheck[] {
+  if (!Array.isArray(value) || !value.length || value.length > 32) throw new Error('Planned checks requires 1–32 entries per deliverable.');
+  return value.map(value => {
+    const item = objectWithKeys(value, 'planned check', ['id', 'command', 'requirement', 'appliesWhen']);
+    const id = evidenceID(item.id, 'planned check ID');
+    if (seen.has(id)) throw new Error(`planned check ID ${id} is used more than once.`);
+    seen.add(id);
+    if (seen.size > 64) throw new Error('Plan exceeds 64 checks.');
+    if (item.requirement !== 'required' && item.requirement !== 'optional') throw new Error(`Check ${id} needs requirement required or optional.`);
+    return { id, command: shortText(item.command, `command of ${id}`, Infinity), requirement: item.requirement,
+      ...(item.appliesWhen !== undefined ? { appliesWhen: shortText(item.appliesWhen, `applicability of ${id}`) } : {}) };
+  });
+}
+
+export function deliverables(value: unknown, version?: VerificationVersion): Deliverable[] {
+  verificationVersion(version);
   if (!Array.isArray(value) || !value.length || value.length > 32) throw new Error('Planning requires 1–32 explicit deliverables.');
   const ids = new Set<string>();
+  const checkIDs = new Set<string>();
   return value.map(item => {
-    const entry = objectWithKeys(item, 'deliverable', ['id', 'description', 'path', 'check', 'scenarios', 'decisions', 'dependsOn', 'parallel']);
+    const entry = objectWithKeys(item, 'deliverable', ['id', 'description', 'path', version ? 'checks' : 'check', 'scenarios', 'decisions', 'dependsOn', 'parallel']);
     if (typeof entry.id !== 'string' || !/^[a-zA-Z0-9_-]{1,64}$/.test(entry.id)) throw new Error(`Deliverable id ${JSON.stringify(String(entry.id).slice(0, 64))} must be a stable short identifier of 1–64 letters, digits, underscores or hyphens.`);
     if (ids.has(entry.id)) throw new Error(`Deliverable id ${entry.id} is used more than once.`);
     ids.add(entry.id);
     const parallel = Object.hasOwn(entry, 'parallel') ? parseParallelScope(entry.parallel) : undefined;
     return { id: entry.id, description: shortText(entry.description, `description of deliverable ${entry.id}`),
-      path: shortText(entry.path, `implementation target of deliverable ${entry.id}`, 400), check: shortText(entry.check, `planned check command of deliverable ${entry.id}`, Infinity),
+      path: shortText(entry.path, `implementation target of deliverable ${entry.id}`, 400),
+      ...(version ? { checks: plannedChecks(entry.checks, checkIDs) } : { check: shortText(entry.check, `planned check command of deliverable ${entry.id}`, Infinity) }),
       scenarios: references(entry.scenarios, `scenarios of deliverable ${entry.id}`), decisions: references(Object.hasOwn(entry, 'decisions') ? entry.decisions : [], `decisions of deliverable ${entry.id}`, true), dependsOn: references(Object.hasOwn(entry, 'dependsOn') ? entry.dependsOn : [], `dependencies of deliverable ${entry.id}`, true),
       // An omitted dependency declaration is not an attestation, even after JSON/checkpoint replay.
       ...(parallel && Object.hasOwn(entry, 'dependsOn') ? { parallel } : {}) };
@@ -37,7 +63,8 @@ export function deliverables(value: unknown): Deliverable[] {
  * `reported`/`passed` keep the commands as stated, so assessments citing them are judged against
  * what the report says it ran even when another entry of the list is malformed.
  */
-function readExecuted(value: unknown): { checks: Check[]; problems: string[]; reported?: string[]; passed?: string[] } {
+function readExecuted(value: unknown, version?: VerificationVersion): { checks: Check[]; problems: string[]; reported?: string[]; passed?: string[] } {
+  verificationVersion(version);
   if (value === undefined) return { checks: [], problems: [], reported: [], passed: [] };
   if (!Array.isArray(value) || value.length > 32) {
     return { checks: [], problems: [`Report executed checks as a list of at most 32 entries${Array.isArray(value) ? `; this report lists ${value.length}` : ''}.`] };
@@ -46,29 +73,40 @@ function readExecuted(value: unknown): { checks: Check[]; problems: string[]; re
   const problems: string[] = [];
   const reported: string[] = [];
   const passed: string[] = [];
+  const ids = new Set<string>();
   value.forEach((item, index) => {
     let entry: Record<string, unknown>;
-    try { entry = objectWithKeys(item, `checks[${index}]`, ['command', 'exit']); }
+    try { entry = objectWithKeys(item, `checks[${index}]`, [...(version ? ['id'] : []), 'command', 'exit']); }
     catch (error) { problems.push(error instanceof Error ? error.message : String(error)); return; }
     const exit = entry.exit ?? null;
-    if (typeof entry.command === 'string') {
-      reported.push(entry.command.trim());
-      if (exit === 0) passed.push(entry.command.trim());
+    const reference = version ? entry.id : entry.command;
+    if (typeof reference === 'string') {
+      reported.push(reference.trim());
+      if (exit === 0) passed.push(reference.trim());
     }
     const own: string[] = [];
+    let id: string | undefined;
+    if (version) {
+      try {
+        id = evidenceID(entry.id, `checks[${index}] execution ID`);
+        if (ids.has(id)) throw new Error(`execution ID ${id} is used more than once.`);
+        ids.add(id);
+      } catch (error) { own.push(error instanceof Error ? error.message : String(error)); }
+      if (!Object.hasOwn(entry, 'exit')) own.push(`checks[${index}].exit is missing; report null for an interrupted execution.`);
+    }
     if (exit !== null && !Number.isInteger(exit)) own.push(`checks[${index}].exit must be an integer exit code, or null when the command did not finish; it read ${JSON.stringify(exit) ?? String(exit)}.`);
     let command: string | undefined;
     try { command = shortText(entry.command, `checks[${index}].command`, Infinity); }
     catch (error) { own.push(error instanceof Error ? error.message : String(error)); }
     problems.push(...own);
-    if (!own.length) checks.push({ command: command!, exit: exit as number | null });
+    if (!own.length) checks.push({ ...(id ? { id } : {}), command: command!, exit: exit as number | null });
   });
   return { checks, problems, reported, passed };
 }
 
 /** Executed checks as reported. MDD records the claim and shows it as a claim; it neither re-runs the command nor presents an exit code as proof of behaviour. */
-export function executed(value: unknown): Check[] {
-  const read = readExecuted(value);
+export function executed(value: unknown, version?: VerificationVersion): Check[] {
+  const read = readExecuted(value, version);
   raise(read.problems, 'The executed checks');
   return read.checks;
 }
@@ -78,11 +116,23 @@ export function executed(value: unknown): Check[] {
  * ran and the verification that cites them are written together and fixed together. With a held
  * plan this is the real validation; without one it is the form `mdd_check_report` can answer.
  */
-export function verifyReport(checks: unknown, report: unknown, held?: HeldPlan): { ran: Check[]; verification?: Verification } {
-  const ran = readExecuted(checks);
-  const read = readVerification(report, held, ran.reported, ran.passed);
+export function verifyReport(checks: unknown, report: unknown, held?: HeldPlan, version = held?.verificationVersion): { ran: Check[]; verification?: Verification } {
+  if (held && version !== held.verificationVersion) throw new Error('Verification version contradicts the held contract.');
+  if (held) deliverables(held.planned, version);
+  const ran = readExecuted(checks, version);
+  const read = readVerification(report, held, ran.reported, ran.passed, version, ran.problems.length ? undefined : ran.checks);
   raise([...ran.problems, ...read.problems], 'The verification report');
   return { ran: ran.checks, ...(read.verification ? { verification: read.verification } : {}) };
+}
+
+/** Replay checks the recorded contract without manufacturing IDs or strengthening legacy evidence. */
+export function retainedVerification(value: unknown, checks: unknown, held: HeldPlan): Verification {
+  const entry = objectWithKeys(value, 'retained verification', ['scenarios', 'steps', 'decisions', 'changes', 'limits', 'matched',
+    ...(held.verificationVersion ? ['checkResults', 'supplementalChecks'] : [])]);
+  const { matched, ...report } = entry;
+  const checked = verifyReport(checks, report, held).verification!;
+  if (matched !== checked.matched) throw new Error('Retained verification match is inconsistent.');
+  return checked;
 }
 
 export type Delivered = { what: string; implies?: string };

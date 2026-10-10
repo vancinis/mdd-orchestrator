@@ -6,9 +6,9 @@ import type { WorkflowEvent } from './workflow.js';
 import { objectWithKeys, ValidationError } from './validation.js';
 import type { Progress } from './progress.js';
 import { ProgressGuard } from './progress.js';
-import { acceptance, decisions, validatePlan, verification } from './acceptance.js';
+import { acceptance, decisions, validatePlan } from './acceptance.js';
 import type { Acceptance, Decision, Verification } from './acceptance.js';
-import { deliverables, delivered, executed } from './phase-evidence.js';
+import { deliverables, delivered, executed, retainedVerification, verificationVersion, type VerificationVersion } from './phase-evidence.js';
 import type { ChangedFile, Check, Deliverable, Delivered } from './phase-evidence.js';
 import { concerns } from './concerns.js';
 import { evidenceCoverage, renderReport } from './reporting.js';
@@ -65,6 +65,7 @@ export type Checkpoint = {
 
 /** Stored content is data, never a live ArtifactStore reference or a consent receipt. */
 export type ResumeData = {
+  verificationVersion?: VerificationVersion;
   directory: string; worktree: string; userMessageID: string; requirements: string;
   memoryProject?: string;
   context: { label: string; content: string; source: 'coordinator' }[];
@@ -236,7 +237,8 @@ function validateRisk(value: unknown, workflow: Workflow, runID: string): { verd
 function validateData(value: unknown, workflow: Workflow, runID: string): ResumeData {
   const data = objectWithKeys(value, 'checkpoint data', ['directory', 'worktree', 'userMessageID', 'requirements', 'memoryProject', 'context',
     'dependencies', 'contexts', 'acceptance', 'decisions', 'planned', 'evidence', 'verification', 'executedChecks',
-    'changedFiles', 'calls', 'usedMessages', 'proposed', 'rework', 'workerPolicy', 'workerState', 'risk']);
+    'changedFiles', 'calls', 'usedMessages', 'proposed', 'rework', 'workerPolicy', 'workerState', 'risk', 'verificationVersion']);
+  const version = verificationVersion(data.verificationVersion);
   if (![data.directory, data.worktree].every(item => bounded(item, 4096)) || !identifier(data.userMessageID) ||
       !bounded(data.requirements, 12000)) throw new ValidationError('Invalid checkpoint identity or requirements.');
   if (data.memoryProject !== undefined && (typeof data.memoryProject !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(data.memoryProject))) throw new ValidationError('Invalid checkpoint memory project.');
@@ -262,7 +264,7 @@ function validateData(value: unknown, workflow: Workflow, runID: string): Resume
   const accepted = data.acceptance === undefined ? undefined : acceptance(data.acceptance);
   if (!accepted && (list(data.decisions, 32, 'decisions').length || list(data.planned, 32, 'plan').length || data.verification !== undefined)) throw new ValidationError('Checkpoint plan has no acceptance.');
   const choices = accepted ? decisions(data.decisions, accepted) : [];
-  const planned = list(data.planned, 32, 'plan').length ? deliverables(data.planned) : [];
+  const planned = list(data.planned, 32, 'plan').length ? deliverables(data.planned, version) : [];
   if (planned.length) validatePlan(accepted!, choices, planned);
   const progress = workflow.applyProgress();
   if (progress && !isDeepStrictEqual(progress.planned, planned.map(({ id, dependsOn }) => ({ id, dependsOn })))) {
@@ -278,13 +280,14 @@ function validateData(value: unknown, workflow: Workflow, runID: string): Resume
     throw new ValidationError('Checkpoint omits verification findings.');
   }
   evidenceCoverage(data.evidence as Evidence);
-  const checks = executed(data.executedChecks);
+  executed(data.executedChecks, version);
+  if (version && (data.executedChecks as Check[]).length && data.verification === undefined)
+    throw new ValidationError('Checkpoint execution evidence has no verification.');
   if (data.verification !== undefined) {
     if (!accepted || !planned.length) throw new ValidationError('Checkpoint verification has no held plan.');
-    const item = objectWithKeys(data.verification, 'checkpoint verification', ['scenarios', 'steps', 'decisions', 'changes', 'limits', 'matched']);
-    const { matched, ...report } = item;
-    const checked = verification(report, accepted, choices, planned, checks.map(check => check.command), checks.filter(check => check.exit === 0).map(check => check.command));
-    if (matched !== checked.matched) throw new ValidationError('Checkpoint verification match is inconsistent.');
+    const checked = retainedVerification(data.verification, data.executedChecks, { accepted, choices, planned, verificationVersion: version });
+    if (version && results.filter(result => result.phase === 'mdd-verify').at(-1)?.outcome === 'passed' && !checked.matched)
+      throw new ValidationError('Checkpoint passed verification contradicts required checks or semantic coverage.');
   }
   if (!Number.isSafeInteger(data.changedFiles) || (data.changedFiles as number) < 0 || (data.changedFiles as number) > 100000) throw new ValidationError('Invalid checkpoint changed-file count.');
   for (const key of ['calls', 'usedMessages'] as const) {

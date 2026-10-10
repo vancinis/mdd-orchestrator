@@ -10,7 +10,7 @@ import { once } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
 import { opencodeBinary } from '../dist/model-catalog.js';
 import { defaultSettings } from '../dist/settings.js';
-import { reportDocument, riskReport, traceFixture } from './adapter-fixture.mjs';
+import { reportDocument, riskReport, structuredTraceFixture as traceFixture } from './adapter-fixture.mjs';
 import { CheckpointStore } from '../dist/checkpoint.js';
 import { PhaseRunner } from '../dist/phase-runner.js';
 import { ProgressGuard } from '../dist/progress.js';
@@ -79,9 +79,9 @@ export class ScriptedProvider {
     if (agent === 'mdd-plan') {
       const trace = traceFixture('first.txt', 'first');
       trace.deliverables[0].scenarios = ['S1'];
-      trace.deliverables[0].check = 'node check.mjs first';
+      trace.deliverables[0].checks[0].command = 'node check.mjs first';
       trace.deliverables.push({ ...trace.deliverables[0], id: 'second', path: 'second.txt', scenarios: ['S2'],
-        check: 'node check.mjs second', dependsOn: ['first'] });
+        checks: [{ id: 'second-check', command: 'node check.mjs second', requirement: 'required' }], dependsOn: ['first'] });
       return { text: reportDocument({ ...base, ...trace }) };
     }
     assert.ok(['mdd-apply', 'mdd-verify'].includes(agent), `Unexpected actor ${agent}`);
@@ -95,14 +95,18 @@ export class ScriptedProvider {
     assert.equal(last.role, 'tool');
     const check = JSON.parse(textContent(last.content));
     assert.equal(check.exit, 0, last.content);
+    // Assign identity to this observed workload result, not to an unexecuted planned command.
+    check.id = `execution-${step}`;
     if (agent === 'mdd-apply') return { text: reportDocument({ ...base, checks: [check], changes: [`${step}.txt`],
       ...(this.scenario === 'failed' ? { outcome: 'failed' } : { completed: [this.scenario === 'ambiguous' ? 'unknown' : step] }),
       delivered: { what: 'Fixture progress is preserved.', implies: 'The dependent actor can read the prior file.' } }) };
-    const assessment = { status: 'verified', checks: [check.command], assessment: 'Actual fixture command confirmed both files and their dependency.' };
+    const assessment = { status: 'verified', checks: [check.id], assessment: 'Actual fixture command confirmed both files and their dependency.' };
     return { text: reportDocument({ ...base, checks: [check], verification: {
       scenarios: ['first', 'second'].map((stepID, i) => ({ requirementID: 'R1', scenarioID: `S${i + 1}`, stepID, ...assessment })),
       steps: ['first', 'second'].map(stepID => ({ stepID, ...assessment })), decisions: [{ decisionID: 'D1', ...assessment }],
       changes: 'Both fixture deliverables are present.', limits: ['Scripted local provider; no external model evaluation.'],
+      checkResults: ['first-check', 'second-check'].map(checkID => ({ checkID, disposition: 'replaced', executions: [check.id],
+        reason: 'Singular Verify runs the combined workload.', equivalence: 'The verify workload asserts both file contents and the dependency that the per-step workloads checked.' })), supplementalChecks: [],
     } }) };
   }
 }

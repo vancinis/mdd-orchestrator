@@ -2,7 +2,7 @@ import { boundedText, nonemptyText } from './phase-runner.js';
 import { acceptance, assertNoTraceSection, phaseFields, UNMATCHED_PASS } from './acceptance.js';
 import { concerns } from './concerns.js';
 import { openQuestions } from './open-questions.js';
-import { changed, deliverables, executed, verifyReport } from './phase-evidence.js';
+import { changed, deliverables, executed, verificationVersion, verifyReport } from './phase-evidence.js';
 import { narrativeOf, parsePhaseReport, parseRiskReport, parseSecurityReport, reportFormatLines } from './phase-report.js';
 import { parseRiskVerdict, riskReportFormatLines, RISK_REPORT_KEYS } from './risk.js';
 import type { RiskVerdict } from './risk.js';
@@ -54,7 +54,7 @@ const CLEAN = 'No problem of form was found. This is not an acceptance: it says 
 const FOUND = 'These are problems of form in the document, not in the work it describes. Fix them all and re-check before reporting; nothing has been recorded and no attempt has been spent.';
 
 export function checkReportForm(phase: Phase, text: unknown): ReportCheck {
-  const resultFormat = reportFormatLines(phase);
+  let resultFormat = reportFormatLines(phase);
   const done = (problems: string[]): ReportCheck =>
     ({ ok: !problems.length, problems, resultFormat, note: problems.length ? FOUND : CLEAN });
 
@@ -66,6 +66,10 @@ export function checkReportForm(phase: Phase, text: unknown): ReportCheck {
   let fields: Record<string, unknown>;
   try { fields = phaseFields(phase, parsePhaseReport(text as string, phase)).fields; }
   catch (error) { return done([error instanceof Error ? error.message : 'The phase report could not be parsed.']); }
+
+  let version;
+  try { version = verificationVersion(fields.verificationVersion); resultFormat = reportFormatLines(phase, version); }
+  catch (error) { return done([String(error)]); }
 
   const outcome = fields.outcome;
   const passed = outcome === 'passed';
@@ -80,16 +84,16 @@ export function checkReportForm(phase: Phase, text: unknown): ReportCheck {
     // links in `verification`, are left to the run, because both are checked against IDs it holds.
     ...(phase === 'mdd-spec' ? [() => boundedText(fields.domain, 'spec domain', 64)] : []),
     ...(passed && (phase === 'mdd-plan' || phase === 'mdd-spec') ? [() => acceptance(fields.acceptance)] : []),
-    ...(passed && (phase === 'mdd-plan' || phase === 'mdd-tasks') ? [() => deliverables(fields.deliverables)] : []),
+    ...(passed && (phase === 'mdd-plan' || phase === 'mdd-tasks') ? [() => deliverables(fields.deliverables, version)] : []),
     ...(passed && phase === 'mdd-apply' ? [() => changed(fields.changes, fields.noChangeReason), () => {
       if (taskIDs(fields.completed).length !== 1) throw new Error('Successful Apply must name exactly one completed task.');
-    }, () => executed(fields.checks)] : []),
+    }, () => executed(fields.checks, version)] : []),
     // Verify's checks and verification are read on every outcome, exactly as the run reads them. A
     // check that skipped them on a failed Verify once cleared a report the run then refused, so
     // the actor was told it was fine at the one moment it could still have fixed it. Which links
     // exist is the run's to judge; everything the document says about itself is checked here.
     ...(phase === 'mdd-verify' ? [() => {
-      const { verification } = verifyReport(fields.checks, fields.verification);
+      const { verification } = verifyReport(fields.checks, fields.verification, undefined, version);
       if (passed && verification && !verification.matched) throw new Error(UNMATCHED_PASS);
     }] : []),
   ]));

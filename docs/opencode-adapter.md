@@ -3,8 +3,102 @@
 This opt-in adapter targets OpenCode **V2 2.0.22** and preserves the approved low/high main routes.
 It uses the native permission-controlled foreground `subagent` tool, not SDK prompting.
 When optional Engram memory is enabled, receipts must be read back before dispatch and before recording a result.
-Verify is grounded in actual native command outcomes. This is **execution evidence, not
-a guarantee of semantic correctness or independent review**. Model-backed E2E is pending.
+Verify reports commands and their outcomes. MDD validates the **consistency of actor-reported
+evidence**, not independent execution attestation, semantic correctness or independent review.
+Model-backed E2E is pending.
+
+## Structured verification and legacy replay
+
+New runs capture `verificationVersion: 1` before planning. The runner supplies the frozen contract
+and held plan to the shared validators; an actor cannot select the legacy contract by omitting
+structured fields. The marker survives checkpoints, dossiers, restart and transfer. Report format
+instructions select the recorded version, including on resumed runs.
+
+| Field | Version 1 contract |
+|---|---|
+| `deliverables[].checks` | Nonempty objects `{id, command, requirement, appliesWhen?}`. IDs are globally unique across the plan; `requirement` is `required` or `optional`. Declare conditions before execution. |
+| `checks` | Actual executions `{id, command, exit}` in chronological order. Each attempt has its own ID, including repeated commands. `exit` is an integer or `null` for an interrupted execution. |
+| Assessment `checks` | Execution IDs, covering every held scenario-step link, step and decision. A verified row cites successful final executions and explains source-based semantic evidence. |
+| `verification.checkResults` | Exactly one `{checkID, disposition, executions, reason?, equivalence?}` for each held check. Requiredness and applicability come from the held plan, never from this report. |
+| `verification.supplementalChecks` | Additional executions grouped as `{id, requirement, disposition, executions, reason?}`. Every execution is accounted for, including failures. Supplemental entries cannot overlap held evidence or downgrade held checks. |
+
+Disposition rules:
+
+- **passed / failed / ran:** at least one execution, ending in exit 0 / a nonzero exit / null.
+- **blocked:** no execution and a reason describing the blocker.
+- **not-applicable:** no execution, a condition already held in `appliesWhen`, and a source-based
+  reason explaining why it does not apply. Unconditional checks cannot be waived this way.
+- **replaced:** an actually executed successful replacement, a reason and an equivalence rationale
+  explaining how it covers the held check. Replacement references execution IDs, never another
+  replacement disposition. Command equality binds an attempt to a declared check; it does not
+  determine whether a check is material.
+
+Every disposition except `passed` requires a reason. Multiple attempts also require a reason.
+Preserve failed attempts and their order: the final attempt determines the disposition, and an
+earlier green attempt cannot support acceptance after a failed retry. One integration execution
+may support multiple held checks, but each must retain the same complete attempt history and
+provide equivalence evidence when replacing a different command. Do not invent duplicate executions.
+
+Required applicable failed, interrupted, blocked or missing results cannot earn PASS. Optional
+failures remain visible without blocking independently supported semantic acceptance; their failed
+executions cannot support verified rows. Supplemental dispositions are `passed`, `failed` or `ran`;
+required supplemental failures also prevent PASS. Successful checks alone never replace run-wide
+semantic acceptance coverage.
+
+`mdd_check_report` uses the version reported in the document for advisory form checking. It has no
+held plan and cannot authenticate requiredness or applicability. The runner checks the same report
+against its frozen plan. Neither validates that an actor actually executed a command or that its
+source-based applicability/equivalence rationale is true; these remain reported evidence.
+
+**Legacy records have no marker.** They resume the recorded command-based schema, retaining
+commands, outcomes and historical matched fields. MDD does not synthesize IDs, requiredness or
+execution proof. Status, preserved-run views and PR evidence limits label this weaker evidence.
+Mixed versioned/legacy payloads are rejected. Existing PR rendering retains command/exit counts,
+failures and reported limits for both contracts.
+
+PR facts carry the recorded verification version. For version 1, verification blockers use the
+runner's settled verification result, which includes unresolved required dispositions and semantic
+coverage. Optional failures and failed attempts followed by a successful retry remain visible under
+`Verificación` without becoming current blockers by themselves. Unresolved required checks and
+semantic gaps remain incomplete under `Bloqueos`, even when every recorded execution exited 0.
+Unversioned PR facts retain legacy behavior: every nonzero or interrupted execution is a blocker.
+Recorded limits, missing implementation evidence and uncertainty continue to be reported separately.
+
+## Continue working after failed verification
+
+A recorded failed Verify stops the current run, not all future work. Nothing continues automatically.
+The coordinator interprets the user's request and selects an existing typed action; the runtime
+authenticates the exact latest native text without parsing intent or requiring special consent words.
+
+| User intent | Action |
+|---|---|
+| Correct the same implementation | `mdd_reset({scope:"rework", userText})` returns to Apply with the findings. |
+| Retry the checks | `mdd_reset({scope:"phase"})` retries Verify in the same run. |
+| Proceed despite the failed checks | `mdd_reset({scope:"continue", runID, userText})` preserves the failed run and releases its active stop. |
+| Start a clear new objective | `mdd_start({requirements})` authenticates the latest request, preserves the failed predecessor and applies normal new-task preflight. No manual discard is needed. |
+
+Verify is the last phase in both routes. `continued-with-failed-verification` is **not complete or
+PASS**, and bare continuation authorizes no next work. Unclear requested work may need one focused
+clarification; an already clear request does not need a new workflow-confirmation ritual.
+
+Continuation requires a matching run ID, unused native message identity, settled checkpoint/progress
+and the existing exclusive writer. It cannot release a pending actor, question, intake or transfer,
+and never enters stopped-child attestation or aborts a child. Replayed consent cannot retire a later
+run. Reported uncertainties remain evidence; they are not automatically new native questions.
+
+Before retiring the parent claim, MDD writes and reads back a parent/run-bound
+`.mdd/run-<64-hex>.continued.json` archive and its current dossier index. It records the native request,
+message identity, action, timestamp and source checkpoint sequence/digest alongside the failed result.
+Archive errors leave the active failed run and ownership intact. Retirement is the final durable
+mutation: the original failed checkpoint and settled progress stay data-only behind the existing
+retirement marker until a fresh authenticated start clears them. A restart checks their archive binding
+and never replays the failed run as successful. Continued records are excluded from active workspace
+run listings; the archive remains accessible after the current dossier is replaced by new work.
+
+`mdd_pr_body({runID, userText, ...})` targets that retained failed run explicitly. Its checks and limits
+remain visible and `verified` stays false for both version 1 and unversioned legacy evidence; no IDs
+or proof are manufactured. This local continuation grants no security review, Judgment Day, commit,
+push or publication authority. These tests exercise native host contracts, not live-model behavior.
 
 ## Setup
 
@@ -637,6 +731,37 @@ not echoed; errors do not expose captured source or credentials. Status distingu
 invalid results and incomplete coverage end only this audit, without retries or workflow resets.
 Findings are advisory: the coordinator presents them and waits for **separate user authorization
 for corrections through `mdd-apply`**. Nothing grants fix, commit, publication or delivery authority.
+
+Redaction alone does not prove credential exposure. An exposure finding needs supporting unredacted,
+runtime-bound evidence; hidden values and heuristic markers cannot supply it. When redaction or access
+limits prevent assessment, the actor reports the affected scope and unresolved question as inconclusive,
+retains independently grounded findings and never claims to have inspected omitted material. This does
+not authorize reconstruction of secrets or wider live access; snapshot/findings binding still applies.
+
+## Judgment Day readiness and correction limits
+
+**Parent readiness before paired dispatch** is part of the existing immutable-target freeze protocol
+in [the packaged parent reference](../assets/opencode/skills/mdd-judgment-day/references/prompts-and-formats.md).
+Before either initial review or scoped rejudgment, the parent confirms exact local full commit objects,
+supported requested paths and all existing relevant source sides (base for deletions, target for
+additions, both for changed files). Already authorized read-only capabilities must establish required
+blob/text availability and known blob/diff/tree output bounds: 128 KiB and five seconds per command.
+Size checks cannot guarantee completion within the timeout. Missing objects, binary/invalid UTF-8
+material, unsupported paths or oversized output require a scoped limitation, not partial inspection,
+guessed content or predictably unable judge launches. Readiness permits no fetch, snapshot creation
+or execution of target code. The parent cannot call judge-only `mdd_jd_inspect`.
+
+Readiness is not inspection evidence or approval. The dispatch hook has no structured target input;
+these instructions add no manifest or runtime readiness gate. Both judges retain identical criteria
+and independently inspect immutable material. Residual failures remain incomplete/unavailable with
+exact limitations and only successful reads recorded; an empty findings list cannot imply completion.
+
+For JD Fix, native hooks check admission, ownership, workspace and one active correction writer,
+and restrict tool categories under native permissions. Explicit correction consent, confirmed severe
+ledger IDs, exact allowed edit paths and the two-round budget remain parent/actor protocol obligations,
+not mechanically validated from the prompt. Tool admission is not a path sandbox or correction consent.
+The parent supplies and tracks those constraints; the actor blocks ambiguous or conflicting authority.
+Structural instruction assertions and immutable-tool regressions verify contracts, not live-model behavior.
 
 ## Safety and storage boundaries
 
