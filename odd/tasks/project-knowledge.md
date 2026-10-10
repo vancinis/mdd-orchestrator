@@ -104,7 +104,7 @@ Reuse validated project knowledge and relevant skills without filling the coordi
 
 ## Integration and delivery
 
-- [ ] **PK-6: Integrate current main and publish default-on knowledge.**
+- [x] **PK-6: Integrate current main and publish default-on knowledge.**
   - User explicitly requested fetching main, committing and pushing to main. Retain the previously confirmed destination `https://github.com/vancinis/mdd-orchestrator.git` and configured Git authentication; no credential inspection or force push.
   - Starting local boundary: `96606af`; fetched upstream: `f51cdf0406ab9281d0b670b77dc307eaa01d1274` (seven incoming commits, including verified subagent improvements); local branch is ahead two/behind seven.
   - Route: bounded Git merge, then delegated direct conflict correction if necessary and delegated verification. Incoming changes cover 51 files; handwritten resolution is restricted to actual overlapping files, initially `tests/full-native.test.mjs`. Preserve both structured verification/subagent changes and knowledge default-on/telemetry assertions.
@@ -112,7 +112,7 @@ Reuse validated project knowledge and relevant skills without filling the coordi
   - Checks: `npm run build`; `node --import ./tests/isolate-home.mjs --test tests/settings.test.mjs tests/setup-ui.test.mjs tests/project-knowledge.test.mjs tests/project-knowledge-runtime.test.mjs tests/opencode-plugin.test.mjs tests/opencode-v2.test.mjs tests/full-native.test.mjs tests/optional-memory.test.mjs tests/phase-runner.test.mjs tests/phase-report.test.mjs tests/acceptance.test.mjs tests/checkpoint.test.mjs`; `npm run typecheck`; `npm test`; `git diff --check`.
   - Merge was automatic with no unresolved files. Independent integration verification passed: build/typecheck; focused 871 passed/0 failed/1 skipped; full suite 1,945 passed/0 failed/3 skipped; staged/unstaged diff checks clean. Parent repeated typecheck and both diff checks. The sole semantic overlap in `tests/full-native.test.mjs` retains upstream continuation coverage and both local telemetry assertions.
   - Same documented skips: two Windows file-symlink privilege checks and optional installed-Engram smoke; real-host/provider interoperability remains untested. Native assessment high due incoming security asset; independent integration verification performed without enabling RDD.
-  - RDD remains clone-local off. The incoming commits are already-authored upstream work, not a new feature scope or new PR-chain choice. Verification complete; merge commit and normal push evidence pending.
+  - RDD remains clone-local off. The incoming commits are already-authored upstream work, not a new feature scope or new PR-chain choice. Merge commit `30c94fe` (`merge(main): integrate upstream with default-on knowledge`) was fast-forwarded into local main and successfully published by normal push: `f51cdf0..30c94fe`, `HEAD -> main`. Both local main and origin/main resolved to `30c94feb87db321d177ad573afccc2ecc286403e` immediately after publication; worktree was clean.
 
 ## Verification and limitations
 
@@ -122,6 +122,6 @@ Source digest checks validate declared dependencies, not the completeness of a c
 
 ## Progress and next step
 
-Initial four tasks were published through `8d329dd`; PK-5 default-on is complete in `a00a8bd` with tracking `96606af`. PK-6 merged fetched main `f51cdf0` without conflicts and passed full independent integration verification; merge commit and normal publication are next.
+All six tasks are complete. Initial feature published through `8d329dd`; PK-5 default-on `a00a8bd` and tracking `96606af` were integrated with upstream `f51cdf0` and published in merge `30c94fe` after full independent integration verification. This final passive tracking update records the confirmed publication without changing runtime bytes.
 
 No installed settings, installation or project catalog will be changed by PK-5; only the shipped default changes. Real-host trials and token-savings evidence remain pending. Three environment-dependent test skips and the native-fallback post-restart limitation remain documented. Engram's full task mirror remains pending due to session/project mismatch; separate progress observations and session summaries were saved without changing the binding.
