@@ -947,6 +947,29 @@ test('V2 child recovery never treats missing or foreign status events as idle', 
   assert.equal((await f.call('mdd_status', {})).liveness.verdict, 'stopped');
 });
 
+test('V2 model context collapses superseded status replies and keeps the latest one whole', async t => {
+  const f = await fixture(t); f.user('Implement the requested change.');
+  // The plugin's own replies, as the host stores them: v2Payload is plain JSON, so it round-trips.
+  const replies = [];
+  for (const [name, args] of [['mdd_start', { requirements: 'Implement the requested change.' }], ['mdd_status', {}], ['mdd_status', {}]])
+    replies.push({ name, text: JSON.stringify(await f.call(name, args)) });
+  const messages = [{ role: 'user', content: [{ type: 'text', text: 'Implement the requested change.' }] },
+    ...replies.flatMap(({ name, text }, index) => [
+      { role: 'assistant', content: [{ type: 'tool-call', id: `reply-${index}`, name, input: {} }] },
+      { role: 'tool', content: [{ type: 'tool-result', id: `reply-${index}`, name, result: { type: 'text', value: text } }] },
+    ])];
+  const before = structuredClone(messages);
+  const event = { sessionID: f.sessionID, agent: 'mdd-orchestrator', messages, tools: {} };
+  await f.sessionHooks.get('context')(event);
+  const sent = event.messages.filter(message => message.role === 'tool').map(message => message.content[0].result.value);
+  assert.equal(sent.at(-1), replies.at(-1).text, 'the latest status is sent byte for byte');
+  for (const [index, text] of sent.slice(0, -1).entries()) {
+    assert.equal(JSON.parse(text).superseded, replies[index].name);
+    assert.ok(Buffer.byteLength(text) < Buffer.byteLength(replies[index].text));
+  }
+  assert.deepEqual(messages, before, 'the native messages handed in are not mutated');
+});
+
 test('V2 model context collapse uses native messages and never mutates persisted input', async t => {
   const f = await fixture(t);
   const input = { agent: 'mdd-plan', description: 'Plan', prompt: 'x'.repeat(3000) };

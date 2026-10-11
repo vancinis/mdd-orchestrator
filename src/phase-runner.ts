@@ -148,7 +148,11 @@ function dispatchMismatchMessage(verdict: DispatchVerdict, noun: 'task' | 'inves
         : '';
   return `Task arguments differ from the ready ${noun}. Read mdd_status and pass its exact task object, copying description, subagent_type and prompt verbatim; do not compose your own. No execution was started.${detail}`;
 }
-const DISPATCH_NOTE = 'The prompt in task is a single-use MDD dispatch handle, not a shortened or truncated prompt. MDD expands it into the full phase prompt inside the hook, so the actor receives the complete instructions, dependency artifacts and packaged MDD instructions exactly as before. Pass the three fields through unchanged: do not expand the handle yourself, do not substitute a prompt of your own, and do not ask MDD for the full text. Keeping it out of this conversation is what stops a long run from filling the context window and being compacted.';
+/**
+ * Shipped with every ready task, so it carries only the instruction. Why handles exist and what the
+ * actor receives is in the coordinator definition, read once instead of on every status read.
+ */
+const DISPATCH_NOTE = 'The prompt in task is a single-use MDD dispatch handle, not a truncated prompt: MDD expands it inside the hook. Pass description, subagent_type and prompt unchanged; never ask for the full text.';
 type State = 'starting' | 'ready' | 'persisting-intent' | 'await-result' | 'persisting-result' | 'blocked' | 'await-approval' | 'complete';
 /**
  * The risk-* stable labels name the same Run-level states a phase occupies: `risk-ready` is a
@@ -1188,8 +1192,10 @@ export class PhaseRunner {
       // The brief restates the whole phase prompt, so shipping both doubles the payload for a
       // field that is only actionable once delegation has failed and the phase is the
       // coordinator's own. Duplicating it is what pushed `task` past the host output limit. The
-      // report form is small and is always shipped instead: reporting a phase inline with no
-      // schema in front of the coordinator is how a finished phase used to be rejected four times.
+      // report form travels with it: reporting a phase inline with no schema in front of the
+      // coordinator is how a finished phase used to be rejected four times. A delegated phase
+      // does not need it here, because the actor's own prompt already carries the form, and
+      // shipping it anyway cost every ready status two and a half kilobytes nobody read.
       // A compacted conversation has lost the transcript MDD's own instructions were read in, so
       // the run restates itself from state that never lived there. It costs a few hundred bytes
       // and it is the difference between a coordinator that resumes and one that starts guessing.
@@ -1200,7 +1206,7 @@ export class PhaseRunner {
         : {}),
       ...(run.state === 'ready' && !run.rejected && !run.workerTasks
         ? { task: this.#dispatchable(run), ...(run.expose === 'full' ? {} : { dispatch: { mode: 'handle' as const, note: DISPATCH_NOTE } }),
-            resultFormat, ...(run.mode === 'inline' ? { brief: run.brief } : {}) }
+            ...(run.mode === 'inline' ? { resultFormat, brief: run.brief } : {}) }
         : {}),
     };
   }

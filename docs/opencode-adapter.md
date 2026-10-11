@@ -159,7 +159,11 @@ Run the single [setup wizard](setup.md): `npm run setup` from trusted source, or
     returned `task` arguments (`agent`, `description`, `prompt`), once, using native `subagent`
     foreground execution. Do not add `background`, `sessionID`, `model`, or extra keys. The hook
    appends the actual native call ID in place after checking the expected args.
-   After the task, call `mdd_status` and present the readable artifact to the user.
+   After the task, call `mdd_status` and present the readable artifact to the user. Workflow tools
+   (`mdd_start`, `mdd_prepare_advance`, `mdd_revisit`, `mdd_answer`, `mdd_phase_result`,
+   `mdd_reset`, `mdd_change_request`, `mdd_context`, `mdd_contextual_explore`) already reply with
+   that same status, so the coordinator acts on their reply instead of reading `mdd_status` again;
+   it reads status after a native question, a settled task or a tool error.
    In interactive mode, a passed phase exposes an exact native Proceed/Stop question for
    the next phase. Approval prepares only that phase's task. Automatic mode returns the next
    exact executable task without an approval question, unless the phase reported open questions:
@@ -245,8 +249,8 @@ regression tests; this is not a claim of maintained V1 host acceptance.
 - Child status is learned from native events. Missing events, a restarted stream, or a closed
   stream mean **unknown**, never idle. Explicit native user recovery remains available; automatic
   recovery cannot assume that an unseen child stopped.
-- Tools are direct (`codemode: false`). Model context collapses settled phase prompts without
-  rewriting persisted native messages or recorded artifacts.
+- Tools are direct (`codemode: false`). Model context collapses settled phase prompts and
+  superseded status replies without rewriting persisted native messages or recorded artifacts.
 
 Run `node tests/opencode-v2-host-smoke.mjs` after building for the explicit **2.0.22** host check.
 It starts a service in isolated XDG directories, authenticates from that service's registration,
@@ -594,7 +598,8 @@ the composed phase prompt is checked against — rather than a smaller aggregate
 what actually has to stay deliverable, no longer the `task` field of `mdd_status`, since context no
 longer travels through status at all. Every contribution therefore trial-composes the current
 phase prompt and is refused, unrecorded, if that composed prompt would exceed 96,000 bytes; a
-ready phase's prompt is recomposed immediately so `mdd_status` returns the updated task. Delivery
+ready phase's prompt is recomposed immediately, so the `mdd_context` reply itself carries the
+updated task and no separate `mdd_status` read is needed. Delivery
 still targets the smaller **38,000-byte** `DISPATCHABLE_PROMPT_BYTES` compaction goal described
 below, by shedding older inlined artifacts first, before the 96,000-byte bound is ever reached. A
 silently trimmed prompt is the delegation failure both bounds exist to prevent. Contributions are
@@ -645,6 +650,40 @@ undispatchable. So `PhaseRunner.before` treats the note as the handle when `desc
 `subagent_type` are exactly those of the ready task. Nothing new is authorized by that: the note
 cannot carry a composed prompt, the actor receives the run's own ready prompt, and a note naming
 another phase or actor, or arriving with extra arguments, is still refused.
+
+### Superseded status replies: only the latest one is re-read
+
+Handles kept phase prompts out of the transcript; status replies kept piling up in it. Every
+workflow tool answers with the run's current status, and each answer replaces the one before it,
+yet the host replays all of them on every later model call. On fifteen recorded coordinator
+conversations (1,174 model calls), `mdd_status` replies alone were 44% of everything re-sent to
+the model and the other workflow replies another 15%; the compact view made each snapshot
+smaller but could not stop them from accumulating.
+
+So the same transform that collapses settled dispatches (V1 `experimental.chat.messages.transform`,
+V2 session `context` hook) replaces every status reply that a later one superseded with a fixed
+placeholder: `{"superseded":"<tool>","state":…,"phase":…,"note":…}`
+(`src/status-transcript.ts`). The rules:
+
+- Only a completed reply of a workflow tool that parses as a status (a JSON object with `state`)
+  supersedes or is superseded. Errors, running calls and other tools' outputs — a PR body, an
+  improvement report, a knowledge record — do neither, so a failed call never hides the last
+  status that succeeded.
+- The latest status reply is never touched.
+- A placeholder depends only on the reply it replaces, so once written it is byte-stable on every
+  later call and the provider's prefix cache keeps hitting; each reply costs one cache miss, once.
+- A placeholder carries no task, question, handle or next action, so a spent handle or an answered
+  question can no longer be copied back out of the history.
+- While a restatement is pending and the latest reply had to leave `rejected.text` out, the most
+  recent reply still carrying that same text stays whole.
+- Persisted messages are never rewritten; only what is sent to the model changes. The TUI sidebar
+  reads its own host events and is unaffected.
+
+The compact view itself also stopped repeating what never changes: `omittedNote` and the
+`dispatch` note are one sentence each, `workflow.evaluation.reasons` (the same policy prose in
+every run) is left out, `risk` keeps its evidence and risks only until a phase after exploration
+has been recorded, and `resultFormat` ships only when a report is the coordinator's own to write.
+`detail="full"` still returns all of it.
 
 ### Native consent contract
 
@@ -944,8 +983,10 @@ document is ignored, the legacy whole-message JSON object is still understood, a
 phase reports is dropped and named rather than failing the phase. `phase`, `runID` and `callID`
 are checked when the actor states them and are never required: the dispatch was already matched
 by call ID and by exact task arguments, so stating them can only reject a mismatch, never
-authorize one. `mdd_status` returns `resultFormat`, the exact headings for the current phase, as
-a protected field, so a phase reported inline is never reported against a remembered shape.
+authorize one. Whenever a report is the coordinator's own to write — a rejected report waiting to
+be restated, or a phase carried inline — `mdd_status` returns `resultFormat`, the exact headings
+for that phase, as a protected field, so it is never reported against a remembered shape. A
+delegated task omits it: the actor's own prompt already carries the form.
 
 A report MDD cannot read is not a phase that failed. The work it describes is often finished and
 already in the working tree, so it costs a restatement rather than an attempt: the text comes

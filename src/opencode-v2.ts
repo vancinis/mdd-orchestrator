@@ -7,6 +7,7 @@ import { MODEL_ROLES, modelFor, freezeProfile } from './settings.js';
 import { PHASES } from './policy.js';
 import { loadGlobalSettings } from './global-settings.js';
 import { collapsedPrompt, COLLAPSE_MIN_BYTES } from './dispatch-transcript.js';
+import { collapseSupersededStatusResults } from './status-transcript.js';
 import { DISPATCH_HANDLE_PREFIX } from './phase-runner.js';
 import { WorkerFence, type WorkerHost } from './worker-fence.js';
 import { SECURITY_AGENT, SECURITY_RUNTIME_GUARD } from './security-audit.js';
@@ -387,6 +388,9 @@ export async function setupV2(ctx: Plugin.Context, createMotor: LegacyPlugin): P
         return { ...part, input: { ...args, prompt: collapsedPrompt(args.agent, Buffer.byteLength(args.prompt)) } };
       }) };
     });
+    // Status replies a later one replaced; see src/status-transcript.ts. Never fails the turn.
+    try { event.messages = collapseSupersededStatusResults(event.messages).messages; }
+    catch { /* the untouched messages are still correct, only larger */ }
   });
   return async () => {
     controller.abort();

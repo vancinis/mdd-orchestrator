@@ -2474,6 +2474,45 @@ test('a settled dispatch stops being re-read, while the run still dispatches the
   assert.ok(next.task || next.state === 'complete');
 });
 
+// Measured on real coordinator conversations, status replies were nearly half of everything re-sent
+// to the model: each one replaces the last, yet every one was replayed on every later turn.
+test('superseded status replies stop being re-read, while the latest one still dispatches', async t => {
+  const f = await fixture(t, { route: 'high' });
+  // Real replies, exactly as the plugin writes them: status reads across two phases, then a
+  // context contribution, which answers with the updated status itself.
+  const replies = [];
+  const reply = async (tool, args = {}) => {
+    const raw = await f.hooks.tool[tool].execute(args, f.context);
+    replies.push({ tool, raw });
+    return JSON.parse(raw);
+  };
+  await reply('mdd_status');
+  await f.phase({ large: true });
+  await reply('mdd_status');
+  await f.phase({ large: true });
+  await reply('mdd_status');
+  const latest = await reply('mdd_context', { label: 'Prior decision', content: 'Keep the current exit codes.' });
+  assert.ok(latest.task, 'the contribution answers with the recomposed task');
+
+  const transcript = [f.parent[0], { info: { id: 'msg_replies', role: 'assistant' }, parts: replies.map(({ tool, raw }, index) =>
+    ({ type: 'tool', tool, callID: `reply-${index}`, sessionID: f.context.sessionID, state: { status: 'completed', input: {}, output: raw } })) }];
+  const outgoing = structuredClone(transcript);
+  await f.hooks['experimental.chat.messages.transform']({}, { messages: outgoing });
+  const sent = outgoing[1].parts.map(part => part.state.output);
+
+  assert.equal(sent.at(-1), replies.at(-1).raw, 'the reply the coordinator acts on travels byte for byte');
+  for (const [index, text] of sent.slice(0, -1).entries()) {
+    assert.match(text, /"superseded"/, `reply ${index} was replaced by a later one`);
+    assert.ok(Buffer.byteLength(text) < Buffer.byteLength(replies[index].raw) / 4,
+      `reply ${index} collapsed to ${Buffer.byteLength(text)} of ${Buffer.byteLength(replies[index].raw)} bytes`);
+    assert.equal(text.includes('mdd:dispatch:'), false, 'no spent handle survives in the transcript');
+  }
+  assert.deepEqual(transcript[1].parts.map(part => part.state.output), replies.map(item => item.raw), 'the host records are untouched');
+
+  // Acting on the latest reply still works: its task is the one the run dispatches.
+  await f.hooks['tool.execute.before']({ sessionID: f.context.sessionID, callID: 'after-collapse', tool: 'task' }, { args: latest.task });
+});
+
 test('the compact view keeps the protocol and sheds what a later turn would only re-read', async t => {
   const f = await fixture(t, { route: 'high' });
   await f.phase({ large: true });

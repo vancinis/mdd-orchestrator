@@ -318,7 +318,9 @@ test('risk stage: a passed exploration publishes the mdd-risk task with requirem
   assert.equal(risk.next.kind, 'execute-risk');
   assert.equal(risk.task.subagent_type, 'mdd-risk');
   assert.deepEqual(risk.workflow.evaluation.phases, ['mdd-explore']);
-  assert.match(risk.resultFormat.join('\n'), /exactly this key: risk/);
+  // The form travels in the actor's own prompt (asserted below). A delegated task does not repeat
+  // it to the coordinator, which only needs it when a report is its own to restate.
+  assert.equal(risk.resultFormat, undefined);
   const dispatched = await runner.before({ ...call, callID: 'call_risk' }, risk.task);
   assert.equal(dispatched.subagent_type, 'mdd-risk');
   assert.ok(dispatched.prompt.includes(`Requirements data: ${JSON.stringify(input.requirements)}`));

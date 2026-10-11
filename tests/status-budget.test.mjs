@@ -114,6 +114,33 @@ test('compact view: recorded progress keeps its phases and drops only the prose'
   assert.ok(payload.omitted.includes('workflow.results[].evidenceSummary'));
 });
 
+test('compact view: the route evaluation keeps its route and phases and drops the policy prose', () => {
+  const evaluation = { policyVersion: 'v', route: 'high', phases: ['mdd-explore', 'mdd-propose'], reasons: [filler(300), filler(300)] };
+  const payload = JSON.parse(statusPayload({ ...base(), workflow: { answers: {}, evaluation, results: [] } }, 'compact'));
+  assert.deepEqual(payload.workflow.evaluation, { policyVersion: 'v', route: 'high', phases: ['mdd-explore', 'mdd-propose'] });
+  assert.ok(payload.omitted.includes('workflow.evaluation.reasons'));
+  const full = JSON.parse(statusPayload({ ...base(), workflow: { answers: {}, evaluation, results: [] } }, 'full'));
+  assert.deepEqual(full.workflow.evaluation, evaluation, 'the full view still carries the reasons');
+});
+
+test('compact view: the risk evidence ships while the route is being decided, and goes once it is history', () => {
+  const risk = { route: 'low', complexity: 'low', reason: 'Contained.', routeOrigin: 'suggested', ref: { phase: 'mdd-risk' },
+    evidence: [{ source: filler(150), finding: filler(250) }], risks: [{ description: filler(200), evidence: filler(200), mitigation: filler(200) }] };
+  const deciding = { ...base(), risk, workflow: { answers: {}, results: [{ phase: 'mdd-explore', outcome: 'passed' }] } };
+  assert.deepEqual(JSON.parse(statusPayload(deciding, 'compact')).risk, risk, 'the route choice is made from the evidence');
+  const decided = { ...deciding, workflow: { answers: {}, results: [...deciding.workflow.results, { phase: 'mdd-plan', outcome: 'passed' }] } };
+  const payload = JSON.parse(statusPayload(decided, 'compact'));
+  assert.deepEqual(payload.risk, { route: 'low', complexity: 'low', reason: 'Contained.', routeOrigin: 'suggested', ref: { phase: 'mdd-risk' } });
+  assert.ok(payload.omitted.includes('risk.evidence'));
+  assert.ok(payload.omitted.includes('risk.risks'));
+  assert.deepEqual(JSON.parse(statusPayload(decided, 'full')).risk, risk, 'detail="full" returns the whole verdict');
+});
+
+test('compact view: the note says what omitted means in one sentence, not why the view exists', () => {
+  const payload = JSON.parse(statusPayload({ ...base(), acceptance: { goal: filler(3000) } }, 'compact'));
+  assert.ok(Buffer.byteLength(payload.omittedNote) < 160, `note is ${Buffer.byteLength(payload.omittedNote)} bytes`);
+});
+
 test('compact view: a run with nothing to shed is never made larger by the note', () => {
   // Declaring an omission costs more than this payload could save, so the whole thing is returned.
   const value = { ...base(), brief: 'Carry out the phase.', report: 'Resumen\n', concerns: [{ evidence: 'short' }] };

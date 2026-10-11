@@ -96,18 +96,47 @@ export const STATUS_COMPACT_KEEP: readonly string[] = Object.freeze([
  * outcome are what the coordinator acts on, so the compact view keeps those and drops the rest.
  * Nothing is lost — the run still holds every summary, and detail="full" returns them.
  */
-function compactWorkflow(value: unknown): { workflow: unknown; omitted: boolean } {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return { workflow: value, omitted: false };
-  const snapshot = value as Record<string, unknown>;
-  if (!Array.isArray(snapshot.results) || !snapshot.results.length) return { workflow: value, omitted: false };
-  let omitted = false;
-  const results = snapshot.results.map(item => {
-    if (!item || typeof item !== 'object' || Array.isArray(item)) return item;
-    const { evidenceSummary, ...rest } = item as Record<string, unknown>;
-    if (evidenceSummary !== undefined) omitted = true;
-    return rest;
-  });
-  return { workflow: { ...snapshot, results }, omitted };
+function compactWorkflow(value: unknown): { workflow: unknown; omitted: string[] } {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return { workflow: value, omitted: [] };
+  const snapshot = { ...(value as Record<string, unknown>) };
+  const omitted: string[] = [];
+  if (Array.isArray(snapshot.results) && snapshot.results.length) {
+    let summaries = false;
+    snapshot.results = snapshot.results.map(item => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return item;
+      const { evidenceSummary, ...rest } = item as Record<string, unknown>;
+      if (evidenceSummary !== undefined) summaries = true;
+      return rest;
+    });
+    if (summaries) omitted.push('workflow.results[].evidenceSummary');
+  }
+  // The route and its phases are what the coordinator (and the sidebar) read; the reasons are the
+  // same two policy sentences in every run, repeated on every status read.
+  const evaluation = snapshot.evaluation;
+  if (evaluation && typeof evaluation === 'object' && !Array.isArray(evaluation) && Object.hasOwn(evaluation, 'reasons')) {
+    const { reasons: _reasons, ...rest } = evaluation as Record<string, unknown>;
+    snapshot.evaluation = rest;
+    omitted.push('workflow.evaluation.reasons');
+  }
+  return omitted.length ? { workflow: snapshot, omitted } : { workflow: value, omitted };
+}
+
+/**
+ * The risk verdict without the evidence it was decided from, once deciding is over. The evidence
+ * and the risks are what the route choice is presented and made from, so they ship until a phase
+ * after exploration has been recorded; from then on the route is history, and every later read
+ * carried the same three kilobytes again. Route, complexity, reason, origin and the artifact ref
+ * stay; detail="full" returns the rest, and the artifact store holds the whole verdict.
+ */
+function compactRisk(risk: unknown, workflow: unknown): { risk: unknown; omitted: string[] } {
+  if (!risk || typeof risk !== 'object' || Array.isArray(risk)) return { risk, omitted: [] };
+  const results = workflow && typeof workflow === 'object' && !Array.isArray(workflow) ? (workflow as Record<string, unknown>).results : undefined;
+  const decided = Array.isArray(results) && results.some(item =>
+    !!item && typeof item === 'object' && (item as Record<string, unknown>).phase !== 'mdd-explore');
+  if (!decided) return { risk, omitted: [] };
+  const { evidence, risks, risksJustification, ...kept } = risk as Record<string, unknown>;
+  const omitted = Object.entries({ evidence, risks, risksJustification }).filter(([, value]) => value !== undefined).map(([key]) => `risk.${key}`);
+  return omitted.length ? { risk: kept, omitted } : { risk, omitted };
 }
 
 /**
@@ -147,7 +176,12 @@ function rejectedView(payload: Record<string, unknown>): string {
 }
 
 const OMITTED_NOTE = 'These fields were left out to keep this payload under the host output limit, so that task and question stay readable and copyable. Nothing was deleted: artifacts remain in the configured artifact store and every omitted field is still held by the run.';
-const COMPACT_NOTE = 'This is the compact view: the state machine, the next call, and what that call needs. Nothing was deleted — reference material the run still holds, such as acceptance, decisions, the plan, concerns, recorded evidence summaries, run history and the inline brief, was left out because a long run re-reads every payload on every later turn, and each phase re-reports what it needs. Call mdd_status with detail="full" to get any of it, including brief when a phase is yours to carry out.';
+/**
+ * Shipped on every compact payload, so it says only what a reader needs to act: what `omitted`
+ * means and how to get it back. Why the view exists belongs in the tool description, read once,
+ * not in a note re-read on every turn of a long run.
+ */
+const COMPACT_NOTE = 'Compact view. Nothing was deleted: the run still holds every omitted field, and mdd_status with detail="full" returns it.';
 
 /**
  * A brief short enough to cost less than the pointer replacing it is simply shipped. The threshold
@@ -193,10 +227,15 @@ export function statusPayload(value: unknown, view: StatusView = 'full'): string
       delete payload[key];
       omitted.push(key);
     }
+    if (Object.hasOwn(payload, 'risk') && payload.risk !== undefined) {
+      const projected = compactRisk(payload.risk, payload.workflow);
+      payload.risk = projected.risk;
+      omitted.push(...projected.omitted);
+    }
     if (Object.hasOwn(payload, 'workflow') && payload.workflow !== undefined) {
       const projected = compactWorkflow(payload.workflow);
       payload.workflow = projected.workflow;
-      if (projected.omitted) omitted.push('workflow.results[].evidenceSummary');
+      omitted.push(...projected.omitted);
     }
     // `brief` is the whole phase prompt again, shipped once a phase becomes the coordinator's own.
     // It is protected against the budget because an inline phase cannot be carried out without it,
