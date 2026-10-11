@@ -9,12 +9,25 @@ import { once } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
 import { opencodeBinary } from '../dist/model-catalog.js';
 import { defaultSettings } from '../dist/settings.js';
+import { MDD_TOOLS } from '../dist/opencode-plugin.js';
+import { JD_INSPECT } from '../dist/judgment-day.js';
+
+// What the host must expose, read from the plugin and the packaged agents rather than counted by
+// hand: hard-coded totals went stale as tools and agents were added, and the smoke failed for it.
+const expectedTools = [...new Set([...MDD_TOOLS, 'mdd_check_report', JD_INSPECT, 'mdd_worker_edit'])].sort();
+const expectedAgents = fs.readdirSync('assets/opencode/agents').filter(name => /^mdd-.*\.md$/.test(name)).map(name => name.slice(0, -3)).sort();
+// OpenCode applies the last matching rule, which is what the plugin relies on when it appends its own.
+const glob = pattern => new RegExp(`^${pattern.split('*').map(part => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*')}$`);
+const effect = (agent, action) => agent.permissions.findLast(rule => glob(rule.action).test(action) && glob(rule.resource).test('*'))?.effect;
 
 const binary = opencodeBinary();
 const pluginEntry = resolve(process.argv[2] ?? 'dist/opencode-plugin.js');
 assert.ok(binary, 'A native OpenCode V2 executable must be available on PATH.');
 const version = spawnSync(binary, ['--version'], { encoding: 'utf8', timeout: 10000 });
-assert.match(version.stdout, /v?2\.0\.22\b/);
+assert.ifError(version.error);
+// Any V2-or-later host: this checks the plugin contract on a real host, not one specific build.
+const release = /\bv?(\d+)\.(\d+)\.(\d+)\b/.exec(version.stdout);
+assert.ok(release && Number(release[1]) >= 2, `OpenCode >= 2.0.0 is required; found ${version.stdout.trim() || 'no version'}.`);
 const root = fs.mkdtempSync(join(tmpdir(), 'mdd-v2-host-'));
 let host;
 let hostEnv;
@@ -37,7 +50,7 @@ export default { id: 'mdd.host-smoke', async setup(ctx) {
   const write = async () => {
     const tools = await ctx.tool.list();
     const mddTools = tools.filter(tool => tool.id.startsWith('mdd_'));
-    if (mddTools.length === 15) fs.writeFileSync(${JSON.stringify(evidence)}, JSON.stringify({
+    if (mddTools.length === ${expectedTools.length}) fs.writeFileSync(${JSON.stringify(evidence)}, JSON.stringify({
       tools: mddTools.map(tool => ({ id: tool.id, codemode: tool.options?.codemode })),
     }));
   };
@@ -82,18 +95,21 @@ export default { id: 'mdd.host-smoke', async setup(ctx) {
   do {
     const { data: agents } = await (await fetch(`${url}/api/agent?location[directory]=${encodeURIComponent(project)}`, { headers })).json();
     checked.agents = agents.filter(agent => agent.id.startsWith('mdd-'));
-    if (checked.agents.length === 9 && checked.agents.find(agent => agent.id === 'mdd-plan').model?.variant === 'high') break;
+    if (checked.agents.length === expectedAgents.length && checked.agents.find(agent => agent.id === 'mdd-plan')?.model?.variant === 'high') break;
     await delay(100);
   } while (Date.now() < deadline);
   const plugins = (await (await fetch(`${url}/api/plugin?location[directory]=${encodeURIComponent(project)}`, { headers })).json()).data;
   assert.equal(plugins.find(plugin => plugin.id === 'mdd')?.state.status, 'active', JSON.stringify(plugins.filter(plugin => plugin.source.type !== 'builtin')));
-  assert.equal(checked.tools.length, 15);
+  assert.deepEqual(checked.tools.map(tool => tool.id).sort(), expectedTools);
   assert.ok(checked.tools.every(tool => tool.codemode === false));
-  assert.equal(checked.agents.length, 9);
+  assert.deepEqual(checked.agents.map(agent => agent.id).sort(), expectedAgents);
   assert.deepEqual(checked.agents.find(agent => agent.id === 'mdd-plan').model, { providerID: 'openai', id: 'test-model', variant: 'high' });
-  assert.ok(checked.agents.filter(agent => agent.id !== 'mdd-orchestrator').every(agent =>
-    agent.permissions.some(rule => rule.action === 'subagent' && rule.effect === 'deny')));
-  console.log(`OpenCode V2 host smoke passed (${version.stdout.trim()}): 15 tools, 9 agents; isolated config, no model requests.`);
+  // Only the coordinator dispatches. Every other MDD agent is denied subagent, whether by an
+  // explicit rule (phase actors) or by a deny-all its own definition starts from (security, judges).
+  for (const agent of checked.agents.filter(agent => agent.id !== 'mdd-orchestrator'))
+    assert.equal(effect(agent, 'subagent'), 'deny', `${agent.id} must not dispatch subagents`);
+  assert.equal(effect(checked.agents.find(agent => agent.id === 'mdd-orchestrator'), 'subagent'), 'allow');
+  console.log(`OpenCode V2 host smoke passed (${version.stdout.trim()}): ${expectedTools.length} tools, ${expectedAgents.length} agents; isolated config, no model requests.`);
 } finally {
   if (host && host.exitCode === null) {
     const exited = once(host, 'exit');

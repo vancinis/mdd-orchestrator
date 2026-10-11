@@ -252,9 +252,11 @@ regression tests; this is not a claim of maintained V1 host acceptance.
 - Tools are direct (`codemode: false`). Model context collapses settled phase prompts and
   superseded status replies without rewriting persisted native messages or recorded artifacts.
 
-Run `node tests/opencode-v2-host-smoke.mjs` after building for the explicit **2.0.22** host check.
+Run `node tests/opencode-v2-host-smoke.mjs` after building for the explicit host check; it accepts
+any installed OpenCode **>= 2.0.0**.
 It starts a service in isolated XDG directories, authenticates from that service's registration,
-and verifies 15 tools, nine agents, profile variants and phase isolation permissions without
+and verifies the exact MDD tool and agent sets (read from the plugin and the packaged agents, not
+counted by hand), profile variants and that only the coordinator can dispatch subagents, without
 model requests. Contract tests cover intake, grouped questions, foreground Plan/Apply/Verify,
 native fallback restrictions, workspace isolation and CLI events. Neither check proves model-backed
 end-to-end execution or interactive permission/UI behavior.
