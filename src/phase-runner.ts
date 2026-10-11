@@ -2583,9 +2583,21 @@ export class PhaseRunner {
   approvalStopped(sessionID: string): void { const run = this.#runs.get(sessionID); if (run) this.#event(run, 'approval', 'cancelled'); }
 
   prFacts(sessionID: string, runID?: string): PRFacts {
+    const facts = this.recordedPRFacts(sessionID, runID);
+    if (!facts) throw new Error('No recorded MDD run is available for this parent. A draft cannot claim implementation evidence.');
+    return facts;
+  }
+
+  /**
+   * Undefined when this parent recorded no run to draft from — typically a direct edit, whose body
+   * is built from git instead. An explicit runID is different: it names a retained target, and a
+   * target that is not there is an error, never a silent switch to a body about something else.
+   */
+  recordedPRFacts(sessionID: string, runID?: string): PRFacts | undefined {
     const run = this.#runs.get(sessionID);
     if (!run || (runID !== undefined && runID !== run.id)) {
       const prior = runID ? this.options.dossier?.readContinued(sessionID, runID) : this.#prior(sessionID);
+      if (!prior?.continuation && runID === undefined) return undefined;
       if (!prior?.continuation) throw new Error('No recorded MDD run is available for this parent or retained failed verification target. A draft cannot claim implementation evidence.');
       return { runID: prior.runID, goal: prior.acceptance?.goal ?? prior.requirements,
         ...(prior.verificationVersion ? { verificationVersion: prior.verificationVersion } : {}),

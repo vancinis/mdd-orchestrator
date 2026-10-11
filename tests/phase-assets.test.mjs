@@ -533,6 +533,9 @@ test('assets: the coordinator asks approval natively, delegates fallback and dra
   assert.match(text, /one tracked fallback: explore for/);
   assert.match(text, /Never do\n  substantive phase work in this conversation/);
   assert.match(text, /call mdd_pr_body with the user's exact latest text; do not hand-write one/);
+  // A quick edit records no run, and its PR was left unopened because the body tool refused it.
+  assert.match(text, /Without a recorded run\n\(a quick edit\), pass baseRef, the PR target branch/);
+  assert.match(text, /one reason per listed file, never invented checks/);
 });
 
 // MDD asks its questions in Spanish and its actors answer in English, so the coordinator sits on
@@ -604,7 +607,7 @@ test('assets: the coordinator hands gathered context to MDD instead of editing a
 // preflight questions again: delivering a recorded change is not a new objective.
 test('assets: the coordinator delivers a recorded run without a new run or preflight', () => {
   const text = fs.readFileSync('assets/opencode/agents/mdd-orchestrator.md', 'utf8');
-  assert.match(text, /Delivering a recorded run's change \(commit, push, open its PR\) is not a new objective/);
+  assert.match(text, /Delivering a recorded run's or a quick edit's change \(commit, push, open its PR\) is not a new objective/);
   assert.match(text, /never\ncall mdd_start or mdd_change_request for it, and never repeat preflight/);
   assert.match(text, /The user's explicit\nrequest is that decision: do only the actions it names/);
   assert.match(text, /a fresh implementation task uses mdd_start normally/);

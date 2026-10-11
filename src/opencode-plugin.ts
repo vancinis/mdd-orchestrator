@@ -20,7 +20,8 @@ import { assessTransfer, projectTargetTransfer } from './transfer.js';
 import { CheckpointStore, STABLE_CHECKPOINT_VERSION } from './checkpoint.js';
 import { QuestionCheckpointStore } from './question-checkpoint.js';
 import { RunOwnershipStore } from './run-ownership.js';
-import { prBodyRequest, renderPRBody } from './pr-body.js';
+import { directPRRequest, prBodyRequest, renderDirectPRBody, renderPRBody } from './pr-body.js';
+import { directChanges } from './pr-direct.js';
 import { TranslationError } from './pr-translation.js';
 import { mddDataRoot } from './engram-http.js';
 import { statusPayload } from './status-budget.js';
@@ -1104,7 +1105,7 @@ const plugin: Plugin = async input => {
         },
       }),
       mdd_pr_body: tool({
-        description: 'Draft only a PR body using the exact local skill/template and recorded current-run evidence. Two calls: without translations it returns the recorded text to translate into Spanish; with them it renders the body. Never commits, pushes or publishes. Optional notes must quote whole lines of the actual latest user text; unknown facts remain unverified.',
+        description: 'Draft only a PR body using the exact local skill/template, with or without a recorded MDD run. With a run: two calls, the first returns the recorded text to translate into Spanish and the second, with translations, renders the body. Without one (a direct edit): pass baseRef, the PR target branch; the first call lists the files git says changed and the second, with direct, renders the body from your Spanish summary and per-file reasons. Never commits, pushes or publishes. Optional notes must quote whole lines of the actual latest user text; unknown facts remain unverified.',
         args: {
           userText: tool.schema.string().min(1),
           runID: tool.schema.string().min(1).optional().describe('Optional explicit retained failed-run target after continuation; never uses another run as its evidence.'),
@@ -1112,15 +1113,30 @@ const plugin: Plugin = async input => {
           digest: tool.schema.string().min(1).optional().describe('The digest the first call returned. Required with translations, and it binds them to the evidence they were made from.'),
           translations: tool.schema.array(tool.schema.object({ key: tool.schema.string().min(1), text: tool.schema.string().min(1) })).max(128).optional()
             .describe('One Spanish translation per key returned by the first call. Translate only: keep numbers, paths, identifiers and commands exactly, add no fact and drop none.'),
+          baseRef: tool.schema.string().min(1).max(200).optional()
+            .describe('Only when no MDD run is recorded here: the PR target branch, such as staging or origin/staging. The changed files are read from git against it.'),
+          direct: tool.schema.object({
+            summary: tool.schema.string().min(1).describe('One Spanish line: what the change delivers and enables, not how it was built.'),
+            files: tool.schema.array(tool.schema.object({ path: tool.schema.string().min(1), reason: tool.schema.string().min(1) })).max(128)
+              .describe('Exactly one Spanish one-line reason per path the first call listed.'),
+          }).optional().describe('Only without a recorded run, after the first call listed the changed files.'),
         },
         async execute(args, context) {
           enter(context, 'mdd_pr_body');
           if (context.abort.aborted) throw new Error('The PR body draft was aborted.');
-          const current = runner.prFacts(context.sessionID, args.runID);
+          const current = runner.recordedPRFacts(context.sessionID, args.runID);
           await inspector.intake(context, boundedText(args.userText, 'actual user request', 12000), context.messageID);
           runner.owner(context.sessionID);
-          const facts = runner.prFacts(context.sessionID, args.runID);
-          if (facts.runID !== current.runID) throw new Error('The current run changed while drafting; no draft was produced.');
+          const facts = runner.recordedPRFacts(context.sessionID, args.runID);
+          if (facts?.runID !== current?.runID) throw new Error('The current run changed while drafting; no draft was produced.');
+          // No run recorded here: a direct edit. Its files come from git, never from the caller.
+          if (!facts) {
+            if (args.translations || args.digest) throw new Error('No MDD run is recorded here, so there is no recorded text to translate. Pass baseRef, then direct with your Spanish summary and reasons.');
+            if (!args.baseRef) throw new Error('No MDD run is recorded here, so this body describes a direct edit. Call again with baseRef, the PR target branch (for example staging or origin/staging); the changed files are read from git against it.');
+            const changes = await directChanges(context.directory, args.baseRef, context.abort);
+            return JSON.stringify(args.direct ? renderDirectPRBody(changes, args.direct, args.userText, args.notes) : directPRRequest(changes));
+          }
+          if (args.direct) throw new Error('This conversation has a recorded MDD run, so its body comes from that evidence. Omit direct and translate the recorded text instead.');
           // Asking again for the recorded text is how a stuck translation is restarted, so it
           // clears the budget: the next set is judged on its own, not on what came before it.
           if (!args.translations) { translationAttempts.delete(context.sessionID); return JSON.stringify(prBodyRequest(facts)); }

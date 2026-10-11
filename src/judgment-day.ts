@@ -24,7 +24,7 @@ export function judgmentTask(value: unknown): { subagent_type: string; descripti
 
 const execute = promisify(execFile);
 const LIMIT = 128 * 1024;
-function gitExecutable(root: string): string {
+export function gitExecutable(root: string): string {
   const checkout = realpathSync(root);
   const outside = (base: string, path: string) => {
     const fromRoot = relative(base, path);

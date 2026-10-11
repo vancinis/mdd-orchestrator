@@ -88,6 +88,18 @@ function problem(entry: Translatable, text: string): string | undefined {
 }
 
 /**
+ * Text the coordinator writes itself, for a direct edit no phase recorded. With no source to hold
+ * it to, only what can be told without one is checked: it is there, it is one line a table cell
+ * can carry, and it is Spanish rather than the English the coordinator was just reading.
+ */
+export function authoredProblem(text: string): string | undefined {
+  if (!text.trim()) return 'quedó vacío';
+  if (/[\x00-\x1f\x7f]/.test(text)) return 'trae saltos de línea o caracteres de control; tiene que ser una sola línea';
+  if (text.length >= SHORT && !SPANISH.test(text)) return 'no parece estar en español';
+  return undefined;
+}
+
+/**
  * Every requested key, exactly once, each one a plausible translation of the text it answers.
  * All the problems are collected and reported together: a coordinator that learns about one fault
  * per attempt spends the retry budget discovering the next one instead of fixing anything.

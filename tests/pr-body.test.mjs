@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import fs from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { prBodyRequest, renderPRBody, translatable } from '../dist/pr-body.js';
+import { directPRRequest, prBodyRequest, renderDirectPRBody, renderPRBody, translatable } from '../dist/pr-body.js';
 import { checkTranslations, translationDigest } from '../dist/pr-translation.js';
 import { PhaseRunner } from '../dist/phase-runner.js';
 import { answers, reportDocument, structuredTraceFixture, structuredVerificationFixture, throughRiskStop } from './adapter-fixture.mjs';
@@ -331,6 +331,69 @@ test('a translation has no size limit of its own', () => {
   const text = 'Rechaza la orden cuando falta el total. '.repeat(100);
   assert.ok(text.length > 2000);
   assert.equal(checkTranslations(entries, [{ key: 'a', text }]).get('a'), text.trim());
+});
+
+// A quick edit records no run, and its PR to staging was left unopened because the body tool
+// refused to draft without one. Git lists the files; the coordinator only says why each changed.
+const changes = { baseRef: 'origin/staging', baseCommit: 'a'.repeat(40), files: ['src/dashboard/title.ts', 'tests/dashboard.test.ts'] };
+const direct = {
+  summary: 'El título del dashboard ahora saluda con Buen día en lugar de Hola.',
+  files: [
+    { path: 'src/dashboard/title.ts', reason: 'Cambia el texto del título que ve quien entra al dashboard.' },
+    { path: 'tests/dashboard.test.ts', reason: 'Actualiza la prueba que comprueba el texto del título.' },
+  ],
+};
+
+test('a direct edit asks for its summary and reasons over exactly the files git listed', () => {
+  const request = directPRRequest(changes);
+  assert.equal(request.render, 'pending-direct');
+  assert.equal(request.source, 'direct');
+  assert.equal(request.baseRef, 'origin/staging');
+  assert.deepEqual(request.files, changes.files);
+  assert.equal(request.publication, 'not-authorized');
+  assert.match(request.instruction, /never claim tests, checks or deployments/);
+});
+
+test('a direct edit renders the same seven sections and says MDD did not verify it', () => {
+  const result = renderDirectPRBody(changes, direct, 'Abrí el PR a staging.');
+  assert.deepEqual([...result.body.matchAll(/^## (.+)$/gm)].map(match => match[1]),
+    ['Resumen', 'Cambios', 'Verificación', 'Variables de entorno', 'Seguimiento', 'Bloqueos', 'Despliegue']);
+  assert.match(result.body, /^## Resumen\n\nEl título del dashboard ahora saluda con Buen día/m);
+  assert.match(result.body, /\| `src\/dashboard\/title\.ts` \| Cambia el texto del título que ve quien entra al dashboard\. \|/);
+  assert.match(result.body, /\| `tests\/dashboard\.test\.ts` \| Actualiza la prueba/);
+  const verification = result.body.split('## Verificación\n\n')[1].split('\n## ')[0];
+  assert.match(verification, /Ajuste directo, sin una ejecución MDD registrada/);
+  assert.match(verification, /no registró comandos de verificación/);
+  assert.doesNotMatch(verification, /Comandos registrados/);
+  // Not a blocker by itself: a small edit made on request is ordinary work.
+  assert.match(result.body, /## Bloqueos\n\nNo aplica\./);
+  assert.equal(result.render, 'final');
+  assert.equal(result.publication, 'not-authorized');
+  assert.deepEqual({ source: result.provenance.source, baseRef: result.provenance.baseRef }, { source: 'direct', baseRef: 'origin/staging' });
+  assert.match(result.provenance.template.digest, /^[a-f0-9]{64}$/);
+});
+
+test('a direct edit cannot leave out, add or repeat a file, and its prose must be one Spanish line', () => {
+  const [first, second] = direct.files;
+  const faults = [
+    [{ ...direct, files: [first] }, /falta el motivo de "tests\/dashboard\.test\.ts"/],
+    [{ ...direct, files: [...direct.files, { path: 'src/other.ts', reason: 'Otro archivo que no cambió.' }] }, /"src\/other\.ts" no cambió contra origin\/staging/],
+    [{ ...direct, files: [first, first, second] }, /viene repetido/],
+    [{ ...direct, summary: 'The dashboard title now greets with Buen día instead of Hola.' }, /el resumen no parece estar en español/],
+    [{ ...direct, files: [first, { ...second, reason: 'Actualiza la prueba\ndel título.' }] }, /tiene que ser una sola línea/],
+  ];
+  for (const [text, expected] of faults) assert.throws(() => renderDirectPRBody(changes, text, 'Abrí el PR.'), expected);
+  assert.throws(() => renderDirectPRBody(changes, { ...direct, extra: 'x' }, 'Abrí el PR.'), /unknown/);
+});
+
+test('a direct edit keeps the user notes rule and the renderer safety filter', () => {
+  const userText = 'Abrí el PR a staging.\nDesplegar a mano después de revisar.';
+  const result = renderDirectPRBody(changes, { ...direct, summary: 'Lee C:\\private\\source para mostrar el título.' }, userText,
+    { deployment: 'Desplegar a mano después de revisar.' });
+  assert.match(result.body, /Lo aportó el usuario, sin verificación independiente: Desplegar a mano/);
+  assert.doesNotMatch(result.body, /C:\\private/);
+  assert.match(result.body, /se omitió texto sensible/);
+  assert.throws(() => renderDirectPRBody(changes, direct, userText, { deployment: 'Desplegar a mano' }), /complete line/);
 });
 
 test('a translation that is really a rewrite or a summary is refused', t => {

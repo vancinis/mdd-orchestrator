@@ -485,7 +485,8 @@ of guessing. If the change turns out larger than it was described — new logic,
 dependencies, data or security — it stops and offers a normal run with the user's own text. It
 never does this while a phase task is in flight or an MDD question is pending, and its reply is a
 few Spanish lines naming `file:line`, before and after. Native edit permissions still apply, and
-because no run is recorded there is no coverage, ledger row or `mdd_pr_body` evidence for it.
+because no run is recorded there is no coverage or ledger row for it. Its PR body still comes from
+`mdd_pr_body`, with the files read from git instead of a run (see [PR-body drafts](#pr-body-drafts)).
 
 ### Complete Spanish clarification conversations
 
@@ -1111,13 +1112,28 @@ for the file format, the retention rule and the optional memory index.
 
 ## PR-body drafts
 
-When requested, `mdd_pr_body({ userText, notes?, digest?, translations? })` checks the actual
-latest native user text and current parent, then renders the shared local template without
-changing workflow, approval, artifacts or memory. It requires a recorded run; it never starts
-implementation merely to draft a body. Optional notes contain `environmentVariables`,
-`followUps`, and/or `deployment`, each quoting a whole user-provided line. They stay attributed
-and unverified. No model-callable parameter can replace recorded changes, checks or completion
-evidence.
+When requested, `mdd_pr_body({ userText, notes?, digest?, translations?, baseRef?, direct? })`
+checks the actual latest native user text and current parent, then renders the shared local
+template without changing workflow, approval, artifacts or memory. It drafts with or without a
+recorded run, and it never starts implementation merely to draft a body. Optional notes contain
+`environmentVariables`, `followUps`, and/or `deployment`, each quoting a whole user-provided line.
+They stay attributed and unverified. No model-callable parameter can replace recorded changes,
+checks or completion evidence.
+
+Without a recorded run — a quick edit, typically — there is no recorded
+prose to translate and no check to report, but git still knows which files changed. The first call
+takes `baseRef`, the PR target branch, and returns `render: 'pending-direct'` with the files that
+differ between its merge base and the working tree: committed, staged, unstaged and untracked
+alike. `origin/<baseRef>` is preferred over a local branch of the same name, because a stale local
+copy would sweep work other people already merged into the table. The second call adds `direct`:
+a Spanish one-line summary and exactly one Spanish one-line reason per listed path. A missing,
+extra or repeated path is refused, as is text that is empty, multi-line or not Spanish. The body
+then says under `Verificación` that it is a direct edit MDD neither planned nor verified, that the
+files come from git and the prose from the coordinator; it records no command and invents none.
+That alone is not a blocker, since a small edit made on request is ordinary work. Git is called
+with the user's global configuration, so their global ignore file applies, but with external diff,
+textconv, fsmonitor, the pager, prompts and lazy fetch switched off. `direct` is refused when a run
+is recorded, and translations are refused when none is.
 
 Drafting takes two calls, because every sentence of substance in a body was written by a phase
 actor in English and a body is read by a reviewer in Spanish. Rendering the recorded prose as it

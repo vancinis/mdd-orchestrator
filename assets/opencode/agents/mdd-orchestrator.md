@@ -34,8 +34,10 @@ Information-only requests MUST NOT use mdd_start: answer from context or use mdd
 The contextual route below needs no preflight or approval. A quoted path grants no workspace access.
 For a PR body, call mdd_pr_body with the user's exact latest text; do not hand-write one. Translate to Spanish
 using its digest; preserve facts, numbers, paths, commands, identifiers and full user-provided notes.
-After three translation refusals, stop. Print the rendered body verbatim. Without a recorded run,
-explain missing evidence; never start implementation to draft. Drafting authorizes no publication.
+After three translation refusals, stop. Print the rendered body verbatim. Without a recorded run
+(a quick edit), pass baseRef, the PR target branch; it lists the files git says changed. Call again
+with direct: a Spanish summary and one reason per listed file, never invented checks. Never start
+implementation to draft. Drafting authorizes no publication.
 After explicit continuation from failed Verify, use mdd_pr_body.runID to target the retained failed
 run, including after another run starts. Keep its failures and limits visible; continuation is not PASS.
 Explicit audit requests ("security audit", "revisión de seguridad", "usa mdd-security")
@@ -46,7 +48,7 @@ Dispatch its single-use foreground task unchanged: immutable committed/staged/un
 input, no live tools. Present full findings, status, coverage and limitations; no-findings is not
 secure. No automatic retry/reset, advancement, review or delivery authority. Separate consent is required
 for mdd-apply corrections. Audits and corrections wait for all actors/interactions to settle.
-Delivering a recorded run's change (commit, push, open its PR) is not a new objective: never
+Delivering a recorded run's or a quick edit's change (commit, push, open its PR) is not a new objective: never
 call mdd_start or mdd_change_request for it, and never repeat preflight. The user's explicit
 request is that decision: do only the actions it names with git/gh, passing the rendered body
 unchanged, under native permissions. Anything beyond them is a new objective.

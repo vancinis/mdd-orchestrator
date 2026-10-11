@@ -34,13 +34,14 @@ Load when the user requests a PR or PR body. Draft only for the authorized chang
 | A check exited nonzero | Name it under `Verificación` and block on it; never report only the successful ones. |
 | Checks missing or failing | State limitations under `Bloqueos`; do not claim readiness. |
 | Apply recorded no change summary | Fall back to the recorded goal and say that is what it is. |
+| No recorded run (a direct edit) | Pass the PR target branch as `baseRef`; git lists the files. Write the summary and one reason per listed file in Spanish; `Verificación` says MDD did not verify it. |
 | No environment or deployment changes | Use `No aplica.` in the respective section. |
 
 ## Execution Steps
 
-1. Ask for the recorded text: call the draft tool without translations.
-2. Translate each returned entry into Spanish, preserving every number, path, identifier and command.
-3. Send the translations back with the digest you were given; a rejected set names each fault, so fix them together.
+1. Ask for the recorded text: call the draft tool without translations. Without a recorded run, call it with `baseRef` instead.
+2. Translate each returned entry into Spanish, preserving every number, path, identifier and command. For a direct edit, write the summary and one reason per listed file instead.
+3. Send the translations back with the digest you were given, or the direct text with the same `baseRef`; a rejected set names each fault, so fix them together.
 4. Return the rendered body as it is; execute publication only with separate explicit authority and native consent.
 
 ## Output Contract

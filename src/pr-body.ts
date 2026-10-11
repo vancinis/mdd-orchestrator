@@ -1,6 +1,7 @@
 import { assetText, PACKAGE_ROOT } from './project-assets.js';
 import type { ChangedFile, Check, Delivered, VerificationVersion } from './phase-evidence.js';
-import { checkTranslations, TranslationError, translationDigest } from './pr-translation.js';
+import type { DirectChanges } from './pr-direct.js';
+import { authoredProblem, checkTranslations, TranslationError, translationDigest } from './pr-translation.js';
 import type { Translatable, Translation } from './pr-translation.js';
 import { objectWithKeys } from './validation.js';
 
@@ -88,9 +89,51 @@ function commands(checks: readonly Check[]): string {
  * the phase actor's own, recorded when it reported the change; where it did not give one, the row
  * says so instead of inventing a plausible motive.
  */
-function changeTable(files: readonly ChangedFile[], spanish: (key: string) => string): string {
-  const rows = files.map((file, index) => `| \`${cell(file.path)}\` | ${file.reason ? cell(spanish(`file.${index}`)) : 'Sin motivo registrado; revisá el diff.'} |`);
+function changeTable(files: readonly { path: string; reason?: string }[]): string {
+  const rows = files.map(file => `| \`${cell(file.path)}\` | ${file.reason ? cell(file.reason) : 'Sin motivo registrado; revisá el diff.'} |`);
   return ['| Archivo | Por qué cambió |', '|---|---|', ...rows].join('\n');
+}
+
+/** The packaged skill and template, never a workspace copy, checked before anything is rendered. */
+function packaged() {
+  const skill = assetText(PACKAGE_ROOT, 'assets/opencode/skills/mdd-pr-body/SKILL.md');
+  if (!/^---\r?\n(?:[^\n]*\n)*?name: mdd-pr-body\r?\n/.test(skill.content)) throw new Error('The exact packaged mdd-pr-body skill is required.');
+  const template = assetText(PACKAGE_ROOT, 'assets/opencode/skills/mdd-pr-body/assets/template.md');
+  const headings = [...template.content.matchAll(/^## (.+)$/gm)].map(match => match[1]);
+  if (JSON.stringify(headings) !== JSON.stringify(HEADINGS)) throw new Error('The packaged PR template must retain the seven approved sections in order.');
+  return { skill, template };
+}
+
+/** The sections only the user can answer: quoted from their own latest words, or not applicable. */
+function userNotes(userText: string, value: unknown): (key: string) => string {
+  const notes = objectWithKeys(value, 'PR notes', ['environmentVariables', 'followUps', 'deployment']);
+  return key => {
+    // An absent optional note is the ordinary case: the user asked for a body and said nothing
+    // about deployment. The template, the skill and the docs all answer that with "No aplica."
+    // Answering it with "unverified" instead made every normal draft look like it had lost data.
+    if (!Object.hasOwn(notes, key)) return 'No aplica.';
+    const note = notes[key];
+    if (typeof note !== 'string' || !note.trim()) throw new Error(`PR note ${key} must be nonempty text, or be omitted entirely to render "No aplica.".`);
+    if (!userText.split(/\r?\n/).some(line => line.trim() === note.trim())) throw new Error(`PR note ${key} must quote a complete line of the actual latest user text; MDD does not author these sections.`);
+    const safe = safeCopy(note);
+    // The user writing exactly "No aplica." is answering the section, not supplying a fact about
+    // it, so attributing it back to them would read as evidence where there is none.
+    if (safe === REDACTED || safe === 'No aplica.') return safe;
+    return `Lo aportó el usuario, sin verificación independiente: ${safe}`;
+  };
+}
+
+function finished(template: { content: string }, sections: Record<string, string>, provenance: Record<string, unknown>) {
+  const body = template.content.replace(/^## (.+)\r?\n[\s\S]*?(?=^## |$(?![\s\S]))/gm, (_section, heading: string) => `## ${heading}\n\n${sections[heading]}\n\n`).trimEnd() + '\n';
+  return {
+    body,
+    // The body is assembled here from recorded facts against a fixed template, so reformatting it
+    // downstream can only move it away from the template it was built to satisfy. The prose was
+    // translated or written in Spanish before it got here, which is why nothing may translate it now.
+    render: 'final', instruction: 'Print body verbatim. Do not rewrite, summarize, reorder, reformat or translate it; it is already written for the reader. Keep provenance in drilldown evidence.',
+    publication: 'not-authorized',
+    provenance,
+  };
 }
 
 /**
@@ -126,32 +169,14 @@ export function prBodyRequest(facts: PRFacts): Record<string, unknown> {
 }
 
 export function renderPRBody(root: string, facts: PRFacts, userText: string, value: unknown = {}, supplied: { digest: string; translations: readonly Translation[] }) {
-  const skill = assetText(PACKAGE_ROOT, 'assets/opencode/skills/mdd-pr-body/SKILL.md');
-  if (!/^---\r?\n(?:[^\n]*\n)*?name: mdd-pr-body\r?\n/.test(skill.content)) throw new Error('The exact packaged mdd-pr-body skill is required.');
-  const template = assetText(PACKAGE_ROOT, 'assets/opencode/skills/mdd-pr-body/assets/template.md');
-  const headings = [...template.content.matchAll(/^## (.+)$/gm)].map(match => match[1]);
-  if (JSON.stringify(headings) !== JSON.stringify(HEADINGS)) throw new Error('The packaged PR template must retain the seven approved sections in order.');
+  const { skill, template } = packaged();
   const entries = translatable(facts);
   if (supplied.digest !== translationDigest(facts.runID, entries)) {
     throw new TranslationError('Esa traducción no corresponde a la evidencia registrada ahora; la ejecución cambió mientras se redactaba. Pedí de nuevo los textos con mdd_pr_body sin traducciones y traducí los que devuelva.');
   }
   const translated = checkTranslations(entries, supplied.translations);
   const spanish = (key: string): string => translated.get(key) ?? '';
-  const notes = objectWithKeys(value, 'PR notes', ['environmentVariables', 'followUps', 'deployment']);
-  const human = (key: string): string => {
-    // An absent optional note is the ordinary case: the user asked for a body and said nothing
-    // about deployment. The template, the skill and the docs all answer that with "No aplica."
-    // Answering it with "unverified" instead made every normal draft look like it had lost data.
-    if (!Object.hasOwn(notes, key)) return 'No aplica.';
-    const note = notes[key];
-    if (typeof note !== 'string' || !note.trim()) throw new Error(`PR note ${key} must be nonempty text, or be omitted entirely to render "No aplica.".`);
-    if (!userText.split(/\r?\n/).some(line => line.trim() === note.trim())) throw new Error(`PR note ${key} must quote a complete line of the actual latest user text; MDD does not author these sections.`);
-    const safe = safeCopy(note);
-    // The user writing exactly "No aplica." is answering the section, not supplying a fact about
-    // it, so attributing it back to them would read as evidence where there is none.
-    if (safe === REDACTED || safe === 'No aplica.') return safe;
-    return `Lo aportó el usuario, sin verificación independiente: ${safe}`;
-  };
+  const human = userNotes(userText, value);
   const failed = facts.checks.filter(check => check.exit !== 0).length;
   // For structured runs, the runner's settled `verified` result already includes required
   // dispositions and semantic coverage. Historical exits cannot reconstruct that decision.
@@ -173,24 +198,72 @@ export function renderPRBody(root: string, facts: PRFacts, userText: string, val
     Resumen: facts.delivered
       ? [safeCopy(spanish('delivered.what')), ...(facts.delivered.implies ? [safeCopy(spanish('delivered.implies'))] : [])].join('\n\n')
       : `${safeCopy(spanish('goal'))}\n\nNo se registró un resumen del cambio: este texto es el objetivo que se pidió, no lo que quedó implementado.`,
-    Cambios: facts.changedFiles ? changeTable(facts.files, spanish) : 'No se registró ningún cambio de implementación.',
+    Cambios: facts.changedFiles
+      ? changeTable(facts.files.map((file, index) => ({ path: file.path, ...(file.reason ? { reason: spanish(`file.${index}`) } : {}) })))
+      : 'No se registró ningún cambio de implementación.',
     Verificación: `${facts.verified
       ? 'La ejecución registrada terminó; que los requisitos y el plan coincidan sigue siendo la evaluación del agente, no una revisión independiente.'
       : 'Los requisitos y el plan de esta ejecución no están verificados del todo.'}\n\n${safeCopy(spanish('verification'))}\n\n${commands(facts.checks)}`,
     'Variables de entorno': human('environmentVariables'), Seguimiento: human('followUps'),
     Bloqueos: blockers.length ? blockers.map(item => `- ${item}`).join('\n') : 'No aplica.', Despliegue: human('deployment'),
   };
-  const body = template.content.replace(/^## (.+)\r?\n[\s\S]*?(?=^## |$(?![\s\S]))/gm, (_section, heading: string) => `## ${heading}\n\n${sections[heading]}\n\n`).trimEnd() + '\n';
+  return finished(template, sections, { runID: facts.runID, skill: { path: skill.path, digest: skill.digest }, template: { path: template.path, digest: template.digest },
+    // Named so the record shows which sentences reached the reviewer through a translation
+    // rather than straight from the phase that recorded them.
+    translated: entries.map(entry => entry.key) });
+}
+
+/**
+ * The first call for a direct edit: the files git says changed, and what the coordinator has to
+ * write about them. No phase recorded any prose, so there is nothing to translate; the coordinator
+ * writes the Spanish itself, and only for the files listed here.
+ */
+export function directPRRequest(changes: DirectChanges): Record<string, unknown> {
   return {
-    body,
-    // The body is assembled here from recorded facts against a fixed template, so reformatting it
-    // downstream can only move it away from the template it was built to satisfy. The prose was
-    // translated before it got here, which is why nothing may translate it now.
-    render: 'final', instruction: 'Print body verbatim. Do not rewrite, summarize, reorder, reformat or translate it; it is already written for the reader. Keep provenance in drilldown evidence.',
+    render: 'pending-direct', source: 'direct', baseRef: changes.baseRef, files: [...changes.files],
+    instruction: 'No MDD run is recorded here, so this body describes a direct edit. Write in Spanish, for the reviewer, one line each: direct.summary says what the change delivers and what it enables, not how it was built; direct.files gives exactly one reason per path listed here, saying why that file changed. Then call mdd_pr_body again with the same userText and baseRef plus direct. State only what was changed; never claim tests, checks or deployments. If a listed path should not be in the PR, stop and tell the user instead of leaving it out.',
     publication: 'not-authorized',
-    provenance: { runID: facts.runID, skill: { path: skill.path, digest: skill.digest }, template: { path: template.path, digest: template.digest },
-      // Named so the record shows which sentences reached the reviewer through a translation
-      // rather than straight from the phase that recorded them.
-      translated: entries.map(entry => entry.key) },
   };
+}
+
+/**
+ * A body for a change no run recorded. The file list is git's and the prose is the coordinator's,
+ * and the body says exactly that under Verificación instead of borrowing the vocabulary of a run:
+ * nothing here was planned or verified by MDD, and a reviewer has to be able to tell.
+ * It is not a blocker on its own — a small edit made on request is ordinary work — but no check
+ * is invented for it either.
+ */
+export function renderDirectPRBody(changes: DirectChanges, value: unknown, userText: string, notes: unknown = {}) {
+  const { skill, template } = packaged();
+  const direct = objectWithKeys(value, 'direct PR text', ['summary', 'files']);
+  const faults: string[] = [];
+  const summary = typeof direct.summary === 'string' ? direct.summary.trim() : '';
+  const summaryFault = authoredProblem(summary);
+  if (summaryFault) faults.push(`el resumen ${summaryFault}`);
+  const reasons = new Map<string, string>();
+  if (!Array.isArray(direct.files)) faults.push('files tiene que ser una lista con un motivo por archivo');
+  for (const item of Array.isArray(direct.files) ? direct.files : []) {
+    const file = objectWithKeys(item, 'direct PR file', ['path', 'reason']);
+    const path = typeof file.path === 'string' ? file.path : '';
+    if (!changes.files.includes(path)) { faults.push(`"${path.slice(0, 200)}" no cambió contra ${changes.baseRef}`); continue; }
+    if (reasons.has(path)) { faults.push(`"${path}" viene repetido`); continue; }
+    const reason = typeof file.reason === 'string' ? file.reason.trim() : '';
+    const fault = authoredProblem(reason);
+    if (fault) faults.push(`el motivo de "${path}" ${fault}`);
+    reasons.set(path, reason);
+  }
+  for (const path of changes.files) if (!reasons.has(path)) faults.push(`falta el motivo de "${path}"`);
+  if (faults.length) {
+    throw new Error(`El texto del ajuste directo no se pudo usar: ${faults.slice(0, 8).join('; ')}. Escribí en español, en una línea, el resumen y un motivo por cada archivo que listó git, ni más ni menos.`);
+  }
+  const human = userNotes(userText, notes);
+  const sections: Record<string, string> = {
+    Resumen: safeCopy(summary),
+    Cambios: changeTable(changes.files.map(path => ({ path, reason: reasons.get(path)! }))),
+    Verificación: 'Ajuste directo, sin una ejecución MDD registrada: MDD no planificó ni verificó este cambio y no registró comandos de verificación. La lista de archivos sale de git; el resumen y los motivos los escribió el agente, sin revisión independiente.',
+    'Variables de entorno': human('environmentVariables'), Seguimiento: human('followUps'),
+    Bloqueos: 'No aplica.', Despliegue: human('deployment'),
+  };
+  return finished(template, sections, { source: 'direct', baseRef: changes.baseRef, baseCommit: changes.baseCommit,
+    skill: { path: skill.path, digest: skill.digest }, template: { path: template.path, digest: template.digest } });
 }

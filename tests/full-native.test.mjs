@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
+import { execFileSync } from 'node:child_process';
 import { createLegacyPlugin as plugin } from '../dist/opencode-plugin.js';
 import { defaultSettings, MODEL_ROLES } from '../dist/settings.js';
 import { saveGlobalSettings } from '../dist/global-settings.js';
@@ -3058,6 +3059,39 @@ test('PR-body tool preserves pending approval and refuses wrong user/parent evid
   assert.match(draft.body, /No se registró ningún cambio de implementación/); assert.match(draft.body, /no están verificados del todo/);
   await assert.rejects(f.hooks.tool.mdd_pr_body.execute({ userText: 'The work was approved and deployed.' }, f.context));
   await assert.rejects(f.hooks.tool.mdd_pr_body.execute({ userText: 'Draft a preliminary PR body.' }, { ...f.context, sessionID: 'other-parent' }));
+  // A recorded run's body comes from its evidence; text written for a direct edit cannot replace it.
+  await assert.rejects(f.hooks.tool.mdd_pr_body.execute({ userText: 'Draft a preliminary PR body.', direct: { summary: 'Resumen inventado.', files: [] } }, f.context), /recorded MDD run/);
+  assert.deepEqual(await f.status(), before);
+});
+
+// "Abrí el PR a staging con la etiqueta preview" after a quick edit left the PR unopened: the body
+// tool refused to draft because the edit, by design, recorded no run.
+test('a quick edit with no recorded run still drafts its PR body from git and the coordinator\'s Spanish', async t => {
+  const f = await fixture(t, { start: false, memoryEnabled: false });
+  const git = (...args) => execFileSync('git', ['-c', 'user.name=MDD', '-c', 'user.email=mdd@example.invalid', '-c', 'commit.gpgsign=false', ...args],
+    { cwd: f.root, stdio: ['ignore', 'pipe', 'pipe'] });
+  git('init', '-q', '-b', 'staging'); git('add', '.'); git('commit', '-q', '-m', 'base'); git('checkout', '-q', '-b', 'fix/feature');
+  await writeFile(join(f.root, 'feature.txt'), 'done\n');
+  const userText = 'Abrí el PR a staging con la etiqueta preview.';
+  f.user(userText);
+  const before = await f.status();
+  await assert.rejects(f.hooks.tool.mdd_pr_body.execute({ userText }, f.context), /baseRef, the PR target branch/);
+  const request = JSON.parse(await f.hooks.tool.mdd_pr_body.execute({ userText, baseRef: 'staging' }, f.context));
+  assert.equal(request.render, 'pending-direct');
+  assert.deepEqual(request.files, ['feature.txt']);
+  // There is no recorded prose here, so there is nothing to translate either.
+  await assert.rejects(f.hooks.tool.mdd_pr_body.execute({ userText, baseRef: 'staging', digest: 'x', translations: [{ key: 'goal', text: 'Objetivo.' }] }, f.context), /no recorded text to translate/);
+  const direct = { summary: 'La feature queda marcada como terminada para quien la consulta.',
+    files: [{ path: 'feature.txt', reason: 'Cambia el estado de la feature de pendiente a terminada.' }] };
+  const draft = JSON.parse(await f.hooks.tool.mdd_pr_body.execute({ userText, baseRef: 'staging', direct }, f.context));
+  assert.match(draft.body, /## Resumen\n\nLa feature queda marcada como terminada/);
+  assert.match(draft.body, /\| `feature\.txt` \| Cambia el estado de la feature de pendiente a terminada\. \|/);
+  assert.match(draft.body, /Ajuste directo, sin una ejecución MDD registrada/);
+  assert.equal(draft.publication, 'not-authorized');
+  assert.equal(draft.provenance.source, 'direct');
+  // The user's text is still authenticated: a claim they never wrote drafts nothing.
+  await assert.rejects(f.hooks.tool.mdd_pr_body.execute({ userText: 'Ya está aprobado y desplegado.', baseRef: 'staging', direct }, f.context));
+  // Drafting starts nothing: no run, no question, no state change.
   assert.deepEqual(await f.status(), before);
 });
 
