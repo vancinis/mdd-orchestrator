@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join, parse, relative, resolve, sep } from 'node:path';
 import { ArtifactObservationError, EngramHttp } from './engram-http.js';
 import type { Answers, Phase } from './policy.js';
+import type { TaskStore } from './task-store.js';
 
 /**
  * `mdd-risk` is not a Phase, but its assessment is persisted exactly like a phase artifact so the
@@ -20,7 +21,7 @@ export type ArtifactRef = Readonly<ArtifactIdentity & {
 }>;
 export type ArtifactResult = Readonly<{ ref: ArtifactRef; content: string }>;
 export type ArtifactAttempt = Readonly<{
-  backend: 'openspec' | 'engram'; status: 'confirmed' | 'unknown'; ref: ArtifactRef;
+  backend: 'openspec' | 'engram' | 'local'; status: 'confirmed' | 'unknown'; ref: ArtifactRef;
 }>;
 export class ArtifactWriteError extends Error {
   constructor(readonly attempts: readonly ArtifactAttempt[]) {
@@ -68,7 +69,7 @@ function artifactPath(value: ArtifactIdentity): string {
   return `openspec/changes/${value.runID}/${name}`;
 }
 
-function directories(path: string, createBelow?: string): void {
+export function artifactDirectories(path: string, createBelow?: string): void {
   const root = parse(path).root;
   let current = root;
   for (const part of relative(root, path).split(sep).filter(Boolean)) {
@@ -81,8 +82,8 @@ function directories(path: string, createBelow?: string): void {
     if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('Unsafe artifact directory.');
   }
 }
-function readFile(path: string): string {
-  directories(dirname(path));
+export function readArtifactFile(path: string): string {
+  artifactDirectories(dirname(path));
   const before = fs.lstatSync(path);
   if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1) throw new Error('Unsafe artifact file.');
   const fd = fs.openSync(path, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
@@ -98,20 +99,36 @@ function readFile(path: string): string {
   } finally { fs.closeSync(fd); }
 }
 
+/** Exclusive evidence publication. An existing file is never reused or overwritten. */
+export function publishArtifactFile(root: string, name: string, content: string): void {
+  contentCheck(content);
+  const path = join(root, name);
+  const inside = relative(root, resolve(path));
+  if (!inside || inside === '..' || inside.startsWith(`..${sep}`) || parse(inside).root) throw new Error('Unsafe artifact destination.');
+  artifactDirectories(dirname(path), root);
+  const fd = fs.openSync(path, 'wx', 0o600);
+  try { fs.writeFileSync(fd, content, 'utf8'); fs.fsyncSync(fd); }
+  finally { fs.closeSync(fd); }
+  if (readArtifactFile(path) !== content) throw new Error('Artifact publication readback differs.');
+}
+
 /** Live references are capabilities of this instance, not arbitrary paths or observation IDs. */
 export class ArtifactStore {
   readonly #root: string;
   readonly #store: Answers['artifactStore'];
   readonly #engram: EngramHttp | undefined;
+  readonly #task: TaskStore | undefined;
   readonly #issued = new WeakMap<ArtifactRef, { content: string; envelope: string; title: string }>();
 
-  constructor(root: string, store: Answers['artifactStore'], engram?: EngramHttp) {
-    if (!['engram', 'openspec', 'both', 'none'].includes(store)) throw new Error('Invalid artifact store.');
+  constructor(root: string, store: Answers['artifactStore'], engram?: EngramHttp, task?: TaskStore) {
+    if (!['engram', 'openspec', 'both', 'none', 'local'].includes(store)) throw new Error('Invalid artifact store.');
     if ((store === 'engram' || store === 'both') && !engram) throw new Error('Bound Engram client required.');
     this.#root = resolve(root);
     if (store === 'engram' || store === 'both') engram!.assertArtifactDirectory(this.#root);
     this.#store = store;
     this.#engram = engram;
+    if (store === 'local' && (!task || task.identity.directory !== root)) throw new Error('Bound local task store required.');
+    this.#task = task;
   }
 
   async save(value: ArtifactIdentity, content: string): Promise<ArtifactResult> {
@@ -123,17 +140,27 @@ export class ArtifactStore {
     const envelope = JSON.stringify({ kind: 'mdd-artifact', version: 1, ...base, content });
     let ref = base;
     const attempts: ArtifactAttempt[] = [];
+    if (this.#store === 'local') {
+      ref = { ...ref, path: this.#task!.artifactName(ref.recordID) };
+      try {
+        this.#task!.publishArtifact(ref, content);
+        attempts.push(Object.freeze({ backend: 'local', status: 'confirmed', ref: Object.freeze({ ...ref }) }));
+      } catch {
+        attempts.push(Object.freeze({ backend: 'local', status: 'unknown', ref: Object.freeze({ ...ref }) }));
+        throw new ArtifactWriteError(Object.freeze(attempts));
+      }
+    }
     if (this.#store === 'openspec' || this.#store === 'both') {
       ref = { ...ref, path: artifactPath(key) };
       try {
         const path = join(this.#root, ref.path!);
-        directories(dirname(path), this.#root);
+        artifactDirectories(dirname(path), this.#root);
         if (!fs.lstatSync(path, { throwIfNoEntry: false })) {
           const fd = fs.openSync(path, 'wx', 0o600);
           try { fs.writeFileSync(fd, content, 'utf8'); fs.fsyncSync(fd); }
           finally { fs.closeSync(fd); }
         }
-        if (readFile(path) !== content) throw new Error('Existing artifact differs.');
+        if (readArtifactFile(path) !== content) throw new Error('Existing artifact differs.');
         attempts.push(Object.freeze({ backend: 'openspec', status: 'confirmed', ref: Object.freeze({ ...ref }) }));
       } catch {
         attempts.push(Object.freeze({ backend: 'openspec', status: 'unknown', ref: Object.freeze({ ...ref }) }));
@@ -160,7 +187,8 @@ export class ArtifactStore {
   async read(ref: ArtifactRef): Promise<string> {
     const issued = this.#issued.get(ref);
     if (!issued) throw new Error('Unissued artifact reference; serialized or modified references are not capabilities.');
-    if (ref.path && readFile(join(this.#root, ref.path)) !== issued.content) throw new Error('Artifact disk readback mismatch.');
+    if (ref.store === 'local' && this.#task!.readArtifact(ref) !== issued.content) throw new Error('Artifact disk readback mismatch.');
+    if (ref.store !== 'local' && ref.path && readArtifactFile(join(this.#root, ref.path)) !== issued.content) throw new Error('Artifact disk readback mismatch.');
     if (ref.observationID !== undefined &&
         await this.#engram!.readArtifact(ref.observationID, issued.title) !== issued.envelope) {
       throw new Error('Artifact Engram readback mismatch.');

@@ -45,6 +45,7 @@ import { completeStep, selectedStep, taskIDs } from './apply-batches.js';
 import { relative, resolve } from 'node:path';
 import { supplementKnowledge } from './project-knowledge.js';
 import type { KnowledgeResolution, KnowledgeDiagnostics, KnowledgeSelection } from './project-knowledge.js';
+import { TaskStore, TaskWriteError } from './task-store.js';
 
 export type Runtime = { sessionID: string; agent: string; directory: string; worktree: string };
 export type TaskCall = { sessionID: string; callID: string };
@@ -211,6 +212,7 @@ type Run = {
   /** Set when the phase prompt reports earlier artifacts as summaries rather than full text. */
   handoff?: { inlined: number; summarized: { phase: Phase; recordID: string }[] };
   artifacts: ArtifactStore; artifact?: ArtifactResult; artifactAttempts?: readonly ArtifactAttempt[];
+  task?: TaskStore; riskHistory?: ArtifactResult[]; retainedReceipts?: PriorReceipt[];
   history: ArtifactResult[]; calls: Set<string>; planned: Deliverable[]; evidence: Evidence;
   report: PhaseReport; started?: number; readyAt?: number; telemetryDiagnostic?: string;
   acceptance?: Acceptance; decisions: Decision[]; verification?: Verification; executedChecks: Check[]; changedFiles: number;
@@ -977,7 +979,13 @@ export class PhaseRunner {
       if (data.memoryProject && !bindMemory) return { restored: false, reason: 'A fresh Engram session binding is required before restoration; no task was reissued.' };
       const memory = data.memoryProject ? await bindMemory!(data.memoryProject) : undefined;
       if (memory && memory.project !== data.memoryProject) throw new Error('Engram project binding changed.');
-      const artifacts = new ArtifactStore(runtime.directory, store, memory);
+      const task = store === 'local' ? TaskStore.open(data.task, { runID: checkpoint.runID, directory: runtime.directory,
+        worktree: runtime.worktree, ...(memory ? { project: memory.project } : {}) }) : undefined;
+      const localPhases = task ? data.taskArtifacts!.phases.map(ref => ({ ref: structuredClone(ref), content: task.readArtifact(ref) })) : undefined;
+      const localContexts = task ? data.taskArtifacts!.contexts.map(ref => ({ ref: structuredClone(ref), content: task.readArtifact(ref) })) : undefined;
+      const riskHistory = task ? data.taskArtifacts!.risks.map(ref => ({ ref: structuredClone(ref), content: task.readArtifact(ref) })) : undefined;
+      const retained = task?.latest();
+      const artifacts = new ArtifactStore(runtime.directory, store, memory, task);
       // These synthetic identifiers are diagnostic data only. ArtifactStore.read will reject them
       // because this new store instance never issued the serialized historical references.
       const historical = (phase: Phase, content: string, digest: string, index: number, explorationID?: string, batchID?: string): ArtifactResult => ({
@@ -994,15 +1002,17 @@ export class PhaseRunner {
         ...(data.workerState ? { workerState: structuredClone(data.workerState) } : {}),
         id: checkpoint.runID, runtime: { ...runtime }, workflow,
         phase: stable.state === 'await-approval' ? workflow.snapshot().results.at(-1)!.phase : stable.phase, requirements: data.requirements,
-        memory, artifacts, args: { description: '', subagent_type: stable.phase, prompt: '' },
+        memory, artifacts, ...(task ? { task, riskHistory: riskHistory!, retainedReceipts: retained?.dossier.questionReceipts ?? [] } : {}),
+        args: { description: '', subagent_type: stable.phase, prompt: '' },
         state: releasedAttempt ? 'blocked' : STABLE_TO_STATE[stable.state],
         ...(risking ? { stage: RISK_ACTOR } : {}),
         ...(data.risk && lastRisk ? { riskVerdict: structuredClone(data.risk.verdict), riskSummary: lastRisk.result.evidenceSummary,
-          riskArtifact: { ref: structuredClone(data.risk.ref), content: '' } } : {}),
+          riskArtifact: riskHistory?.at(-1) ?? { ref: structuredClone(data.risk.ref), content: '' } } : {}),
+        ...(!data.risk && riskHistory?.length ? { riskArtifact: riskHistory.at(-1)! } : {}),
         checkpointRequest: structuredClone(checkpoint.request), checkpointSequence: checkpoint.sequence,
-        history: data.dependencies.map((item, index) => historical(item.phase, item.content, item.digest, index, undefined, item.batchID)),
+        history: localPhases ?? data.dependencies.map((item, index) => historical(item.phase, item.content, item.digest, index, undefined, item.batchID)),
         contexts: data.contexts.map((item, index) => ({ explorationID: item.explorationID, outcome: item.outcome,
-          summary: item.summary, concerns: structuredClone(item.concerns), artifact: historical('mdd-explore', item.content, item.digest, index, item.explorationID) })),
+          summary: item.summary, concerns: structuredClone(item.concerns), artifact: localContexts?.[index] ?? historical('mdd-explore', item.content, item.digest, index, item.explorationID) })),
         calls: new Set(data.calls), planned: structuredClone(data.planned), evidence: { ...data.evidence },
         ...(data.acceptance ? { acceptance: structuredClone(data.acceptance) } : {}),
         decisions: structuredClone(data.decisions), ...(data.verification ? { verification: structuredClone(data.verification) } : {}),
@@ -1056,6 +1066,7 @@ export class PhaseRunner {
           }
         }
       }
+      if (task && retained?.checkpoint.parent !== runtime.sessionID) this.#checkpoint(run, checkpoint.attempt?.state);
       this.#runs.set(runtime.sessionID, run);
       this.owner(runtime.sessionID);
       return { restored: true };
@@ -1474,6 +1485,8 @@ export class PhaseRunner {
     const first = workflow.nextAction();
     if (first.kind !== 'execute') throw new ValidationError('No initial phase is ready.');
     const requirements = boundedText(request.requirements, 'requirements', 12000);
+    if (workflow.snapshot().answers.artifactStore === 'local' && !trusted?.userMessageID)
+      throw new Error('A native user message identity is required for local task provenance.');
     // Context supplied at startup rides with the very first phase; more can arrive later through
     // mdd_context. It never substitutes for requirements, which stay the native user's own text.
     const context = request.context === undefined ? [] : [runContext(request.context)];
@@ -1484,6 +1497,9 @@ export class PhaseRunner {
       memory = new EngramHttp(boundedText(request.engramEndpoint, 'engramEndpoint', 100), { id: runtime.sessionID, project, directory: runtime.directory });
     }
     const id = randomUUID();
+    const task = workflow.snapshot().answers.artifactStore === 'local' ? TaskStore.create({ runID: id, directory: runtime.directory,
+      worktree: runtime.worktree, sessionID: runtime.sessionID, userMessageID: trusted!.userMessageID!, requirements,
+      ...(memory ? { project: memory.project } : {}) }) : undefined;
     // Call IDs consumed by a run this process never saw still have to be refused, so a restart
     // inherits that guard. It can only reject a replay; it never authorizes anything.
     const inherited = previous ? undefined : [...(this.#inheritedCalls.get(runtime.sessionID) ?? []), ...(this.#prior(runtime.sessionID)?.calls ?? [])];
@@ -1494,10 +1510,11 @@ export class PhaseRunner {
       id, runtime: { ...runtime }, workflow, phase: first.phase, requirements,
       // The persisted request names the route this run started on, so replay after a restart
       // follows it even when a later routing policy would choose another one.
-      ...(this.options.checkpoint ? { checkpointRequest: Workflow.recordedRequest(request.preflight, workflow), checkpointSequence: -1 } : {}),
+      ...(this.options.checkpoint || task ? { checkpointRequest: Workflow.recordedRequest(request.preflight, workflow), checkpointSequence: -1 } : {}),
       // A confirmed replacement supersedes the previous run's checkpoint in this same parent.
       ...(previous ? { replacesRunID: previous.id } : {}),
-      memory, artifacts: new ArtifactStore(runtime.directory, workflow.snapshot().answers.artifactStore, memory),
+      memory, artifacts: new ArtifactStore(runtime.directory, workflow.snapshot().answers.artifactStore, memory, task),
+      ...(task ? { task, riskHistory: [] } : {}),
       args: { description: '', subagent_type: first.phase, prompt: '' }, state: 'starting',
       history: [], calls: new Set(previous?.calls ?? inherited), planned: [], evidence: { ...emptyEvidence(), requirements: trusted?.requirementsConfirmed ? 'confirmed' : 'unearned' },
       uncertain: false, userMessageID: trusted?.userMessageID ?? '', concerns: [], contexts: [], context, malformed: 0,
@@ -1543,6 +1560,17 @@ export class PhaseRunner {
    * every other uncertain Apply outcome retains pending protection and requires explicit recovery.
    */
   #degrade(run: Run, error: unknown, failure: FailureClass = 'result-rejected', reported?: string): never {
+    if (run.task && (error instanceof ArtifactWriteError || error instanceof TaskWriteError ||
+        (!this.#inflight.has(run.runtime.sessionID) && run.state === 'persisting-result' && !(error instanceof MalformedReport)))) {
+      if (error instanceof ArtifactWriteError) run.artifactAttempts = error.attempts;
+      run.checkpointFailed = true;
+      run.uncertain = true;
+      run.state = 'blocked';
+      run.evidence = invalidateEvidence(run.evidence, this.#affected(run.phase));
+      run.report = { ...run.report, status: 'blocked', evidence: run.evidence };
+      run.reason = 'Local task publication is incomplete or unknown. No retry, advancement or dispatch is permitted; inspect retained records and request explicit recovery.';
+      throw new Error(run.reason);
+    }
     if (run.checkpointFailed) throw new Error('Checkpoint outcome is unconfirmed. Do not retry or dispatch; inspect local state and explicitly discard the run if necessary.');
     if (run.settledCheckpoint) {
       run.checkpointFailed = true;
@@ -1811,7 +1839,7 @@ export class PhaseRunner {
       this.owner(call.sessionID, call.callID);
       if (run.state !== 'persisting-intent') throw new Error('Dispatch became uncertain during inspection.');
       run.uncertain = true;
-      if (!run.side && this.options.checkpoint) {
+      if (!run.side && (this.options.checkpoint || run.task)) {
         run.attemptID = call.callID;
         run.settledCheckpoint = false;
         this.#checkpoint(run, 'pending');
@@ -2141,7 +2169,7 @@ export class PhaseRunner {
       const phaseResult = { phase: run.phase, outcome, evidenceSummary,
         ...(outcome === 'passed' && ['mdd-plan', 'mdd-tasks'].includes(run.phase) ? { applyPlan: planned.map(({ id, dependsOn }) => ({ id, dependsOn })) } : {}),
         ...(batchID ? { batchID } : {}), ...(completed ? { completed } : {}) };
-      if (this.options.checkpoint && !publication) {
+      if ((this.options.checkpoint || run.task) && !publication) {
         const staged = Workflow.replay(run.checkpointRequest, [...run.workflow.history(),
           { kind: 'result', result: phaseResult }]);
         this.#checkpoint(run, 'settled', staged);
@@ -2241,6 +2269,7 @@ export class PhaseRunner {
     delete run.lastFailure;
     run.artifact = saved;
     run.riskArtifact = saved;
+    run.riskHistory?.push(saved);
     run.riskSummary = evidenceSummary;
     if (verdict) run.riskVerdict = verdict; else delete run.riskVerdict;
     run.concerns = mergeConcerns(run.concerns, advisory);
@@ -2250,7 +2279,7 @@ export class PhaseRunner {
     delete run.rejected;
     run.malformed = 0;
     const result = verdict ? { outcome, evidenceSummary, route: verdict.route } : { outcome, evidenceSummary };
-    if (this.options.checkpoint) {
+    if (this.options.checkpoint || run.task) {
       const staged = Workflow.replay(run.checkpointRequest, [...run.workflow.history(), { kind: 'risk-result', result }]);
       this.#checkpoint(run, 'settled', staged);
       run.settledCheckpoint = !run.checkpointDegraded;
@@ -2288,7 +2317,7 @@ export class PhaseRunner {
   #failRisk(run: Run, reason: string): void {
     if (run.workflow.nextAction().kind !== 'await-risk-result') return;
     const result = { outcome: 'failed' as const, evidenceSummary: clip(reason, 2000) };
-    if (this.options.checkpoint) {
+    if (this.options.checkpoint || run.task) {
       const staged = Workflow.replay(run.checkpointRequest, [...run.workflow.history(), { kind: 'risk-result', result }]);
       this.#checkpoint(run, 'settled', staged);
     }
@@ -2496,6 +2525,7 @@ export class PhaseRunner {
       dossier.usedMessages = [...new Set([...saved.data.usedMessages, ...dossier.usedMessages, run.userMessageID, consent.userMessageID])];
       dossier.continuation = { kind: consent.kind, userMessageID: consent.userMessageID, userText: consent.userText,
         checkpointSequence: saved.sequence, checkpointDigest: saved.dataDigest, timestamp: this.#now() };
+      run.task?.writeSnapshot(saved, dossier);
       const preserved = this.options.dossier.archiveContinuation(sessionID, dossier);
       if (owner.receipt) this.options.ownership.retireTransferredParent(sessionID, run.id, operation.callID, owner.epoch);
       else this.options.ownership.retireParent(sessionID, run.id);
@@ -3059,7 +3089,8 @@ export class PhaseRunner {
    */
   #preserve(run: Run): void {
     this.#ledger(run);
-    if (!this.options.dossier) return;
+    // Local snapshots and the legacy discovery index publish together inside #checkpoint's fence.
+    if (run.task || !this.options.dossier) return;
     try { this.options.dossier.write(run.runtime.sessionID, this.#dossier(run)); delete run.dossierDiagnostic; }
     catch (error) { run.dossierDiagnostic = `This run's evidence could not be preserved locally, so a restart may not find it: ${error instanceof Error ? error.message : 'unknown local storage outcome'}. Execution itself was unaffected.`; }
   }
@@ -3070,12 +3101,13 @@ export class PhaseRunner {
    * recomputable from `#phasePrompts`, and the live memory and artifact clients, rebuildable
    * from settings. A restored run would have to pretend it knows what mdd-apply wrote; it cannot.
    */
-  #dossier(run: Run): RunDossier {
-    const snapshot = run.workflow.snapshot();
+  #dossier(run: Run, workflow = run.workflow): RunDossier {
+    const snapshot = workflow.snapshot();
     const consent = this.#consent.get(run.runtime.sessionID);
     const settled = ['ready', 'blocked', 'await-approval', 'complete'] as const;
     return {
       version: DOSSIER_VERSION, runID: run.id,
+      ...(run.task ? { task: run.task.identity } : {}),
       ...(run.verificationVersion ? { verificationVersion: run.verificationVersion } : {}),
       parent: { sessionID: run.runtime.sessionID, directory: run.runtime.directory, worktree: run.runtime.worktree },
       userMessageID: run.userMessageID, requirements: run.requirements, context: structuredClone(run.context),
@@ -3087,10 +3119,10 @@ export class PhaseRunner {
       ...(run.verification ? { verification: structuredClone(run.verification) } : {}),
       executedChecks: structuredClone(run.executedChecks), changedFiles: run.changedFiles, changedList: structuredClone(run.changedList),
       ...(run.delivered ? { delivered: { ...run.delivered } } : {}), concerns: structuredClone(run.concerns),
-      artifacts: run.history.map(item => ({ ref: structuredClone(item.ref), content: item.content })),
+      artifacts: [...run.history, ...(run.riskHistory ?? [])].map(item => ({ ref: structuredClone(item.ref), content: item.content })),
       contexts: run.contexts.map(item => ({ explorationID: item.explorationID, outcome: item.outcome, summary: item.summary,
         concerns: structuredClone(item.concerns), artifact: { ref: structuredClone(item.artifact.ref), content: item.artifact.content } })),
-      calls: [...run.calls], questionReceipts: structuredClone(consent?.questionReceipts ?? []),
+      calls: [...run.calls], questionReceipts: structuredClone(consent?.questionReceipts ?? run.retainedReceipts ?? []),
       usedMessages: [...(consent?.usedMessages ?? [])], proposed: [...(consent?.proposed ?? [])],
       timestamp: this.#now(),
     };
@@ -3187,13 +3219,13 @@ export class PhaseRunner {
    * expose the next writer, including through an older ready checkpoint after restart.
    */
   #checkpoint(run: Run, attemptState?: 'pending' | 'settled' | 'released', staged?: Workflow): void {
-    if (!this.options.checkpoint || run.side) return;
+    if ((!this.options.checkpoint && !run.task) || run.side) return;
     if (run.checkpointFailed) throw new Error('Checkpoint durability remains unconfirmed.');
     let checkpoint: StableCheckpoint | undefined;
     try { checkpoint = this.#stableCheckpoint(run, attemptState, staged); } catch { checkpoint = undefined; }
     let conflict = false;
     const next = (staged ?? run.workflow).nextAction();
-    const guardsApply = run.phase === 'mdd-apply' || ('phase' in next && next.phase === 'mdd-apply');
+    const guardsApply = !!run.task || run.phase === 'mdd-apply' || ('phase' in next && next.phase === 'mdd-apply');
     const attempts = guardsApply ? 1 : CHECKPOINT_ATTEMPTS;
     let priorMarker;
     if (guardsApply && this.options.progress) {
@@ -3207,10 +3239,19 @@ export class PhaseRunner {
     }
     for (let attempt = 1; checkpoint && attempt <= attempts; attempt++) {
       try {
-        this.options.checkpoint.write(run.runtime.sessionID, checkpoint, run.replacesRunID);
+        if (run.task) {
+          const dossier = this.#dossier(run, staged ?? run.workflow);
+          dossier.phase = checkpoint.stable.phase;
+          dossier.lastState = { ready: 'ready', 'await-approval': 'await-approval', 'await-result': 'interrupted', blocked: 'blocked', complete: 'complete',
+            'risk-ready': 'ready', 'risk-await-result': 'interrupted', 'risk-blocked': 'blocked' }[checkpoint.stable.state] as RunDossier['lastState'];
+          run.task.writeSnapshot(checkpoint, dossier);
+          this.options.dossier?.write(run.runtime.sessionID, dossier);
+        }
+        this.options.checkpoint?.write(run.runtime.sessionID, checkpoint, run.replacesRunID);
         run.checkpointSequence = checkpoint.sequence;
         delete run.replacesRunID;
         if (guardsApply && priorMarker) this.options.progress!.write(run.runtime.sessionID, priorMarker);
+        else if (run.task && this.options.progress) this.options.progress.clear(run.runtime.sessionID);
         if (run.checkpointDegraded) this.#restoreResumable(run);
         return;
       } catch (error) {
@@ -3231,9 +3272,11 @@ export class PhaseRunner {
     run.report = { ...run.report, status: 'blocked', evidence: run.evidence };
     run.reason = conflict
       ? 'Another writer changed this run\'s checkpoint. No result is authorized to advance and no phase may be retried. Inspect local state; only explicit run discard remains.'
-      : guardsApply
-        ? 'Apply checkpoint outcome is unconfirmed. Its pending transition remains reserved; no result may advance and no writer may be retried. Inspect local state; only explicit run discard remains.'
-        : 'Checkpoint durability is unconfirmed and resumability could not be withdrawn. No result is authorized to advance and no phase may be retried. Inspect local state; only explicit run discard remains.';
+      : run.task
+        ? 'Local task/checkpoint publication is unconfirmed. Its pending transition remains reserved; no result may advance and no phase may be retried. Inspect retained records; only explicit run discard remains.'
+        : guardsApply
+          ? 'Apply checkpoint outcome is unconfirmed. Its pending transition remains reserved; no result may advance and no writer may be retried. Inspect local state; only explicit run discard remains.'
+          : 'Checkpoint durability is unconfirmed and resumability could not be withdrawn. No result is authorized to advance and no phase may be retried. Inspect local state; only explicit run discard remains.';
     throw new Error(run.reason);
   }
 
@@ -3286,6 +3329,8 @@ export class PhaseRunner {
         ...(run.workerState ? { workerState: structuredClone(run.workerState) } : {}),
         directory: run.runtime.directory, worktree: run.runtime.worktree, userMessageID: run.userMessageID,
         ...(run.memory ? { memoryProject: run.memory.project } : {}),
+        ...(run.task ? { task: run.task.identity, taskArtifacts: { phases: run.history.map(item => structuredClone(item.ref)),
+          risks: (run.riskHistory ?? []).map(item => structuredClone(item.ref)), contexts: run.contexts.map(item => structuredClone(item.artifact.ref)) } } : {}),
         requirements: run.requirements, context: structuredClone(run.context),
         dependencies: run.history.map(body),
         contexts: run.contexts.map(item => ({ explorationID: item.explorationID, outcome: item.outcome,

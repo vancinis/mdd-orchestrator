@@ -10,6 +10,8 @@ import { objectWithKeys } from './validation.js';
 import type { Answers, Phase } from './policy.js';
 import type { Evidence } from './reporting.js';
 import type { PhaseResult } from './workflow.js';
+import { TASK_SNAPSHOT_MAX_BYTES, validateTaskIdentity } from './task-store.js';
+import type { TaskIdentity } from './task-store.js';
 
 /**
  * Everything about a run lived in process memory, while its artifacts were persisted elsewhere.
@@ -50,6 +52,7 @@ export type RunDossier = {
   verificationVersion?: VerificationVersion;
   version: typeof DOSSIER_VERSION;
   runID: string;
+  task?: TaskIdentity;
   parent: { sessionID: string; directory: string; worktree: string };
   userMessageID: string;
   requirements: string;
@@ -112,6 +115,11 @@ function parse(value: unknown): RunDossier {
     throw new Error('shape');
   }
   const version = verificationVersion(item.verificationVersion);
+  if ((item.answers as Answers).artifactStore === 'local') {
+    validateTaskIdentity(item.task, { runID: item.runID as string, directory: parent.directory as string,
+      worktree: parent.worktree as string, project: (item.task as TaskIdentity | undefined)?.project });
+    if (item.artifactContentOmitted) throw new Error('Local task evidence cannot be omitted.');
+  } else if (item.task !== undefined) throw new Error('Legacy dossier cannot acquire a local task identity.');
   if (item.continuation !== undefined) {
     const consent = objectWithKeys(item.continuation, 'failed verification continuation',
       ['kind', 'userMessageID', 'userText', 'checkpointSequence', 'checkpointDigest', 'timestamp']);
@@ -157,6 +165,12 @@ function parse(value: unknown): RunDossier {
     if ((item.results as PhaseResult[]).some(result => result.phase === 'mdd-verify') && !checked) throw new Error('missing verification');
   }
   return item as unknown as RunDossier;
+}
+
+function parseText(text: string): RunDossier {
+  const entry = parse(JSON.parse(text));
+  if (!entry.task && Buffer.byteLength(text) > DOSSIER_MAX_BYTES) throw new Error('Legacy dossier exceeds its storage budget.');
+  return entry;
 }
 
 /**
@@ -215,9 +229,9 @@ export class RunDossierStore {
   }
 
   readContinued(parent: string, runID: string): RunDossier | undefined {
-    const text = this.#files.read(this.#continued(parent, runID), DOSSIER_MAX_BYTES);
+    const text = this.#files.read(this.#continued(parent, runID), TASK_SNAPSHOT_MAX_BYTES);
     if (text === undefined) return undefined;
-    const entry = parse(JSON.parse(text));
+    const entry = parseText(text);
     if (!entry.continuation || entry.runID !== runID || entry.parent.sessionID !== parent) throw new Error('Continued run binding differs.');
     return entry;
   }
@@ -228,18 +242,18 @@ export class RunDossierStore {
     if (!entry.continuation || entry.parent.sessionID !== parent) throw new Error('Missing continuation provenance.');
     const file = this.#continued(parent, entry.runID);
     const text = JSON.stringify(entry);
-    this.#files.update(file, () => text, DOSSIER_MAX_BYTES);
+    this.#files.update(file, () => text, entry.task ? TASK_SNAPSHOT_MAX_BYTES : DOSSIER_MAX_BYTES);
     if (JSON.stringify(this.readContinued(parent, entry.runID)) !== text) throw new Error('Continuation archive readback differs.');
     // Keep the latest failed target discoverable until a fresh run replaces this live index.
-    this.#files.update(this.#name(parent), () => text, DOSSIER_MAX_BYTES);
+    this.#files.update(this.#name(parent), () => text, entry.task ? TASK_SNAPSHOT_MAX_BYTES : DOSSIER_MAX_BYTES);
     if (JSON.stringify(this.read(parent)) !== text) throw new Error('Continuation index readback differs.');
     return { file, runID: entry.runID };
   }
 
   read(parent: string): RunDossier | undefined {
     try {
-      const text = this.#files.read(this.#name(parent), DOSSIER_MAX_BYTES);
-      return text === undefined ? undefined : parse(JSON.parse(text));
+      const text = this.#files.read(this.#name(parent), TASK_SNAPSHOT_MAX_BYTES);
+      return text === undefined ? undefined : parseText(text);
     } catch {
       throw new Error('A preserved run record exists for this conversation but cannot be read safely. Do not assume prior work was lost or completed; inspect the .mdd directory, and use mdd_reset to discard it.');
     }
@@ -255,9 +269,9 @@ export class RunDossierStore {
     const found: { file: string; dossier: RunDossier }[] = [];
     for (const { name } of this.#files.runRecords().slice(0, Math.max(0, limit))) {
       try {
-        const text = this.#files.read(name, DOSSIER_MAX_BYTES);
+        const text = this.#files.read(name, TASK_SNAPSHOT_MAX_BYTES);
         if (text !== undefined) {
-          const dossier = parse(JSON.parse(text));
+          const dossier = parseText(text);
           if (!dossier.continuation) found.push({ file: name, dossier });
         }
       } catch { /* Another conversation's unreadable record is not this conversation's problem. */ }
@@ -282,7 +296,7 @@ export class RunDossierStore {
       if (dossier) {
         const name = this.#discarded(parent);
         const text = JSON.stringify({ ...dossier, discardedAt: now });
-        this.#files.update(name, () => text, DOSSIER_MAX_BYTES);
+        this.#files.update(name, () => text, dossier.task ? TASK_SNAPSHOT_MAX_BYTES : DOSSIER_MAX_BYTES);
         moved = { file: name, runID: dossier.runID };
       }
       // A record that cannot be read or copied must never hold up the reset that frees the
@@ -297,11 +311,12 @@ export class RunDossierStore {
     let text = JSON.stringify(entry);
     // Plan, acceptance and refs are what make a restart useful; artifact bodies are the bulk and
     // the most replaceable part, since every ref still names a record in the artifact store.
-    if (Buffer.byteLength(text) > DOSSIER_MAX_BYTES) {
+    if (!entry.task && Buffer.byteLength(text) > DOSSIER_MAX_BYTES) {
       text = JSON.stringify({ ...entry, artifactContentOmitted: true,
         artifacts: entry.artifacts.map(item => ({ ref: item.ref })),
         contexts: entry.contexts.map(item => ({ ...item, artifact: { ref: item.artifact.ref } })) });
     }
-    this.#files.update(this.#name(parent), () => text, DOSSIER_MAX_BYTES);
+    this.#files.update(this.#name(parent), () => text, entry.task ? TASK_SNAPSHOT_MAX_BYTES : DOSSIER_MAX_BYTES);
+    if (entry.task && JSON.stringify(this.read(parent)) !== text) throw new Error('Local task dossier readback differs.');
   }
 }

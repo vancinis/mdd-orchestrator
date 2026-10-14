@@ -40,7 +40,7 @@ export function parseAnswers(value: unknown): Answers {
   const answers = objectWithKeys(value, 'answers', ['certainty', 'artifactStore', 'mode', 'summary', 'complexity']);
   return {
     certainty: option(answers.certainty, 'answers.certainty', ['very-sure', 'somewhat-sure', 'not-sure']),
-    artifactStore: option(answers.artifactStore, 'answers.artifactStore', ['engram', 'openspec', 'both', 'none']),
+    artifactStore: option(answers.artifactStore, 'answers.artifactStore', ['engram', 'openspec', 'both', 'none', 'local']),
     mode: option(answers.mode, 'answers.mode', ['interactive', 'automatic']),
     summary: option(answers.summary, 'answers.summary', ['detailed', 'medium', 'low']),
   };

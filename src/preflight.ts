@@ -49,7 +49,7 @@ export function parsePartialAnswers(value: unknown): Partial<Answers> {
   const result: Record<string, string> = {};
   for (const key of ANSWER_FIELDS) {
     if (!Object.hasOwn(input, key)) continue;
-    if (!fields[key].choices.some(choice => choice.token === input[key])) {
+    if (!(key === 'artifactStore' && input[key] === 'local') && !fields[key].choices.some(choice => choice.token === input[key])) {
       throw new ValidationError(`Invalid answers.${key}. Select an explicit supported value.`);
     }
     result[key] = input[key] as string;

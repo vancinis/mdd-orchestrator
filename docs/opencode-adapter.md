@@ -293,12 +293,24 @@ Legacy status still exposes singular `task` and `nextAction.args`. The V2 adapte
 
 Version 3 checkpoints accept optional `workerPolicy` and `workerState` data without changing the
 legacy format. Missing captured policy keeps old checkpoints serial, even on a capable host.
+
 Unpublished successful evidence requires confined recovery; it never authorizes replay or advancement
 past an uncertain sibling. Published progress permits ordinary single-step serial fallback if later
 work is unsafe for concurrency. Complete member reports remain in the checkpoint alongside distinct
 Apply artifacts. Explicit Verify rework starts a new implementation pass.
 Read-only investigations use the same plural status surfaces and member/owner CAS model, with
 separate durable exploration records so contextual work cannot advance or overwrite the main plan.
+
+#### Complete local task persistence
+
+Resolved `artifactStore: "local"` additionally freezes optional `task` and `taskArtifacts` resume
+metadata. Local progress is archived completely under the repository-anchored task directory
+before exposing advancement or dispatch. Artifact references keep their original identities on
+restart and transfer; actual risk bodies, repeated phases, batches, worker reports and context
+snapshots remain immutable evidence. Publication/readback failures block continuation rather
+than silently retrying a possibly committed write or trimming dossier bodies. Old v3 checkpoints
+without these fields remain readable and pinned to their original backend. The existing storage
+question and default selection are unchanged; see [complete local task storage](artifacts-and-actors.md#complete-local-task-storage).
 
 #### Explicit read-only exploration
 

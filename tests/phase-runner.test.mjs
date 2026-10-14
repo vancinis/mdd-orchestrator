@@ -11,6 +11,183 @@ import { statusPayload, STATUS_BUDGET_BYTES } from '../dist/status-budget.js';
 import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import fs from 'node:fs';
+import { TaskStore, TaskWriteError } from '../dist/task-store.js';
+import { LocalFiles } from '../dist/local-files.js';
+
+test('PF-2: local storage preserves full risk retries, receipts and context through restart', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'mdd-local-run-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const here = { ...runtime, directory: root, worktree: root };
+  const options = { checkpoint: new CheckpointStore(root), progress: new ProgressGuard(root), dossier: new RunDossierStore(root) };
+  const inspect = { parent: async () => {}, result: async (_r, _c, _p, output) => output, stopped: async () => true };
+  let runner = new PhaseRunner(inspect, options);
+  await runner.start({ preflight: { answers: { ...answers, artifactStore: 'local' } }, requirements: 'Preserve risk evidence.',
+    context: { label: 'Initial context', content: 'Exact coordinator snapshot.' } }, here,
+    { requirementsConfirmed: true, userMessageID: 'local-user' });
+  const settle = async (callID, text) => {
+    const issued = { sessionID: here.sessionID, callID };
+    await runner.after(issued, await runner.before(issued, runner.status(here.sessionID).task), text);
+  };
+  await settle('local-explore', reportDocument({ evidenceSummary: 'Explored.', artifact: 'Exploration body.' }));
+  const failedBody = 'Failed assessment: ' + 'é'.repeat(220000);
+  await settle('local-risk-failed', riskReport('low', 'failed', { artifact: failedBody }));
+  assert.equal(runner.status(here.sessionID).state, 'blocked');
+  runner = new PhaseRunner(inspect, options);
+  assert.deepEqual(await runner.restore(here), { restored: true });
+  runner.retryRisk(here.sessionID);
+  const passedBody = 'Passed assessment: ' + '✓'.repeat(150000);
+  await settle('local-risk-passed', riskReport('low', 'passed', { artifact: passedBody }));
+  await runner.explore({ purpose: 'Inspect contextual evidence.' }, here);
+  await settle('local-context', reportDocument({ evidenceSummary: 'Context inspected.', artifact: 'Exact contextual findings.' }));
+  runner.contribute({ label: 'Updated context', content: 'Second coordinator snapshot.' }, here);
+  runner.recordConsent(here.sessionID, { questionReceipts: [{ kind: 'preflight', callID: 'question-local', answers: [['accepted']] }], usedMessages: ['local-user'], proposed: [] });
+  const saved = options.checkpoint.read(here.sessionID).checkpoint;
+  assert.equal(saved.data.taskArtifacts.risks.length, 2);
+  assert.match(saved.data.task.name, /^preserve-risk-evidence-/);
+  const manifest = JSON.parse(fs.readFileSync(join(root, '.mdd/tasks', saved.data.task.name, 'manifest.json'), 'utf8'));
+  const snapshot = JSON.parse(fs.readFileSync(join(root, '.mdd/tasks', saved.data.task.name, `snapshot-${manifest.latest}.json`), 'utf8'));
+  assert.equal(snapshot.dossier.context[0].content, 'Exact coordinator snapshot.');
+  assert.equal(snapshot.dossier.context[1].content, 'Second coordinator snapshot.');
+  assert.equal(snapshot.dossier.contexts[0].artifact.content, 'Exact contextual findings.');
+  assert.equal(snapshot.dossier.questionReceipts[0].callID, 'question-local');
+  const risks = snapshot.dossier.artifacts.filter(item => item.ref.phase === 'mdd-risk');
+  assert.deepEqual(risks.map(item => item.content), [failedBody, passedBody]);
+  runner = new PhaseRunner(inspect, options);
+  assert.deepEqual(await runner.restore(here), { restored: true });
+  assert.equal(runner.status(here.sessionID).risk.ref.store, 'local');
+  runner.recordConsent(here.sessionID, { questionReceipts: [], usedMessages: ['local-user'], proposed: [] });
+  const restoredDossier = options.dossier.read(here.sessionID);
+  assert.equal(restoredDossier.artifacts.find(item => item.ref.recordID === saved.data.risk.ref.recordID).content, passedBody);
+  fs.writeFileSync(join(root, saved.data.risk.ref.path), 'Corrupt risk bytes.');
+  assert.equal((await new PhaseRunner(inspect, options).restore(here)).restored, false);
+});
+
+test('PF-2: local exploration workers retain complete member reports before aggregation and settlement', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'mdd-local-exploration-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  for (const name of ['a.txt', 'b.txt']) fs.writeFileSync(join(root, name), name);
+  const here = { ...runtime, directory: root, worktree: root };
+  const checkpoint = new CheckpointStore(root);
+  const runner = new PhaseRunner({ parent: async () => {}, result: async (_r, _c, _p, output) => output, stopped: async () => true }, {
+    checkpoint, progress: new ProgressGuard(root), ownership: new RunOwnershipStore(root), workers: { enabled: true },
+    workerCapability: { phase: 'mdd-explore', readOnly: true },
+  });
+  const workItems = ['a', 'b'].map((name, index) => ({ id: `E${index + 1}`, purpose: `Inspect ${name} independently`,
+    dependsOn: [], independent: true, complete: true, reads: [{ root, files: [`${name}.txt`] }] }));
+  await runner.start({ preflight: { answers: { ...answers, artifactStore: 'local' } }, requirements: 'Preserve exploration workers.',
+    exploration: { workItems } }, here, { requirementsConfirmed: true, userMessageID: 'workers-user' });
+  const tasks = runner.status(here.sessionID).tasks;
+  const calls = ['worker-a', 'worker-b'].map(callID => ({ sessionID: here.sessionID, callID }));
+  const args = await Promise.all(tasks.map((task, index) => runner.before(calls[index], task)));
+  const reports = ['First exact findings.', 'Second exact findings.'].map(artifact => reportDocument({ evidenceSummary: artifact, artifact }));
+  await runner.after(calls[1], args[1], reports[1]);
+  const identity = checkpoint.read(here.sessionID).checkpoint.data.task;
+  const taskDirectory = join(root, '.mdd/tasks', identity.name);
+  const records = () => {
+    const manifest = JSON.parse(fs.readFileSync(join(taskDirectory, 'manifest.json'), 'utf8'));
+    return manifest.records.filter(record => record.kind === 'exploration').map(record => JSON.parse(fs.readFileSync(join(taskDirectory, `snapshot-${record.id}.json`), 'utf8')).exploration);
+  };
+  assert.ok(records().length > 0, 'complete exploration member evidence must be locally indexed before settlement');
+  assert.equal(records().at(-1).workerState.completed[0].text, reports[1]);
+  await runner.after(calls[0], args[0], reports[0]);
+  assert.deepEqual(records().at(-1).workerState.completed.map(member => member.text), reports);
+  assert.equal(records().at(-1).state, 'settled');
+});
+
+for (const boundary of ['intent', 'result', 'artifact', 'dossier']) test(`PF-2: unknown local ${boundary} publication blocks dispatch and restart without retry`, async t => {
+  const root = await mkdtemp(join(tmpdir(), 'mdd-local-unknown-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const here = { ...runtime, directory: root, worktree: root };
+  const checkpoint = new CheckpointStore(root); const progress = new ProgressGuard(root);
+  const inspect = { parent: async () => {}, result: async (_r, _c, _p, output) => output, stopped: async () => true };
+  const runner = new PhaseRunner(inspect, { checkpoint, progress, dossier: new RunDossierStore(root) });
+  const started = await runner.start({ preflight: { answers: { ...answers, artifactStore: 'local' } }, requirements: 'Fence unclear local publication.' }, here,
+    { requirementsConfirmed: true, userMessageID: 'unknown-user' });
+  const issued = { sessionID: here.sessionID, callID: 'unclear-call' };
+  const args = boundary !== 'intent' ? await runner.before(issued, started.task) : undefined;
+  const write = TaskStore.prototype.writeSnapshot;
+  const update = LocalFiles.prototype.update;
+  const preserve = RunDossierStore.prototype.write;
+  let writes = 0;
+  if (boundary === 'artifact') LocalFiles.prototype.update = function (name, ...values) {
+    if (name.endsWith('/manifest.json')) { writes++; throw new Error('Unknown manifest publication.'); }
+    return update.call(this, name, ...values);
+  };
+  else if (boundary === 'dossier') RunDossierStore.prototype.write = function (...values) {
+    writes++; preserve.apply(this, values); throw new Error('Unknown dossier readback.');
+  };
+  else TaskStore.prototype.writeSnapshot = function (...values) { writes++; write.apply(this, values); throw new TaskWriteError('confirmed-bytes-unknown-readback'); };
+  try {
+    if (boundary === 'intent') await assert.rejects(runner.before(issued, started.task), /unconfirmed/);
+    else await assert.rejects(runner.after(issued, args, reportDocument({ evidenceSummary: 'Explored.', artifact: 'Complete retained exploration.' })), /unconfirmed|incomplete or unknown/);
+  } finally { TaskStore.prototype.writeSnapshot = write; LocalFiles.prototype.update = update; RunDossierStore.prototype.write = preserve; }
+  assert.equal(writes, 1);
+  assert.equal(runner.status(here.sessionID).state, 'blocked');
+  assert.equal(runner.status(here.sessionID).task, undefined);
+  assert.equal(progress.read(here.sessionID).state, 'pending');
+  if (boundary === 'artifact') {
+    const attempts = runner.status(here.sessionID).artifactAttempts;
+    assert.deepEqual(attempts.map(attempt => [attempt.backend, attempt.status]), [['local', 'unknown']]);
+    assert.equal(fs.readFileSync(join(root, attempts[0].ref.path), 'utf8'), 'Complete retained exploration.');
+  }
+  assert.equal((await new PhaseRunner(inspect, { checkpoint, progress }).restore(here)).restored, false);
+});
+
+test('PF-2: local checkpoint metadata rejects backend rebinding and arbitrary artifact locations', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'mdd-local-metadata-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const here = { ...runtime, directory: root, worktree: root };
+  const checkpoint = new CheckpointStore(root); const progress = new ProgressGuard(root);
+  const runner = new PhaseRunner({ parent: async () => {}, result: async (_r, _c, _p, output) => output, stopped: async () => true }, { checkpoint, progress });
+  const started = await runner.start({ preflight: { answers: { ...answers, artifactStore: 'local' } }, requirements: 'Validate exact task identity.' }, here,
+    { requirementsConfirmed: true, userMessageID: 'identity-user' });
+  const issued = { sessionID: here.sessionID, callID: 'identity-explore' };
+  await runner.after(issued, await runner.before(issued, started.task), reportDocument({ evidenceSummary: 'Explored.', artifact: 'Bound exploration.' }));
+  const saved = checkpoint.read(here.sessionID).checkpoint;
+  for (const mutate of [
+    item => { delete item.data.task; },
+    item => { delete item.data.taskArtifacts; },
+    item => { item.data.task.name = '../escape'; },
+    item => { item.data.task.runID = 'different'; },
+    item => { item.data.task.worktree = 'different'; },
+    item => { item.data.memoryProject = 'other-project'; },
+    item => { item.data.taskArtifacts.phases[0].path = '../secret'; },
+    item => { item.data.taskArtifacts.phases[0].domain = ''; },
+    item => { item.data.taskArtifacts.phases[0].store = 'none'; },
+    item => { item.request.answers.artifactStore = 'none'; },
+  ]) {
+    const changed = structuredClone(saved); mutate(changed);
+    changed.dataDigest = sealResumeData(changed.data, changed.runID, changed.parent, changed.events, changed.stable);
+    assert.throws(() => validateCheckpoint(changed));
+  }
+  assert.deepEqual(checkpoint.read(here.sessionID).checkpoint, saved);
+});
+
+test('PF-2: a general receipt failure after local artifact publication cannot reissue work', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'mdd-local-receipt-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  let refused = 0;
+  const memory = await memoryServer(t, (req, reply, writes) => {
+    if (req.method === 'POST' && JSON.parse(writes.at(-1).content).kind === 'agent-evidence') { refused++; reply.status = 500; }
+  });
+  const here = { ...runtime, directory: root, worktree: root };
+  memory.binding.directory = root;
+  const checkpoint = new CheckpointStore(root); const progress = new ProgressGuard(root);
+  const inspect = { parent: async () => {}, result: async (_r, _c, _p, output) => output, stopped: async () => true };
+  const runner = new PhaseRunner(inspect, { checkpoint, progress });
+  const started = await runner.start({ preflight: { answers: { ...answers, artifactStore: 'local' } }, requirements: 'Keep published local evidence.',
+    engramEndpoint: memory.endpoint, project: 'mdd-test' }, here, { requirementsConfirmed: true, userMessageID: 'receipt-user' });
+  const issued = { sessionID: here.sessionID, callID: 'receipt-explore' };
+  await assert.rejects(runner.after(issued, await runner.before(issued, started.task), reportDocument({ evidenceSummary: 'Explored.', artifact: 'Exact retained evidence.' })));
+  assert.equal(refused, 1);
+  const status = runner.status(here.sessionID);
+  assert.equal(status.state, 'blocked');
+  assert.equal(status.task, undefined);
+  assert.equal(status.artifact.ref.store, 'local');
+  assert.equal(fs.readFileSync(join(root, status.artifact.ref.path), 'utf8'), 'Exact retained evidence.');
+  assert.equal(progress.read(here.sessionID).state, 'pending');
+});
 
 /** The shape MDD accepted before reports became documents; still read, never asked for. */
 function legacyResult(status, outcome = 'passed') {
@@ -148,8 +325,8 @@ for (const requirement of ['required', 'optional']) {
   });
 }
 
-for (const legacy of [false, true]) {
-  test(`SA-3: continued ${legacy ? 'legacy' : 'v1'} failure retains exact evidence and PR truth after restart`, async t => {
+for (const backend of ['none', 'local']) for (const legacy of [false, true]) {
+  test(`${backend}: continued ${legacy ? 'legacy' : 'v1'} failure retains exact evidence and PR truth after restart`, async t => {
     const root = await mkdtemp(join(tmpdir(), 'mdd-continued-'));
     t.after(() => rm(root, { recursive: true, force: true }));
     const here = { ...runtime, directory: root, worktree: root };
@@ -157,7 +334,7 @@ for (const legacy of [false, true]) {
       ownership: new RunOwnershipStore(root), dossier: new RunDossierStore(root) };
     const inspect = { parent: async () => {}, result: async (_r, _c, _p, output) => output, stopped: async () => true };
     const first = new PhaseRunner(inspect, options);
-    await first.start({ preflight: { answers }, requirements: 'Preserve the failed verification.' }, here,
+    await first.start({ preflight: { answers: { ...answers, artifactStore: backend } }, requirements: 'Preserve the failed verification.' }, here,
       { requirementsConfirmed: true, userMessageID: 'initial-user' });
     if (legacy) {
       const saved = options.checkpoint.read(here.sessionID).checkpoint;
@@ -203,6 +380,11 @@ for (const legacy of [false, true]) {
     assert.deepEqual(archive.verification, before.data.verification);
     assert.equal(archive.verificationVersion, legacy ? undefined : 1);
     assert.equal(archive.continuation.checkpointDigest, before.dataDigest);
+    if (backend === 'local') {
+      const task = TaskStore.open(before.data.task, { runID: before.runID, directory: root, worktree: root });
+      assert.deepEqual(task.latest().dossier.continuation, archive.continuation);
+      assert.deepEqual(task.latest().dossier.executedChecks, data.checks);
+    }
     const facts = restarted.prFacts(here.sessionID, before.runID);
     assert.equal(facts.verified, false);
     assert.deepEqual(facts.checks, data.checks);

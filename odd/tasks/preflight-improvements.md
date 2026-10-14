@@ -39,7 +39,8 @@ not a complete task artifact store.
   report final authored size honestly rather than compressing or omitting proof.
 - Forecast: approximately 2,050 authored additions plus deletions, +/-30%.
 - Unit forecasts: PF-1 410; PF-2 970; PF-3 670 authored changed lines.
-- Running authored count: 0. Generated `dist/` is ignored and excluded.
+- Running authored count: 763 from PF-1, including feature tracking. Generated
+  `dist/` is ignored and excluded.
 - Work-unit boundaries: PF-1, PF-2, PF-3 coherent behavior boundaries; one eventual
   review range. No PRs are authorized or created; no further chain prompt is due.
 
@@ -62,7 +63,7 @@ not a complete task artifact store.
 
 ## Tasks
 
-- [ ] **PF-1 — Persist and reuse accepted session preferences.**
+- [x] **PF-1 — Persist and reuse accepted session preferences.**
   - Route: delegated direct. Trigger: preparation requires unfamiliar intake and
     recovery code; implementation changes multiple non-trivial files.
   - Persist versioned same-parent, worktree-bound mode/summary preferences only
@@ -91,7 +92,9 @@ not a complete task artifact store.
   - Corrected writer: typecheck/build/focused/full green; 1,990 passed, 0 failed,
     3 baseline skips. Parent reran typecheck successfully.
   - Staged native assessment: medium, executable_change; RDD disabled/unmanaged.
-  - Writer authored size: 610 lines; commit including tracking: pending.
+  - Writer authored size: 610 lines; work-unit commit includes 763 authored lines.
+  - Commit: `088f2fe283295ff820c472977803459ad8bb361c`
+    (`feat(preflight): reuse accepted session preferences`).
 
 - [ ] **PF-2 — Add complete durable local task storage.**
   - Route: delegated direct. Trigger: multi-file artifact publication/recovery
@@ -110,7 +113,17 @@ not a complete task artifact store.
     risk artifacts and repeated-phase history.
   - Rollback: disable new activation; retain readers once local records exist.
   - Rationale: coherent storage publication/recovery boundary may exceed 400 lines.
-  - Evidence, risk assessment, commit and authored count: pending.
+  - Writer observed behavioral RED for unsupported local storage, exploration
+    member archival and persistence-failure fencing, then GREEN.
+  - Writer typecheck/build/focused/full checks passed: 313 focused passed,
+    1 focused baseline skip; full suite 2,023 passed, 0 failed, 3 baseline skips.
+    Additional scoped local checks: 31 passed. No live-host proof claimed.
+  - Parent structurally read back TaskStore publication/readback and checkpoint
+    advancement fencing; reran `npm.cmd run typecheck` successfully.
+  - Staged native assessment: medium, executable_change. Writer default profile
+    self-verification plus parent readback/spot check satisfies the off-mode tier;
+    no additional semantic review or native lifecycle was started.
+  - Writer authored size: 912 lines. Commit including tracking: pending.
 
 - [ ] **PF-3 — Automatically resolve new-run storage and remove its question.**
   - Route: delegated direct. Trigger: multiple native intake/UI/schema/doc changes.
@@ -149,5 +162,8 @@ not a complete task artifact store.
 - Offline dependency preparation and baseline checks completed; no source changes.
 - Delivery strategy resolved explicitly: one large eventual delivery.
 - PF-1 functional checks and scoped independent correction recheck completed.
-- Next step: commit PF-1, record its identity, then implement PF-2. PF-2 and PF-3
-  source work has not begun.
+- PF-1 committed as `088f2fe283295ff820c472977803459ad8bb361c`.
+- PF-2 implemented and verified, including full local risk/retry/batch evidence
+  and recovery while legacy backend selection remains unchanged.
+- Next step: commit PF-2, record its identity, then implement PF-3 automatic
+  backend selection. PF-3 source work has not begun.

@@ -17,7 +17,7 @@ const artifactText = await store.read(saved.ref);
 
 | Export | Signature / purpose |
 |---|---|
-| `ArtifactStore` | `constructor(root: string, store: Answers['artifactStore'], engram?: EngramHttp)` |
+| `ArtifactStore` | `constructor(root: string, store: Answers['artifactStore'], engram?: EngramHttp, task?: TaskStore)` |
 | `save` | `(identity: ArtifactIdentity, content: string): Promise<ArtifactResult>` |
 | `read` | `(ref: ArtifactRef): Promise<string>` |
 | `ArtifactIdentity` | `{ runID: string; phase: Phase; domain?: string; explorationID?: string }` |
@@ -40,6 +40,9 @@ remain stable diagnostic identifiers, but are not restart/resume authorization. 
 bypass this guard: the resume checkpoint carries each dependency's exact bytes with their digest,
 and a restored run hands those bytes to the next phase as data. A restored store never reads a
 serialized reference.
+Local restoration instead reads diagnostic data through `TaskStore`, after validating the frozen
+task/run/workspace binding and each immutable record against its manifest. It does not mint live
+artifact capabilities or native approval.
 
 The run dossier (`.mdd/run-<SHA256(parentID)>.json`) serializes refs alongside the artifact
 content it already holds. That does not weaken the paragraph above: a serialized ref is exactly
@@ -63,6 +66,10 @@ content only in the live return/handoff; it has no dedicated disk or observation
 | `openspec` | Exclusive file creation or identical-content readback. |
 | `engram` | Fresh dedicated `mdd-artifact` observation with exact readback. |
 | `both` | Disk first, then Engram; both must confirm before success. |
+| `local` | Immutable task records and complete progress snapshots, with required readback. |
+
+Local is supported as a resolved backend; it is not automatically selected yet. The existing
+Engram/OpenSpec/Both/None question and legacy backend behavior remain unchanged.
 
 **General memory is optional and independent of artifact selection.** Engram and Both
 require an opted-in backend. With memory off, the runner omits the client and receipt writes;
@@ -94,6 +101,43 @@ is not attempted after a failure. No rollback, deletion, retry or workflow advan
 A partial disk write may remain after I/O failure. Inspect known references and reconcile
 explicitly; never claim that failure means nothing was written. Both-mode reads recheck
 both backends and fail on either mismatch; they never select whichever copy still works.
+
+## Complete local task storage
+
+Local-backed runs retain complete task evidence under
+`.mdd/tasks/<readable-objective>-<run-UUID>/`. The adapter generates the name; model-supplied
+paths are not accepted. The UUID separates runs with the same objective. Frozen resume metadata
+binds the location to its originating directory, worktree, run, native user message and optional
+memory project. Transfer retains that identity rather than moving or reselecting the backend.
+
+| Record | Preserved data |
+|---|---|
+| `manifest.json` | Frozen task identity, ordered immutable record identities/digests/byte counts, latest progress snapshot. |
+| `artifact-<UUID>.md` | Exact phase, risk, Apply-batch or contextual artifact bytes. Every retry/rework gets a new file. |
+| `snapshot-<UUID>.json` | Complete workflow/checkpoint and dossier, or a complete exploration-worker record. |
+
+Progress snapshots retain requirements, accepted answers, acceptance maps, decisions, plans,
+verification, coordinator context, native receipt history and replay guards. All risk assessments,
+including failed/retried assessments, retain their actual bodies. Exploration and Apply member
+reports survive aggregation. Each snapshot identifies its current parent and message; the task
+identity and earlier snapshots retain origin provenance. Receipts remain historical data, never
+restored approval authority.
+
+The root comes from `mddDataRoot`: linked-worktree data is stored in the owning repository, so
+deleting that worktree does not delete its task evidence. Those files remain inspectable; a new
+worktree cannot impersonate the originating workspace to resume them.
+
+Publication is exclusive and fsynced, followed by exact record and manifest readback. Manifest
+updates use the existing locked temporary-file/fsync/rename primitive. Operational ownership,
+questions, checkpoints and progress fences stay in their legacy locations. Local progress must
+publish before advancement or dispatch; it never degrades to best-effort dossier storage. An
+unknown write leaves evidence in place and blocks automatic retry and continuation, including
+restart from an older checkpoint. No deletion, fallback or legacy migration reconciles it.
+
+Local dossiers do not shed bodies at the legacy 400 KB budget. Checkpoints retain their existing
+16 MiB sanity ceiling; complete task snapshots have a 64 MiB ceiling. Exceeding a ceiling stops
+publication explicitly rather than trimming evidence. Status and prompt budgets affect views,
+not stored bytes. Existing link/hardlink checks and trusted-filesystem limitations apply.
 
 ## Exact OpenSpec layout
 

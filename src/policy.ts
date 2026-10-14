@@ -4,9 +4,12 @@
  */
 export const POLICY_VERSION = 'mdd-routing-v2';
 
+export type LegacyArtifactStore = 'engram' | 'openspec' | 'both' | 'none';
+export type ArtifactBackend = LegacyArtifactStore | 'local';
+
 export type Answers = {
   certainty: 'very-sure' | 'somewhat-sure' | 'not-sure';
-  artifactStore: 'engram' | 'openspec' | 'both' | 'none';
+  artifactStore: ArtifactBackend;
   mode: 'interactive' | 'automatic';
   summary: 'detailed' | 'medium' | 'low';
 };
