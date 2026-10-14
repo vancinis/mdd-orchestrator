@@ -9,7 +9,7 @@ The user approved starting with these two recommendations. Reuse existing coordi
 ## Delivery and environment
 
 - Branch: `feat-analisis-mdd`; initial boundary: `683c7452a5e48385669d7bcd4d573a55054322c7`.
-- Delivery strategy: `ask-on-risk`; revised forecast: approximately 420 authored changed lines including tracking. User selected `stacked-to-main`: future slice 1 contains CH-1 (`4efe877`); slice 2 contains CH-2 and depends on slice 1. Running committed count: 318. Only local commits are authorized; no PR publication is authorized.
+- Delivery strategy: `ask-on-risk`; initial forecast was approximately 420 authored changed lines; actual work-unit total is 526 including tracking (318 in CH-1, 208 in CH-2). User selected `stacked-to-main`: future slice 1 is `683c745..4efe877`; slice 2 is `4efe877..646931f`. Only local commits are authorized; no PR publication is authorized. Final tracking-only closure adds six authored lines, for 532 accumulated lines.
 - RDD: off, decided by `clone_local`; do not start review or toggle the preference. Assess writer diffs for ordinary verification routing.
 - Runtime: Node 26.9.0, npm 11.19.1. Anonymous isolated `npm ci --ignore-scripts --no-audit --no-fund` installed 396 packages; package/lock hashes stayed unchanged and local TypeScript 7.0.2 is available. Tests load `dist`, so rebuild before test execution. No source-mutating normalizer is configured.
 - TDD: applicability-based test-first, no configured override found in `mdd.config.json`. Observe RED, GREEN, then refactor with focused tests green.
@@ -33,7 +33,7 @@ The user approved starting with these two recommendations. Reuse existing coordi
   - Acceptance: evidence/limitations reach downstream prompts and declared compaction; stale evidence is not fresh proof; no authority, report schema, or structured coverage changes.
   - Correct only directly related obsolete context-budget/compaction documentation.
   - Checks: focused `evidence handoff:` tests, build, typecheck, full suite, and `git diff --check`. Live actor compliance and token savings remain unmeasured.
-  - Evidence: RED 13 passed/4 failed; final GREEN 17 passed/0 failed. Initial full suite had three fallback/reset/strict-argument failures: redundant instruction prose raised serialized tasks above the existing 18,000-byte gate. Removed repeated compaction explanation and added measured-byte assertions without changing budgets or expected semantics. Targeted correction checks passed 9/9. Final build/typecheck/diff check pass; full suite: 1,990 total, 1,987 passed, 0 failed, 3 skipped (same environment skips as CH-1), 265 seconds. Final authored CH-2 diff +184/-12; native assessment medium, RDD disabled/unmanaged; parent diff-check spot check passed. Commit ready.
+  - Evidence: RED 13 passed/4 failed; final GREEN 17 passed/0 failed. Initial full suite had three fallback/reset/strict-argument failures: redundant instruction prose raised serialized tasks above the existing 18,000-byte gate. Removed repeated compaction explanation and added measured-byte assertions without changing budgets or expected semantics. Targeted correction checks passed 9/9. Final build/typecheck/diff check pass; full suite: 1,990 total, 1,987 passed, 0 failed, 3 skipped (same environment skips as CH-1), 265 seconds. Final authored CH-2 diff +184/-12; native assessment medium, RDD disabled/unmanaged; parent diff-check spot check passed. Work-unit commit: `646931fae4ec9e71eededd369001932ae685e693`; clean worktree immediately afterward.
 
 ## Verification commands
 
@@ -47,4 +47,4 @@ npm test
 
 ## Progress and next step
 
-Both units have observed test-first and functional proof; CH-1 also has independent verification. CH-2's initial regressions were corrected without weakening transport limits or verification. Commit CH-2 locally and record its identity. Strategy is stacked PRs toward main; publication remains unauthorized. Live actor compliance and measured token reduction remain unproven; the Engram topic mirror remains pending.
+Both units are verified and committed locally; CH-1 also has independent verification. CH-2's initial regressions were corrected without weakening transport limits or verification. Strategy is stacked PRs toward main; publication remains unauthorized. Next: compare equivalent live tasks to measure rediscovery and token savings, or prepare the recorded PR slices only after explicit publication authorization. Live actor compliance and measured token reduction remain unproven; the Engram topic mirror remains pending.
