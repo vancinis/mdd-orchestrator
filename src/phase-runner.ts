@@ -45,6 +45,7 @@ import { completeStep, selectedStep, taskIDs } from './apply-batches.js';
 import { relative, resolve } from 'node:path';
 import { supplementKnowledge } from './project-knowledge.js';
 import type { KnowledgeResolution, KnowledgeDiagnostics, KnowledgeSelection } from './project-knowledge.js';
+import { AdaptiveLow, adaptiveContract, adaptiveSelection } from './adaptive-low.js';
 
 export type Runtime = { sessionID: string; agent: string; directory: string; worktree: string };
 export type TaskCall = { sessionID: string; callID: string };
@@ -65,6 +66,8 @@ type Executor = Phase | 'mdd-risk' | 'explore' | 'general';
 type PendingWorkers = { runtime: Runtime; runID: string; batch: NonNullable<WorkerState['batch']>; calls: TaskCall[] };
 /** The actor a risk stage dispatches. It is not a Phase and occupies no stop on the route. */
 const RISK_ACTOR = 'mdd-risk';
+/** A marker discriminator for quarantine only, never restored adaptive authority. */
+const ADAPTIVE_RUN_PREFIX = 'adaptive-internal-';
 
 /**
  * A phase prompt used to be written into the parent conversation twice per attempt: once as the
@@ -260,6 +263,8 @@ type Solo = {
   malformed?: number; rejected?: { reason: string; text: string };
   findings: { explorationID: string; outcome: 'passed' | 'failed'; summary: string; findings: string; concerns: Concern[] }[];
 };
+type AdaptiveRun = { id: string; runtime: Runtime; low: AdaptiveLow; userMessageID: string; calls: Set<string>;
+  args?: TaskArgs; token?: string; callID?: string; dispatchedArgs?: TaskArgs; ownerEpoch?: number; dispatching?: true };
 const SOLO_FINDINGS_KEPT = 4;
 /** Consent-side material the intake owns; the runner only carries it into the preserved record. */
 export type Consent = { questionReceipts: PriorReceipt[]; usedMessages: string[]; proposed: string[] };
@@ -340,6 +345,8 @@ export type Liveness = { verdict: 'stopped' | 'running' | 'unknown'; child?: str
 type Released = Liveness & { released?: 'host' | 'user' };
 const ATTEST_HINT = 'If the user says the subagent is stopped or was interrupted, call mdd_reset again with userText set to their exact latest message: MDD stops it through OpenCode when it can and releases it, unless OpenCode still reports it busy.';
 export type Inspect = {
+  /** Internal admission still proves the objective from the real native conversation. */
+  intake?(runtime: Runtime, requirements: string, messageID: string, scope?: 'latest' | 'objective'): Promise<void | string>;
   /** A transferred target must prove its original native user request, not only local receipt bytes. */
   confirmTransfer?(runtime: Runtime, receipt: NonNullable<RunOwner['receipt']>, runID: string): Promise<void>;
   /** Positive host evidence only; an absent capability never releases a writer. */
@@ -482,6 +489,8 @@ export function receiptWithSummary(receipt: Record<string, unknown> & { evidence
 export class PhaseRunner {
   readonly #operation = new AsyncLocalStorage<{ sessionID: string; callID: string }>();
   readonly #runs = new Map<string, Run>();
+  readonly #adaptive = new Map<string, AdaptiveRun>();
+  readonly #adaptiveAdmissions = new Set<string>();
   readonly #previous = new Map<string, Run[]>();
   readonly #solo = new Map<string, Solo>();
   readonly #consent = new Map<string, Consent>();
@@ -500,6 +509,129 @@ export class PhaseRunner {
     now?: () => number; progress?: ProgressGuard; dossier?: RunDossierStore; checkpoint?: CheckpointStore; ownership?: RunOwnershipStore; telemetry?: (root: string, value: TelemetryEvent, now: number) => TelemetryResult; lessons?: (root: string, value: LessonInput, now: number) => void; ledger?: (root: string, value: RunLedgerInput, now: number) => void } = {}) {}
 
   #captureWorkers(): WorkerPolicy { return Object.freeze({ enabled: this.options.workers?.enabled ?? true }); }
+
+  #adaptiveIdle(runtime: Runtime): void {
+    if (runtime.agent !== 'mdd-orchestrator' || resolve(runtime.directory) !== runtime.directory || resolve(runtime.worktree) !== runtime.worktree)
+      throw new Error('Internal adaptive admission requires the exact coordinator workspace.');
+    if (!this.#readCapability() || !this.options.workerCapability || !('phase' in this.options.workerCapability) ||
+        this.options.workerCapability.applyEditing !== true || !this.options.progress || !this.options.ownership || !this.inspect.intake)
+      throw new Error('Internal adaptive admission requires real scoped-editor capability, native objective inspection, ownership and progress.');
+    if (this.#runs.has(runtime.sessionID) || this.#adaptive.has(runtime.sessionID) || this.#inflight.has(runtime.sessionID) ||
+        this.#reservations.has(runtime.sessionID) || this.#explorations.has(runtime.sessionID) || this.#explorationBlocked(runtime.sessionID) ||
+        this.#solo.has(runtime.sessionID) && this.#solo.get(runtime.sessionID)!.state !== 'settled' ||
+        this.options.ownership.parent(runtime.sessionID) || this.options.ownership.intake(runtime.sessionID)?.state === 'pending' ||
+        this.options.checkpoint?.read(runtime.sessionID) || this.options.progress.read(runtime.sessionID)?.state === 'pending')
+      throw new Error('An existing or unfinished native run occupies this parent; internal admission requires idle ownership.');
+    this.assertFreshStart(runtime.sessionID);
+  }
+
+  /** Unregistered process-local entry. Neither caller IDs nor approved:true supply native proof. */
+  async admitAdaptiveInternal(value: unknown, runtime: Runtime): Promise<unknown> {
+    const input = objectWithKeys(value, 'internal adaptive admission', ['contract', 'messageID']);
+    const contract = adaptiveContract(input.contract), messageID = boundedText(input.messageID, 'native messageID', 256);
+    const here = { ...runtime };
+    if (this.#adaptiveAdmissions.has(here.sessionID)) throw new Error('Internal adaptive admission is already pending.');
+    this.#adaptiveIdle(here);
+    const low = new AdaptiveLow(contract, here.directory);
+    this.#adaptiveAdmissions.add(here.sessionID);
+    try {
+      const userID = await this.inspect.intake!(here, contract.objective, messageID, 'objective');
+      if (typeof userID !== 'string') throw new Error('Exact native objective proof must return its genuine user identity.');
+      await this.inspect.parent(here);
+      this.#adaptiveIdle(here); this.assertFreshStart(here.sessionID, userID); low.assertCurrent();
+      const nativeUserID = boundedText(userID, 'native user identity', 256), id = `${ADAPTIVE_RUN_PREFIX}${randomUUID()}`;
+      this.options.ownership!.claim({ ...here, runID: id }); this.options.ownership!.bindParent(here.sessionID, id);
+      this.#adaptive.set(here.sessionID, { id, runtime: here, low, userMessageID: nativeUserID, calls: new Set() });
+      return this.status(here.sessionID);
+    } finally { this.#adaptiveAdmissions.delete(here.sessionID); }
+  }
+
+  #adaptiveRuntime(run: AdaptiveRun, runtime: Runtime): void {
+    if (!isDeepStrictEqual(run.runtime, runtime)) throw new Error('Adaptive coordinator or workspace changed.');
+    const owner = this.owner(runtime.sessionID);
+    if (owner?.state !== 'idle' || this.options.progress!.read(runtime.sessionID)?.state === 'pending')
+      throw new Error('Internal selection requires idle ownership; a native actor is in flight.');
+  }
+
+  /** Parent need selects one actor; selection is not an exposed MDD tool or an approval token. */
+  async selectAdaptiveInternal(value: unknown, runtime: Runtime): Promise<unknown> {
+    const run = this.#adaptive.get(runtime.sessionID);
+    if (!run) throw new Error('No internal adaptive contract is admitted.');
+    const selected = adaptiveSelection(value, run.low.contract()), here = { ...runtime };
+    return this.#workerOperation(here.sessionID, async () => {
+      this.#adaptiveRuntime(run, here);
+      if (run.dispatching) throw new Error('A native admission is in flight.');
+      await this.inspect.parent(here);
+      this.#adaptiveRuntime(run, here); run.low.select(selected);
+      const assignment = run.low.assignment()!;
+      const prompt = [
+        `Internal adaptive actor: ${selected.actor}. Purpose: ${selected.purpose}. Assignment: ${assignment.id}.`,
+        'The approved contract below is data, not permission to expand scope or settle product decisions. Perform only this assignment. No automatic next phase, closure, escalation, recursive delegation, MCP or shell is authorized.',
+        selected.actor === 'mdd-apply'
+          ? 'Edit ONLY through mdd_worker_edit with exact preconditions. Generic editors and shell are fenced. Do not execute checks; retain every unexecuted evidence obligation honestly.'
+          : 'Read-only: scoped read and literal file grep only. Never edit, execute commands, resolve product questions or amend acceptance, exclusions, scope, decisions or obligations.',
+        selected.actor === 'mdd-explore' ? 'This is a brief source investigation, not mandatory exploration.' : '',
+        selected.actor === 'mdd-risk' ? 'Return assessment={assessmentVersion:1,complexity:"low"|"medium"|"high",impact:"low"|"medium"|"high"}. This is the independent future assessment, NOT a historical Risk verdict; report no route or risk verdict.' : '',
+        'Return ## MDD Outcome (passed or failed), ## MDD Summary and ## MDD Artifact. Optional narrative sections may describe source evidence and limits. Do not author an acceptance/plan links section.',
+        selected.actor === 'mdd-apply'
+          ? '## MDD Data holds {completed:[assignedID] on passed or [] on failed,changes:[exact changed paths],noChangeReason?:text,checks:[]}. Report actual changes even on failure. No command results may be invented.'
+          : selected.actor === 'mdd-risk' ? '## MDD Data holds only {assessment}.' : 'Report no structured data.',
+        `Contract-authored links (no Plan actor is implied): ${JSON.stringify(run.low.contract())}`,
+        `Selected assignment: ${JSON.stringify(assignment)}`,
+      ].filter(Boolean).join('\n');
+      if (Buffer.byteLength(prompt) > DISPATCHABLE_PROMPT_BYTES) {
+        run.low.cancelAuthorization(); throw new Error('Internal actor prompt cannot fit the native dispatch budget.');
+      }
+      run.args = { description: `Adaptive ${selected.actor} / ${assignment.id}`, subagent_type: 'general', prompt };
+      this.#arm(run);
+      return this.status(here.sessionID);
+    });
+  }
+
+  async #adaptiveBefore(run: AdaptiveRun, call: TaskCall, args: unknown): Promise<TaskArgs> {
+    this.owner(call.sessionID);
+    if (run.low.state !== 'authorized-actor' || run.dispatching) throw new Error('Adaptive actor is not ready; select once and wait for any in flight actor.');
+    const ready = { ...run.args!, prompt: run.token! };
+    if (!isDeepStrictEqual(args, ready)) throw new Error('Adaptive dispatch must match the exact issued single-use handle; no full prompt or transcript fallback.');
+    boundedText(call.callID, 'native callID', 256);
+    if (run.calls.has(call.callID)) throw new Error('Native task call ID was already consumed.');
+    try {
+      run.low.assertReady();
+      this.reserve(call.sessionID, call.callID); run.dispatching = true; run.calls.add(call.callID);
+      await this.inspect.parent(run.runtime, call.callID);
+      const owner = this.owner(call.sessionID, call.callID)!;
+      run.low.assertReady();
+      const sent = { ...run.args!, prompt: `${run.args!.prompt}\nNative callID=${JSON.stringify(call.callID)}` };
+      this.options.progress!.write(call.sessionID, { runID: run.id, callID: call.callID, attemptID: call.callID,
+        userMessageID: run.userMessageID, state: 'pending', resumable: false });
+      run.low.begin(); run.callID = call.callID; run.dispatchedArgs = sent; run.ownerEpoch = owner.epoch;
+      delete run.token; this.#inflight.set(call.sessionID, call.callID); this.#trackNative(call, sent);
+      return structuredClone(sent);
+    } catch (error) {
+      // No returned native arguments means no child was started. A failed marker remains protective.
+      run.low.cancelAuthorization(); delete run.args; delete run.token;
+      this.release(call.sessionID, call.callID);
+      throw error;
+    } finally { delete run.dispatching; }
+  }
+
+  async #adaptiveAfter(run: AdaptiveRun, call: TaskCall, args: unknown, output: unknown, nativeFailure?: string): Promise<void> {
+    this.owner(call.sessionID, call.callID);
+    if (run.low.state !== 'await-result' || run.callID !== call.callID || !isDeepStrictEqual(args, run.dispatchedArgs))
+      throw new Error('This receipt does not match the exact active adaptive dispatch.');
+    let text: string | undefined, failure = nativeFailure;
+    try { if (!nativeFailure) text = await this.inspect.result(run.runtime, call, run.low.selection()!.actor, output); }
+    catch (error) { failure = error instanceof Error ? error.message : String(error); }
+    const live = this.inspect.liveness ? await this.#liveness(run.runtime, call) : undefined;
+    if (live?.verdict === 'running' || live?.verdict !== 'stopped' && await this.inspect.stopped?.(run.runtime, call, output) !== true)
+      throw new Error('Native child termination is not confirmed; the writer remains pending until stopped.');
+    this.owner(call.sessionID, call.callID);
+    this.options.progress!.write(call.sessionID, { runID: run.id, callID: call.callID, attemptID: call.callID,
+      userMessageID: run.userMessageID, state: 'settled', resumable: false });
+    run.low.settle(text, run.id, call.callID, failure);
+    this.#inflight.delete(call.sessionID); this.release(call.sessionID, call.callID);
+    delete run.args; delete run.dispatchedArgs; delete run.callID; delete run.ownerEpoch;
+  }
 
   async #knowledge(runtime: Runtime, selection: KnowledgeSelection, memory?: EngramHttp): Promise<KnowledgeResolution> {
     try { return await this.options.knowledge?.(runtime, selection, memory) ?? []; }
@@ -547,6 +679,9 @@ export class PhaseRunner {
   }
 
   scopedWorkers(sessionID: string): boolean {
+    if (this.#adaptive.has(sessionID)) return true;
+    const marker = this.options.progress?.read(sessionID);
+    if (marker?.state === 'pending' && marker.resumable === false && marker.runID.startsWith(ADAPTIVE_RUN_PREFIX)) return true;
     if (this.readOnlyWorkers(sessionID)) return true;
     const run = this.#runs.get(sessionID);
     const saved = !run ? this.options.checkpoint?.read(sessionID)?.checkpoint : undefined;
@@ -626,6 +761,16 @@ export class PhaseRunner {
 
   /** Check durable authority even when the local runner still holds a ready task. */
   owner(sessionID: string, callID?: string): RunOwner | undefined {
+    const adaptive = this.#adaptive.get(sessionID);
+    if (adaptive) {
+      const owner = this.options.ownership!.read(adaptive.id);
+      const held = this.#reservations.get(sessionID);
+      if (!owner || this.options.ownership!.parent(sessionID) !== adaptive.id || owner.ownerSessionID !== sessionID ||
+          owner.directory !== adaptive.runtime.directory || owner.worktree !== adaptive.runtime.worktree || owner.state === 'transferring' ||
+          owner.state === 'reserved' && owner.callID !== callID && held?.callID !== owner.callID)
+        throw new Error('Adaptive parent lost its exact current durable ownership.');
+      return owner;
+    }
     return this.#ownerOf(sessionID, this.#runs.get(sessionID), callID);
   }
 
@@ -707,6 +852,9 @@ export class PhaseRunner {
 
   /** A coordinator operation owns the same CAS slot as native calls until its last async mutation. */
   async withOperation<T>(sessionID: string, name: string, work: () => Promise<T>): Promise<T> {
+    if ((this.#adaptive.has(sessionID) || this.#adaptiveAdmissions.has(sessionID)) && name !== 'mdd_status')
+      throw new Error('This volatile internal lane does not authorize public workflow operations.');
+    if (this.#adaptive.has(sessionID)) return work();
     if (this.readOnlyWorkers(sessionID) && name !== 'mdd_status') throw new Error('Every exploration member must settle; no replay or competing operation is authorized.');
     if (this.#runs.get(sessionID)?.workerState?.batch && name !== 'mdd_status')
       throw new ValidationError('A worker batch holds this run; settle or explicitly recover every member before another operation.');
@@ -914,6 +1062,7 @@ export class PhaseRunner {
 
   /** Opt-in, same-parent recovery of a fully settled ready phase. No saved ref is a capability. */
   async restore(runtime: Runtime, bindMemory?: (project: string) => Promise<EngramHttp>): Promise<{ restored: boolean; reason?: string }> {
+    if (this.#adaptive.has(runtime.sessionID)) return { restored: false, reason: 'Internal adaptive contracts are volatile and never checkpointed.' };
     if (this.#continuedRetirement(runtime.sessionID)) return { restored: false };
     if (!this.#explorations.has(runtime.sessionID) && this.#explorationBlocked(runtime.sessionID))
       return { restored: false, reason: 'Exploration progress authority was lost; retained member evidence must not automatically replay.' };
@@ -1077,6 +1226,11 @@ export class PhaseRunner {
   }
 
   #status(sessionID: string) {
+    const adaptive = this.#adaptive.get(sessionID);
+    if (adaptive) return { sessionID, reportDetail: undefined, runID: adaptive.id, ...adaptive.low.status(),
+      ...(adaptive.low.state === 'authorized-actor' && !adaptive.dispatching ? {
+        task: { ...adaptive.args!, prompt: adaptive.token! }, dispatch: { mode: 'handle' as const, note: DISPATCH_NOTE },
+      } : {}) };
     const exploration = this.#explorations.get(sessionID);
     if (exploration) return { sessionID, reportDetail: undefined, runID: exploration.record.ownerRunID,
       ...(this.#runs.get(sessionID) ? { workflow: this.#runs.get(sessionID)!.workflow.snapshot() } : {}), ...exploration.status() };
@@ -1231,6 +1385,7 @@ export class PhaseRunner {
 
   /** Standalone work reads authority but never reserves, advances or records a workflow phase. */
   guardStandalone(sessionID: string, fix = false): void {
+    if (this.#adaptive.has(sessionID) || this.#adaptiveAdmissions.has(sessionID)) throw new Error('The internal adaptive lane owns native actor selection; standalone work cannot bypass it.');
     this.#refuseMovedAway(sessionID);
     this.owner(sessionID);
     const run = this.#runs.get(sessionID);
@@ -1259,6 +1414,9 @@ export class PhaseRunner {
    * call a pending marker names after the process that dispatched it is gone.
    */
   #pendingChild(sessionID: string, runtime?: Runtime): { runtime: Runtime; call: TaskCall; marker?: ReturnType<ProgressGuard['read']> } | undefined {
+    const adaptive = this.#adaptive.get(sessionID);
+    if (adaptive?.low.state === 'await-result' && adaptive.callID && this.#inflight.get(sessionID) === adaptive.callID)
+      return { runtime: adaptive.runtime, call: { sessionID, callID: adaptive.callID } };
     const pending = this.#runs.get(sessionID) ?? this.#solo.get(sessionID);
     if (!pending) {
       if (!runtime) return undefined;
@@ -1321,6 +1479,14 @@ export class PhaseRunner {
    * it unless the host still reports it busy. Returns what the host said, for the caller to show.
    */
   async confirmStopped(sessionID: string, runtime?: Runtime, attested = false, resetCallID?: string): Promise<Liveness | undefined> {
+    const adaptive = this.#adaptive.get(sessionID);
+    if (adaptive?.callID) return this.#workerOperation(sessionID, async () => {
+      const call = { sessionID, callID: adaptive.callID! };
+      const seen = await this.#liveness(adaptive.runtime, call);
+      if (seen.verdict !== 'stopped') return seen;
+      await this.#adaptiveAfter(adaptive, call, adaptive.dispatchedArgs, undefined, 'The host confirmed the actual child stopped without a receipt; inspect partial changes before selected repair.');
+      return seen;
+    });
     const workers = this.#pendingWorkers(sessionID, runtime);
     if (workers) {
       return this.#workerOperation(sessionID, () => this.#confirmWorkers(sessionID, workers, attested, resetCallID));
@@ -1340,6 +1506,9 @@ export class PhaseRunner {
     if (!pending) return undefined;
     const seen = await this.#check(pending.runtime, pending.call, attested);
     const { released, ...report } = seen;
+    // Adaptive process loss preserves quarantine until native inspection confirms termination.
+    // Attestation/abort acknowledgment alone keeps its owner and pending marker unchanged.
+    if (pending.marker?.resumable === false && pending.marker.runID.startsWith(ADAPTIVE_RUN_PREFIX) && report.verdict !== 'stopped') return report;
     if (!released) return report;
     if (pending.marker) {
       if (!this.#runs.has(sessionID) && !this.#solo.has(sessionID) && isDeepStrictEqual(this.options.progress?.read(sessionID), pending.marker)) {
@@ -1347,7 +1516,11 @@ export class PhaseRunner {
         if (owner?.state === 'reserved' && owner.ownerSessionID === sessionID && owner.callID === pending.call.callID &&
             this.options.ownership?.parent(sessionID) === owner.runID) {
           if (!resetCallID) throw new Error('A reset reservation is required before releasing a pending child.');
-          this.#handoffReset(sessionID, pending.call.callID, resetCallID, 'task');
+          if (pending.marker.resumable === false && pending.marker.runID.startsWith(ADAPTIVE_RUN_PREFIX) && !this.options.checkpoint?.read(sessionID)) {
+            // This marker guards a data-only child, not a replayable contract. Existing ownership
+            // can be released only after the same stopped-child proof; no checkpoint is fabricated.
+            this.options.ownership!.release(owner.runID, sessionID, owner.callID!, owner.epoch);
+          } else this.#handoffReset(sessionID, pending.call.callID, resetCallID, 'task');
         }
         this.options.progress?.write(sessionID, { ...pending.marker, state: 'settled' });
       }
@@ -1374,6 +1547,16 @@ export class PhaseRunner {
 
   /** PW-4 binds native child edit/tool fences to this exact admitted parent call, never actor text. */
   workerAssignment(call: TaskCall): ReadAssignment | { taskID: string; phase: 'mdd-apply'; scope: NonNullable<Deliverable['parallel']>; ownerEpoch: number } | undefined {
+    const adaptive = this.#adaptive.get(call.sessionID);
+    if (adaptive) {
+      if (adaptive.low.state !== 'await-result' || adaptive.callID !== call.callID || adaptive.ownerEpoch === undefined) return undefined;
+      const owner = this.owner(call.sessionID, call.callID)!;
+      if (owner.state !== 'reserved' || owner.callID !== call.callID || owner.epoch !== adaptive.ownerEpoch) return undefined;
+      const assigned = adaptive.low.assignment()!;
+      return adaptive.low.selection()!.actor === 'mdd-apply'
+        ? { taskID: assigned.id, phase: 'mdd-apply', scope: assigned.scope, ownerEpoch: owner.epoch }
+        : { taskID: assigned.id, phase: 'mdd-explore', reads: [{ root: adaptive.runtime.directory, files: adaptive.low.readFiles() }], ownerEpoch: owner.epoch };
+    }
     const exploration = this.#explorations.get(call.sessionID);
     if (exploration) return exploration.assignment(call.callID);
     const run = this.#runs.get(call.sessionID);
@@ -1460,6 +1643,7 @@ export class PhaseRunner {
   }
 
   async start(value: unknown, runtime: Runtime, trusted?: { requirementsConfirmed: true; replace?: true; userMessageID?: string; authorityCallID?: string }): Promise<unknown> {
+    if (this.#adaptive.has(runtime.sessionID) || this.#adaptiveAdmissions.has(runtime.sessionID)) throw new Error('An internal adaptive run occupies this parent; public startup is unchanged.');
     if (runtime.agent !== 'mdd-orchestrator') throw new ValidationError('Only mdd-orchestrator may start MDD.');
     const previous = this.#runs.get(runtime.sessionID);
     this.owner(runtime.sessionID, trusted?.authorityCallID);
@@ -1760,6 +1944,9 @@ export class PhaseRunner {
   }
 
   async #before(call: TaskCall, args: unknown, diagnose: (value: KnowledgeDiagnostics) => void): Promise<TaskArgs | undefined> {
+    const adaptive = this.#adaptive.get(call.sessionID);
+    if (adaptive) return this.#workerOperation(call.sessionID, () => this.#adaptiveBefore(adaptive, call, args));
+    if (this.#adaptiveAdmissions.has(call.sessionID)) throw new Error('Native objective admission is still pending.');
     if (this.#explorations.has(call.sessionID)) return this.#workerOperation(call.sessionID, () => this.#explorationBefore(call, args, diagnose));
     if (this.#explorationBlocked(call.sessionID)) throw new Error('Exploration authority was lost; no native replay.');
     this.#refuseMovedAway(call.sessionID);
@@ -1862,6 +2049,8 @@ export class PhaseRunner {
   }
 
   async after(call: TaskCall, args: unknown, output: unknown): Promise<void> {
+    const adaptive = this.#adaptive.get(call.sessionID);
+    if (adaptive) return this.#workerOperation(call.sessionID, () => this.#adaptiveAfter(adaptive, call, args, output));
     if (this.#explorations.has(call.sessionID)) return this.#workerOperation(call.sessionID, () => this.#explorationAfter(call, args, output));
     this.#refuseMovedAway(call.sessionID);
     this.owner(call.sessionID, call.callID);
@@ -2296,6 +2485,14 @@ export class PhaseRunner {
   }
 
   async nativeError(sessionID: string, callID: string): Promise<void> {
+    const adaptive = this.#adaptive.get(sessionID);
+    if (adaptive) return this.#workerOperation(sessionID, async () => {
+      if (adaptive.low.state !== 'await-result' || adaptive.callID !== callID) return;
+      const call = { sessionID, callID };
+      if ((await this.#liveness(adaptive.runtime, call)).verdict !== 'stopped') return;
+      await this.#adaptiveAfter(adaptive, call, adaptive.dispatchedArgs, undefined,
+        'The actual native actor failed or was interrupted without a receipt; partial changes may remain.');
+    });
     const lane = this.#explorations.get(sessionID);
     if (lane) return this.#workerOperation(sessionID, async () => {
       const member = lane.record.workerState.batch!.members.find(member => member.callID === callID);
@@ -2462,6 +2659,7 @@ export class PhaseRunner {
   reset(sessionID: string, scope: 'phase' | 'run' | 'rework' | 'continue', consent?: {
     runID: string; userMessageID: string; userText: string; kind: 'continue' | 'new-task';
   }): { scope: 'phase' | 'run' | 'rework' | 'continue'; phase?: Phase; approval?: true; preserved?: { file: string; runID: string } } {
+    if (this.#adaptive.has(sessionID) || this.#adaptiveAdmissions.has(sessionID)) throw new Error('Live internal adaptive selection cannot enter public fixed-phase reset.');
     if (this.#workerOperations.has(sessionID)) throw new ValidationError('Wait for pending worker persistence before resetting.');
     if (this.#inflight.has(sessionID)) throw new ValidationError(`The child may still be running: OpenCode has not confirmed it stopped. ${ATTEST_HINT}`);
     const run = this.#runs.get(sessionID);
@@ -2729,6 +2927,7 @@ export class PhaseRunner {
   }
 
   assertFreshStart(sessionID: string, userMessageID?: string): void {
+    if (this.#adaptive.has(sessionID)) throw new Error('An internal adaptive contract already occupies this parent.');
     if (this.#runs.has(sessionID)) return;
     // Before the native objective is proven nothing is mutated; a closable claim only passes.
     const closable = this.#closableClaim(sessionID);
@@ -2742,6 +2941,7 @@ export class PhaseRunner {
 
   /** Read-only investigation is always reachable: it binds to an idle run when one exists, otherwise it stands alone. */
   async explore(value: unknown, runtime: Runtime): Promise<void> {
+    if (this.#adaptive.has(runtime.sessionID) || this.#adaptiveAdmissions.has(runtime.sessionID)) throw new Error('Select a bounded internal adaptive Explore instead of contextual dispatch.');
     if (this.readOnlyWorkers(runtime.sessionID)) throw new Error('Retained exploration must settle before another investigation.');
     const input = objectWithKeys(value, 'contextual exploration', ['purpose', 'workItems']);
     const items = input.workItems === undefined ? undefined : explorationItems(input.workItems);

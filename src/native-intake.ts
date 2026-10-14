@@ -23,6 +23,7 @@ import type { Clarification, QuestionCheckpointStore, QuestionRecord } from './q
 import type { RunOwnershipStore } from './run-ownership.js';
 import { typedSelections } from './typed-answer.js';
 import type { TypedEvidence } from './typed-answer.js';
+import { adaptiveContract } from './adaptive-low.js';
 
 export type IntakeInspect = {
   setupPending?(runtime: Runtime, requirements?: string, messageID?: string): Promise<{ requirements: string; userMessageID: string } | undefined>;
@@ -36,7 +37,7 @@ export type IntakeInspect = {
   transferLiveness?(runtime: Runtime, sourceSessionID: string, runID: string, requestDigest: string,
     assistantMessageID?: string): Promise<'running' | 'stopped' | 'unknown'>;
 };
-type Runner = Pick<PhaseRunner, 'start' | 'status' | 'approveNative' | 'block'> & Partial<Pick<PhaseRunner, 'approvalStopped' | 'assertChangeable' | 'assertFreshStart' | 'closeForFreshStart' | 'contribute' | 'explore' | 'movedAway' | 'priorGuards' | 'recordConsent' | 'reset' | 'failedVerification' | 'resumable' | 'submit' | 'owner' | 'reserve' | 'release' | 'handoffRecoveredQuestion' | 'forceRoute' | 'retryRisk' | 'chooseManualRoute' | 'openQuestions' | 'takeOpenQuestions'>>;
+type Runner = Pick<PhaseRunner, 'start' | 'status' | 'approveNative' | 'block'> & Partial<Pick<PhaseRunner, 'admitAdaptiveInternal' | 'approvalStopped' | 'assertChangeable' | 'assertFreshStart' | 'closeForFreshStart' | 'contribute' | 'explore' | 'movedAway' | 'priorGuards' | 'recordConsent' | 'reset' | 'failedVerification' | 'resumable' | 'submit' | 'owner' | 'reserve' | 'release' | 'handoffRecoveredQuestion' | 'forceRoute' | 'retryRisk' | 'chooseManualRoute' | 'openQuestions' | 'takeOpenQuestions'>>;
 /** The run and settled state a native question reserved the durable writer against. */
 type Reservation = NonNullable<QuestionRecord['reservation']>;
 /** `fields` counts a preflight envelope's leading field questions; the rest are its clarifications. */
@@ -246,6 +247,22 @@ export class NativeIntake {
   }
 
   async close(): Promise<void> { await this.#managed?.close(); }
+
+  /** Internal only: AL-02 cannot bypass an interactive approval or an unresolved native question. */
+  async admitAdaptiveInternal(value: unknown, runtime: Runtime, messageID: string): Promise<unknown> {
+    const input = objectWithKeys(value, 'internal adaptive intake', ['contract']);
+    const contract = adaptiveContract(input.contract), here = { ...runtime };
+    const nativeMessage = boundedText(messageID, 'native messageID', 256);
+    if (here.agent !== 'mdd-orchestrator' || this.#profile.answers.mode !== 'automatic')
+      throw new Error('Internal adaptive intake requires the coordinator and an explicitly automatic native profile; interactive approval is not bypassed.');
+    if (this.#sessions.has(here.sessionID) || this.#unresolved(here.sessionID)) throw new Error('A native intake or question already occupies this parent.');
+    if (!this.runner.admitAdaptiveInternal) throw new Error('Internal adaptive runner admission is unavailable.');
+    const identity = await this.inspect.intake(here, contract.objective, nativeMessage, 'objective');
+    if (typeof identity !== 'string') throw new Error('Exact native objective proof is required; caller-supplied provenance is insufficient.');
+    if (this.#sessions.has(here.sessionID) || this.#unresolved(here.sessionID)) throw new Error('Native intake changed during objective inspection.');
+    // Runner independently inspects the same native text/message, ownership and current source.
+    return this.runner.admitAdaptiveInternal({ contract, messageID: nativeMessage }, here);
+  }
 
   /**
    * Frees a parent whose run moved to another conversation: its unresolved question record (if

@@ -207,3 +207,15 @@ test('compact view: the default for statusPayload stays full, so callers opt in'
   assert.equal(compact.acceptance, undefined);
   assert.deepEqual(compact.omitted, ['acceptance', 'brief']);
 });
+test('AL-02: bounded selection metadata and the last actual receipt survive status projection', () => {
+  const payload = { lane: 'adaptive-low-internal', state: 'await-selection', selection: { handle: 'internal', completed: ['A1'] },
+    lastReceipt: { actor: 'mdd-apply', outcome: 'failed', summary: 'Partial changes remain.' }, report: 'x'.repeat(60000) };
+  for (const view of ['full', 'compact']) {
+    const value = JSON.parse(statusPayload(payload, view));
+    assert.deepEqual(value.selection, payload.selection);
+    assert.deepEqual(value.lastReceipt, payload.lastReceipt);
+    assert.equal(value.phase, undefined);
+  }
+  assert.ok(STATUS_PROTECTED_FIELDS.includes('selection'));
+  assert.ok(STATUS_PROTECTED_FIELDS.includes('lastReceipt'));
+});

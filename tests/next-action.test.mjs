@@ -115,3 +115,11 @@ test('next action: attaching it never touches what the tool already decided', ()
   assert.equal(attached.nextAction.tool, 'task');
   assert.equal(status.nextAction, undefined, 'the original status is not mutated');
 });
+test('AL-02: an actorless adaptive boundary waits for internal selection, not startup/reset/completion', () => {
+  const action = nextAction({ lane: 'adaptive-low-internal', state: 'await-selection', selection: { handle: 'internal' } });
+  assert.equal(action.tool, 'mdd_status');
+  assert.equal(action.args, undefined);
+  assert.match(action.why, /select|selection/);
+  const pending = nextAction({ lane: 'adaptive-low-internal', state: 'await-result', liveness: { verdict: 'stopped' } });
+  assert.equal(pending.tool, 'mdd_status'); assert.equal(pending.args, undefined);
+});

@@ -51,6 +51,9 @@ export function nextAction(status: unknown): NextAction | undefined {
   if (!value) return undefined;
   const state = typeof value.state === 'string' ? value.state : '';
 
+  if (value.lane === 'adaptive-low-internal' && state === 'await-selection') return { tool: 'mdd_status',
+    why: 'An actorless internal selection boundary is waiting. Select only the next necessary authorized actor through the internal caller; no public startup, reset, Verify or completion is implied.' };
+
   const question = object(value.question);
   if (question) {
     return { tool: 'question', args: question,
@@ -96,6 +99,9 @@ export function nextAction(status: unknown): NextAction | undefined {
     return { tool: 'task', args: task,
       why: 'This phase is ready to delegate. Call the native task tool once, foreground, with exactly this object and no extra arguments. The prompt may be a single-use MDD dispatch handle; pass it through unchanged.' };
   }
+
+  if (value.lane === 'adaptive-low-internal') return { tool: 'mdd_status',
+    why: 'An internal adaptive actor is authorized or in flight. Wait for its exact stopped-child receipt; never enter fixed-phase reset, redispatch, start or complete automatically.' };
 
   const pending = object(value.pendingStart);
   if (pending && typeof pending.requirements === 'string') {

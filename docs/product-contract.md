@@ -82,8 +82,32 @@ The pure `parseFutureAssessment` reader in `dist/risk.js` accepts only
 `{ assessmentVersion: 1, complexity, impact }`, with each level independently `low`, `medium`
 or `high`. High impact with low complexity is valid in this separate future assessment; it is
 not a current Risk verdict and selects no route. Current `parseRiskVerdict` still requires
-equal low/high `route` and `complexity`. Adaptive low and structured medium execution are not
-active. Summary level `medium` remains a presentation choice, not a runtime route.
+equal low/high `route` and `complexity`. Public adaptive low and structured medium execution are
+not active. Summary level `medium` remains a presentation choice, not a runtime route.
+
+### Internal adaptive admission (AL-02 only)
+
+An unregistered, process-local lane now supports `await-selection -> authorized-actor ->
+await-result -> await-selection`. The parent selects one necessary Explore, Risk, Plan, Apply
+or Verify actor with a purpose and assignment identity; no fixed Workflow or omitted Plan
+receipt is fabricated. Selection boundaries carry no phase, workflow, phase report format
+or fixed-route visual. Status retains bounded selection metadata and the last actual receipt,
+not the full contract body. Public startup and the inactive `routingVersion: 3` guard are unchanged.
+
+| Boundary | Internal guarantee |
+|---|---|
+| Admission | Intake proves genuine native objective text/message; runner independently rechecks it, exact coordinator/workspace, idle ownership and current local source fingerprints. Caller-supplied approval or provenance IDs are not proof. The initial intake supports only explicitly automatic profiles; interactive or unspecified modes are refused rather than bypassed. |
+| Compact contract | Version 1, stable globally unique acceptance/decision/assignment/evidence IDs, exclusions, complete exact scopes, dependency-ordered assignments and source or real command obligations are validated and copied before native awaits. Contract-authored links do not claim Plan provenance. |
+| Selection | Unresolved product ambiguity pauses all actors. Technical uncertainty permits a brief scoped Explore only. Apply requires low impact independently of complexity, understood bounded dependencies, current fingerprints, completed prerequisites and real scoped-editor capability. |
+| Native execution | Exact issued handles are consumed once, with one actor/writer and existing native result/liveness inspection. Apply edits only through the existing single-child WorkerFence and `mdd_worker_edit`; generic editors, shell and out-of-scope writes remain denied. Unsafe bootstrap/config footprints and unsupported hosts have no serial fallback. |
+| Settlement | Every confirmed stopped actual actor returns to selection. Failed, malformed or absent receipts earn no progress or automatic retry; another writer requires an explicit repair reference. Reports cannot broaden acceptance/scope or decide product questions. Internal Risk uses the independent future assessment, never a historical Risk verdict. |
+| Volatility | Before execution the existing pending-child marker is written with `resumable:false`. No adaptive checkpoint, dossier, stored artifact or completion receipt is emitted. Process loss retains stopped-child protection and data-only recovery, never contract replay. |
+
+Scoped actors cannot execute commands. Real planned checks retain their requiredness and
+applicability as unexecuted obligations; source-only work uses a separate small source-obligation
+variant, not fake commands. AL-02 does not verify completion, close, escalate, expose public
+selection, resume full contracts or repair already completed assignments. Those later work units
+must supply permitted evidence execution and recovery without weakening the existing fences.
 
 ## 3. Kernel API and validation
 

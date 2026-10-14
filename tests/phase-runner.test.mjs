@@ -47,6 +47,31 @@ async function fixture(t, fault) {
   return { ...memory, inspect, runner };
 }
 
+test('AL-02 correction P1: historical fixed cold recovery still accepts unknown termination on user attestation', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'mdd-fixed-attestation-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const here = { ...runtime, directory: root, worktree: root };
+  const checkpoint = new CheckpointStore(root), progress = new ProgressGuard(root), ownership = new RunOwnershipStore(root);
+  const inspect = { parent: async () => {}, result: async (_r, _c, _p, output) => output,
+    liveness: async () => ({ verdict: 'unknown', detail: 'No usable native termination trace.' }) };
+  const options = { checkpoint, progress, ownership };
+  const runner = new PhaseRunner(inspect, options);
+  const ready = await runner.start({ preflight: { answers, routingVersion: 2 }, requirements: 'Preserve historical fixed recovery.' }, here,
+    { requirementsConfirmed: true, userMessageID: 'fixed-native-user' });
+  const dispatched = { sessionID: here.sessionID, callID: 'fixed-call' };
+  await runner.before(dispatched, ready.task);
+  const marker = progress.read(here.sessionID), saved = checkpoint.read(here.sessionID).checkpoint;
+  const cold = new PhaseRunner(inspect, options);
+  await cold.withReset(here.sessionID, async resetID => {
+    assert.equal((await cold.confirmStopped(here.sessionID, here, true, resetID)).verdict, 'unknown');
+  });
+  assert.equal(ownership.read(marker.runID).state, 'idle');
+  assert.deepEqual(progress.read(here.sessionID), { ...marker, state: 'settled' });
+  assert.deepEqual(checkpoint.read(here.sessionID).checkpoint, saved);
+  assert.deepEqual(await cold.restore(here), { restored: true });
+  assert.equal(cold.status(here.sessionID).state, 'blocked');
+});
+
 test('AL-01: fixed routing pins survive runner checkpoint writes, restart and pending release', async t => {
   const root = await mkdtemp(join(tmpdir(), 'mdd-routing-pin-'));
   t.after(() => rm(root, { recursive: true, force: true }));
