@@ -39,7 +39,8 @@ not a complete task artifact store.
   report final authored size honestly rather than compressing or omitting proof.
 - Forecast: approximately 2,050 authored additions plus deletions, +/-30%.
 - Unit forecasts: PF-1 410; PF-2 970; PF-3 670 authored changed lines.
-- Running authored count: 1,703 from PF-1 and PF-2, including feature tracking.
+- Running authored count: 2,368 across PF-1/PF-2/PF-3 work-unit commits, including
+  task tracking at those boundaries; final tracking-only closeout is additional.
   Generated `dist/` is ignored and excluded.
 - Work-unit boundaries: PF-1, PF-2, PF-3 coherent behavior boundaries; one eventual
   review range. No PRs are authorized or created; no further chain prompt is due.
@@ -127,7 +128,7 @@ not a complete task artifact store.
   - Commit: `b23f9b24d36ca5a2afe09fd3e06245ef122a9036`
     (`feat(storage): preserve complete local task evidence`).
 
-- [ ] **PF-3 — Automatically resolve new-run storage and remove its question.**
+- [x] **PF-3 — Automatically resolve new-run storage and remove its question.**
   - Route: delegated direct. Trigger: multiple native intake/UI/schema/doc changes.
   - Configured and validated Engram selects Engram; absent/disabled configuration
     selects local. Configured failures stay blocked with no silent fallback.
@@ -159,7 +160,9 @@ not a complete task artifact store.
     parent structural/command spot check satisfy off-mode verification; no native
     lifecycle started. Historical pending storage envelopes remain frozen and
     explicitly recovery-blocked, not reinterpreted or replayed.
-  - Writer authored size: 629 lines. Commit including tracking: pending.
+  - Writer authored size: 629 lines; work-unit commit includes 665 authored lines.
+  - Commit: `adfe216f331ae3bbae95b06c4c4c4cb264b09f88`
+    (`feat(preflight): resolve task storage automatically`).
 
 ## Verification and closure
 
@@ -188,4 +191,10 @@ not a complete task artifact store.
 - PF-2 committed as `b23f9b24d36ca5a2afe09fd3e06245ef122a9036`.
 - PF-3 implemented and verified: automatic storage, no new native storage question,
   compatible legacy readers, explicit block on historical unresolved envelopes.
-- Next step: commit PF-3, record completion and perform final clean-state readback.
+- PF-3 committed as `adfe216f331ae3bbae95b06c4c4c4cb264b09f88`.
+- Implementation complete. Closeout is documentation-only; preserve the final
+  functional evidence above. No push, PR, migration or active installation done.
+- Pending external checks: live-host/model proof and opt-in managed Engram smoke
+  were not run; two Windows symlink tests remain skipped due privilege limitations.
+- Engram full task mirror remains pending; local document is complete and
+  session summaries were saved. Publishing/installing requires user authorization.
