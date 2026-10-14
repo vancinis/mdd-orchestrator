@@ -13,6 +13,314 @@ import { WorkerFence } from '../dist/worker-fence.js';
 import { defaultSettings } from '../dist/settings.js';
 import { createInspector } from '../dist/opencode-plugin.js';
 
+async function applied(t, checks = []) {
+  const f = fixture(t); f.contract.assignments[0].obligations.checks = checks;
+  await f.admit(); await f.select();
+  const args = await f.runner.before(f.call, f.runner.status(f.runtime.sessionID).task);
+  writeFileSync(join(f.root, 'own.txt'), 'after');
+  await f.runner.after(f.call, args, f.report());
+  f.handle = () => f.runner.status(f.runtime.sessionID).selection.handle;
+  f.prepare = () => f.runner.prepareAdaptiveEvidenceInternal({ handle: f.handle() }, f.runtime);
+  f.submit = evidence => f.runner.submitAdaptiveEvidenceInternal({ handle: f.handle(), evidence }, f.runtime);
+  f.close = () => f.runner.closeAdaptiveInternal({ handle: f.handle(), outcome: 'verified' }, f.runtime);
+  f.evidence = snapshot => ({ snapshotID: snapshot.id, readback: { acceptance: f.contract.acceptance,
+    scope: f.contract.scope, exclusions: f.contract.exclusions, decisions: f.contract.decisions },
+    inventory: [{ path: 'own.txt', disposition: 'assignment', reason: 'Replacement inspected in the final diff.' }],
+    exclusions: [{ exclusion: f.contract.exclusions[0], status: 'verified', assessment: 'No other files belong to this change.' }],
+    sources: [{ id: 'E1', paths: ['own.txt'], status: 'verified', assessment: 'The final file contains the replacement text.' }],
+    assignments: [{ assignmentID: 'A1', status: 'verified', sources: ['E1'], checks: [], assessment: 'Assigned replacement is present.' }],
+    scenarios: [{ requirementID: 'R1', scenarioID: 'S1', assignmentID: 'A1', status: 'verified', sources: ['E1'], checks: [], assessment: 'Updated text satisfies the held scenario.' }],
+    decisions: [], checks: [], checkResults: [], supplementalChecks: [], limits: [] });
+  return f;
+}
+
+test('AL-03: source-only Apply closes with parent readback and no mandatory Verify or fake commands', async t => {
+  const f = await applied(t), prepared = await f.prepare();
+  assert.equal(prepared.evidence.snapshot.sources[0].content, 'after');
+  await f.submit(f.evidence(prepared.evidence.snapshot));
+  const closed = await f.close();
+  assert.equal(closed.state, 'completed'); assert.equal(closed.completion.outcome, 'verified');
+  assert.equal(closed.evidence.report.checks.length, 0);
+  assert.match(closed.evidence.assurance, /reported.*not independent/i);
+  assert.equal(closed.task, undefined); assert.equal(closed.workflow, undefined);
+  await assert.rejects(f.select(), /terminal|completed|handle/);
+});
+
+for (const disposition of ['failed', 'ran', 'blocked']) test(`AL-03: required ${disposition} evidence cannot close verified`, async t => {
+  const f = await applied(t, [{ id: 'C1', command: 'npm test', requirement: 'required' }]);
+  const prepared = await f.prepare(), evidence = f.evidence(prepared.evidence.snapshot);
+  evidence.checks = disposition === 'blocked' ? [] : [{ id: 'X1', command: 'npm test', exit: disposition === 'ran' ? null : 1 }];
+  evidence.checkResults = [{ checkID: 'C1', disposition, executions: evidence.checks.map(check => check.id), reason: 'The actual required check did not succeed.' }];
+  const submitted = await f.submit(evidence);
+  assert.equal(submitted.evidence.matched, false);
+  await assert.rejects(f.close(), /required|verified|evidence/);
+  assert.equal(f.runner.status(f.runtime.sessionID).state, 'await-selection');
+});
+
+test('AL-03: missing required check disposition is rejected, not waived', async t => {
+  const f = await applied(t, [{ id: 'C1', command: 'npm test', requirement: 'required' }]);
+  const prepared = await f.prepare();
+  await assert.rejects(f.submit(f.evidence(prepared.evidence.snapshot)), /omits.*C1/);
+  await assert.rejects(f.close(), /evidence/);
+});
+
+for (const boundary of ['prepare', 'submit', 'close']) test(`AL-03: source drift at ${boundary} refuses evidence authority`, async t => {
+  const f = await applied(t);
+  const prepared = boundary === 'prepare' ? undefined : await f.prepare();
+  if (boundary === 'close') await f.submit(f.evidence(prepared.evidence.snapshot));
+  writeFileSync(join(f.root, 'own.txt'), 'drift');
+  await assert.rejects(boundary === 'prepare' ? f.prepare() : boundary === 'submit' ? f.submit(f.evidence(prepared.evidence.snapshot)) : f.close(), /stale|drift/);
+  assert.equal(f.runner.status(f.runtime.sessionID).completion, undefined);
+});
+
+test('AL-03: optional failed check stays visible and retry accounting retains actual history', async t => {
+  const f = await applied(t, [{ id: 'C1', command: 'npm test', requirement: 'optional' }]);
+  const prepared = await f.prepare(), evidence = f.evidence(prepared.evidence.snapshot);
+  evidence.checks = [{ id: 'X1', command: 'npm test', exit: 1 }];
+  evidence.checkResults = [{ checkID: 'C1', disposition: 'failed', executions: ['X1'], reason: 'Optional check failed in the parent tools.' }];
+  await f.submit(evidence); const closed = await f.close();
+  assert.equal(closed.evidence.report.checkResults[0].disposition, 'failed');
+  const g = await applied(t, [{ id: 'C1', command: 'npm test', requirement: 'required' }]);
+  const p = await g.prepare(), e = g.evidence(p.evidence.snapshot);
+  e.checks = [{ id: 'X1', command: 'npm test', exit: 1 }, { id: 'X2', command: 'npm test', exit: 0 }];
+  e.checkResults = [{ checkID: 'C1', disposition: 'passed', executions: ['X1', 'X2'], reason: 'The failed attempt was retried after diagnosing the environment.' }];
+  await g.submit(e); assert.equal((await g.close()).completion.outcome, 'verified');
+});
+
+for (const mutate of [
+  e => { e.readback.scope.writes.push('other.txt'); },
+  e => { e.sources[0].paths = ['other.txt']; },
+  e => { e.scenarios[0].assignmentID = 'invented'; },
+  e => { e.assignments[0].sources = ['invented']; },
+  e => { e.inventory[0].path = 'other.txt'; },
+  e => { e.exclusions = []; },
+]) test(`AL-03: invalid parent readback cannot earn coverage ${mutate.toString()}`, async t => {
+  const f = await applied(t), p = await f.prepare(), e = f.evidence(p.evidence.snapshot); mutate(e);
+  await assert.rejects(f.submit(e)); assert.equal(f.runner.status(f.runtime.sessionID).evidence.matched, false);
+});
+
+test('AL-03: evidence boundary rejects stale handles, wrong runtime and ownership lost during inspection', async t => {
+  const f = await applied(t), handle = f.handle(); await f.prepare();
+  await assert.rejects(f.runner.prepareAdaptiveEvidenceInternal({ handle }, f.runtime), /handle/);
+  await assert.rejects(f.runner.prepareAdaptiveEvidenceInternal({ handle: f.handle() }, { ...f.runtime, agent: 'general' }), /coordinator|workspace/);
+  const owner = f.runner.owner(f.runtime.sessionID);
+  f.inspect.parent = async () => { f.ownership.reserve(owner.runID, f.runtime.sessionID, 'raced-parent', owner.epoch); };
+  await assert.rejects(f.prepare(), /ownership/);
+});
+
+test('AL-03: explicit completed repair references latest Apply, refreshes local fingerprints and does not auto-repeat', async t => {
+  const f = await applied(t), p = await f.prepare(), e = f.evidence(p.evidence.snapshot);
+  e.sources[0].status = 'not-verified'; e.assignments[0].status = 'not-verified'; e.scenarios[0].status = 'not-verified'; await f.submit(e);
+  await assert.rejects(f.select(), /repair|completed/);
+  await assert.rejects(f.select('mdd-apply', { repairOf: 'invented' }), /repair|receipt/);
+  await f.select('mdd-apply', { repairOf: f.runner.status(f.runtime.sessionID).lastReceipt.id });
+  assert.deepEqual(f.runner.status(f.runtime.sessionID).selection.completed, []);
+  assert.equal(f.runner.status(f.runtime.sessionID).evidence.matched, false);
+  const call = { ...f.call, callID: 'explicit-repair' };
+  const args = await f.runner.before(call, f.runner.status(f.runtime.sessionID).task);
+  await f.runner.after(call, args, f.report());
+  const fresh = await f.prepare(); await f.submit(f.evidence(fresh.evidence.snapshot)); await f.close();
+});
+
+for (const mutation of [
+  e => { e.checkResults[0] = { checkID: 'C1', disposition: 'not-applicable', executions: [], reason: 'Skip an unconditional check.' }; e.checks = []; },
+  e => { e.checks[0].command = 'another command'; },
+  e => { e.checks.unshift({ id: 'X0', command: 'npm test', exit: 1 }); },
+  e => { e.checks.unshift({ id: 'X0', command: 'npm test', exit: 1 }); e.supplementalChecks = [{ id: 'extra', requirement: 'optional', disposition: 'failed', executions: ['X0'], reason: 'Hide a held retry as optional.' }]; },
+  e => { e.checks[0].exit = null; },
+]) test(`AL-03: required command accounting rejects waiver, mismatch, omitted retry or interrupted pass ${mutation.toString()}`, async t => {
+  const f = await applied(t, [{ id: 'C1', command: 'npm test', requirement: 'required' }]), p = await f.prepare(), e = f.evidence(p.evidence.snapshot);
+  e.checks = [{ id: 'X1', command: 'npm test', exit: 0 }];
+  e.checkResults = [{ checkID: 'C1', disposition: 'passed', executions: ['X1'] }]; mutation(e);
+  await assert.rejects(f.submit(e)); await assert.rejects(f.close(), /evidence|verified/);
+});
+
+for (const boundary of ['prepare', 'submit', 'close']) test(`AL-03: ${boundary} revalidates source after native parent await`, async t => {
+  const f = await applied(t), p = boundary === 'prepare' ? undefined : await f.prepare();
+  if (boundary === 'close') await f.submit(f.evidence(p.evidence.snapshot));
+  f.inspect.parent = async () => writeFileSync(join(f.root, 'own.txt'), 'raced source');
+  await assert.rejects(boundary === 'prepare' ? f.prepare() : boundary === 'submit' ? f.submit(f.evidence(p.evidence.snapshot)) : f.close(), /stale/);
+  assert.equal(f.runner.status(f.runtime.sessionID).completion, undefined);
+});
+
+test('AL-03: completed repair invalidates dependent proof and preserves unrelated completed source proof', async t => {
+  const f = await selectedDependency(t);
+  const firstApply = f.runner.status(f.runtime.sessionID).lastReceipt;
+  const complete = async (id, callID, content) => {
+    const call = { ...f.call, callID }, args = await f.runner.before(call, f.runner.status(f.runtime.sessionID).task);
+    if (content) writeFileSync(join(f.root, id === 'A2' ? 'other.txt' : 'later.txt'), content);
+    await f.runner.after(call, args, f.report({ completed: [id], changes: [id === 'A2' ? 'other.txt' : 'later.txt'] }));
+  };
+  await complete('A2', 'finish-dependent');
+  await f.select('mdd-apply', { assignmentID: 'A3' }); await complete('A3', 'finish-unrelated');
+  const receipt = f.runner.status(f.runtime.sessionID).lastReceipt;
+  const handle = () => f.runner.status(f.runtime.sessionID).selection.handle;
+  const prepared = await f.runner.prepareAdaptiveEvidenceInternal({ handle: handle() }, f.runtime);
+  const proof = assignment => ({ status: 'verified', sources: assignment.obligations.source.map(item => item.id), checks: [], assessment: 'The final assigned source and held behavior were read back.' });
+  await f.runner.submitAdaptiveEvidenceInternal({ handle: handle(), evidence: {
+    snapshotID: prepared.evidence.snapshot.id, readback: { acceptance: f.contract.acceptance, scope: f.contract.scope, exclusions: f.contract.exclusions, decisions: [] },
+    inventory: [{ path: 'own.txt', disposition: 'assignment', reason: 'The actual final replacement diff was read back.' }],
+    exclusions: [{ exclusion: f.contract.exclusions[0], status: 'verified', assessment: 'The parent found no excluded change.' }],
+    sources: f.contract.assignments.flatMap(item => item.obligations.source.map(source => ({ id: source.id, paths: source.paths, status: 'verified', assessment: 'Final source was read back against its held obligation.' }))),
+    assignments: f.contract.assignments.map(item => ({ assignmentID: item.id, ...proof(item) })),
+    scenarios: f.contract.assignments.map(item => ({ requirementID: 'R1', scenarioID: 'S1', assignmentID: item.id, ...proof(item) })),
+    decisions: [], checks: [], checkResults: [], supplementalChecks: [], limits: [],
+  } }, f.runtime);
+  await f.select('mdd-verify', { assignmentID: 'A1' });
+  const review = { ...f.call, callID: 'read-only-review' };
+  await f.runner.after(review, await f.runner.before(review, f.runner.status(f.runtime.sessionID).task), JSON.stringify({ outcome: 'passed', evidenceSummary: 'Read-only findings.', artifact: 'Source remains inspectable.' }));
+  assert.equal(receipt.assignmentID, 'A3');
+  writeFileSync(join(f.root, 'own.txt'), 'stale implementation');
+  await f.select('mdd-apply', { assignmentID: 'A1', repairOf: firstApply.id });
+  assert.deepEqual(f.runner.status(f.runtime.sessionID).selection.completed, ['A3']);
+  assert.deepEqual(f.runner.status(f.runtime.sessionID).evidence.invalidatedAssignments, ['A1', 'A2']);
+  assert.deepEqual(f.runner.status(f.runtime.sessionID).evidence.retainedAssignments, ['A3']);
+  const repair = { ...f.call, callID: 'repair-prerequisite' };
+  await f.runner.after(repair, await f.runner.before(repair, f.runner.status(f.runtime.sessionID).task), f.report());
+  const fresh = await f.runner.prepareAdaptiveEvidenceInternal({ handle: handle() }, f.runtime);
+  assert.deepEqual(fresh.evidence.retainedSourceProof.map(item => item.assignmentID), ['A3']);
+  assert.equal(fresh.evidence.priorEvidence.report.assignments.find(item => item.assignmentID === 'A3').status, 'verified');
+  assert.deepEqual(fresh.evidence.priorEvidence.invalidatedAssignments, ['A1', 'A2']);
+});
+
+test('AL-03: manual unverified close retains honest limits and never marks verified completion', async t => {
+  const f = await applied(t);
+  const closed = await f.runner.closeAdaptiveInternal({ handle: f.handle(), outcome: 'unverified', limits: ['Required command evidence was not collected.'] }, f.runtime);
+  assert.equal(closed.state, 'closed-unverified'); assert.equal(closed.completion.outcome, 'unverified');
+  assert.equal(closed.evidence.matched, false); assert.equal(closed.completion.limits.length, 1);
+});
+
+test('AL-03: evidence never bypasses a pending child or accepts caller attestation fields', async t => {
+  const f = fixture(t, { stopped: async () => false }); await f.admit();
+  const old = f.runner.status(f.runtime.sessionID).selection.handle; await f.select();
+  const args = await f.runner.before(f.call, f.runner.status(f.runtime.sessionID).task);
+  await assert.rejects(f.runner.after(f.call, args, f.report()), /termination/);
+  await assert.rejects(f.runner.prepareAdaptiveEvidenceInternal({ handle: old }, f.runtime), /ownership|actor|handle/);
+  const g = await applied(t);
+  await assert.rejects(g.runner.prepareAdaptiveEvidenceInternal({ handle: g.handle(), approved: true, executor: 'attested' }, g.runtime), /unknown/);
+});
+
+test('AL-03: re-preparing unchanged source cannot erase previously reported failed attempts', async t => {
+  const f = await applied(t, [{ id: 'C1', command: 'npm test', requirement: 'required' }]), p = await f.prepare(), e = f.evidence(p.evidence.snapshot);
+  e.checks = [{ id: 'X1', command: 'npm test', exit: 1 }];
+  e.checkResults = [{ checkID: 'C1', disposition: 'failed', executions: ['X1'], reason: 'Initial required check failed.' }];
+  await f.submit(e); const next = await f.prepare(), retry = f.evidence(next.evidence.snapshot);
+  retry.checks = [{ id: 'X2', command: 'npm test', exit: 0 }];
+  retry.checkResults = [{ checkID: 'C1', disposition: 'passed', executions: ['X2'] }];
+  await assert.rejects(f.submit(retry), /history|attempt|retry/);
+  retry.checks.unshift(e.checks[0]); retry.checkResults[0].executions.unshift('X1'); retry.checkResults[0].reason = 'Retried with the actual initial failure retained.';
+  await f.submit(retry); await f.close();
+});
+
+test('AL-03: malformed resubmission cannot leave an earlier verified match closable', async t => {
+  const f = await applied(t), p = await f.prepare(), e = f.evidence(p.evidence.snapshot); await f.submit(e);
+  e.scenarios[0].scenarioID = 'invented'; await assert.rejects(f.submit(e));
+  await assert.rejects(f.close(), /evidence|verified/);
+});
+
+test('AL-03: command-only proof uses actual successful execution IDs without inventing source obligations', async t => {
+  const f = fixture(t); f.contract.assignments[0].obligations = { source: [], checks: [{ id: 'C1', command: 'npm test', requirement: 'required' }] };
+  await f.admit(); await f.select(); const args = await f.runner.before(f.call, f.runner.status(f.runtime.sessionID).task);
+  await f.runner.after(f.call, args, f.report());
+  const handle = () => f.runner.status(f.runtime.sessionID).selection.handle;
+  const p = await f.runner.prepareAdaptiveEvidenceInternal({ handle: handle() }, f.runtime);
+  const e = { snapshotID: p.evidence.snapshot.id, readback: { acceptance: f.contract.acceptance, scope: f.contract.scope, exclusions: f.contract.exclusions, decisions: [] },
+    inventory: [{ path: 'own.txt', disposition: 'assignment', reason: 'Parent inspected the actual final diff.' }],
+    exclusions: [{ exclusion: f.contract.exclusions[0], status: 'verified', assessment: 'Parent readback found no exclusion breach.' }], sources: [],
+    assignments: [{ assignmentID: 'A1', status: 'verified', sources: [], checks: ['X1'], assessment: 'The actual command exercised the assigned replacement.' }],
+    scenarios: [{ requirementID: 'R1', scenarioID: 'S1', assignmentID: 'A1', status: 'verified', sources: [], checks: ['X1'], assessment: 'The command covered the held replacement scenario.' }], decisions: [],
+    checks: [{ id: 'X1', command: 'npm test', exit: 0 }], checkResults: [{ checkID: 'C1', disposition: 'passed', executions: ['X1'] }], supplementalChecks: [], limits: [] };
+  await f.runner.submitAdaptiveEvidenceInternal({ handle: handle(), evidence: e }, f.runtime);
+  assert.equal((await f.runner.closeAdaptiveInternal({ handle: handle(), outcome: 'verified' }, f.runtime)).completion.outcome, 'verified');
+});
+
+test('AL-03: actorless preparation and actor selection serialize on the same consumed handle', async t => {
+  const f = await applied(t), handle = f.handle();
+  const results = await Promise.allSettled([f.prepare(), f.select('mdd-verify', { handle })]);
+  assert.equal(results.filter(item => item.status === 'fulfilled').length, 1);
+  assert.equal(f.runner.status(f.runtime.sessionID).state, 'await-selection');
+});
+
+test('AL-03: optional read-only Verify may follow evidence without becoming command execution authority', async t => {
+  const f = await applied(t), p = await f.prepare(); await f.submit(f.evidence(p.evidence.snapshot));
+  await f.select('mdd-verify'); const call = { ...f.call, callID: 'optional-verify' };
+  const args = await f.runner.before(call, f.runner.status(f.runtime.sessionID).task);
+  assert.equal(f.runner.workerAssignment(call).phase, 'mdd-explore'); assert.equal(f.runner.workerAssignment(call).scope, undefined);
+  await f.runner.after(call, args, JSON.stringify({ outcome: 'passed', evidenceSummary: 'Source-only optional review.', artifact: 'Final source readback is consistent.' }));
+  assert.equal((await f.close()).completion.outcome, 'verified');
+});
+
+test('AL-03: snapshot freshness includes declared read-only context beyond the completed writer footprint', async t => {
+  const f = fixture(t); f.contract.scope = structuredClone(f.contract.scope);
+  f.contract.scope.reads.push('other.txt'); f.contract.context.fingerprints.push({ path: 'other.txt', digest: digest('outside') });
+  await f.admit(); await f.select(); await f.runner.after(f.call, await f.runner.before(f.call, f.runner.status(f.runtime.sessionID).task), f.report());
+  const p = await f.runner.prepareAdaptiveEvidenceInternal({ handle: f.runner.status(f.runtime.sessionID).selection.handle }, f.runtime);
+  assert.deepEqual(p.evidence.snapshot.sources.map(item => item.path), ['own.txt', 'other.txt']);
+  writeFileSync(join(f.root, 'other.txt'), 'context drift');
+  await assert.rejects(f.runner.submitAdaptiveEvidenceInternal({ handle: f.runner.status(f.runtime.sessionID).selection.handle, evidence: {} }, f.runtime), /snapshot.*stale/);
+});
+
+test('AL-03: explicit completed repairs have a finite budget and never repeat automatically', async t => {
+  const f = await applied(t);
+  for (let i = 0; i < 4; i++) {
+    const p = await f.prepare(), e = f.evidence(p.evidence.snapshot);
+    for (const row of [...e.sources, ...e.assignments, ...e.scenarios]) row.status = 'not-verified';
+    await f.submit(e); await f.select('mdd-apply', { repairOf: f.runner.status(f.runtime.sessionID).lastReceipt.id });
+    const call = { ...f.call, callID: `repair-${i}` };
+    await f.runner.after(call, await f.runner.before(call, f.runner.status(f.runtime.sessionID).task), f.report());
+  }
+  const p = await f.prepare(), e = f.evidence(p.evidence.snapshot);
+  for (const row of [...e.sources, ...e.assignments, ...e.scenarios]) row.status = 'not-verified';
+  await f.submit(e);
+  await assert.rejects(f.select('mdd-apply', { repairOf: f.runner.status(f.runtime.sessionID).lastReceipt.id }), /budget.*exhausted/);
+  assert.deepEqual(f.runner.status(f.runtime.sessionID).selection.completed, ['A1']);
+});
+
+test('AL-03: pending native intake and idle ownership epoch races refuse parent evidence preparation', async t => {
+  const f = await applied(t);
+  f.ownership.claimIntake(f.runtime.sessionID, 'pending-intake', 'another-user');
+  await assert.rejects(f.prepare(), /ownership|actor/);
+  const g = await applied(t), owner = g.runner.owner(g.runtime.sessionID);
+  g.inspect.parent = async () => {
+    const reserved = g.ownership.reserve(owner.runID, g.runtime.sessionID, 'temporary-operation', owner.epoch);
+    g.ownership.release(owner.runID, g.runtime.sessionID, 'temporary-operation', reserved.epoch);
+  };
+  await assert.rejects(g.prepare(), /ownership changed/);
+});
+
+test('AL-03: compact status does not repeat final source bodies, while internal preparation returns readback', async t => {
+  const f = await applied(t), text = 'Final source line.\n'.repeat(10000);
+  // Explicitly re-settle a genuine writer after stale proof rather than broaden source authority.
+  writeFileSync(join(f.root, 'own.txt'), text);
+  await f.select('mdd-apply', { repairOf: f.runner.status(f.runtime.sessionID).lastReceipt.id });
+  const call = { ...f.call, callID: 'large-source-repair' };
+  await f.runner.after(call, await f.runner.before(call, f.runner.status(f.runtime.sessionID).task), f.report());
+  const p = await f.prepare(); assert.equal(p.evidence.snapshot.sources[0].content, text);
+  const s = f.runner.status(f.runtime.sessionID);
+  assert.equal(s.evidence.snapshot.sources, undefined); assert.ok(Buffer.byteLength(JSON.stringify(s)) < 46000);
+});
+
+test('AL-03: parent semantic claims without an actual completed Apply cannot earn verified closure', async t => {
+  const template = await applied(t), f = fixture(t); await f.admit();
+  const handle = () => f.runner.status(f.runtime.sessionID).selection.handle;
+  const p = await f.runner.prepareAdaptiveEvidenceInternal({ handle: handle() }, f.runtime);
+  await f.runner.submitAdaptiveEvidenceInternal({ handle: handle(), evidence: template.evidence(p.evidence.snapshot) }, f.runtime);
+  await assert.rejects(f.runner.closeAdaptiveInternal({ handle: handle(), outcome: 'verified' }, f.runtime), /evidence|acceptance/);
+  assert.deepEqual(f.runner.status(f.runtime.sessionID).selection.completed, []);
+});
+
+test('AL-03: malformed disposition cannot erase a newly reported failed command attempt', async t => {
+  const f = await applied(t, [{ id: 'C1', command: 'npm test', requirement: 'required' }]), p = await f.prepare(), e = f.evidence(p.evidence.snapshot);
+  e.checks = [{ id: 'X1', command: 'npm test', exit: 0 }]; e.checkResults = [{ checkID: 'C1', disposition: 'passed', executions: ['X1'] }];
+  await f.submit(e);
+  const invalid = structuredClone(e); invalid.checks.push({ id: 'X2', command: 'npm test', exit: 1 });
+  invalid.checkResults[0].executions.push('X2'); invalid.checkResults[0].reason = 'A later retry failed but the disposition was incorrectly passed.';
+  await assert.rejects(f.submit(invalid), /final exit/);
+  await assert.rejects(f.submit(e), /history|attempt/);
+  invalid.checkResults[0].disposition = 'failed'; await f.submit(invalid);
+  await assert.rejects(f.close(), /evidence|verified/);
+});
+
 const digest = text => createHash('sha256').update(text).digest('hex');
 function fixture(t, overrides = {}) {
   const root = mkdtempSync(join(tmpdir(), 'mdd-adaptive-'));

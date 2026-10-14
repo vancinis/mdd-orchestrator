@@ -85,7 +85,7 @@ not a current Risk verdict and selects no route. Current `parseRiskVerdict` stil
 equal low/high `route` and `complexity`. Public adaptive low and structured medium execution are
 not active. Summary level `medium` remains a presentation choice, not a runtime route.
 
-### Internal adaptive admission (AL-02 only)
+### Internal adaptive admission and evidence (AL-02/AL-03)
 
 An unregistered, process-local lane now supports `await-selection -> authorized-actor ->
 await-result -> await-selection`. The parent selects one necessary Explore, Risk, Plan, Apply
@@ -101,13 +101,33 @@ not the full contract body. Public startup and the inactive `routingVersion: 3` 
 | Selection | Unresolved product ambiguity pauses all actors. Technical uncertainty permits a brief scoped Explore only. Apply requires low impact independently of complexity, understood bounded dependencies, current fingerprints, completed prerequisites and real scoped-editor capability. |
 | Native execution | Exact issued handles are consumed once, with one actor/writer and existing native result/liveness inspection. Apply edits only through the existing single-child WorkerFence and `mdd_worker_edit`; generic editors, shell and out-of-scope writes remain denied. Unsafe bootstrap/config footprints and unsupported hosts have no serial fallback. |
 | Settlement | Every confirmed stopped actual actor returns to selection. Failed, malformed or absent receipts earn no progress or automatic retry; another writer requires an explicit repair reference. Reports cannot broaden acceptance/scope or decide product questions. Internal Risk uses the independent future assessment, never a historical Risk verdict. |
-| Volatility | Before execution the existing pending-child marker is written with `resumable:false`. No adaptive checkpoint, dossier, stored artifact or completion receipt is emitted. Process loss retains stopped-child protection and data-only recovery, never contract replay. |
+| Volatility | Before execution the existing pending-child marker is written with `resumable:false`. No adaptive checkpoint, dossier, stored artifact or durable completion receipt is emitted. Process loss retains stopped-child protection and data-only recovery, never contract replay. |
 
 Scoped actors cannot execute commands. Real planned checks retain their requiredness and
 applicability as unexecuted obligations; source-only work uses a separate small source-obligation
-variant, not fake commands. AL-02 does not verify completion, close, escalate, expose public
-selection, resume full contracts or repair already completed assignments. Those later work units
-must supply permitted evidence execution and recovery without weakening the existing fences.
+variant, not fake commands. The coordinator executes actual checks through its existing permitted
+tools; the internal evidence operations do not execute commands, expand permissions or attest
+SDK/host execution. Optional Verify is still a fenced, read-only source reviewer, not an executor.
+
+#### Final evidence and honest closure
+
+The guarded internal sequence is **prepare source snapshot → execute permitted checks → submit
+parent readback → close**. Each operation is serialized with actor selection and rechecks exact
+native coordinator/runtime/workspace, the current single-use handle, idle ownership (including its
+epoch), absence of pending intake/child admission, and native parent inspection after any await.
+
+| Evidence boundary | Guarantee and limitation |
+|---|---|
+| Preparation | Locally inspect the complete declared read/write footprint before checks. Exact-file alias checks, credential exclusions, fingerprints, UTF-8 readback, 256 KiB per-file and 1 MiB total byte budgets apply. Completed assignment inputs/outputs must still match. Preparation returns bounded source bodies; ordinary status retains only compact metadata. |
+| Parent readback | Repeat exact held acceptance criteria, scope, exclusions and decisions. Supply final diff inventory with assignment/unrelated dispositions and reasons, one finding per exclusion, every source obligation with its exact paths, and every scenario-assignment, assignment and decision assessment. Apply summaries do not supply this readback. Locally changed declared bytes cannot be omitted; whole-worktree inventory remains a reported observation, not comprehensive diff attestation. |
+| Commands | Reuse structured chronological execution and held-check accounting. Required applicable failed, interrupted or blocked checks prevent verified closure; missing dispositions are rejected. Optional failures remain visible. Unconditional checks cannot be waived, command mismatches require an explicit supported replacement, and retries retain complete attempts and reasons. Supplemental entries cannot hide a held command retry. Re-preparing unchanged source cannot erase execution history; a malformed disposition does not erase an otherwise readable reported attempt. |
+| Source-only proof | Separate obligation readback and linked source assessments can support verified semantic rows without invented command IDs. Command-backed rows cite actual reported successful final execution IDs. All held source and semantic links must be covered exactly; exit codes alone do not prove acceptance. |
+| Freshness and assurance | Submission and verified closure independently recheck the prepared local fingerprints and completed prerequisites. This is structured parent-reported consistency, **not independent execution or applicability attestation**. Any malformed resubmission removes the current match until corrected. |
+| Closure | All assignments must have actual accepted Apply completion and all required evidence/semantic links must match. No Plan or Verify receipt is mandatory. `completed` records snapshot-bound reported verification; `closed-unverified` requires explicit remaining limits and never earns verified completion. Terminal status retains coverage, failed/optional dispositions, limits and assurance; next-action grants no new work or review authority. |
+| Explicit repair | A completed writer can be selected again only for failed or stale evidence, referencing its latest actual Apply receipt. Reinspect only its existing footprint, invalidate overlap/dependency-sensitive completion and proof, and retain unrelated completed fingerprints and prior evidence. Old command proof is invalidated conservatively; checks must follow a fresh final snapshot. There are at most four completed-assignment repairs and 64 actor receipts, with no automatic retry or new scope. Overlapping prerequisites must be explicitly repaired first. |
+
+Public version 3 remains inactive. Internal contracts and closure are volatile; full durable
+resume, transfer and escalation belong to AL-04, and public activation belongs to AL-05.
 
 ## 3. Kernel API and validation
 

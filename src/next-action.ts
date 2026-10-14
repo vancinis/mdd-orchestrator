@@ -51,8 +51,11 @@ export function nextAction(status: unknown): NextAction | undefined {
   if (!value) return undefined;
   const state = typeof value.state === 'string' ? value.state : '';
 
+  if (value.lane === 'adaptive-low-internal' && ['completed', 'closed-unverified'].includes(state)) return { tool: 'mdd_status',
+    why: 'Internal closure retains reported coverage, failures and assurance limits. It grants no Plan, Verify, review authority, new work, public activation or durable resume; unverified closure is not verified completion.' };
+
   if (value.lane === 'adaptive-low-internal' && state === 'await-selection') return { tool: 'mdd_status',
-    why: 'An actorless internal selection boundary is waiting. Select only the next necessary authorized actor through the internal caller; no public startup, reset, Verify or completion is implied.' };
+    why: 'An actorless internal selection boundary is waiting. Select only the next necessary authorized actor or prepare and submit final evidence through the guarded internal caller; no public startup, reset, mandatory Plan or Verify, review authority or automatic completion is implied.' };
 
   const question = object(value.question);
   if (question) {

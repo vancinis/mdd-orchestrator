@@ -12,6 +12,13 @@ test('plural foreground tasks preserve exact objects and cannot advance a phase 
 import { nextAction, withNextAction } from '../dist/next-action.js';
 
 const task = { description: 'MDD plan phase', subagent_type: 'mdd-plan', prompt: 'mdd:dispatch:token' };
+
+for (const state of ['completed', 'closed-unverified']) test(`AL-03: internal ${state} offers status only, never public or review authority`, () => {
+  const action = nextAction({ lane: 'adaptive-low-internal', state });
+  assert.equal(action.tool, 'mdd_status'); assert.equal(action.args, undefined);
+  assert.match(action.why, /no Plan, Verify, review authority/);
+  assert.match(action.why, /unverified closure is not verified completion/);
+});
 const question = { questions: [{ header: 'Aprobación', question: '¿Continuar?', multiple: false, options: [] }] };
 
 test('SA-3: failed Verify offers explicit actions without fabricating the next phase or consent', () => {

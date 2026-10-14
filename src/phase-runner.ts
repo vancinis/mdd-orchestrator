@@ -549,9 +549,38 @@ export class PhaseRunner {
   #adaptiveRuntime(run: AdaptiveRun, runtime: Runtime): void {
     if (!isDeepStrictEqual(run.runtime, runtime)) throw new Error('Adaptive coordinator or workspace changed.');
     const owner = this.owner(runtime.sessionID);
-    if (owner?.state !== 'idle' || this.options.progress!.read(runtime.sessionID)?.state === 'pending')
+    if (this.#adaptive.get(runtime.sessionID) !== run || this.#adaptiveAdmissions.has(runtime.sessionID) || run.dispatching ||
+        run.callID || this.#inflight.has(runtime.sessionID) || this.#reservations.has(runtime.sessionID) ||
+        this.options.ownership!.intake(runtime.sessionID)?.state === 'pending' ||
+        owner?.state !== 'idle' || this.options.progress!.read(runtime.sessionID)?.state === 'pending')
       throw new Error('Internal selection requires idle ownership; a native actor is in flight.');
   }
+
+  /** Guarded parent evidence only: existing tools execute checks; this adds no executor or attestation. */
+  async #adaptiveEvidence(value: unknown, runtime: Runtime, operation: 'prepare' | 'submit' | 'close'): Promise<unknown> {
+    const input = objectWithKeys(value, 'internal adaptive evidence operation', ['handle', ...(operation === 'submit' ? ['evidence'] : operation === 'close' ? ['outcome', 'limits'] : [])]);
+    const handle = boundedText(input.handle, 'adaptive evidence handle', 200);
+    const payload = operation === 'submit' ? structuredClone(input.evidence) : operation === 'close' ? { outcome: input.outcome, limits: structuredClone(input.limits) } : undefined;
+    const run = this.#adaptive.get(runtime.sessionID), here = { ...runtime };
+    if (!run) throw new Error('No internal adaptive contract is admitted.');
+    return this.#workerOperation(here.sessionID, async () => {
+      const guard = () => { this.#adaptiveRuntime(run, here); run.low.assertBoundary(handle); };
+      guard();
+      const owner = this.owner(here.sessionID);
+      if (operation === 'prepare') run.low.assertPreparationCurrent();
+      if (operation === 'submit' || operation === 'close' && (payload as { outcome: unknown }).outcome === 'verified') run.low.assertEvidenceCurrent();
+      await this.inspect.parent(here);
+      guard();
+      if (!isDeepStrictEqual(this.owner(here.sessionID), owner)) throw new Error('Adaptive ownership changed during evidence inspection.');
+      if (operation === 'prepare') run.low.prepareEvidence(handle);
+      else if (operation === 'submit') run.low.submitEvidence(handle, payload);
+      else { const close = payload as { outcome: unknown; limits: unknown }; run.low.close(handle, close.outcome, close.limits); }
+      return { ...this.status(here.sessionID), evidence: run.low.evidence() };
+    });
+  }
+  prepareAdaptiveEvidenceInternal(value: unknown, runtime: Runtime): Promise<unknown> { return this.#adaptiveEvidence(value, runtime, 'prepare'); }
+  submitAdaptiveEvidenceInternal(value: unknown, runtime: Runtime): Promise<unknown> { return this.#adaptiveEvidence(value, runtime, 'submit'); }
+  closeAdaptiveInternal(value: unknown, runtime: Runtime): Promise<unknown> { return this.#adaptiveEvidence(value, runtime, 'close'); }
 
   /** Parent need selects one actor; selection is not an exposed MDD tool or an approval token. */
   async selectAdaptiveInternal(value: unknown, runtime: Runtime): Promise<unknown> {

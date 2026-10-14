@@ -1,10 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { lstatSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { acceptance, decisions, evidenceID, references, shortText, assertNoTraceSection } from './acceptance.js';
+import { isDeepStrictEqual } from 'node:util';
+import { acceptance, decisions, evidenceID, references, shortText, assertNoTraceSection, checkAccounting } from './acceptance.js';
 import type { Acceptance, Decision } from './acceptance.js';
 import { applyPlan, taskIDs } from './apply-batches.js';
-import { changed, plannedChecks } from './phase-evidence.js';
+import { changed, plannedChecks, executed } from './phase-evidence.js';
 import type { PlannedCheck } from './phase-evidence.js';
 import { parsePhaseReport, parseRiskReport } from './phase-report.js';
 import { parseFutureAssessment } from './risk.js';
@@ -28,6 +29,30 @@ type Receipt = { id: string; actor: AdaptiveActor; assignmentID: string; purpose
   summary: string; artifact?: string; changes?: string[]; assessment?: FutureAssessment; failure?: string };
 const ACTORS: readonly AdaptiveActor[] = ['mdd-explore', 'mdd-risk', 'mdd-plan', 'mdd-apply', 'mdd-verify'];
 const CONTRACT_BYTES = 24000;
+const ASSURANCE = 'Structured parent-reported consistency, not independent execution attestation. Local declared source bytes are bound; whole-worktree diff inventory is a reported observation, not comprehensive attestation.';
+type Snapshot = { id: string; sources: { path: string; digest: string | null; content: string | null }[] };
+type SourceAssessment = { id: string; paths: string[]; status: 'verified' | 'not-verified' | 'deviation'; assessment: string };
+type SemanticAssessment = { status: SourceAssessment['status']; sources: string[]; checks: string[]; assessment: string };
+type EvidenceReport = { snapshotID: string; readback: { acceptance: Acceptance; scope: Scope; exclusions: string[]; decisions: Decision[] };
+  inventory: { path: string; disposition: 'assignment' | 'unrelated'; reason: string }[];
+  exclusions: { exclusion: string; status: SourceAssessment['status']; assessment: string }[];
+  sources: SourceAssessment[]; assignments: (SemanticAssessment & { assignmentID: string })[];
+  scenarios: (SemanticAssessment & { requirementID: string; scenarioID: string; assignmentID: string })[];
+  decisions: (SemanticAssessment & { decisionID: string })[]; checks: ReturnType<typeof executed>;
+  checkResults: ReturnType<typeof checkAccounting>['checkResults']; supplementalChecks: ReturnType<typeof checkAccounting>['supplementalChecks']; limits: string[] };
+
+function entries(value: unknown, label: string): unknown[] {
+  if (!Array.isArray(value) || value.length > 64) throw new Error(`${label} requires at most 64 entries.`);
+  return Array.from(value);
+}
+function status(value: unknown): SourceAssessment['status'] {
+  if (value !== 'verified' && value !== 'not-verified' && value !== 'deviation') throw new Error('Evidence needs explicit verified/not-verified/deviation status.');
+  return value;
+}
+function exactCoverage(actual: string[], expected: string[], label: string): void {
+  if (new Set(actual).size !== actual.length || actual.length !== expected.length || expected.some(id => !actual.includes(id)))
+    throw new Error(`${label} must cover exactly the held links, without omissions or invented IDs.`);
+}
 
 function texts(value: unknown, label: string): string[] {
   if (!Array.isArray(value) || value.length > 16) throw new Error(`${label} requires at most 16 entries.`);
@@ -157,7 +182,16 @@ export class AdaptiveLow {
   readonly #completed = new Map<string, { path: string; digest: string | null }[]>();
   #context: Context;
   #assessment: FutureAssessment;
-  #state: 'await-selection' | 'authorized-actor' | 'await-result' = 'await-selection';
+  #state: 'await-selection' | 'authorized-actor' | 'await-result' | 'completed' | 'closed-unverified' = 'await-selection';
+  #snapshot: Snapshot | undefined;
+  #report: EvidenceReport | undefined;
+  #matched = false;
+  #completion: { outcome: 'verified' | 'unverified'; limits: string[] } | undefined;
+  #repairs = 0;
+  #invalidatedAssignments: string[] = [];
+  #retainedProof: { assignmentID: string; fingerprints: { path: string; digest: string | null }[] }[] = [];
+  #priorEvidence: { report: EvidenceReport; invalidatedAssignments: string[] } | undefined;
+  #checkHistory: ReturnType<typeof executed> = [];
   #selection: AdaptiveSelection | undefined;
   #handle = randomUUID();
   constructor(value: unknown, readonly root: string) {
@@ -187,6 +221,154 @@ export class AdaptiveLow {
     for (const id of assignment.dependsOn) for (const item of this.#completed.get(id)!)
       if (fingerprint(this.root, item.path) !== item.digest) throw new Error('Completed prerequisite source is stale.');
   }
+  assertBoundary(handle: string): void {
+    if (handle !== this.#handle) throw new Error('Evidence or selection handle is stale or consumed.');
+    if (this.#state !== 'await-selection') throw new Error('Evidence requires an actorless nonterminal boundary, not a completed or pending actor.');
+  }
+  #assertCompleted(): void {
+    for (const files of this.#completed.values()) for (const file of files)
+      if (fingerprint(this.root, file.path) !== file.digest) throw new Error(`Completed assignment source is stale for ${file.path}.`);
+  }
+  assertPreparationCurrent(): void {
+    this.#assertCompleted(); applyScopeFiles(this.root, this.#contract.scope);
+    explorationFiles([{ root: this.root, files: this.#contract.scope.reads }]);
+  }
+  assertEvidenceCurrent(): void {
+    this.#assertCompleted();
+    if (!this.#snapshot) throw new Error('Prepare a final source snapshot before checks and evidence submission.');
+    applyScopeFiles(this.root, this.#contract.scope);
+    for (const file of this.#snapshot.sources)
+      if (fingerprint(this.root, file.path) !== file.digest) throw new Error(`Final source snapshot is stale for ${file.path}.`);
+  }
+  prepareEvidence(handle: string): void {
+    this.assertBoundary(handle); this.assertPreparationCurrent();
+    let bytes = 0;
+    const sources = [...new Set([...this.#contract.scope.reads, ...this.#contract.scope.writes])].map(path => {
+      const digest = fingerprint(this.root, path);
+      const data = digest === null ? null : readFileSync(resolve(this.root, path));
+      bytes += data?.length ?? 0;
+      if (bytes > 1024 * 1024) throw new Error('Final source snapshot exceeds the 1 MiB inspection budget.');
+      if (data && createHash('sha256').update(data).digest('hex') !== digest || fingerprint(this.root, path) !== digest)
+        throw new Error('Final source snapshot changed during inspection.');
+      if (data && !Buffer.from(data.toString('utf8'), 'utf8').equals(data)) throw new Error('Final source readback requires UTF-8 source, not lossy binary decoding.');
+      return { path, digest, content: data?.toString('utf8') ?? null };
+    });
+    const drift = this.#snapshot?.sources.filter(previous => sources.find(item => item.path === previous.path)!.digest !== previous.digest).map(item => item.path) ?? [];
+    if (this.#report) this.#priorEvidence = { report: structuredClone(this.#report), invalidatedAssignments: drift.length ? this.#contract.assignments.map(item => item.id) : [] };
+    if (drift.length) this.#checkHistory = [];
+    this.#snapshot = { id: randomUUID(), sources }; this.#report = undefined; this.#matched = false;
+    this.#handle = randomUUID();
+  }
+  submitEvidence(handle: string, value: unknown): void {
+    this.assertBoundary(handle); this.assertEvidenceCurrent();
+    this.#matched = false;
+    const input = objectWithKeys(value, 'adaptive evidence', ['snapshotID', 'readback', 'inventory', 'exclusions', 'sources', 'assignments',
+      'scenarios', 'decisions', 'checks', 'checkResults', 'supplementalChecks', 'limits']);
+    if (input.snapshotID !== this.#snapshot!.id) throw new Error('Evidence belongs to another prepared snapshot.');
+    const readback = objectWithKeys(input.readback, 'parent contract readback', ['acceptance', 'scope', 'exclusions', 'decisions']);
+    const expected = { acceptance: this.#contract.acceptance, scope: this.#contract.scope, exclusions: this.#contract.exclusions, decisions: this.#contract.decisions };
+    if (!isDeepStrictEqual(readback, expected)) throw new Error('Parent readback must repeat exact held acceptance, scope, exclusions and decisions.');
+    const checks = executed(input.checks, 1);
+    if (checks.length < this.#checkHistory.length || !isDeepStrictEqual(checks.slice(0, this.#checkHistory.length), this.#checkHistory))
+      throw new Error('Evidence must preserve the chronological reported execution history, including failed attempts and retries.');
+    if (Buffer.byteLength(JSON.stringify(checks)) > 48000) throw new Error('Adaptive reported executions exceed the bounded evidence budget.');
+    // A malformed disposition cannot erase an otherwise readable reported failed attempt.
+    this.#checkHistory = structuredClone(checks);
+    const accounting = checkAccounting(input, { planned: this.#contract.assignments.map(item => ({ checks: item.obligations.checks })) }, checks);
+    for (const held of this.#contract.assignments.flatMap(item => item.obligations.checks)) {
+      const result = accounting.checkResults.find(item => item.checkID === held.id)!;
+      const replacement = result.disposition === 'replaced' ? checks.find(item => item.id === result.executions.at(-1))!.command : held.command;
+      const attempts = checks.filter(item => item.command === held.command || item.command === replacement).map(item => item.id!);
+      if (result.executions.length && !isDeepStrictEqual(result.executions, attempts))
+        throw new Error(`Held check ${held.id} must retain every reported command attempt; supplemental evidence cannot hide or downgrade a retry.`);
+    }
+    const inventory = entries(input.inventory, 'final diff inventory').map(value => {
+      const item = objectWithKeys(value, 'final diff path', ['path', 'disposition', 'reason']);
+      const path = scopePath(item.path);
+      if (item.disposition !== 'assignment' && item.disposition !== 'unrelated') throw new Error('Final diff needs assignment/unrelated disposition.');
+      if (item.disposition === 'assignment' && !this.#contract.scope.writes.includes(path) ||
+          item.disposition === 'unrelated' && this.#contract.scope.writes.includes(path)) throw new Error('Final diff scope claim contradicts held writes.');
+      return { path, disposition: item.disposition as 'assignment' | 'unrelated', reason: shortText(item.reason, 'final diff rationale') };
+    });
+    if (new Set(inventory.map(item => item.path)).size !== inventory.length) throw new Error('Final diff repeats a path.');
+    // This is parent readback, never independent discovery of the whole worktree diff.
+    const observed = new Set<string>();
+    for (const path of this.#contract.scope.writes)
+      if (fingerprint(this.root, path) !== this.#contract.context.fingerprints.find(file => file.path === path)!.digest) observed.add(path);
+    if ([...observed].some(path => !inventory.some(item => item.path === path && item.disposition === 'assignment')))
+      throw new Error('Final diff inventory omits locally changed declared assignment paths.');
+    const exclusions = entries(input.exclusions, 'exclusion findings').map(value => {
+      const item = objectWithKeys(value, 'exclusion finding', ['exclusion', 'status', 'assessment']);
+      return { exclusion: shortText(item.exclusion, 'held exclusion'), status: status(item.status), assessment: shortText(item.assessment, 'exclusion assessment') };
+    });
+    exactCoverage(exclusions.map(item => item.exclusion), this.#contract.exclusions, 'Exclusion findings');
+    const obligations = this.#contract.assignments.flatMap(item => item.obligations.source);
+    const sources = entries(input.sources, 'source readback').map(value => {
+      const item = objectWithKeys(value, 'source readback', ['id', 'paths', 'status', 'assessment']);
+      const id = evidenceID(item.id), obligation = obligations.find(item => item.id === id), targets = paths(item.paths);
+      if (!obligation || !isDeepStrictEqual(targets, obligation.paths)) throw new Error('Source readback paths contradict held obligation links.');
+      return { id, paths: targets, status: status(item.status), assessment: shortText(item.assessment, 'source readback assessment') };
+    });
+    exactCoverage(sources.map(item => item.id), obligations.map(item => item.id), 'Source readback');
+    const assess = (item: Record<string, unknown>, assignments: Assignment[]): SemanticAssessment => {
+      const result = { status: status(item.status), sources: references(item.sources, 'source evidence references', true),
+        checks: references(item.checks, 'execution references', true), assessment: shortText(item.assessment, 'semantic source assessment') };
+      const allowedSource = assignments.flatMap(item => item.obligations.source.map(item => item.id));
+      const allowedExecutions = assignments.flatMap(item => item.obligations.checks.flatMap(check => accounting.checkResults.find(result => result.checkID === check.id)!.executions));
+      if (result.sources.some(id => !allowedSource.includes(id)) || result.checks.some(id => !allowedExecutions.includes(id)))
+        throw new Error('Semantic assessment cites evidence outside its held assignment links.');
+      if (result.status === 'verified' && (!result.sources.length && !result.checks.length ||
+          result.sources.some(id => sources.find(item => item.id === id)!.status !== 'verified') || result.checks.some(id => !accounting.usable.includes(id))))
+        throw new Error('Verified assessment needs successful final command or separately verified source evidence.');
+      return result;
+    };
+    const assignments = entries(input.assignments, 'assignment coverage').map(value => {
+      const item = objectWithKeys(value, 'assignment coverage', ['assignmentID', 'status', 'sources', 'checks', 'assessment']);
+      const assignment = this.#contract.assignments.find(assignment => assignment.id === item.assignmentID);
+      if (!assignment) throw new Error('Assignment assessment invents a held link.');
+      return { assignmentID: assignment.id, ...assess(item, [assignment]) };
+    });
+    exactCoverage(assignments.map(item => item.assignmentID), this.#contract.assignments.map(item => item.id), 'Assignment coverage');
+    const scenarios = entries(input.scenarios, 'scenario coverage').map(value => {
+      const item = objectWithKeys(value, 'scenario coverage', ['requirementID', 'scenarioID', 'assignmentID', 'status', 'sources', 'checks', 'assessment']);
+      const assignment = this.#contract.assignments.find(assignment => assignment.id === item.assignmentID);
+      const requirement = this.#contract.acceptance.requirements.find(requirement => requirement.id === item.requirementID && requirement.scenarios.some(scenario => scenario.id === item.scenarioID));
+      if (!assignment || !requirement || !assignment.scenarios.includes(String(item.scenarioID))) throw new Error('Scenario assessment invents a held link.');
+      return { requirementID: requirement.id, scenarioID: String(item.scenarioID), assignmentID: assignment.id, ...assess(item, [assignment]) };
+    });
+    exactCoverage(scenarios.map(item => `${item.assignmentID}/${item.scenarioID}`), this.#contract.assignments.flatMap(item => item.scenarios.map(id => `${item.id}/${id}`)), 'Scenario coverage');
+    const choices = entries(input.decisions, 'decision coverage').map(value => {
+      const item = objectWithKeys(value, 'decision coverage', ['decisionID', 'status', 'sources', 'checks', 'assessment']);
+      const decision = this.#contract.decisions.find(decision => decision.id === item.decisionID);
+      if (!decision) throw new Error('Decision assessment invents a held link.');
+      return { decisionID: decision.id, ...assess(item, this.#contract.assignments.filter(assignment => assignment.decisions.includes(decision.id))) };
+    });
+    exactCoverage(choices.map(item => item.decisionID), this.#contract.decisions.map(item => item.id), 'Decision coverage');
+    const limits = texts(input.limits, 'evidence limits');
+    if (limits.length > 4) throw new Error('Evidence limits require at most four entries.');
+    const report: EvidenceReport = { snapshotID: this.#snapshot!.id, readback: structuredClone(expected), inventory, exclusions, sources,
+      assignments, scenarios, decisions: choices, checks, checkResults: accounting.checkResults, supplementalChecks: accounting.supplementalChecks, limits };
+    if (Buffer.byteLength(JSON.stringify(report)) > 48000) throw new Error('Adaptive evidence exceeds its 48000-byte budget.');
+    this.assertEvidenceCurrent(); this.#report = report; this.#checkHistory = structuredClone(checks);
+    this.#matched = accounting.complete && [...sources, ...assignments, ...scenarios, ...choices, ...exclusions].every(item => item.status === 'verified');
+    this.#handle = randomUUID();
+  }
+  close(handle: string, outcome: unknown, limits: unknown): void {
+    this.assertBoundary(handle);
+    if (outcome !== 'verified' && outcome !== 'unverified') throw new Error('Close must explicitly select verified or unverified.');
+    const remaining = limits === undefined ? [] : texts(limits, 'manual unverified limits');
+    if (outcome === 'verified') {
+      this.assertEvidenceCurrent();
+      if (!this.#report || !this.#matched || this.#contract.assignments.some(item => !this.#completed.has(item.id)))
+        throw new Error('Required evidence and all held acceptance links must be verified before completion.');
+      if (remaining.length) throw new Error('Manual unverified limits never earn verified completion.');
+    } else {
+      if (!remaining.length) throw new Error('Unverified close needs explicit remaining limits.');
+      this.#matched = false;
+    }
+    this.#completion = { outcome, limits: [...(this.#report?.limits ?? []), ...remaining] };
+    this.#state = outcome === 'verified' ? 'completed' : 'closed-unverified'; this.#handle = randomUUID();
+  }
   select(value: AdaptiveSelection): void {
     if (value.handle !== this.#handle) throw new Error('Selection handle is stale or was consumed.');
     if (this.#state !== 'await-selection') throw new Error('Selection requires an actorless boundary; a task is already authorized or in flight.');
@@ -194,20 +376,52 @@ export class AdaptiveLow {
     if (this.#contract.productQuestions.length) throw new Error('Unresolved product ambiguity pauses actor selection.');
     const assignment = this.#contract.assignments.find(item => item.id === value.assignmentID);
     if (!assignment) throw new Error('Unknown adaptive assignment.');
-    const current = value.context ?? this.#context;
+    let current = value.context ?? this.#context;
     if (current.technical === 'uncertain' && value.actor !== 'mdd-explore') throw new Error('Uncertain technical context permits only a brief Explore, never writes.');
     if (value.context) this.assertCurrent(this.#contract.scope, current);
     if (value.actor === 'mdd-apply') {
       if (this.#assessment.impact !== 'low') throw new Error('Apply requires low impact independent of complexity or scope size.');
       if (current.dependencies !== 'bounded') throw new Error('Apply requires understood bounded dependencies.');
-      if (this.#completed.has(assignment.id)) throw new Error('Completed Apply cannot be automatically repeated.');
-      this.#assertPrerequisites(assignment);
       const prior = this.#receipts.findLast(receipt => receipt.actor === 'mdd-apply' && receipt.assignmentID === assignment.id);
       if (prior && value.repairOf !== prior.id) throw new Error('A repeated writer requires an explicit repairOf the last actual Apply receipt.');
       if (value.repairOf && !prior) throw new Error('Repair receipt is not an actual Apply attempt.');
+      if (this.#completed.has(assignment.id)) {
+        const stale = this.#completed.get(assignment.id)!.some(item => fingerprint(this.root, item.path) !== item.digest);
+        const failed = this.#report && (this.#report.assignments.find(item => item.assignmentID === assignment.id)!.status !== 'verified' ||
+          assignment.obligations.source.some(item => this.#report!.sources.find(source => source.id === item.id)!.status !== 'verified') ||
+          assignment.obligations.checks.some(item => !['passed', 'replaced', 'not-applicable'].includes(this.#report!.checkResults.find(check => check.checkID === item.id)!.disposition)) ||
+          this.#report.scenarios.some(item => item.assignmentID === assignment.id && item.status !== 'verified') ||
+          this.#report.decisions.some(item => assignment.decisions.includes(item.decisionID) && item.status !== 'verified'));
+        if (!stale && !failed) throw new Error('Completed Apply cannot repeat without failed or stale evidence requiring explicit repair.');
+        if (this.#repairs >= 4) throw new Error('Explicit completed-assignment repair budget is exhausted.');
+        // Reinspection only refreshes the authorized footprint; it never grants new paths.
+        const refreshed = structuredClone(current);
+        for (const path of new Set([...assignment.scope.reads, ...assignment.scope.writes]))
+          refreshed.fingerprints.find(item => item.path === path)!.digest = fingerprint(this.root, path);
+        this.assertCurrent(assignment.scope, refreshed);
+        this.#assertPrerequisites(assignment);
+        const invalid = new Set([assignment.id]);
+        let count = -1;
+        while (count !== invalid.size) {
+          count = invalid.size;
+          const writes = this.#contract.assignments.filter(item => invalid.has(item.id)).flatMap(item => item.scope.writes);
+          for (const item of this.#contract.assignments) if (item.dependsOn.some(id => invalid.has(id)) ||
+            [...item.scope.reads, ...item.scope.writes].some(path => writes.includes(path))) invalid.add(item.id);
+        }
+        if (assignment.dependsOn.some(id => invalid.has(id))) throw new Error('Repair overlaps a prerequisite; explicitly repair the prerequisite first.');
+        this.#invalidatedAssignments = [...invalid];
+        this.#retainedProof = [...this.#completed].filter(([id]) => !invalid.has(id)).map(([assignmentID, fingerprints]) => ({ assignmentID, fingerprints: structuredClone(fingerprints) }));
+        if (this.#report) this.#priorEvidence = { report: structuredClone(this.#report), invalidatedAssignments: [...invalid] };
+        for (const id of invalid) this.#completed.delete(id);
+        this.#snapshot = undefined; this.#report = undefined; this.#matched = false; this.#checkHistory = []; this.#repairs++;
+        current = refreshed;
+      }
+      this.#assertPrerequisites(assignment);
       this.assertCurrent(assignment.scope, current);
     }
-    this.#context = structuredClone(current); this.#selection = structuredClone(value); this.#state = 'authorized-actor';
+    this.#context = structuredClone(current);
+    if (value.actor === 'mdd-apply') { this.#snapshot = undefined; this.#report = undefined; this.#matched = false; this.#checkHistory = []; }
+    this.#selection = structuredClone(value); this.#state = 'authorized-actor';
   }
   assertReady(): void {
     if (this.#state !== 'authorized-actor') throw new Error('Adaptive actor is not ready.');
@@ -273,11 +487,37 @@ export class AdaptiveLow {
         context: { technical: this.#context.technical, dependencies: this.#context.dependencies, ...this.#assessment },
         assignments: this.#contract.assignments.map(item => ({ id: item.id, description: item.description.slice(0, 150),
           prerequisitesComplete: item.dependsOn.every(id => this.#completed.has(id)),
-          obligations: { source: item.obligations.source.length, checks: item.obligations.checks.length, executed: 0 } })),
+          obligations: { source: item.obligations.source.length, checks: item.obligations.checks.length,
+            executed: this.#report ? item.obligations.checks.filter(check => this.#report!.checkResults.find(result => result.checkID === check.id)!.executions.length).length : 0 } })),
         ...(this.#contract.productQuestions.length ? { blocked: 'product-ambiguity' } : {}) },
       ...(this.#selection ? { actor: this.#selection.actor, assignmentID: this.#selection.assignmentID } : {}),
       ...(last ? { lastReceipt: { id: last.id, actor: last.actor, assignmentID: last.assignmentID, outcome: last.outcome,
         summary: last.summary, ...(last.failure ? { failure: last.failure } : {}) } } : {}),
-      reason: 'Select the next necessary actor internally. No automatic phase, verification, completion, reset or escalation is implied.' };
+      evidence: { matched: this.#matched, assurance: ASSURANCE, invalidatedAssignments: [...this.#invalidatedAssignments],
+        retainedAssignments: this.#retainedProof.map(item => item.assignmentID),
+        executionHistory: this.#checkHistory.map(({ id, exit }) => ({ id, exit })),
+        ...(this.#snapshot ? { snapshot: { id: this.#snapshot.id, paths: this.#snapshot.sources.map(item => item.path) } } : {}),
+        ...(this.#report ? { coverage: { sources: this.#report.sources.map(({ id, status }) => ({ id, status })),
+          assignments: this.#report.assignments.map(({ assignmentID, status }) => ({ assignmentID, status })),
+          scenarios: this.#report.scenarios.map(({ assignmentID, scenarioID, status }) => ({ assignmentID, scenarioID, status })),
+          decisions: this.#report.decisions.map(({ decisionID, status }) => ({ decisionID, status })) },
+          exclusions: this.#report.exclusions.map(({ exclusion, status }) => ({ exclusion: exclusion.slice(0, 150), status })),
+          checkResults: this.#report.checkResults.map(({ checkID, disposition, executions, reason }) => ({ checkID, disposition, executions, ...(reason ? { reason: reason.slice(0, 150) } : {}) })),
+          supplementalChecks: this.#report.supplementalChecks.map(({ id, requirement, disposition }) => ({ id, requirement, disposition })),
+          limits: [...this.#report.limits] } : {}),
+        ...(this.#priorEvidence ? { priorEvidence: { snapshotID: this.#priorEvidence.report.snapshotID,
+          invalidatedAssignments: [...this.#priorEvidence.invalidatedAssignments], commandEvidenceInvalidated: this.#priorEvidence.invalidatedAssignments.length > 0,
+          checkResults: this.#priorEvidence.report.checkResults.map(({ checkID, disposition }) => ({ checkID, disposition })) } } : {}) },
+      ...(this.#completion ? { completion: structuredClone(this.#completion) } : {}),
+      reason: this.#completion ? 'Internal closure grants no further actor, review authority, public activation or durable resume.'
+        : 'Select the next necessary actor or prepare final evidence internally. No automatic phase, verification, completion, reset or escalation is implied.' };
+  }
+  /** Explicit bounded internal readback, separate from compact status. No execution authority. */
+  evidence() {
+    return { ...this.status().evidence,
+      ...(this.#snapshot ? { snapshot: structuredClone(this.#snapshot) } : {}),
+      ...(this.#report ? { report: structuredClone(this.#report) } : {}),
+      retainedSourceProof: structuredClone(this.#retainedProof),
+      ...(this.#priorEvidence ? { priorEvidence: structuredClone(this.#priorEvidence) } : {}) };
   }
 }

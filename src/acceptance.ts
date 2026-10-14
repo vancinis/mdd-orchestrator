@@ -210,7 +210,7 @@ export function validatePlan(accepted: Acceptance, choices: Decision[], steps: D
 export type HeldPlan = { accepted: Acceptance; choices: Decision[]; planned: Deliverable[]; verificationVersion?: VerificationVersion | undefined };
 
 /** Checks consistency of actor-reported evidence, not independent execution or applicability proof. */
-function checkAccounting(input: Record<string, unknown>, held: HeldPlan | undefined, ran: readonly Check[] | undefined) {
+export function checkAccounting(input: Record<string, unknown>, held: { planned: { checks?: PlannedCheck[] }[] } | undefined, ran: readonly Check[] | undefined) {
   const planned = held?.planned.flatMap(step => step.checks ?? []);
   const seenChecks = new Set<string>();
   const seenExecutions = new Set<string>();
