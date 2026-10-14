@@ -3325,7 +3325,7 @@ export class PhaseRunner {
       return {
         version: STABLE_CHECKPOINT_VERSION, runID: run.id, parent: run.runtime.sessionID, sequence: (run.checkpointSequence ?? -1) + 1,
         request: structuredClone(run.checkpointRequest), events, data, stable,
-        dataDigest: sealResumeData(data, run.id, run.runtime.sessionID, events, stable),
+        dataDigest: sealResumeData(data, run.id, run.runtime.sessionID, events, stable, run.checkpointRequest),
         ...(attemptState && run.attemptID ? { attempt: { id: run.attemptID,
           phase: this.#risking(run) ? RISK_ACTOR : attemptState === 'settled' ? workflow.snapshot().results.at(-1)!.phase : run.phase, state: attemptState } } : {}),
       };
@@ -3471,7 +3471,7 @@ export class PhaseRunner {
       for (const member of saved.data.workerState!.batch!.members) if (['pending', 'uncertain'].includes(member.state)) member.state = 'settled';
       saved.data.workerState!.batch!.blocked = 'Every pending worker was explicitly released. Retained successes are not replayed.';
       saved.sequence++;
-      saved.dataDigest = sealResumeData(saved.data, saved.runID, saved.parent, saved.events, saved.stable);
+      saved.dataDigest = sealResumeData(saved.data, saved.runID, saved.parent, saved.events, saved.stable, saved.request);
       this.options.checkpoint!.write(sessionID, saved);
       const marker = this.options.progress!.read(sessionID)!;
       this.options.progress!.write(sessionID, { ...marker, state: 'settled' });

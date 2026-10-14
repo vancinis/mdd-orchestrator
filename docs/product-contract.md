@@ -64,6 +64,27 @@ Phase identities use the `mdd-*` form everywhere in output:
 
 A run recorded before the risk stop existed keeps the route it recorded, including the older low route without exploration (`mdd-plan`, `mdd-apply`, `mdd-verify`). `explore` is still accepted on input for those saved requests but no longer changes the first phase.
 
+### Routing-contract pins and inactive future vocabulary
+
+| Request discriminator | Interpretation |
+|---|---|
+| `routingVersion` omitted | Retains historical fixed semantics permanently. Modern histories replay their low/high Risk events; older unmarked histories may infer the single known legacy route that fits. No version is stamped. |
+| `routingVersion: 2` | Explicit fixed contract with the same default evaluation and low/high tails. Recording preserves the pin; replay cannot fall back to legacy route inference. An explicitly recorded known legacy route still retains that route. |
+| `routingVersion: 3` | Reserved, inactive future contract. Construction, evaluation and replay reject execution. |
+| Any other supplied value | Rejected, including null, strings and explicit undefined. |
+
+Resume checkpoint versions 2 and 3 integrity-bind an explicitly supplied routing discriminator.
+Removing, inserting or altering it without a valid new seal is rejected. Unmarked checkpoints
+retain the exact historical digest. Checkpoint version 1 has no seal and cannot carry a pin.
+Restart and both transfer projections preserve the pin; none grants new execution authority.
+
+The pure `parseFutureAssessment` reader in `dist/risk.js` accepts only
+`{ assessmentVersion: 1, complexity, impact }`, with each level independently `low`, `medium`
+or `high`. High impact with low complexity is valid in this separate future assessment; it is
+not a current Risk verdict and selects no route. Current `parseRiskVerdict` still requires
+equal low/high `route` and `complexity`. Adaptive low and structured medium execution are not
+active. Summary level `medium` remains a presentation choice, not a runtime route.
+
 ## 3. Kernel API and validation
 
 After `npm run build`, import `evaluate` from `dist/kernel.js`. It accepts an unknown value and validates its entire request before evaluation:
@@ -88,6 +109,7 @@ const saved = evaluate({ profile: { answers } });
 | `answers` | Complete four-field answer object. Mutually exclusive with `profile`. The legacy `complexity` key is accepted and ignored if present. |
 | `profile` | Exactly `{ answers: <complete four-field object> }`. Uses the same answer validator and evaluator. |
 | `explore` | Optional boolean, accepted for saved requests; it no longer changes the first phase. |
+| `routingVersion` | Optional integer `2` pins the fixed contract; omission keeps historical semantics. Reserved `3` is inactive and rejected. Output remains `mdd-routing-v2`. |
 
 A request that still carries `config` (the old threshold and weights) is rejected with a `ValidationError` that says scoring was removed, rather than having its weights silently ignored; the CLI's `--config` flag is refused the same way.
 

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { LocalFiles } from './local-files.js';
 import { Workflow } from './workflow.js';
+import { requestRoutingVersion } from './kernel.js';
 import type { WorkflowEvent } from './workflow.js';
 import { objectWithKeys, ValidationError } from './validation.js';
 import type { Progress } from './progress.js';
@@ -115,8 +116,13 @@ export type StableCheckpoint = Omit<ResumeCheckpoint, 'version' | 'attempt'> & {
 export type AnyCheckpoint = Checkpoint | ResumeCheckpoint | StableCheckpoint;
 
 function digest(text: string): string { return createHash('sha256').update(text).digest('hex'); }
-export function sealResumeData(data: ResumeData, runID: string, parent: string, events: readonly WorkflowEvent[], stable?: StableRunnerState): string {
-  return digest(JSON.stringify({ runID, parent, events, data, ...(stable ? { stable } : {}) }));
+export function sealResumeData(data: ResumeData, runID: string, parent: string, events: readonly WorkflowEvent[],
+  stable?: StableRunnerState, request?: unknown): string {
+  const routingVersion = request === undefined ? undefined : requestRoutingVersion(request);
+  // Unmarked records keep their exact historical bytes. Only an explicit discriminator is bound,
+  // not unrelated request fields; removing the pin therefore invalidates the original seal.
+  return digest(JSON.stringify({ runID, parent, events, data, ...(stable ? { stable } : {}),
+    ...(routingVersion !== undefined ? { routingVersion } : {}) }));
 }
 
 function validateStable(value: unknown, workflow: Workflow, data: ResumeData): StableRunnerState {
@@ -345,6 +351,9 @@ export function validateCheckpoint(value: unknown): { checkpoint: AnyCheckpoint;
   if (item.version === RESUME_CHECKPOINT_VERSION && item.stable !== undefined) throw new ValidationError('Unexpected v2 runner state.');
   if (item.version !== 1 && (!Object.hasOwn(item, 'data') || !Object.hasOwn(item, 'dataDigest'))) throw new ValidationError('Missing checkpoint data.');
   if (item.version === STABLE_CHECKPOINT_VERSION && !Object.hasOwn(item, 'stable')) throw new ValidationError('Missing stable runner state.');
+  if (item.version === CHECKPOINT_VERSION && requestRoutingVersion(item.request) !== undefined) {
+    throw new ValidationError('Explicit routing versioning requires a sealed resume checkpoint.');
+  }
   const workflow = Workflow.replay(item.request, item.events as WorkflowEvent[]);
   if (item.attempt !== undefined) {
     const attempt = objectWithKeys(item.attempt, 'checkpoint attempt', ['id', 'phase', 'state']);
@@ -366,7 +375,7 @@ export function validateCheckpoint(value: unknown): { checkpoint: AnyCheckpoint;
   if (item.version !== 1) {
     if (typeof item.dataDigest !== 'string' || !/^[a-f0-9]{64}$/.test(item.dataDigest) ||
         sealResumeData(item.data as ResumeData, item.runID as string, item.parent as string, item.events as WorkflowEvent[],
-          item.version === STABLE_CHECKPOINT_VERSION ? item.stable as StableRunnerState : undefined) !== item.dataDigest) throw new ValidationError('Checkpoint data digest mismatch.');
+          item.version === STABLE_CHECKPOINT_VERSION ? item.stable as StableRunnerState : undefined, item.request) !== item.dataDigest) throw new ValidationError('Checkpoint data digest mismatch.');
     const data = validateData(item.data, workflow, item.runID as string);
     if (data.workerState) {
       for (const member of data.workerState.completed) {

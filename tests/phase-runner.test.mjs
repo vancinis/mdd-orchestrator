@@ -1,14 +1,15 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { PhaseRunner, SINGULAR_EXPLORATION } from '../dist/phase-runner.js';
+import { Workflow } from '../dist/workflow.js';
 import { reportFormatLines } from '../dist/phase-report.js';
-import { memoryServer, request, result, reportDocument, riskReport, runtime, call, answers, installCleanup, structuredTraceFixture as traceFixture, structuredVerificationFixture, traceFixture as legacyTraceFixture, ARTIFACT_TEXT, SUMMARY_TEXT } from './adapter-fixture.mjs';
+import { memoryServer, request, result, reportDocument, riskReport, runtime, call, answers, installCleanup, structuredTraceFixture as traceFixture, structuredVerificationFixture, traceFixture as legacyTraceFixture, ARTIFACT_TEXT, SUMMARY_TEXT, throughRiskStop } from './adapter-fixture.mjs';
 import { validateCheckpoint, CheckpointStore, CheckpointStorageError, sealResumeData } from '../dist/checkpoint.js';
 import { ProgressGuard } from '../dist/progress.js';
 import { RunOwnershipStore } from '../dist/run-ownership.js';
 import { RunDossierStore } from '../dist/run-dossier.js';
 import { statusPayload, STATUS_BUDGET_BYTES } from '../dist/status-budget.js';
-import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { mkdtemp, rm, stat, mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -45,6 +46,139 @@ async function fixture(t, fault) {
   const runner = new PhaseRunner(inspect);
   return { ...memory, inspect, runner };
 }
+
+test('AL-01: fixed routing pins survive runner checkpoint writes, restart and pending release', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'mdd-routing-pin-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const checkpoint = new CheckpointStore(root); const progress = new ProgressGuard(root);
+  const inspect = { parent: async () => {}, result: async (_r, _c, _p, output) => output, stopped: async () => true };
+  const input = { preflight: { answers, routingVersion: 2 }, requirements: 'Preserve fixed routing on restart.' };
+  const runner = new PhaseRunner(inspect, { checkpoint, progress });
+  const ready = await runner.start(input, runtime, { requirementsConfirmed: true, userMessageID: 'routing-user' });
+  const assertPin = () => {
+    const saved = checkpoint.read(runtime.sessionID).checkpoint;
+    assert.equal(saved.request.routingVersion, 2);
+    const { routingVersion: _pin, ...unmarked } = saved.request;
+    assert.throws(() => validateCheckpoint({ ...saved, request: unmarked }), /digest mismatch/);
+    return saved;
+  };
+  assertPin();
+  await toPlan(runner, ready);
+  assertPin();
+  const restarted = new PhaseRunner(inspect, { checkpoint, progress });
+  assert.deepEqual(await restarted.restore(runtime), { restored: true });
+  assert.equal(restarted.status(runtime.sessionID).phase, 'mdd-plan');
+  const planCall = { ...call, callID: 'routing-plan' };
+  await restarted.before(planCall, restarted.status(runtime.sessionID).task);
+  assertPin();
+  const interrupted = new PhaseRunner(inspect, { checkpoint, progress });
+  assert.equal((await interrupted.restore(runtime)).restored, false, 'pending work is not replayed');
+  assert.equal((await interrupted.confirmStopped(runtime.sessionID, runtime)).verdict, 'stopped');
+  assert.deepEqual(await interrupted.restore(runtime), { restored: true });
+  assert.equal(interrupted.status(runtime.sessionID).state, 'blocked', 'release alone does not authorize retry');
+  assert.equal(interrupted.status(runtime.sessionID).task, undefined);
+  assertPin();
+  assert.deepEqual(interrupted.reset(runtime.sessionID, 'phase'), { scope: 'phase', phase: 'mdd-plan' });
+  const retry = { ...call, callID: 'routing-plan-retry' };
+  await interrupted.after(retry, await interrupted.before(retry, interrupted.status(runtime.sessionID).task),
+    reportDocument({ evidenceSummary: 'Plan held.', artifact: 'Plan.', ...traceFixture() }));
+  assert.equal(assertPin().stable.phase, 'mdd-apply');
+});
+
+test('AL-01: the runner refuses reserved adaptive routing before creating durable state', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'mdd-routing-inactive-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const checkpoint = new CheckpointStore(root);
+  const runner = new PhaseRunner({ parent: async () => {}, result: async (_r, _c, _p, output) => output }, { checkpoint });
+  await assert.rejects(runner.start({ preflight: { answers, routingVersion: 3 }, requirements: 'Inactive contract.' }, runtime,
+    { requirementsConfirmed: true, userMessageID: 'routing-user' }), /routingVersion.*inactive/);
+  assert.equal(checkpoint.read(runtime.sessionID), undefined);
+});
+
+test('AL-01 correction: a non-enumerable own fixed pin reaches the real checkpoint seal and restart', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'mdd-own-routing-pin-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const checkpoint = new CheckpointStore(root); const progress = new ProgressGuard(root);
+  const inspect = { parent: async () => {}, result: async (_r, _c, _p, output) => output };
+  const preflight = Object.defineProperty({ answers }, 'routingVersion', { value: 2 });
+  const runner = new PhaseRunner(inspect, { checkpoint, progress });
+  const ready = await runner.start({ preflight, requirements: 'Retain the own fixed routing pin.' }, runtime,
+    { requirementsConfirmed: true, userMessageID: 'own-routing-user' });
+  const planOnly = [{ kind: 'start', phase: 'mdd-plan' }];
+  assert.throws(() => Workflow.replay(preflight, planOnly), /Only the current ready phase can start/);
+  const assertPin = () => {
+    const saved = checkpoint.read(runtime.sessionID).checkpoint;
+    assert.equal(Object.hasOwn(saved.request, 'routingVersion'), true);
+    assert.equal(saved.request.routingVersion, 2);
+    assert.notEqual(saved.dataDigest, sealResumeData(saved.data, saved.runID, saved.parent, saved.events, saved.stable));
+    assert.throws(() => Workflow.replay(saved.request, planOnly), /Only the current ready phase can start/);
+    const unmarked = structuredClone(saved); delete unmarked.request.routingVersion;
+    assert.throws(() => validateCheckpoint(unmarked), /digest mismatch/);
+  };
+  assertPin();
+  await toPlan(runner, ready);
+  assertPin();
+  const restarted = new PhaseRunner(inspect, { checkpoint, progress });
+  assert.deepEqual(await restarted.restore(runtime), { restored: true });
+  assert.equal(restarted.status(runtime.sessionID).phase, 'mdd-plan');
+  assertPin();
+});
+
+test('AL-01 correction: the runner rejects non-enumerable invalid pins before recording a legacy route', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'mdd-own-routing-inactive-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const checkpoint = new CheckpointStore(root);
+  for (const routingVersion of [3, undefined, null, '2', 4]) {
+    const runner = new PhaseRunner({ parent: async () => {}, result: async (_r, _c, _p, output) => output }, { checkpoint });
+    const preflight = Object.defineProperty({ answers, route: ['mdd-plan', 'mdd-apply', 'mdd-verify'] }, 'routingVersion', { value: routingVersion });
+    await assert.rejects(runner.start({ preflight, requirements: 'Reject the own invalid routing pin.' }, runtime,
+      { requirementsConfirmed: true, userMessageID: 'own-routing-user' }), routingVersion === 3 ? /routingVersion.*inactive/ : /routingVersion.*unsupported/);
+    assert.equal(checkpoint.read(runtime.sessionID), undefined);
+  }
+});
+
+test('AL-01: cold worker release reseals the fixed pin without losing completed work', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'mdd-worker-routing-pin-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, 'src'));
+  for (const name of ['a', 'b']) await writeFile(join(root, `src/${name}.ts`), name);
+  const here = { ...runtime, sessionID: 'routing-workers', directory: root, worktree: root };
+  const checkpoint = new CheckpointStore(root); const progress = new ProgressGuard(root);
+  const inspect = { parent: async () => {}, result: async (_r, _c, _p, output) => output, stopped: async () => true };
+  const options = { checkpoint, progress, ownership: new RunOwnershipStore(root), workers: { enabled: true }, workerCapability: { confined: true } };
+  const runner = new PhaseRunner(inspect, options);
+  await runner.start({ preflight: { answers, routingVersion: 2 }, requirements: 'Preserve independent worker progress.' }, here,
+    { requirementsConfirmed: true, userMessageID: 'routing-workers-user' });
+  const ready = await throughRiskStop(runner, here.sessionID, 'low', { release: true });
+  const trace = traceFixture(); const base = trace.deliverables[0];
+  trace.deliverables = ['a', 'b'].map((name, index) => ({ ...base, id: `T${index + 1}`, path: `src/${name}.ts`, dependsOn: [],
+    parallel: { complete: true, reads: [], writes: [`src/${name}.ts`] },
+    checks: [{ id: `T${index + 1}-check`, command: 'npm test', requirement: 'required' }] }));
+  const planCall = { sessionID: here.sessionID, callID: 'routing-workers-plan' };
+  await runner.after(planCall, await runner.before(planCall, ready.task),
+    reportDocument({ evidenceSummary: 'Plan held.', artifact: 'Plan.', ...trace }));
+  runner.releaseSettled(here.sessionID, planCall.callID);
+  const tasks = runner.status(here.sessionID).tasks;
+  const calls = ['routing-worker-one', 'routing-worker-two'].map(callID => ({ sessionID: here.sessionID, callID }));
+  const args = await Promise.all(tasks.map((task, index) => runner.before(calls[index], task)));
+  await runner.after(calls[0], args[0], reportDocument({ evidenceSummary: 'First task completed.', artifact: 'First task evidence.',
+    completed: ['T1'], changes: ['src/a.ts'], checks: [] }));
+  const cold = new PhaseRunner(inspect, options);
+  assert.equal((await cold.restore(here)).restored, false);
+  await cold.withReset(here.sessionID, async resetID => {
+    assert.equal((await cold.confirmStopped(here.sessionID, here, false, resetID)).verdict, 'stopped');
+    const saved = checkpoint.read(here.sessionID).checkpoint;
+    assert.equal(saved.request.routingVersion, 2);
+    const unmarked = structuredClone(saved); delete unmarked.request.routingVersion;
+    assert.throws(() => validateCheckpoint(unmarked), /digest mismatch/);
+    assert.deepEqual(await cold.restore(here), { restored: true });
+    cold.reset(here.sessionID, 'phase');
+  });
+  const restored = cold.status(here.sessionID);
+  assert.deepEqual(restored.workerProgress.completed, ['T1']);
+  assert.equal(restored.tasks.length, 1, 'the completed worker is not reissued');
+  assert.equal(checkpoint.read(here.sessionID).checkpoint.request.routingVersion, 2);
+});
 
 test('SA-2: new runs freeze the version before planning and refuse legacy report downgrade', async t => {
   const { runner, endpoint } = await fixture(t);
