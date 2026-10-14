@@ -3,8 +3,15 @@
 Setup installs MDD globally, not into each execution workspace. **Memory defaults off.**
 The installer, doctor, profile commands and configuration editor share one settings file.
 The native plugin uses that same global authority. Telemetry preference is global, but event
-files, progress, history and selected OpenSpec artifacts stay in the active project.
+files, progress and task history stay under the active repository's local data anchor.
 Installation readiness does not establish model acceptance.
+
+New native runs automatically use validated configured Engram, otherwise complete local storage at
+`.mdd/tasks/<safe-objective-slug>-<run-UUID>/`. Preflight and the profile editor ask no storage question.
+Configured Engram failures block without local fallback; ambient MCP tools alone activate nothing.
+Existing runs keep their pinned backend on restart/transfer without migration. Doctor reports the
+resolution policy without starting a run; `mdd_status.storage.backend` and `storage.taskDirectory`
+show the actual backend and validated local task location.
 
 ## Start here
 

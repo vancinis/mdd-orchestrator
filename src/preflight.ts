@@ -3,6 +3,8 @@ import { preflight } from './kernel.js';
 import { objectWithKeys, parseAnswers, ValidationError } from './validation.js';
 
 export const ANSWER_FIELDS = Object.freeze(['certainty', 'artifactStore', 'mode', 'summary'] as const);
+/** New questions ask only user preferences; the native adapter resolves storage itself. */
+export const PREFLIGHT_FIELDS = Object.freeze(['certainty', 'mode', 'summary'] as const);
 // Accepted on input for backward compatibility with saved profiles and kernel callers, but never
 // asked and never scored: mdd-risk now judges complexity, after exploration, not this intake.
 const LEGACY_FIELDS = Object.freeze(['complexity'] as const);
@@ -57,11 +59,11 @@ export function parsePartialAnswers(value: unknown): Partial<Answers> {
   return result as Partial<Answers>;
 }
 
-export function questionEnvelope(known: unknown = {}, memoryEnabled = true): QuestionEnvelope {
+export function questionEnvelope(known: unknown = {}, _memoryEnabled = true): QuestionEnvelope {
   const answers = parsePartialAnswers(known);
-  return { questions: ANSWER_FIELDS.filter(key => !Object.hasOwn(answers, key)).map(key => ({
+  return { questions: PREFLIGHT_FIELDS.filter(key => !Object.hasOwn(answers, key)).map(key => ({
     header: fields[key].header, question: fields[key].question, multiple: false,
-    options: fields[key].choices.filter(choice => key !== 'artifactStore' || memoryEnabled || ['openspec', 'none'].includes(choice.token)).map(({ label, description }) => ({ label, description })),
+    options: fields[key].choices.map(({ label, description }) => ({ label, description })),
   })) };
 }
 
@@ -72,7 +74,7 @@ export function answerFromLabel<FieldName extends Field>(field: FieldName, label
   return matches[0]!.token as Answers[FieldName];
 }
 
-/** Native answers are ordered arrays of selected labels, one label per missing field. */
+/** Frozen resolved-answer schema, including historical storage-containing field vectors. */
 export function answersFromLabels(known: unknown, selections: unknown): Answers {
   const answers = parsePartialAnswers(known);
   const missing = ANSWER_FIELDS.filter(key => !Object.hasOwn(answers, key));

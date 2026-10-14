@@ -1614,6 +1614,7 @@ const plugin: Plugin = async input => {
           // workflow at a state with its own native recovery, such as blocked-risk after an
           // exhausted mdd-risk fallback; that recovery is armed here too, not only on success.
           try { await runner.after(input, input.args, output); }
+          catch (error) { intake.storageFailed(input.sessionID); throw error; }
           finally { try { intake.phaseRecorded(input.sessionID); } catch { /* best effort re-arm; the original outcome still propagates. */ } }
           const current = runner.status(input.sessionID);
           const phase = typeof input.args === 'object' && input.args !== null && 'subagent_type' in input.args &&

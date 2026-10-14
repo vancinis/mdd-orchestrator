@@ -241,6 +241,12 @@ test('documented JSON schema matches supported roles/tokens and the guide exampl
     assert.ok(schema.$defs.profile.properties.answers.properties[field].enum.includes(value));
   }
   assert.equal(parsed.activeProfile, 'work');
+  assert.equal(parsed.profiles.work.answers.artifactStore, undefined, 'new configuration examples present only user defaults');
+  const storage = schema.$defs.profile.properties.answers.properties.artifactStore;
+  assert.equal(storage.deprecated, true);
+  for (const artifactStore of storage.enum) {
+    assert.equal(parseSettings({ ...example, profiles: { work: { answers: { artifactStore } } } }).profiles.work.answers.artifactStore, artifactStore);
+  }
   assert.deepEqual(schema.required, ['version', 'activeProfile', 'profiles']);
   assert.deepEqual(schema.properties.workers.required, ['enabled']);
   assert.equal(schema.properties.workers.type, 'object');

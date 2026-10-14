@@ -7,7 +7,7 @@ one protected native question interaction. Complete main routes, evidence report
 runtime telemetry are integrated; model-backed end-to-end proof remains pending.**
 No command here starts models, registers sessions, or writes general Engram memory.
 Validated artifact storage and phase assets are documented in [Artifact storage and phase actors](artifacts-and-actors.md).
-Selected artifact storage is integrated into every main-route phase.
+Automatically resolved artifact storage is integrated into every main-route phase.
 
 ## Quick path
 
@@ -77,7 +77,6 @@ active-profile existence, safe names, explicit valid ports, and a 128 KiB file l
       "models": { "orchestrator": "provider/model", "mdd-apply": "provider/team/model" },
       "answers": {
         "certainty": "very-sure",
-        "artifactStore": "none",
         "mode": "interactive",
         "summary": "low",
         "complexity": "not-complex"
@@ -99,15 +98,16 @@ no Engram setup, and telemetry/workers enabled. Reading never creates a settings
 | `version`, `activeProfile`, `profiles` | Required. Version exactly 1; active name must exist; 1–64 profiles. Unknown keys rejected at every level. |
 | Names | 1–64 ASCII letters/digits/underscores/hyphens, starting alphanumeric; prototype/device names rejected. |
 | Profile `models` | Optional `orchestrator`, all eight exact phase mappings, `mdd-risk`, `mdd-security`, `mdd-jd-judge-a`, `mdd-jd-judge-b`, and `mdd-jd-fix`. `provider/model`, nested model paths allowed, an optional trailing `#variant` reasoning-effort suffix, at most 256 characters. No whitespace/traversal. Omitted role inherits native selection, not the orchestrator override. |
-| Profile `answers` | Optional partial/complete canonical answers for the four preflight fields (`certainty`, `artifactStore`, `mode`, `summary`); a legacy `complexity` value is accepted and ignored. Missing fields remain missing. |
+| Profile `answers` | Optional `certainty`, `mode`, `summary` user defaults. Deprecated `artifactStore` values remain parseable but cannot override automatic storage on new native runs; legacy `complexity` is accepted and ignored. Missing user fields remain missing. |
 | `engram` | Omitted means memory off. `{ endpoint }` opts into an explicit loopback service; `{ mode: 'local', binary, dataDirectory }` opts into a managed installed binary. Legacy `project` is deprecated and ignored with a runtime notice. No secrets or session IDs in settings. |
 | `telemetry` | Optional `{ "enabled": boolean }`, default enabled. No external destination. |
 | `workers` | Optional `{ "enabled": boolean }`, default enabled when the whole field is omitted. Global, not per profile. If present, `enabled` is required; strings, numbers, null, arrays, and unknown keys are rejected. |
 
 Capture active profile/model mappings and worker preference **once at runtime startup** with `freezeProfile`.
 Restart after changing them; never replace an in-flight workflow's answers. General
-Engram memory stays independent of artifacts, including `none`. The adapter verifies the
-exact registered runtime session/project/directory; it never fabricates a session.
+New native runs use Engram after successful configured project/session bootstrap, otherwise local.
+The adapter verifies the exact registered runtime session/project/directory; it never fabricates
+a session or switches a restored run's backend. Legacy general memory remains independent of artifacts.
 
 ## Accepted session preferences
 
@@ -124,9 +124,9 @@ records block reuse; failed publication/readback is reported, never claimed dura
 
 A material replacement still requires scope confirmation. It refreshes objective certainty
 (an explicitly configured profile certainty may supply it) and clears old context/doubts,
-while retaining applied preferences and the current storage choice. New intakes use the
-existing profile/question storage behavior. Same-objective continuation, phase reset, rework
-and context edits retain certainty. An explicit preflight redo asks every field despite
+while retaining applied preferences. Every replacement resolves its new backend automatically;
+the old run stays pinned. Same-objective continuation, phase reset, rework and context edits
+retain certainty. An explicit preflight redo asks all three user fields despite
 preferences/profile defaults; rejection or cancellation leaves accepted defaults unchanged.
 Preferences are data, not plan, scope or phase approval receipts.
 
@@ -265,10 +265,16 @@ requires separate authorization; packaging/contract tests are not model-run proo
 
 ## Optional memory
 
-Omit `engram` entirely to disable memory. OpenSpec and None then remain available in their
-original relative order. A saved Engram/Both choice is explained and reasked with any other
-missing fields, without rewriting the profile. All native safety and local progress checks
-remain active. None retains full artifacts in the live run only, not on disk or in memory observations.
+Omit `engram` entirely to disable memory. New native runs automatically preserve full artifacts,
+risk reports and progress locally at `.mdd/tasks/<safe-objective-slug>-<run-UUID>/` under the
+repository data anchor. Configured Engram selects Engram only after successful project/session
+binding. Transport, permission, project, session or readback failures stay blocked/enabled;
+there is no silent local fallback. Ambient MCP availability does not activate MDD's HTTP integration.
+The editor asks only certainty, mode and summary. Deprecated profile storage answers are retained
+as data, never asked or used to select a new native backend. Existing runs retain their backend on
+restart/transfer without migration. `mdd_status.storage` shows `backend` and, for local runs with
+validated task metadata, the absolute `taskDirectory`. Doctor explains new-run resolution but
+does not create a run or bootstrap memory.
 
 Existing version-1 `{ "endpoint": "http://127.0.0.1:7437", "project": "mdd" }` settings
 remain readable and are never rewritten on read. The native runtime ignores the deprecated
@@ -409,11 +415,18 @@ function resolvePreflight(known: unknown, selections: unknown, explore?: boolean
   { answers: Answers; evaluation: Evaluation };
 ```
 
-`ANSWER_FIELDS` exports the original order. Issue **one** native question call containing
-all missing fields. A complete profile yields `questions: []`; skip the tool and resolve
-using `[]`. Native responses are ordered `string[][]`, exactly one known label per missing
+`PREFLIGHT_FIELDS` exports the three new question fields, in order. `ANSWER_FIELDS` retains the
+frozen four-field resolved-answer order including storage for standalone callers and historical
+vectors. Issue **one** native question call containing all missing user fields. A complete user
+profile yields `questions: []`. The native adapter supplies storage before decoding new answers;
+standalone `answersFromLabels`/`resolvePreflight` still require a complete resolved backend or the
+original storage-containing vector. Native responses are ordered `string[][]`, one known label per missing
 question. Unknown/custom text, extra selections, wrong order, and wrong counts fail.
 There are no invented `custom` or option `value` fields.
+
+Historical pending preflight records retain their exact envelope, field count/order, call identity
+and unanswered versus answered-but-unapplied state. A restart blocks them without guessing or
+decoding them as the new schema. Explicit run discard permits a fresh intake; it replays no old consent.
 
 Pass resolved answers to `new Workflow({ answers })`, not the rich named profile. These pure
 helpers do not establish human consent. The native `NativeIntake` gate now owns the exact

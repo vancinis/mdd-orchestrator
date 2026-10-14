@@ -68,8 +68,12 @@ content only in the live return/handoff; it has no dedicated disk or observation
 | `both` | Disk first, then Engram; both must confirm before success. |
 | `local` | Immutable task records and complete progress snapshots, with required readback. |
 
-Local is supported as a resolved backend; it is not automatically selected yet. The existing
-Engram/OpenSpec/Both/None question and legacy backend behavior remain unchanged.
+New native runs automatically select `engram` after successful configured project/session binding,
+otherwise `local`. Configured transport/permission/binding/readback failures block without fallback.
+Storage is not asked in preflight, redo or the profile editor; deprecated saved profile choices cannot
+override resolution. Existing Engram/OpenSpec/Both/None/local runs remain pinned on restart and transfer,
+with no migration. Standalone resolved-answer APIs still accept the legacy backend tokens above.
+`mdd_status.storage` reports the effective `backend` and validated local `taskDirectory`.
 
 **General memory is optional and independent of artifact selection.** Engram and Both
 require an opted-in backend. With memory off, the runner omits the client and receipt writes;

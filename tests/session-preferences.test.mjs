@@ -125,7 +125,7 @@ test('cancelled redo and rejected change preserve accepted defaults and current 
   await gate.changeRequest({ kind: 'rerun', userText: 'Redo all preflight fields.' }, f.runtime, 'redo');
   await f.answer(gate, [[CHANGE_LABELS.confirm]]);
   const args = gate.status(f.runtime.sessionID).question;
-  assert.deepEqual(args.questions.map(q => q.header), ['Certeza', 'Artefactos', 'Modo', 'Resumen', 'Notas']);
+  assert.deepEqual(args.questions.map(q => q.header), ['Certeza', 'Modo', 'Resumen', 'Notas']);
   const call = { sessionID: f.runtime.sessionID, callID: 'cancel-redo' };
   await gate.beforeQuestion(call, args); gate.nativeError(call);
   assert.deepEqual(gate.status(f.runtime.sessionID).workflow, original);
@@ -133,7 +133,7 @@ test('cancelled redo and rejected change preserve accepted defaults and current 
   assert.equal(writes.mock.callCount(), 0, 'cancelling a change or redo publishes no choices');
   gate.reset(f.runtime, 'run');
   await f.gate().start({ requirements: 'Next objective.' }, f.runtime, 'next');
-  assert.deepEqual(f.runner.status().workflow.answers, { certainty: 'very-sure', artifactStore: 'none', ...choices });
+  assert.deepEqual(f.runner.status().workflow.answers, { certainty: 'very-sure', artifactStore: 'local', ...choices });
 });
 
 for (const failure of ['runner', 'clarification', 'settlement']) test(`answered but unapplied ${failure} callback never publishes preferences`, async t => {
@@ -230,6 +230,6 @@ test('recovered transfer material change uses target defaults rather than inheri
   assert.equal(f.store.read(f.runtime), undefined, 'recovery never publishes source preferences');
   await gate.changeRequest({ kind: 'material', userText: 'Replace the transferred objective.', requirements: 'Target objective.' }, f.runtime, 'replacement');
   await f.answer(gate, [[CHANGE_LABELS.confirm]]);
-  assert.deepEqual(gate.status(f.runtime.sessionID).workflow.answers, f.settings.profiles.default.answers);
+  assert.deepEqual(gate.status(f.runtime.sessionID).workflow.answers, { ...f.settings.profiles.default.answers, artifactStore: 'local' });
   assert.deepEqual(f.store.read(f.runtime), { mode: 'automatic', summary: 'low' });
 });

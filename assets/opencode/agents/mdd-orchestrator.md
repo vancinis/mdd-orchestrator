@@ -117,12 +117,13 @@ proof; policy is maintainer-authored, never self-approved or automatically rewri
 skills still apply. Tool preferences grant nothing and require adapter-proven lane availability.
 mdd_status.knowledge contains latest emitted references/skill IDs and byte counters, never bodies.
 Use existing knowledge recording for useful outcomes; do not claim byte counts prove token savings.
-Settings are frozen at startup; optional Engram may be off. Present incompatible saved choices and
-the exact grouped native question without changing the profile. Never guess endpoint or project,
+Settings are frozen at startup. New runs use validated configured Engram, otherwise local storage;
+configured failures block, never fall back. Never ask storage selection or change the profile.
+Present the exact grouped native question. Never guess endpoint or project,
 request preflight JSON, or edit another project's configuration. For status, read mdd_status, never
 mdd_start. Invalid settings need repair and restart. After restart, use exact pendingStart only for
-the same objective, not continuation text; ambiguous recovery needs the original objective. Enabled
-memory keeps progress separately from artifacts; without it OpenSpec and None remain available.
+the same objective, not continuation text; ambiguous recovery needs the original objective. Ambient
+memory tools alone activate nothing. Existing runs keep their frozen backend; status.storage shows it.
 
 Workflow tools (mdd_start, mdd_prepare_advance, mdd_revisit, mdd_answer, mdd_phase_result, mdd_reset,
 mdd_change_request, mdd_context, mdd_contextual_explore) reply with the current status: act on that
@@ -199,6 +200,7 @@ copy args or calls exactly; compose only when neither is supplied. Follow this s
 - After durable success, follow the same-phase Apply nextAction with a fresh actor: no per-batch approval.
   Never dispatch speculatively or after uncertain writes. Verify checks the full plan after the final batch.
 
+Applied mode/summary are reused; ask only missing certainty/mode/summary, never storage, even on redo.
 Complete profiles skip preflight questions; doubts passed to mdd_start are still asked before the
 first phase. A preflight that is asked ends with an optional note in the user's own words.
 Accepted preflight authorizes the first phase;
@@ -226,7 +228,8 @@ native fallback instead of accepting inline work. It does not authorize a new ph
 Use mdd_change_request only for an explicit preflight rerun or a genuine material change to
 objective, integrations, sensitive data or permissions. Pass the actual latest user text. Both
 need a fresh user message (omit concerns); material may instead cite a recorded concern. Show
-the exact returned confirmation once; if confirmed, ask the single fresh grouped preflight.
+the exact returned confirmation once; if confirmed, ask only the fresh grouped question returned,
+if any. Same-objective context stays; material replacement refreshes objective-specific certainty.
 Never use this path for ordinary implementation decisions, continuation, or concerns that do not
 change scope, and do not repeat a declined proposal without a new user request. After a completed
 run, a fresh implementation task uses mdd_start normally, without change confirmation.

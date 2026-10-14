@@ -1,4 +1,4 @@
-import { ANSWER_FIELDS, answerFromLabel, questionEnvelope } from './preflight.js';
+import { PREFLIGHT_FIELDS, answerFromLabel, questionEnvelope } from './preflight.js';
 import { defaultSettings, MODEL_ROLES, parseModel, parseSettings, profileName } from './settings.js';
 import { loadGlobalSettings, saveGlobalSettings } from './global-settings.js';
 import { installationPaths } from './installation-paths.js';
@@ -13,7 +13,6 @@ export type { Choice, ConfigIO } from './tui.js';
 
 const FIELD_TITLES: Record<string, string> = {
   certainty: 'Certeza sobre los requisitos',
-  artifactStore: 'Dónde guardar los artefactos del flujo',
   mode: 'Cómo aprobar las fases posteriores',
   summary: 'Cuánto detalle querés en los reportes',
 };
@@ -21,7 +20,7 @@ const UNANSWERED: Choice = { value: '-', label: 'Sin responder', hint: 'Se pregu
 const MENU: readonly Choice[] = [
   { value: 'perfiles', label: 'Perfiles', hint: 'Crear un perfil o cambiar el activo' },
   { value: 'modelos', label: 'Modelos', hint: 'Elegir el modelo de cada agente' },
-  { value: 'preflight', label: 'Respuestas de preflight', hint: 'Fijar las 4 respuestas por defecto' },
+  { value: 'preflight', label: 'Respuestas de preflight', hint: 'Fijar las 3 respuestas por defecto' },
   { value: 'memoria', label: 'Memoria (Engram)', hint: 'Endpoint avanzado o apagarla' },
   { value: 'telemetria', label: 'Telemetría', hint: 'Métricas locales, nunca por red' },
   { value: 'guardar', label: 'Guardar y salir', hint: 'Escribe los cambios y cierra' },
@@ -48,13 +47,14 @@ function memoryLabel(settings: Settings): string {
 function overview(draft: Settings): string {
   const profile = draft.profiles[draft.activeProfile]!;
   const models = MODEL_ROLES.filter(role => profile.models[role]).length;
-  const answered = ANSWER_FIELDS.filter(field => profile.answers[field]).length;
+  const answered = PREFLIGHT_FIELDS.filter(field => profile.answers[field]).length;
   return `${heading('MDD \u00b7 Configuración global')}${rows([
     ['Archivo', installationPaths().settingsPath],
     ['Perfil activo', `${draft.activeProfile}  (${Object.keys(draft.profiles).length} en total)`],
     ['Modelos', `${models}/${MODEL_ROLES.length} asignados; el resto hereda el modelo nativo`],
-    ['Preflight', `${answered}/${ANSWER_FIELDS.length} respondidas; las vacías se preguntan en cada run`],
+    ['Preflight', `${answered}/${PREFLIGHT_FIELDS.length} respondidas; las vacías se preguntan en cada run`],
     ['Memoria', memoryLabel(draft)],
+    ['Artefactos', draft.engram ? 'Engram automático tras validar el vínculo; un fallo bloquea' : 'local automático: .mdd/tasks/<nombre-UUID>/'],
     ['Telemetría', draft.telemetry.enabled ? 'activada (eventos locales del workspace)' : 'apagada'],
     ['Workers', `${draft.workers.enabled ? 'enabled' : 'disabled'} (preference only; dispatch remains sequential)`],
   ])}${note('Nada se escribe hasta elegir «Guardar y salir».')}`;
@@ -134,11 +134,11 @@ async function editAnswers(io: ConfigIO, profile: Settings['profiles'][string]):
   const answers = { ...profile.answers };
   const questions = questionEnvelope().questions;
   io.write(heading('Respuestas de preflight por defecto'));
-  for (const [index, field] of ANSWER_FIELDS.entries()) {
+  for (const [index, field] of PREFLIGHT_FIELDS.entries()) {
     // The envelope already carries the user-facing Spanish label; a second copy here could drift.
     const options = questions[index]!.options.map(option => ({ value: option.label, label: option.label, hint: option.description }));
     const current = options.findIndex(option => answerFromLabel(field, option.value) === answers[field]);
-    const choice = await choose(io, `${FIELD_TITLES[field] ?? field}  (${index + 1}/${ANSWER_FIELDS.length})`,
+    const choice = await choose(io, `${FIELD_TITLES[field] ?? field}  (${index + 1}/${PREFLIGHT_FIELDS.length})`,
       [...options, UNANSWERED], { initial: current < 0 ? options.length : current });
     if (choice === UNANSWERED.value) delete answers[field];
     else Object.assign(answers, { [field]: answerFromLabel(field, choice) });

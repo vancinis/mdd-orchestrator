@@ -39,8 +39,8 @@ not a complete task artifact store.
   report final authored size honestly rather than compressing or omitting proof.
 - Forecast: approximately 2,050 authored additions plus deletions, +/-30%.
 - Unit forecasts: PF-1 410; PF-2 970; PF-3 670 authored changed lines.
-- Running authored count: 763 from PF-1, including feature tracking. Generated
-  `dist/` is ignored and excluded.
+- Running authored count: 1,703 from PF-1 and PF-2, including feature tracking.
+  Generated `dist/` is ignored and excluded.
 - Work-unit boundaries: PF-1, PF-2, PF-3 coherent behavior boundaries; one eventual
   review range. No PRs are authorized or created; no further chain prompt is due.
 
@@ -96,7 +96,7 @@ not a complete task artifact store.
   - Commit: `088f2fe283295ff820c472977803459ad8bb361c`
     (`feat(preflight): reuse accepted session preferences`).
 
-- [ ] **PF-2 — Add complete durable local task storage.**
+- [x] **PF-2 — Add complete durable local task storage.**
   - Route: delegated direct. Trigger: multi-file artifact publication/recovery
     behavior and corresponding tests; one writer only.
   - Support local storage while preserving the frozen answer shape and all legacy
@@ -123,7 +123,9 @@ not a complete task artifact store.
   - Staged native assessment: medium, executable_change. Writer default profile
     self-verification plus parent readback/spot check satisfies the off-mode tier;
     no additional semantic review or native lifecycle was started.
-  - Writer authored size: 912 lines. Commit including tracking: pending.
+  - Writer authored size: 912 lines; work-unit commit includes 940 authored lines.
+  - Commit: `b23f9b24d36ca5a2afe09fd3e06245ef122a9036`
+    (`feat(storage): preserve complete local task evidence`).
 
 - [ ] **PF-3 — Automatically resolve new-run storage and remove its question.**
   - Route: delegated direct. Trigger: multiple native intake/UI/schema/doc changes.
@@ -139,7 +141,25 @@ not a complete task artifact store.
   - Runtime boundary: native fixtures for new local, configured Engram, failed
     configured Engram, old pending envelopes and legacy restoration.
   - Rollback: restore selection/default policy while retaining local readers.
-  - Evidence, risk assessment, commit and authored count: pending.
+  - Initial PF-3 writer stopped before edits: `tests/session-preferences.test.mjs`
+    was omitted from its allowed surface. Lines 128, 136 and 233 still expect
+    storage selection or legacy profile storage on new native runs. Enumerated
+    user explicitly selected "Autorizar ajuste" after interruption. The exact
+    additional path is authorized; no other surface is added by that decision.
+  - Behavioral RED: 14 automatic-selection/question regressions failed before
+    implementation; GREEN after implementation. Restart regressions also verified
+    configured Engram publication failures stay blocked, never local fallback.
+  - Writer typecheck/build/focused/full checks passed: focused 694 passed and
+    1 baseline skip; full suite 2,060 passed, 0 failed, 3 baseline skips.
+    An intermediate concurrent run hit snapshot/race refusals; final sequential
+    full execution passed. No live-host/model proof claimed.
+  - Parent read back automatic resolver and restored configured-storage blocking;
+    reran typecheck and diff whitespace checks successfully.
+  - Staged native risk: medium/executable_change. Writer self-verification and
+    parent structural/command spot check satisfy off-mode verification; no native
+    lifecycle started. Historical pending storage envelopes remain frozen and
+    explicitly recovery-blocked, not reinterpreted or replayed.
+  - Writer authored size: 629 lines. Commit including tracking: pending.
 
 ## Verification and closure
 
@@ -165,5 +185,7 @@ not a complete task artifact store.
 - PF-1 committed as `088f2fe283295ff820c472977803459ad8bb361c`.
 - PF-2 implemented and verified, including full local risk/retry/batch evidence
   and recovery while legacy backend selection remains unchanged.
-- Next step: commit PF-2, record its identity, then implement PF-3 automatic
-  backend selection. PF-3 source work has not begun.
+- PF-2 committed as `b23f9b24d36ca5a2afe09fd3e06245ef122a9036`.
+- PF-3 implemented and verified: automatic storage, no new native storage question,
+  compatible legacy readers, explicit block on historical unresolved envelopes.
+- Next step: commit PF-3, record completion and perform final clean-state readback.

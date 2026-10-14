@@ -67,7 +67,26 @@ for (const fault of ['conflict', 'ended', 'incomplete', 'ambiguous', 'project-ro
   });
 }
 
-for (const store of ['engram', 'both']) test(`off profile transition reasks only incompatible ${store} plus missing fields`, async t => {
+for (const fault of ['conflict', 'ended', 'incomplete', 'ambiguous', 'project-root', 'health', 'race', 'ended-race', 'unknown-missing']) {
+  test(`PF-3: configured ${fault} bootstrap failure blocks native start without selecting local`, async t => {
+    transport(t, fault);
+    const settings = defaultSettings();
+    settings.engram = { endpoint: 'http://127.0.0.1:43210' };
+    settings.profiles.default.answers = { ...answers };
+    let starts = 0;
+    const gate = new NativeIntake({ status: () => ({ state: 'not-started' }), block() {}, async start() { starts++; } },
+      { async intake() { return 'native-user'; } }, settings);
+    await assert.rejects(gate.start({ requirements: 'Actual objective.' }, runtime, 'native-message'));
+    const status = gate.status(runtime.sessionID);
+    assert.equal(status.state, 'blocked');
+    assert.equal(status.memory, 'enabled');
+    assert.equal(status.storage, undefined, 'no successful backend activation is fabricated');
+    assert.equal(status.question, undefined);
+    assert.equal(starts, 0);
+  });
+}
+
+for (const store of ['engram', 'both']) test(`off profile transition ignores deprecated ${store} and asks only missing user fields`, async t => {
   t.mock.method(globalThis, 'fetch', () => assert.fail('Off fetched'));
   const settings = defaultSettings();
   settings.profiles.default.answers = { ...answers, artifactStore: store };
@@ -76,9 +95,8 @@ for (const store of ['engram', 'both']) test(`off profile transition reasks only
   const gate = new NativeIntake({ status: () => ({ state: 'not-started' }) }, { intake: async () => 'actual-user' }, settings);
   const status = await gate.start({ requirements: 'User request' }, runtime, 'actual-message');
   assert.equal(status.memory, 'off');
-  assert.match(status.notice, /requires optional Engram.*profile is unchanged/);
-  assert.deepEqual(status.question.questions.map(q => q.header), ['Artefactos', 'Resumen', 'Notas']);
-  assert.deepEqual(status.question.questions[0].options.map(q => q.label), ['OpenSpec', 'Ninguno']);
+  assert.equal(status.storage.backend, 'local');
+  assert.deepEqual(status.question.questions.map(q => q.header), ['Resumen', 'Notas']);
   assert.deepEqual(settings, original);
 });
 

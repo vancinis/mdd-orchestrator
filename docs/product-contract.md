@@ -40,16 +40,21 @@ and plan match, actual checks and material limits. Internal IDs and receipts sta
 This is original MDD code/instructions using traceability patterns, not imported Gentle AI
 SDD/RDD runtime, commands, dependencies or copied gate text.
 
-The four preflight questions preserve their original order and option meanings. Field names and case-sensitive tokens below are the executable interface. A legacy fifth field, `complexity`, is still accepted on input (saved profiles, kernel requests) for backward compatibility, but it is never asked: judging complexity belongs to the risk assessment after exploration, not this intake.
+New native preflight asks only missing certainty, mode and summary, in that order, plus relevant
+doubts and the optional note. Storage is automatically resolved, not a user question. The complete
+four-field resolved-answer schema below remains compatible with standalone/kernel callers and
+old saved runs. Legacy `complexity` is accepted but ignored; risk judges complexity after exploration.
 
 | # | Question / field | Options in order: label → token | What uses it |
 |---|---|---|---|
 | 1 | Requirements certainty / `certainty` | Very sure → `very-sure`; Somewhat sure → `somewhat-sure`; Not sure → `not-sure` | `mdd-risk` receives it as the user's own statement of how clear the requirements are and weighs it beside the exploration findings; it never selects a route by itself |
-| 2 | Workflow artifact storage / `artifactStore` | Engram → `engram`; OpenSpec → `openspec`; Engram + OpenSpec → `both`; None → `none` | Where phase artifacts are stored |
+| Resolved only | Workflow artifact storage / `artifactStore` | New native: `engram` or `local`. Legacy: `engram`, `openspec`, `both`, `none`, `local` | Frozen backend for artifacts/progress; never a new preflight question |
 | 3 | Phase advancement / `mode` | Interactive (ask each phase) → `interactive`; Automatic (advance) → `automatic` | Whether each later phase waits for an approval |
 | 4 | Phase summary level / `summary` | Detailed → `detailed`; Medium → `medium`; Low → `low` | Which report sections are shown |
 
-All four answers are required. There are no invented answer defaults. All native phases use selected artifact storage, and reports reflect grounded current-phase evidence. No answer is scored: there are no weights, no threshold and no score.
+All four resolved values remain required by standalone APIs. Native intake resolves storage from
+settings and reuses accepted mode/summary before profile defaults; any missing user field is asked,
+never invented. Reports reflect grounded current-phase evidence. No answer is scored.
 
 ## 2. Approved routing policy
 
@@ -166,8 +171,8 @@ reusable same-parent, exact-worktree-bound preferences, persisted locally across
 Current accepted choices win over session preferences, which win over the frozen startup profile;
 missing fields require a question. Preferences never replay approval authority or write global
 settings, and another parent (including a transfer target) inherits no source defaults.
-Explicit reruns still ask every field after confirmation. Material changes require the same fresh
-scope confirmation but retain applied preferences/storage, refresh objective certainty (configured
+Explicit reruns ask all three user fields after confirmation, never storage. Material changes require
+the same fresh scope confirmation but retain applied preferences, refresh objective certainty (configured
 profile certainty may supply it), and discard old context/doubts rather than repeating preferences.
 Same-objective continuation, phase reset, rework and context edits retain certainty. Rejection or
 cancellation preserves defaults and the current plan; stale/unapplied answers cannot publish them.
@@ -178,9 +183,18 @@ Stable explicit inputs and versioned routing are implemented here. Any future au
 
 ### Engram and workflow artifact storage
 
-**Engram installation and use are optional.** Absent `engram` settings mean memory is off, not a setup failure or degraded run. Native identity, approvals, scope, acceptance, commands and local progress guards remain enforced. With memory off, preflight offers OpenSpec then None. An incompatible saved Engram/Both choice is explained and reasked alongside other missing fields without changing the stored profile. With an opted-in backend all four choices remain available. Enabled memory persists compact intent/result receipts independently of artifact selection; `none` retains full artifacts only in the live run. An unavailable opted-in backend blocks rather than silently disabling memory.
+**Engram installation and use are optional.** New native runs automatically select Engram only
+after configured project/session binding succeeds; absent/disabled integration selects complete local
+TaskStore persistence at `.mdd/tasks/<safe-objective-slug>-<run-UUID>/` under the repository anchor.
+Configured failures block while remaining enabled, never silently select local or claim a save succeeded.
+Ambient MCP tools activate nothing. Legacy profile storage choices are parseable/deprecated but cannot
+override new-run resolution. Backend and local location appear in `mdd_status.storage`; doctor explains
+resolution without activation. Existing runs restore/transfer their pinned backend without migration.
+Pending historical question vectors remain frozen and recovery-blocked until explicit recovery/discard;
+their old labels and unapplied answers are never shifted into the new question schema or replayed as consent.
 
-OpenSpec is used only when requested; no automatic folders are authorized. The user approved building this iteration directly without SDD phases or artifacts. Future high-route phase names do not authorize an SDD development process for this project.
+OpenSpec remains a legacy reader/backend, not a routine choice for new native runs. Automatic local
+task directories preserve evidence only; they authorize no implementation, SDD process or native approval.
 
 ### Phase reporting
 

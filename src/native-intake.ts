@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { EngramHttp, KnowledgeWriteUnknownError, LESSON_TITLE_PREFIX, mddDataRoot } from './engram-http.js';
 import { KNOWLEDGE_NOTE, captureKnowledgeDependencies, knowledgeFreshness, knowledgeObservation, knowledgeSummary, parseKnowledgeQuery, parseKnowledgeRequest, queryKnowledge, selectKnowledge } from './project-knowledge.js';
@@ -74,6 +75,7 @@ type Intake = {
 export const APPROVAL_LABELS = Object.freeze({ proceed: 'Continuar', pause: 'Pausar', detail: 'Obtener un resumen más completo de esta fase' });
 export const CHANGE_LABELS = Object.freeze({ confirm: 'Confirmar el cambio', keep: 'Mantener el plan actual' });
 export const CLARIFICATION_LABELS = Object.freeze({ defer: 'Dejar para más adelante', delegate: 'Que decida el agente', nothing: 'Nada que agregar' });
+const CONFIGURED_STORAGE_BLOCK = 'Configured Engram persistence is unconfirmed. No local fallback, automatic retry or advancement is permitted; inspect retained records and request explicit recovery.';
 /** Shown under a clarification so the user sees what depends on the answer before giving it. */
 export const CLARIFICATION_WHY_PREFIX = 'Por qué importa: ';
 /** A clarification header is the short topic the native question shows above it. */
@@ -350,6 +352,15 @@ export class NativeIntake {
     if (this.#sessions.has(runtime.sessionID)) return;
     const status = this.runner.status(runtime.sessionID);
     if (!('workflow' in status)) return;
+    // The runner rebuilds ready tasks from workflow events; restore this negative storage fence
+    // from its sealed checkpoint instead of treating a retry-ready workflow as successful publication.
+    const storageStop = status.workflow.answers.artifactStore === 'engram' ? this.durable.checkpoint?.read(runtime.sessionID)?.checkpoint : undefined;
+    if (storageStop?.version === STABLE_CHECKPOINT_VERSION && storageStop.runID === status.runID &&
+        storageStop.parent === runtime.sessionID && storageStop.data.directory === runtime.directory &&
+        storageStop.data.worktree === runtime.worktree && storageStop.stable.reason === CONFIGURED_STORAGE_BLOCK) {
+      this.runner.block(runtime.sessionID, CONFIGURED_STORAGE_BLOCK);
+      return;
+    }
     const nextAction = status.workflow.nextAction;
     const blockedRisk = nextAction.kind === 'blocked-risk' && status.state === 'blocked';
     const boundary = nextAction.kind === 'execute' && status.state === 'ready';
@@ -454,7 +465,6 @@ export class NativeIntake {
     // Validated at intake so bad context fails here, not later when the first phase is prepared.
     // Only the pair is held: the runner attributes provenance itself when the run is created.
     const context = input.context === undefined ? undefined : (({ label, content }) => ({ label, content }))(runContext(input.context));
-    const engram = this.#settings.engram;
     const pending = !failedTarget && !previous && this.runner.status?.(runtime.sessionID).state !== 'complete' ? await this.inspect.setupPending?.(runtime, requirements, boundedText(messageID, 'native messageID', 256)) : undefined;
     if (pending && pending.requirements !== requirements) throw new Error('The original objective is pending. Resubmit its exact pendingStart arguments, not continuation text. For a different objective, use a fresh parent.');
     this.runner.owner?.(runtime.sessionID);
@@ -490,17 +500,7 @@ export class NativeIntake {
         if (!previous || continued) this.runner.closeForFreshStart?.(runtime.sessionID);
         this.runner.assertFreshStart?.(runtime.sessionID, userID);
       } else if (previous || failedTarget) throw new Error('A fresh native user identity is required for another run.');
-      if (!engram && ['engram', 'both'].includes(entry.known.artifactStore ?? '')) {
-        delete entry.known.artifactStore;
-        entry.notice = 'The saved artifact choice requires optional Engram memory, which is off. Choose a compatible artifact store for this run; the saved profile is unchanged.';
-      }
-      if (engram) {
-        const endpoint = 'endpoint' in engram ? engram.endpoint : await this.#managed!.endpoint();
-        const client = new EngramHttp(endpoint, { id: runtime.sessionID, project: '', directory: runtime.directory });
-        await client.bootstrap();
-        if ('project' in engram && engram.project) entry.notice = 'The deprecated Engram project setting is ignored. Memory is bound to the provider-resolved active workspace; remove project from global settings using mdd config.';
-        entry.memory = { endpoint, project: client.project };
-      }
+      entry.known.artifactStore = await this.#newRunStorage(entry);
       if (entry.state !== 'starting') throw new Error('Intake became uncertain during initialization.');
       if (previous && ['blocked', 'stopped'].includes(previous.state)) this.#releaseIntake(previous);
       const slot = this.#preflightSlot(entry, startup, 'intake');
@@ -753,6 +753,7 @@ export class NativeIntake {
     // workflow at a state with its own native recovery, such as blocked-risk after an exhausted
     // mdd-risk fallback; that recovery is armed here too, not only when the report is accepted.
     try { status = await this.runner.submit(value, runtime); }
+    catch (error) { this.storageFailed(runtime.sessionID); throw error; }
     finally { try { this.phaseRecorded(runtime.sessionID); } catch { /* best effort re-arm; the original outcome still propagates. */ } }
     return entry ? this.status(runtime.sessionID) : status;
   }
@@ -952,14 +953,21 @@ export class NativeIntake {
     const entry = this.#sessions.get(sessionID);
     const status = this.runner.status?.(sessionID) ?? { state: 'not-started' };
     const memory = this.#settings.engram ? 'enabled' : 'off';
+    // A restored run's frozen answers win over today's settings, even when memory is now off.
+    const backend = 'workflow' in status ? status.workflow.answers.artifactStore : entry?.known.artifactStore;
+    const checkpoint = backend === 'local' && 'runID' in status ? this.durable.checkpoint?.read(sessionID)?.checkpoint : undefined;
+    const task = checkpoint?.version === STABLE_CHECKPOINT_VERSION && 'runID' in status && checkpoint.runID === status.runID ? checkpoint.data?.task : undefined;
+    const storage = backend ? { backend, ...(task ? { taskDirectory: join(task.root, '.mdd', 'tasks', task.name) } : {}) } : undefined;
     if (!entry) {
-      if (this.#unresolved(sessionID)) return { ...status, state: 'recovery-blocked', memory, question: undefined, task: undefined,
-        provenance: undefined, questionReceipts: [], reason: 'A native question outcome is unconfirmed. Do not ask again or infer an answer. Reinspect native history before any future restoration; explicit run discard remains available.' };
-      return { ...status, memory, question: undefined, provenance: undefined, questionReceipts: [] };
+      const unresolved = this.#unresolved(sessionID);
+      if (unresolved) return { ...status, state: 'recovery-blocked', memory, storage, question: undefined, task: undefined,
+        provenance: undefined, questionReceipts: [], reason: 'A native question outcome is unconfirmed. Do not ask again or infer an answer. Reinspect native history before any future restoration; explicit run discard remains available.' +
+          (unresolved.slot.kind === 'preflight' ? ' Its frozen preflight field order and any unapplied answer are retained, never interpreted as a new preflight. Explicit run discard permits a fresh intake with automatic storage, without replaying the old answer.' : '') };
+      return { ...status, memory, storage, question: undefined, provenance: undefined, questionReceipts: [] };
     }
     const side = 'contextual' in status && status.contextual;
     const state = entry.state === 'active' || side ? status.state : entry.state;
-    return { ...status, state, memory, ...(entry.reason ? { reason: entry.reason } : {}),
+    return { ...status, state, memory, storage, ...(entry.reason ? { reason: entry.reason } : {}),
       task: (entry.state === 'active' || side) && 'task' in status ? status.task : undefined,
       ...(entry.state !== 'active' && !side ? { next: { kind: entry.state === 'question-ready' ? 'question' : entry.state === 'review-ready' ? 'review' : 'wait', ...(entry.slot?.phase ? { phase: entry.slot.phase } : {}) } } : {}),
       question: entry.state === 'question-ready' && !side ? structuredClone(entry.slot!.args) : undefined,
@@ -1116,6 +1124,7 @@ export class NativeIntake {
             if (defaults.reused) entry.preferenceDefaults = true;
           }
         } else { entry.known = {}; delete entry.preferenceDefaults; }
+        entry.known.artifactStore = await this.#newRunStorage(entry);
         entry.requirements = slot.requirements!; entry.replacing = true;
         const preflight = this.#preflightSlot(entry, [], 're-preflight');
         if (preflight) this.#slot(entry, preflight);
@@ -1248,6 +1257,21 @@ export class NativeIntake {
         ? 'before the next phase is dispatched. Automatic mode needs no approval afterwards.' : 'before the approval is offered.'}`;
       if (old?.callID) this.#persistQuestion(entry, 'settled', undefined, old);
     }
+  }
+
+  /** Configured storage uncertainty is not an actor retry; ordinary report failures still are. */
+  storageFailed(sessionID: string): void {
+    const entry = this.#sessions.get(sessionID);
+    const status = this.runner.status(sessionID);
+    if (!entry || !this.#settings.engram || !('workflow' in status) || status.workflow.answers.artifactStore !== 'engram') return;
+    const artifactUnknown = 'artifactAttempts' in status && status.artifactAttempts?.some(attempt => attempt.backend === 'engram' && attempt.status === 'unknown');
+    const memoryFailure = 'reason' in status && status.reason?.startsWith('Engram');
+    if (!artifactUnknown && !memoryFailure) return;
+    entry.state = 'blocked';
+    entry.reason = CONFIGURED_STORAGE_BLOCK;
+    this.runner.block(sessionID, entry.reason);
+    // Seal the blocked state through existing publication, carrying history unchanged, never new consent.
+    this.#recordConsent(entry);
   }
 
   guardTask(sessionID: string): void {
@@ -1425,7 +1449,7 @@ export class NativeIntake {
    * complete profile still starts at once unless there are genuine doubts. Undefined: nothing to ask.
    */
   #preflightSlot(entry: Intake, startup: Clarification[], tag: 'intake' | 're-preflight'): Slot | undefined {
-    const fields = questionEnvelope(entry.known, !!this.#settings.engram);
+    const fields = questionEnvelope(entry.known);
     entry.clarifications = [...startup, ...(fields.questions.length ? [structuredClone(PREFLIGHT_NOTE)] : [])];
     if (!fields.questions.length && !entry.clarifications.length) return undefined;
     const args: QuestionEnvelope = { questions: [...fields.questions, ...clarificationEnvelope(entry.clarifications).questions] };
@@ -1476,11 +1500,12 @@ export class NativeIntake {
 
   async #startRunner(entry: Intake, selections: unknown, source: NonNullable<Intake['provenance']>['preflight']): Promise<void> {
     const expectedState = entry.state;
-    const engram = entry.memory;
     // Handed over before the run exists, so the record the runner writes at start already carries
     // the guards rather than waiting for the first phase to close.
     this.#recordConsent(entry);
-    const answers = answersFromLabels(entry.known, selections);
+    // Decode the frozen vector first. Even a historical storage answer cannot select a new backend.
+    const answers = { ...answersFromLabels(entry.known, selections), artifactStore: await this.#newRunStorage(entry) };
+    const engram = entry.memory;
     await this.runner.start({ requirements: entry.requirements, preflight: { answers },
       ...(entry.context ? { context: entry.context } : {}),
       ...(entry.exploration ? { exploration: entry.exploration } : {}),
@@ -1509,7 +1534,23 @@ export class NativeIntake {
     if (cached && (cached.directory !== runtime.directory || cached.worktree !== runtime.worktree))
       throw new Error('Session preferences belong to another worktree; no defaults were reused.');
     const choices = this.durable.preferences ? this.durable.preferences.read(runtime) : cached?.choices;
-    return { known: { ...this.#profile.answers, ...choices }, reused: choices !== undefined };
+    const known = { ...this.#profile.answers, ...choices };
+    delete known.artifactStore;
+    return { known, reused: choices !== undefined };
+  }
+
+  /** Only explicit MDD settings activate HTTP memory; configured failures propagate, never fall back. */
+  async #newRunStorage(entry: Intake): Promise<'engram' | 'local'> {
+    const engram = this.#settings.engram;
+    if (!engram) return 'local';
+    if (!entry.memory) {
+      const endpoint = 'endpoint' in engram ? engram.endpoint : await this.#managed!.endpoint();
+      const client = new EngramHttp(endpoint, { id: entry.runtime.sessionID, project: '', directory: entry.runtime.directory });
+      await client.bootstrap();
+      if ('project' in engram && engram.project) entry.notice = 'The deprecated Engram project setting is ignored. Memory is bound to the provider-resolved active workspace; remove project from global settings using mdd config.';
+      entry.memory = { endpoint, project: client.project };
+    }
+    return 'engram';
   }
 
   #defaultSource(entry: Intake): 'startup-profile' | 'session-preference' {

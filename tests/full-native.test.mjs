@@ -636,19 +636,19 @@ test('opt-in Engram project mismatch blocks restoration without rebinding', asyn
   assert.equal(status.task, undefined);
 });
 
-test('opt-in rejected result survives restart as a retry of the same phase', async t => {
+test('automatic local storage fences a rejected result across restart without automatic retry', async t => {
   const f = await fixture(t, { memoryEnabled: false, store: 'none' });
   await assert.rejects(f.phase({ badEnvelope: true }));
   const current = await f.status();
-  assert.equal(current.state, 'ready');
+  assert.equal(current.state, 'blocked');
+  assert.match(current.reason, /Local task publication is incomplete or unknown/);
+  assert.equal(current.task, undefined);
   const resumed = await plugin(f.input);
   const restored = JSON.parse(await resumed.tool.mdd_status.execute({ detail: 'full' }, f.context));
-  assert.equal(restored.state, 'ready');
-  assert.equal(restored.runID, current.runID);
-  assert.equal(restored.phase, 'mdd-plan');
-  assert.equal(restored.attempts, 1);
-  assert.equal(restored.workflow.results.length, 1); // + the exploration every run now starts with
-  assert.equal(restored.task.subagent_type, 'mdd-plan');
+  assert.equal(restored.state, 'recovery-blocked');
+  assert.equal(new CheckpointStore(f.mainRoot).read(f.runtime.sessionID).checkpoint.runID, current.runID, 'the same run remains retained, not resumed');
+  assert.equal(restored.task, undefined);
+  assert.equal(restored.recoverable, true);
 });
 
 test('opt-in malformed completed report restores report-only restatement, not dispatch', async t => {
@@ -770,7 +770,7 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
     // 'Ruta' is the one native route question (3a) that replaces the generic approval at the
     // suggested route's first tail phase; the default answer here keeps the suggested route,
     // exactly like the plain 'Continuar' it stands in for.
-    const labels = { 'Aprobación': 'Continuar', Ruta: 'Continuar con la ruta sugerida', Cambio: 'Confirmar el cambio', Certeza: known.certainty === 'not-sure' ? 'Poco seguro' : known.certainty === 'somewhat-sure' ? 'Algo seguro' : 'Muy seguro', Artefactos: { none: 'Ninguno', openspec: 'OpenSpec', engram: 'Engram', both: 'Ambos' }[store], Modo: mode === 'automatic' ? 'Automático' : 'Interactivo', Resumen: { low: 'Bajo', medium: 'Medio', detailed: 'Detallado' }[known.summary], Notas: 'Nada que agregar' };
+    const labels = { 'Aprobación': 'Continuar', Ruta: 'Continuar con la ruta sugerida', Cambio: 'Confirmar el cambio', Certeza: known.certainty === 'not-sure' ? 'Poco seguro' : known.certainty === 'somewhat-sure' ? 'Algo seguro' : 'Muy seguro', Modo: mode === 'automatic' ? 'Automático' : 'Interactivo', Resumen: { low: 'Bajo', medium: 'Medio', detailed: 'Detallado' }[known.summary], Notas: 'Nada que agregar' };
     const selections = Array.isArray(selection) ? selection : args.questions.map(q => [typeof selection === 'string' ? selection : labels[q.header]]);
     const formatted = args.questions.map((q, i) => `"${q.question}"="${selections[i].join(', ')}"`).join(', ');
     await hooks['tool.execute.after']({ ...call, args }, { title: `Asked ${args.questions.length} question${args.questions.length > 1 ? 's' : ''}`, output: `User has answered your questions: ${formatted}. You can now continue with the user's answers in mind.`, metadata: { answers: selections, truncated: false } });
@@ -1017,6 +1017,54 @@ async function assessedRoute(f, route) {
   return ['mdd-explore', ...tail];
 }
 
+for (const fault of ['', 'permission', 'session', 'readback', 'receipt-readback', 'artifact-permission']) test(`PF-3: configured native Engram activation and publication never fall back (${fault || 'success'})`, async t => {
+  const f = await fixture(t, { start: false, store: 'none', memoryEnabled: true, memoryFault(req, reply) {
+    if (fault === 'permission' && req.url.startsWith('/project/current')) { reply.status = 403; reply.data = { error: 'denied' }; }
+    if (fault === 'session' && req.url.startsWith('/sessions/')) reply.data = { ...reply.data, project: 'foreign-project' };
+    if (fault === 'readback' && req.url.startsWith('/observations/') && reply.data.type === 'mdd-artifact') reply.data = { ...reply.data, content: 'Not the saved artifact.' };
+    if (fault === 'receipt-readback' && req.url.startsWith('/observations/') && reply.data.type === 'workflow' && reply.data.content.includes('agent-evidence')) reply.data = { ...reply.data, content: 'Not the result receipt.' };
+    if (fault === 'artifact-permission' && req.url.startsWith('/observations/') && reply.data.type === 'mdd-artifact') { reply.status = 403; reply.data = { error: 'denied' }; }
+  } });
+  if (['permission', 'session'].includes(fault)) {
+    await assert.rejects(f.hooks.tool.mdd_start.execute({ requirements: f.requirements }, f.context));
+    const status = await f.status();
+    assert.equal(status.state, 'blocked');
+    assert.equal(status.memory, 'enabled');
+    assert.equal(status.storage, undefined);
+    assert.equal(status.question, undefined);
+  } else {
+    await f.hooks.tool.mdd_start.execute({ requirements: f.requirements }, f.context);
+    const started = await f.status();
+    assert.equal(started.storage.backend, 'engram', 'deprecated none profile does not override configured Engram');
+    assert.equal(started.storage.taskDirectory, undefined);
+    if (['readback', 'receipt-readback', 'artifact-permission'].includes(fault)) {
+      await assert.rejects(f.phase({ only: true }));
+      const failed = await f.status();
+      assert.equal(failed.state, 'blocked');
+      assert.equal(failed.memory, 'enabled');
+      assert.equal(failed.storage.backend, 'engram');
+      assert.equal(failed.task, undefined);
+      assert.match(failed.reason, /Configured Engram persistence is unconfirmed/);
+      const resumed = await plugin(f.input);
+      const held = JSON.parse(await resumed.tool.mdd_status.execute({ detail: 'full' }, f.context));
+      assert.ok(['blocked', 'recovery-blocked'].includes(held.state), `configured uncertainty must remain blocked after restart: ${held.state}`);
+      assert.equal(held.task, undefined);
+      assert.equal(held.memory, 'enabled');
+      assert.notEqual(held.storage?.backend, 'local');
+      const retried = JSON.parse(await resumed.tool.mdd_reset.execute({ scope: 'phase' }, f.context));
+      assert.equal(retried.state, 'ready', 'explicit recovery clears the durable storage stop without changing backend');
+      const afterReset = JSON.parse(await resumed.tool.mdd_status.execute({ detail: 'full' }, f.context));
+      assert.equal(afterReset.state, 'ready');
+      assert.equal(afterReset.storage.backend, 'engram');
+    } else {
+      await f.phase({ only: true });
+      assert.ok(f.writes.some(write => write.type === 'mdd-artifact'));
+      assert.equal((await f.status()).artifacts[0].ref.store, 'engram');
+    }
+  }
+  assert.equal(fs.existsSync(join(f.mainRoot, '.mdd/tasks')), false, 'neither a configured failure nor success activates local fallback');
+});
+
 for (const route of ['low', 'high']) for (const store of ['none', 'openspec']) for (const mode of ['automatic', 'interactive']) {
   test(`memory off complete native route: ${route}/${store}/${mode}, no transport or service`, async t => {
     t.mock.method(globalThis, 'fetch', () => { assert.fail('Memory off fetched'); });
@@ -1033,10 +1081,18 @@ for (const route of ['low', 'high']) for (const store of ['none', 'openspec']) f
     assert.equal(status.state, 'complete');
     assert.equal(status.memory, 'off');
     assert.equal(status.coverage, 100);
+    assert.equal(status.workflow.answers.artifactStore, 'local', 'legacy profile choice cannot override automatic local');
+    assert.equal(status.storage.backend, 'local');
+    assert.equal(status.storage.taskDirectory, join(f.mainRoot, '.mdd', 'tasks', new CheckpointStore(f.mainRoot).read(f.runtime.sessionID).checkpoint.data.task.name));
+    const manifest = JSON.parse(await readFile(join(status.storage.taskDirectory, 'manifest.json'), 'utf8'));
+    assert.equal(manifest.task.runID, status.runID);
+    assert.ok(manifest.records.some(record => record.kind === 'snapshot'));
+    assert.ok(manifest.records.some(record => record.kind === 'artifact' && record.ref.phase === 'mdd-risk'));
     assert.equal(f.writes.length, 0);
     for (const artifact of status.artifacts) {
       assert.equal(artifact.ref.observationID, undefined);
-      if (store === 'openspec') assert.ok(artifact.ref.path);
+      assert.equal(artifact.ref.store, 'local');
+      assert.match(artifact.ref.path, /\.mdd\/tasks\/.*\/artifact-/);
     }
     await f.hooks.event({ event: { type: 'server.instance.disposed', properties: { directory: f.root } } });
   });
@@ -1355,8 +1411,13 @@ test('late result memory failure never completes Verify or retains checks credit
     if (req.method === 'POST' && last?.type === 'workflow') { const body = JSON.parse(last.content); if (body.kind === 'agent-evidence' && body.phase === 'mdd-verify') reply.status = 500; }
   } });
   await f.phase(); await f.phase(); await assert.rejects(f.phase());
-  assert.equal((await f.status()).coverage, 65); assert.equal((await f.status()).state, 'ready');
-  assert.equal((await f.status()).evidence.checks, 'unearned');
+  const failed = await f.status();
+  assert.equal(failed.coverage, 40, 'configured persistence uncertainty withdraws affected evidence conservatively');
+  assert.equal(failed.state, 'blocked');
+  assert.equal(failed.memory, 'enabled');
+  assert.equal(failed.storage.backend, 'engram');
+  assert.equal(failed.task, undefined);
+  assert.equal(failed.evidence.checks, 'invalidated');
 });
 
 for (const fault of ['missing', 'invented', 'drift', 'partial']) {
@@ -1763,9 +1824,9 @@ test('confirmed rerun asks every field once despite complete profile and preserv
   const confirmation = await f.change();
   assert.equal(confirmation.question.questions.length, 1);
   await f.answer();
-  const preflight = await f.status(); assert.equal(preflight.question.questions.length, 5);
+  const preflight = await f.status(); assert.equal(preflight.question.questions.length, 4);
   assert.equal(preflight.runID, old.runID);
-  await f.answer([['Muy seguro'], ['Ninguno'], ['Interactivo'], ['Bajo'], ['Nada que agregar']]);
+  await f.answer([['Muy seguro'], ['Interactivo'], ['Bajo'], ['Nada que agregar']]);
   const next = await f.status();
   assert.notEqual(next.runID, old.runID); assert.equal(next.task.subagent_type, 'mdd-explore');
   assert.equal(next.previousRuns[0].runID, old.runID);
@@ -1805,15 +1866,15 @@ test('PF-1 P1: fresh-start preference publication failure keeps the new objectiv
   assert.match(confirmation.question.questions[0].question, /Implement a separate export objective\./);
   assert.ok(!confirmation.question.questions[0].question.includes(f.requirements), 'redo cannot propose the completed predecessor objective');
   await f.answer();
-  assert.deepEqual((await f.status()).question.questions.map(q => q.header), ['Certeza', 'Artefactos', 'Modo', 'Resumen', 'Notas']);
+  assert.deepEqual((await f.status()).question.questions.map(q => q.header), ['Certeza', 'Modo', 'Resumen', 'Notas']);
 });
 
 for (const restart of [false, true]) test(`session preferences override profile for new intake without changing old answers (restart=${restart})`, async t => {
   const f = await fixture(t, { memoryEnabled: false, worktree: restart });
   f.user('Redo every preflight answer.'); await f.change(); await f.answer();
-  await f.answer([['Poco seguro'], ['Ninguno'], ['Interactivo'], ['Detallado'], ['Nada que agregar']]);
+  await f.answer([['Poco seguro'], ['Interactivo'], ['Detallado'], ['Nada que agregar']]);
   const accepted = await f.status();
-  assert.deepEqual(accepted.previousRuns[0].workflow.answers, answers);
+  assert.deepEqual(accepted.previousRuns[0].workflow.answers, { ...answers, artifactStore: 'local' });
   assert.ok((await readdir(join(f.mainRoot, '.mdd'))).some(name => /^preferences-[a-f0-9]{64}\.json$/.test(name)), 'preferences use the shared repository anchor');
   if (restart) assert.equal(fs.existsSync(join(f.root, '.mdd')), false);
   await f.hooks.tool.mdd_reset.execute({ scope: 'run' }, f.context);
@@ -1833,7 +1894,7 @@ for (const restart of [false, true]) test(`session preferences override profile 
     { info: { ...f.parent[1].info, id: other.messageID, sessionID: other.sessionID }, parts: [] },
   ]);
   const separate = JSON.parse(await hooks.tool.mdd_start.execute({ requirements }, other));
-  assert.deepEqual(separate.workflow.answers, answers, 'another parent inherits neither preferences nor receipts');
+  assert.deepEqual(separate.workflow.answers, { ...answers, artifactStore: 'local' }, 'another parent inherits neither preferences nor receipts');
 });
 test('rejected material change restores exact answers, plan and pending approval', async t => {
   const f = await fixture(t, { mode: 'interactive' }); await f.phase();
@@ -1893,7 +1954,7 @@ test('new task after completion uses profile without a redundant change confirma
 });
 for (const mode of ['automatic', 'interactive']) {
   test(`contextual exploration preserves ${mode} main workflow and approval`, async t => {
-    const f = await fixture(t, { mode, store: 'both' }); await f.phase();
+    const f = await fixture(t, { mode, store: 'both', memoryEnabled: false }); await f.phase();
     const old = await f.status();
     await f.hooks.tool.mdd_contextual_explore.execute({ purpose: 'Inspect integration uncertainty without changing the plan.' }, f.context);
     const side = await f.status(); assert.equal(side.contextual, true); assert.equal(side.task.subagent_type, 'mdd-explore'); assert.equal(side.question, undefined);
@@ -1901,7 +1962,7 @@ for (const mode of ['automatic', 'interactive']) {
     await f.phase({ concerns: [{ category: 'integrations', evidence: 'An integration assumption needs inspection.', impact: 'May affect a later explicit scope request.' }] });
     const current = await f.status();
     assert.deepEqual(current.workflow, old.workflow); assert.deepEqual(current.evidence, old.evidence); assert.deepEqual(current.acceptance, old.acceptance);
-    assert.equal(current.contexts.length, 1); assert.match(current.contexts[0].artifact.ref.path, /explorations/);
+    assert.equal(current.contexts.length, 1); assert.match(current.contexts[0].artifact.ref.path, /\.mdd\/tasks\/.*\/artifact-/);
     assert.equal(current.contexts[0].artifact.ref.explorationID, current.contexts[0].explorationID);
     assert.deepEqual(current.question, old.question);
     if (current.question) await f.answer();
@@ -2030,17 +2091,15 @@ test('a result that names no session is charged to nobody rather than to a guess
   const f = await fixture(t, { memoryEnabled: false });
   await assert.rejects(f.phase({ badEnvelope: true, spent: { tokens: { input: 900, output: 120, reasoning: 0, cache: { read: 0, write: 0 } }, cost: 0.004 } }));
   const rows = (await readFile(join(f.root, '.mdd/telemetry.jsonl'), 'utf8')).trim().split('\n').map(row => JSON.parse(row));
-  const ended = rows.findLast(row => row.event === 'phase-end');
-  assert.equal(ended.outcome, 'blocked');
-  assert.equal(ended.failure, 'result-rejected');
-  // The envelope that would name the child is exactly what was malformed, so the spending is
-  // real but unattributable. Recording it against this phase anyway would be inventing evidence.
-  assert.equal(ended.usage, undefined);
-  assert.equal(rows.findLast(row => row.event === 'retry').failure, 'result-rejected');
+  // Automatic local storage fences this unconfirmed result before any phase-end/retry event.
+  // Spending without a valid native envelope remains unattributable, never invented evidence.
+  assert.equal(rows.some(row => row.event === 'phase-end' && row.phase === 'mdd-plan'), false);
+  assert.equal(rows.some(row => row.event === 'retry' && row.phase === 'mdd-plan'), false);
+  const status = await f.status();
+  assert.equal(status.state, 'blocked');
+  assert.equal(status.task, undefined);
+  assert.match(status.reason, /Local task publication is incomplete or unknown/);
   const rollup = JSON.parse(await readFile(join(f.root, '.mdd/telemetry-rollup.json'), 'utf8'));
-  assert.equal(rollup.failures['result-rejected'], 1);
-  assert.equal(rollup.phases['mdd-plan'].retries, 1);
-  assert.equal(rollup.phases['mdd-plan'].blocked, 1);
   assert.equal(rollup.phases['mdd-plan'].measured, 0);
 });
 
@@ -2236,7 +2295,7 @@ test('a new conversation finds a run recorded by another one and can take it ove
 test('transfer keeps held run choices but does not inherit source session preference defaults', async t => {
   const f = await fixture(t, { memoryEnabled: false });
   f.user('Redo the preflight.'); await f.change(); await f.answer();
-  await f.answer([['Muy seguro'], ['Ninguno'], ['Automático'], ['Detallado'], ['Nada que agregar']]);
+  await f.answer([['Muy seguro'], ['Automático'], ['Detallado'], ['Nada que agregar']]);
   await f.phase();
   const live = await f.status();
   const other = 'ses_transfer_preferences';
@@ -2501,7 +2560,7 @@ test('a large history keeps mdd_status within budget and the task byte-identical
   // A superseded run leaves its own history and contexts behind in previousRuns.
   f.user('Please rerun the preflight for this task.');
   await f.change(); await f.answer();
-  await f.answer([['Poco seguro'], ['Ninguno'], ['Automático'], ['Bajo'], ['Nada que agregar']]);
+  await f.answer([['Poco seguro'], ['Automático'], ['Bajo'], ['Nada que agregar']]);
   f.visited.length = 0;
   await f.hooks.tool.mdd_contextual_explore.execute({ purpose: 'Inspect the current feature boundary.' }, f.context);
   await f.phase({ large: true });
@@ -3320,7 +3379,7 @@ test('audit D2: a pending re-preflight question on an existing run survives rest
   await f.change();
   await f.answer();
   const preflight = await f.status();
-  assert.equal(preflight.question.questions.length, 5);
+  assert.equal(preflight.question.questions.length, 4);
   await dispatchQuestion(f, 'preflight-before-restart', structuredClone(preflight.question));
   const resumed = await plugin(f.input);
   assert.equal(JSON.parse(await resumed.tool.mdd_status.execute({}, f.context)).state, 'recovery-blocked');

@@ -8,6 +8,7 @@ import { questionEnvelope } from './preflight.js';
 import { scopedPath } from './safe-paths.js';
 import { installationPaths } from './installation-paths.js';
 import { loadGlobalSettings } from './global-settings.js';
+import { mddDataRoot } from './engram-http.js';
 
 type Check = { check: string; status: 'ok' | 'action' | 'info'; message: string };
 export function isSupportedNodeVersion(version: string): boolean {
@@ -63,12 +64,12 @@ export async function doctor(cwd: string, probeMemory = true): Promise<{ ready: 
   try {
     const settings = loadGlobalSettings();
     const answers = { ...settings.profiles[settings.activeProfile]!.answers };
-    const incompatible = !settings.engram && ['engram', 'both'].includes(answers.artifactStore ?? '');
-    if (incompatible) delete answers.artifactStore;
-    const missing = questionEnvelope(answers, !!settings.engram).questions.length;
+    const missing = questionEnvelope(answers).questions.length;
     checks.push({ check: 'profile', status: 'ok', message: missing ? `Se van a preguntar juntos ${missing} campo(s) del preflight sin responder. No se asumió ningún valor por defecto.` : 'Perfil completo: no hacen falta preguntas de preflight.' });
-    if (incompatible) checks.push({ check: 'artifact-choice', status: 'info', message: 'La opción de artefactos guardada necesita la memoria opcional. El preflight nativo va a pedir una opción compatible sin tocar el perfil guardado.' });
-    if (!settings.engram) checks.push({ check: 'engram', status: 'ok', message: 'La memoria opcional está apagada. Quedan disponibles los artefactos OpenSpec y Ninguno.' });
+    checks.push({ check: 'storage', status: 'info', message: settings.engram
+      ? 'Runs nuevos: Engram automático tras validar el vínculo nativo de proyecto y sesión; un fallo bloquea, sin respaldo local. Los runs anteriores conservan su backend.'
+      : `Runs nuevos: almacenamiento local completo en ${join(mddDataRoot(cwd), '.mdd/tasks/<nombre-UUID>')}. El directorio efectivo se muestra en mdd_status.storage.taskDirectory; los runs anteriores conservan su backend.` });
+    if (!settings.engram) checks.push({ check: 'engram', status: 'ok', message: 'La memoria opcional está apagada. Los runs nuevos guardan artefactos y progreso completos localmente.' });
     else if ('mode' in settings.engram) {
       const { binary, dataDirectory } = settings.engram;
       check('engram', () => {
