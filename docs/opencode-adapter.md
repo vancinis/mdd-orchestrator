@@ -579,6 +579,13 @@ it is not exported as a model-callable tool. Kernel/proof CLI shapes remain unch
 
 ### Coordinator-provided context
 
+Every main phase, Risk assessment and standalone investigation receives a **Workspace binding**
+with the exact runtime `directory` and host `worktree`, encoded separately as JSON. The directory
+is the active checkout; the host worktree may differ. Installed skill paths, predecessor artifacts
+and coordinator context cannot override it. The shared formatter also feeds report-restatement
+briefs, retries, native fallback, contextual investigations and scoped-worker prompts. This is
+orientation only: it adds no scope, permission or approval and widens no worker footprint.
+
 The coordinator often holds material the phases need before any of them runs: the body of the
 issue the user named, a thread, an earlier decision. It hands that material to MDD, optional
 `context` on `mdd_start` or `mdd_context({ label, content })` at any later point, and **MDD**
@@ -593,6 +600,19 @@ Context is data, never authority. It cannot replace `requirements`, which still 
 exact native user text proven by `inspector.intake`; it grants no approval and changes no
 preflight answer, route or evidence flag. Provenance is explicit: every entry is recorded
 as `source: "coordinator"`, distinct from `provenance.requirements: "native-user"`.
+
+Use this existing channel for pertinent **observed negative capability facts**, not automatic
+detection: identify the capability/provider or index location, checkout/environment identity,
+observed failure, fallback and concrete invalidation conditions. For example, a CodeGraph query
+reported no index at the current checkout's `.codegraph`; native read/grep remains a fallback.
+Avoid repeating that unchanged failed availability probe, but reconsider after a restart,
+identity/environment change, a new index or contrary current evidence. The observation is advisory,
+not a blanket tool ban or enforced expiry. Do not inspect global credentials or create a cache.
+Append a concise superseding observation at an idle boundary when the facts change; existing
+entries remain accumulated. Apply/Verify still inspect current sources and run applicable checks,
+and project-knowledge freshness remains unchanged. Standalone receives workspace binding but no
+new observation storage channel. These instructions describe protocol duties, not measured live
+actor compliance or token savings.
 
 Entries accumulate rather than replace, because useful context also appears after the run starts.
 A single entry is bounded to **96,000 UTF-8 bytes** — the same `PHASE_CONTEXT_MAX_BYTES` ceiling

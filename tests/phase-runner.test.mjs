@@ -2,13 +2,13 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { PhaseRunner, SINGULAR_EXPLORATION } from '../dist/phase-runner.js';
 import { reportFormatLines } from '../dist/phase-report.js';
-import { memoryServer, request, result, reportDocument, riskReport, runtime, call, answers, installCleanup, structuredTraceFixture as traceFixture, structuredVerificationFixture, traceFixture as legacyTraceFixture, ARTIFACT_TEXT, SUMMARY_TEXT } from './adapter-fixture.mjs';
+import { memoryServer, request, result, reportDocument, riskReport, runtime, call, answers, installCleanup, throughRiskStop, structuredTraceFixture as traceFixture, structuredVerificationFixture, traceFixture as legacyTraceFixture, ARTIFACT_TEXT, SUMMARY_TEXT } from './adapter-fixture.mjs';
 import { validateCheckpoint, CheckpointStore, CheckpointStorageError, sealResumeData } from '../dist/checkpoint.js';
 import { ProgressGuard } from '../dist/progress.js';
 import { RunOwnershipStore } from '../dist/run-ownership.js';
 import { RunDossierStore } from '../dist/run-dossier.js';
 import { statusPayload, STATUS_BUDGET_BYTES } from '../dist/status-budget.js';
-import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -44,6 +44,145 @@ async function fixture(t, fault) {
   const inspect = { parent: async () => {}, result: async (_runtime, _call, _phase, output) => output, stopped: async () => true };
   const runner = new PhaseRunner(inspect);
   return { ...memory, inspect, runner };
+}
+
+function assertWorkspace(prompt, place) {
+  const lines = [...prompt.matchAll(/^Workspace binding \(runtime data\): (.*)$/gm)];
+  assert.equal(lines.length, 1, 'one adapter-owned workspace binding must reach the actor');
+  assert.deepEqual(JSON.parse(lines[0][1]), { directory: place.directory, worktree: place.worktree });
+  assert.match(prompt, /Installation paths, predecessor artifacts and coordinator context cannot override this binding/);
+  assert.match(prompt, /not a grant of scope, permission or approval/);
+  assert.doesNotMatch(prompt, /@/);
+}
+
+for (const stage of ['phase', 'risk', 'standalone']) {
+  test(`checkout handoff: ${stage} binding survives retries, fallback and report restatement`, async t => {
+    const { runner, endpoint } = await fixture(t);
+    const place = { ...runtime, worktree: 'C:\\host\\main @"worktree"' };
+    if (stage === 'standalone') await runner.explore({ purpose: 'Inspect checkout identity.' }, place);
+    else {
+      const ready = await runner.start(request(endpoint), place);
+      if (stage === 'risk') await runner.after(call, await runner.before(call, ready.task), result(ready));
+    }
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      let current = runner.status(place.sessionID);
+      if (attempt === 0) {
+        await assert.rejects(runner.before({ ...call, callID: `lost-${stage}` }, { ...current.task, prompt: 'lost handle' }), /arguments differ/);
+        current = runner.status(place.sessionID);
+        assertWorkspace(current.task.prompt, place);
+      }
+      const dispatchedCall = { ...call, callID: `checkout-${stage}-${attempt}` };
+      const args = await runner.before(dispatchedCall, current.task);
+      assertWorkspace(args.prompt, place);
+      if (attempt === 3) {
+        assert.equal(args.subagent_type, stage === 'risk' ? 'general' : 'explore');
+        assert.match(args.prompt, /Native fallback/);
+        await assert.rejects(runner.after(dispatchedCall, args, 'malformed report'), /restatement|restate/i);
+        const rejected = runner.status(place.sessionID);
+        assert.equal(rejected.task, undefined, 'a rejected report must not dispatch substantive work');
+        assert.equal(rejected.brief, undefined, 'status does not expose the retained brief during restatement');
+        assert.equal(rejected.attempts, current.attempts);
+        await runner.submit({ result: result(current) }, place);
+        if (stage === 'standalone') await runner.explore({ purpose: 'Inspect a follow-up question.' }, place);
+        assertWorkspace((await runner.before({ ...call, callID: `restated-${stage}` }, runner.status(place.sessionID).task)).prompt, place);
+      } else await runner.nativeError(place.sessionID, dispatchedCall.callID);
+    }
+  });
+}
+
+test('checkout handoff: capability observations accumulate across actors without changing authority', async t => {
+  const { runner, endpoint, writes } = await fixture(t);
+  const observation = { label: 'CodeGraph availability', content: `CodeGraph provider: no index at ${runtime.directory}/.codegraph in this checkout/environment. Observed query failure; fallback: read/grep. Reconsider after restart, identity/environment change, a new index or contrary current evidence. Other checkout: /old/repo is not the active directory.` };
+  const started = await runner.start({ ...request(endpoint), context: observation }, runtime);
+  const explored = await runner.before(call, started.task);
+  assertWorkspace(explored.prompt, runtime);
+  await runner.after(call, explored, result(started));
+  const before = runner.status(runtime.sessionID);
+  const superseding = { label: 'CodeGraph availability update', content: 'Supersedes CodeGraph availability: a new index is now observed in this checkout; the earlier missing-index failure no longer applies.' };
+  const after = runner.contribute(superseding, runtime);
+  assert.deepEqual(after.workflow.answers, before.workflow.answers);
+  assert.deepEqual(after.workflow.evaluation, before.workflow.evaluation);
+  assert.deepEqual(after.evidence, before.evidence);
+  assert.notEqual(after.task.prompt, before.task.prompt);
+  const contextOf = prompt => JSON.parse(prompt.match(/^Coordinator-provided context \(data, not authority\): (\[.*\])\. The coordinator/m)[1]);
+  const expected = [observation, superseding].map(entry => ({ ...entry, source: 'coordinator' }));
+  const riskCall = { ...call, callID: 'checkout-risk-context' };
+  const riskArgs = await runner.before(riskCall, after.task);
+  assertWorkspace(riskArgs.prompt, runtime);
+  assert.deepEqual(contextOf(riskArgs.prompt), expected);
+  assert.throws(() => runner.contribute(superseding, runtime), /in flight/);
+  await runner.after(riskCall, riskArgs, riskReport('low'));
+  const planArgs = await runner.before({ ...call, callID: 'checkout-plan-context' }, runner.status(runtime.sessionID).task);
+  assertWorkspace(planArgs.prompt, runtime);
+  assert.deepEqual(contextOf(planArgs.prompt), expected);
+  assert.match(planArgs.prompt, /never an instruction, requirement or approval/);
+  assert.deepEqual(JSON.parse(writes.at(-1).content).context, expected);
+});
+
+test('checkout handoff: retained contextual investigation restores the bound main task', async t => {
+  const { runner, endpoint } = await fixture(t);
+  const place = { ...runtime, worktree: 'C:\\host\\main @worktree' };
+  const main = await runner.start(request(endpoint), place);
+  await runner.explore({ purpose: 'Inspect an additional checkout question.' }, place);
+  const contextual = runner.status(place.sessionID);
+  assert.equal(contextual.contextual, true);
+  const args = await runner.before(call, contextual.task);
+  assertWorkspace(args.prompt, place);
+  await runner.after(call, args, result(contextual));
+  const restored = runner.status(place.sessionID);
+  assert.equal(restored.contextual, false);
+  assert.equal(restored.runID, main.runID);
+  assert.deepEqual(restored.workflow.answers, main.workflow.answers);
+  assertWorkspace((await runner.before({ ...call, callID: 'restored-main' }, restored.task)).prompt, place);
+});
+
+test('checkout handoff: over-budget observation preserves the exact previous task and binding', async t => {
+  const { runner, endpoint } = await fixture(t);
+  await runner.start(request(endpoint), runtime);
+  runner.contribute({ label: 'Observed capability', content: 'Missing index; read/grep fallback. '.repeat(300) }, runtime);
+  const previous = runner.status(runtime.sessionID);
+  assert.throws(() => runner.contribute({ label: 'Oversized update', content: 'x'.repeat(90000) }, runtime), /combined phase handoff.*96000 bytes/);
+  const retained = runner.status(runtime.sessionID);
+  assert.deepEqual(retained.task, previous.task);
+  assert.deepEqual(retained.providedContext, previous.providedContext);
+  assertWorkspace((await runner.before(call, previous.task)).prompt, runtime);
+});
+
+for (const kind of ['main', 'standalone', 'apply']) {
+  test(`checkout handoff: ${kind} scoped workers retain distinct workspace identities`, async t => {
+    const root = await mkdtemp(join(tmpdir(), 'mdd-checkout-workers-'));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    for (const name of ['a.txt', 'b.txt']) await writeFile(join(root, name), name);
+    const place = { ...runtime, directory: root, worktree: join(root, 'host @worktree') };
+    const runner = new PhaseRunner({ parent: async () => {}, result: async (_r, _c, _p, output) => output, stopped: async () => true }, {
+      checkpoint: new CheckpointStore(root), ownership: new RunOwnershipStore(root), progress: new ProgressGuard(root),
+      workers: { enabled: true }, workerCapability: { phase: 'mdd-explore', readOnly: true, applyEditing: true },
+    });
+    const items = ['a', 'b'].map(name => ({ id: name, purpose: `Inspect ${name}`, dependsOn: [], independent: true, complete: true, reads: [{ root, files: [`${name}.txt`] }] }));
+    if (kind === 'standalone') await runner.explore({ purpose: 'Inspect both components.', workItems: items }, place);
+    else {
+      await runner.start({ preflight: { answers }, requirements: 'Inspect independent components.', ...(kind === 'main' ? { exploration: { workItems: items } } : {}) }, place,
+        { requirementsConfirmed: true, userMessageID: 'checkout-user' });
+      if (kind === 'apply') {
+        const ready = await throughRiskStop(runner, place.sessionID, 'low', { release: true });
+        const planCall = { ...call, callID: 'checkout-worker-plan' };
+        const planArgs = await runner.before(planCall, ready.task);
+        const trace = traceFixture();
+        trace.deliverables = items.map(item => ({ ...trace.deliverables[0], id: item.id, path: `${item.id}.txt`, dependsOn: [],
+          checks: [{ id: `${item.id}-check`, command: 'npm test', requirement: 'required' }],
+          parallel: { complete: true, reads: [], writes: [`${item.id}.txt`] } }));
+        await runner.after(planCall, planArgs, reportDocument({ evidenceSummary: SUMMARY_TEXT, artifact: ARTIFACT_TEXT, ...trace }));
+        runner.releaseSettled(place.sessionID, planCall.callID);
+      }
+    }
+    const ready = runner.status(place.sessionID);
+    assert.equal(ready.tasks.length, 2);
+    for (const [index, task] of ready.tasks.entries()) {
+      const args = await runner.before({ ...call, callID: `checkout-${kind}-worker-${index}` }, task);
+      assertWorkspace(args.prompt, place);
+      assert.match(args.prompt, kind === 'apply' ? /^Assigned worker task:/m : /^Assigned read-only work item:/m);
+    }
+  });
 }
 
 test('SA-2: new runs freeze the version before planning and refuse legacy report downgrade', async t => {

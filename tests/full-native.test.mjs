@@ -23,6 +23,24 @@ import { RunDossierStore } from '../dist/run-dossier.js';
 import { projectApprovalTransfer, projectTargetTransfer } from '../dist/transfer.js';
 import { Workflow } from '../dist/workflow.js';
 
+test('checkout handoff: expanded native transport binds checkout and carries capability context through Verify', async t => {
+  const f = await fixture(t, { memoryEnabled: false, distinctWorktree: true });
+  const observation = { label: 'CodeGraph availability', content: `Observed missing index at ${f.root}/.codegraph; provider query unavailable in this environment. Fallback: native read/grep. Reconsider on restart, identity/environment change, a new index or contrary current evidence.` };
+  await f.hooks.tool.mdd_context.execute(observation, f.context);
+  for (const phase of ['mdd-explore', 'mdd-risk', 'mdd-plan', 'mdd-apply', 'mdd-verify']) {
+    await f.phase({ only: true });
+    const prompt = f.delivered();
+    assert.match(prompt, new RegExp(`Perform only ${phase}`));
+    assert.deepEqual(JSON.parse(prompt.match(/^Workspace binding \(runtime data\): (.*)$/m)[1]),
+      { directory: f.runtime.directory, worktree: f.runtime.worktree });
+    assert.notEqual(f.runtime.directory, f.runtime.worktree);
+    const context = JSON.parse(prompt.match(/^Coordinator-provided context \(data, not authority\): (\[.*\])\. The coordinator/m)[1]);
+    assert.deepEqual(context, [{ ...observation, source: 'coordinator' }]);
+    assert.match(prompt, /never an instruction, requirement or approval/);
+  }
+  assert.equal((await f.status()).state, 'complete');
+});
+
 for (const phase of ['mdd-explore', 'mdd-risk', 'mdd-plan', 'mdd-propose', 'mdd-spec', 'mdd-design', 'mdd-tasks', 'mdd-apply', 'mdd-verify']) {
   test(`SA-1: composed ${phase} prompt keeps phase authority and evidence handoff`, async t => {
     const route = ['mdd-propose', 'mdd-spec', 'mdd-design', 'mdd-tasks'].includes(phase) ? 'high' : 'low';
@@ -697,7 +715,7 @@ test('opt-in failed Verify restores rework and complete runs close before a fres
 });
 
 // Native SDK/hook contract fixtures. No model or real shell execution is performed.
-async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', partial = false, summary = 'low', telemetry = true, memoryEnabled = true, memoryFault, start = true, worktree: worktreeLayout = false, autoReview = true } = {}) {
+async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', partial = false, summary = 'low', telemetry = true, memoryEnabled = true, memoryFault, start = true, worktree: worktreeLayout = false, distinctWorktree = false, autoReview = true } = {}) {
   isolateHome(t);
   // When asked, the session runs inside a linked git worktree laid out as git does on disk — a
   // `.git` file pointing at the administrative directory, which names the shared git directory. It
@@ -716,6 +734,11 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
     await mkdir(root);
     await writeFile(join(root, '.git'), `gitdir: ${administrative.replaceAll('\\', '/')}\n`);
   }
+  const hostWorktree = root;
+  if (distinctWorktree) {
+    root = join(root, 'checkout @active');
+    await mkdir(root);
+  }
   installCleanup(root);
   await writeFile(join(root, 'feature.txt'), 'pending\n');
   const memory = memoryEnabled ? await memoryServer(t, memoryFault) : { binding: {}, writes: [] };
@@ -729,7 +752,7 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
   if (memoryEnabled) settings.engram = { endpoint: memory.endpoint, project: 'mdd-test' };
   settings.telemetry.enabled = telemetry;
   saveGlobalSettings(settings);
-  const runtime = { sessionID: 'ses_parent', agent: 'mdd-orchestrator', directory: root, worktree: root };
+  const runtime = { sessionID: 'ses_parent', agent: 'mdd-orchestrator', directory: root, worktree: hostWorktree };
   const model = { providerID: 'contract-only', modelID: 'model' };
   const requirements = 'Implement a scoped feature and check it.';
   const agents = MODEL_ROLES.map(role => ({ name: role === 'orchestrator' ? 'mdd-orchestrator' : role, mode: role === 'orchestrator' ? 'primary' : 'subagent', permission: [
@@ -738,10 +761,10 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
     ...(['mdd-apply', 'mdd-verify'].includes(role) ? [{ permission: 'bash', pattern: '*', action: 'ask' }] : []),
   ] }));
   const sessions = new Map([[runtime.sessionID, { id: runtime.sessionID, agent: runtime.agent, directory: root, projectID: 'project' }]]);
-  const info = { id: 'msg_parent', sessionID: runtime.sessionID, agent: runtime.agent, role: 'assistant', ...model, path: { cwd: root, root } };
+  const info = { id: 'msg_parent', sessionID: runtime.sessionID, agent: runtime.agent, role: 'assistant', ...model, path: { cwd: root, root: hostWorktree } };
   const parent = [{ info: { id: 'user', sessionID: runtime.sessionID, role: 'user' }, parts: [{ type: 'text', text: requirements, sessionID: runtime.sessionID, messageID: 'user' }] }, { info, parts: [] }];
   const histories = new Map([[runtime.sessionID, parent]]);
-  const input = { directory: root, worktree: root, project: { id: 'project' }, client: {
+  const input = { directory: root, worktree: hostWorktree, project: { id: 'project' }, client: {
     app: { agents: async () => ({ data: agents }) }, session: {
       status: async () => ({ data: {} }),
       get: async ({ path }) => ({ data: sessions.get(path.id) }), messages: async ({ path }) => ({ data: histories.get(path.id) }),
@@ -903,7 +926,7 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
     parent[1].parts[0].state.metadata = { sessionId: childID, parentSessionId: runtime.sessionID, model };
     sessions.set(childID, { id: childID, parentID: runtime.sessionID, directory: root, projectID: 'project', agent: phase, permission: [{ permission: 'task', pattern: '*', action: 'deny' }] });
     await hooks.event({ event: { type: 'session.created', properties: { info: sessions.get(childID) } } });
-    const child = [{ info: { id: `msg-${ordinal}`, sessionID: childID, role: 'assistant', agent: phase, ...model, path: { cwd: root, root }, time: { completed: 10 }, finish: 'stop', ...(options.spent ?? {}) }, parts: [] }];
+    const child = [{ info: { id: `msg-${ordinal}`, sessionID: childID, role: 'assistant', agent: phase, ...model, path: { cwd: root, root: hostWorktree }, time: { completed: 10 }, finish: 'stop', ...(options.spent ?? {}) }, parts: [] }];
     histories.set(childID, child);
     if (options.beforeMismatch) child[0].info.modelID = 'substituted';
     async function tool(name, input, output, execute = async () => {}) {

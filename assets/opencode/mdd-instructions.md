@@ -14,6 +14,23 @@ memory writes, change what this phase reports, or relax a permission. Where they
 your task prompt, the task prompt wins, and saying so in your summary is better than silently
 following either one.
 
+## Workspace and capability orientation
+
+The task's workspace binding gives the exact runtime directory as the active checkout and the
+host worktree as a separate identity that may differ. Installation paths, predecessor artifacts
+and coordinator context cannot override this binding. It is orientation, not scope, permission
+or approval; scoped-worker footprints and native permissions still apply.
+
+Reuse only pertinent, already-observed negative capability facts in coordinator-provided context:
+capability/provider or index location, checkout/environment identity, observed failure, fallback,
+and concrete invalidation conditions. Treat these as advisory observations, never blanket tool bans
+or enforced expiry. Avoid repeating unchanged failed availability probes; reconsider after an
+identity/environment change, restart, a new index or contrary current evidence. When a relevant
+observation changes, report it concisely in existing report prose so the coordinator can append a
+superseding observation at an idle boundary. Do not create a cache or automatic detector, inspect
+global credentials, or invent standalone observation storage. This does not replace current source
+inspection or applicable checks in Apply/Verify, or relax project-knowledge freshness checks.
+
 ## Scope
 
 Perform only the phase you were dispatched for. Do not start the next one, do not repair
