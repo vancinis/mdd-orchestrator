@@ -149,6 +149,32 @@ test('protected intake: model-supplied answers and setup overrides rejected', as
   assert.equal(f.starts(), 0);
 });
 
+test('session preferences: material replacement refreshes only objective certainty and drops old doubts', async t => {
+  const f = await fixture(t, {});
+  f.inspect.intake = async (_runtime, _text, id) => id;
+  const inputs = [];
+  const start = f.runner.start;
+  f.runner.start = async input => { inputs.push(input); await start(input); };
+  await f.gate.start({ requirements: 'Human requirements', context: { label: 'Old context', content: 'Old objective only.' },
+    questions: [{ question: 'Old unresolved detail?', options: [], deferrable: true }] }, runtime, 'original');
+  await f.answer([['Poco seguro'], ['Ninguno'], ['Interactivo'], ['Detallado'], [CLARIFICATION_LABELS.defer], [CLARIFICATION_LABELS.nothing]]);
+  const before = f.workflow().snapshot();
+  await f.gate.changeRequest({ kind: 'material', userText: 'Replace the objective.', requirements: 'A separate objective.' }, runtime, 'replacement');
+  assert.deepEqual(f.workflow().snapshot(), before);
+  await f.answer([[CHANGE_LABELS.confirm]]);
+  const pending = f.gate.status(runtime.sessionID);
+  assert.deepEqual(pending.question.questions.map(q => q.header), ['Certeza', 'Notas']);
+  assert.deepEqual(pending.pendingClarifications, []);
+  assert.deepEqual(pending.clarificationAnswers, []);
+  await f.answer([['Muy seguro'], [CLARIFICATION_LABELS.nothing]]);
+  assert.equal(inputs[1].context, undefined, 'objective-specific context is not carried into replacement');
+  assert.ok(f.gate.status(runtime.sessionID).questionReceipts.some(item => item.answers.some(answer => answer.includes(CLARIFICATION_LABELS.defer))), 'previous answers remain history, not pending doubts');
+  assert.deepEqual(f.workflow().snapshot().answers, { ...answers, mode: 'interactive', summary: 'detailed' });
+  f.pass();
+  assert.equal(f.gate.status(runtime.sessionID).state, 'review-ready');
+  assert.equal(f.workflow().nextAction().kind, 'approve');
+});
+
 test('protected intake: absent Engram is off and asks only supported artifact choices', async t => {
   t.mock.method(globalThis, 'fetch', () => { throw new Error('Memory off must not fetch'); });
   const gate = new NativeIntake({}, { async intake() { return 'native-original'; } }, defaultSettings());
@@ -1362,8 +1388,13 @@ test('written answers: a change confirmation typed into the form stays open and 
   assert.equal(open.state, 'question-ready');
   assert.equal(open.question.questions[0].header, 'Cambio');
   await f.gate.answer({ answers: [{ labels: [CHANGE_LABELS.confirm] }] }, runtime, 'msg_caller');
-  // Confirmed: the single grouped preflight of the new run is what is asked next.
-  assert.deepEqual(f.gate.status(runtime.sessionID).question.questions.map(question => question.header), ['Certeza', 'Artefactos', 'Modo', 'Resumen', 'Notas']);
+  // Fresh typed scope consent replaces the run, not its accepted preference defaults.
+  assert.equal(f.gate.status(runtime.sessionID).question, undefined);
+  assert.equal(f.starts(), 2);
+  assert.equal(f.workflow().snapshot().answers.mode, 'interactive');
+  assert.deepEqual(f.workflow().snapshot().results, []);
+  f.pass();
+  assert.equal(f.workflow().nextAction().kind, 'approve', 'scope consent never approves the next phase');
 });
 
 test('written answers: nothing can be answered when no MDD question waits', async t => {

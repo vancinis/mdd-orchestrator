@@ -22,6 +22,7 @@ import { ProgressGuard } from '../dist/progress.js';
 import { RunDossierStore } from '../dist/run-dossier.js';
 import { projectApprovalTransfer, projectTargetTransfer } from '../dist/transfer.js';
 import { Workflow } from '../dist/workflow.js';
+import { lockIdentity } from '../dist/local-files.js';
 
 for (const phase of ['mdd-explore', 'mdd-risk', 'mdd-plan', 'mdd-propose', 'mdd-spec', 'mdd-design', 'mdd-tasks', 'mdd-apply', 'mdd-verify']) {
   test(`SA-1: composed ${phase} prompt keeps phase authority and evidence handoff`, async t => {
@@ -1534,12 +1535,13 @@ test('SA-3: a new objective still needs latest text and ordinary preflight; arch
   assert.deepEqual((await f.status()).workflow, failed.workflow);
   RunDossierStore.prototype.archiveContinuation = original;
   delete f.settings.profiles.default.answers.mode;
+  delete f.settings.profiles.default.answers.certainty;
   saveGlobalSettings(f.settings);
   const restarted = await plugin(f.input);
   const result = JSON.parse(await restarted.tool.mdd_start.execute({ requirements: f.parent[0].parts[0].text }, f.context));
   assert.equal(result.state, 'question-ready');
   assert.equal(result.task, undefined);
-  assert.equal(result.question.questions[0].header, 'Modo');
+  assert.deepEqual(result.question.questions.map(q => q.header), ['Certeza', 'Notas'], 'new objective certainty is refreshed while applied mode is reused');
   assert.equal(new RunDossierStore(f.root).readContinued(f.runtime.sessionID, failed.runID).results.at(-1).outcome, 'failed');
 });
 
@@ -1773,6 +1775,66 @@ test('confirmed rerun asks every field once despite complete profile and preserv
   assert.equal(f.questions(), 2);
   await assert.rejects(f.change(), /already used by MDD\. A rerun needs a new user message/);
 });
+
+test('PF-1 P1: fresh-start preference publication failure keeps the new objective blocked and redo bound to it', async t => {
+  const f = await fixture(t, { memoryEnabled: false });
+  await f.phase(); await f.phase(); await f.phase();
+  const previous = await f.status();
+  assert.equal(previous.state, 'complete');
+  const preference = join(f.mainRoot, '.mdd', `preferences-${createHash('sha256').update(f.runtime.sessionID).digest('hex')}.json`);
+  const originalPreferences = await readFile(preference, 'utf8');
+  const lock = `${preference}.lock`;
+  await writeFile(lock, JSON.stringify({ ...lockIdentity(), nonce: 'live-preference-writer' }));
+  const requirements = 'Implement a separate export objective.';
+  f.user(requirements);
+  await assert.rejects(f.hooks.tool.mdd_start.execute({ requirements }, f.context), /reusable defaults are not confirmed durable/);
+  const failed = await f.status();
+  assert.equal(failed.state, 'blocked', 'post-start failure cannot restore predecessor intake over the replacement runner');
+  assert.notEqual(failed.runID, previous.runID);
+  assert.equal(new CheckpointStore(f.mainRoot).read(f.runtime.sessionID).checkpoint.data.requirements, requirements);
+  assert.equal(failed.task, undefined);
+  assert.match(failed.reason, /reusable defaults are not confirmed durable/);
+  assert.doesNotMatch(failed.notice ?? '', /planned run is ready|kept.*plan/i);
+  assert.deepEqual(failed.previousRuns[0].workflow, previous.workflow);
+  assert.deepEqual(failed.previousRuns[0].artifacts, previous.artifacts);
+  assert.equal(new RunOwnershipStore(f.mainRoot).parent(f.runtime.sessionID), failed.runID, 'the replacement owner remains bound');
+  assert.equal(await readFile(preference, 'utf8'), originalPreferences, 'failed publication cannot change reusable defaults');
+  await rm(lock);
+  f.user('Please redo the preflight for the export objective.');
+  const confirmation = await f.change();
+  assert.match(confirmation.question.questions[0].question, /Implement a separate export objective\./);
+  assert.ok(!confirmation.question.questions[0].question.includes(f.requirements), 'redo cannot propose the completed predecessor objective');
+  await f.answer();
+  assert.deepEqual((await f.status()).question.questions.map(q => q.header), ['Certeza', 'Artefactos', 'Modo', 'Resumen', 'Notas']);
+});
+
+for (const restart of [false, true]) test(`session preferences override profile for new intake without changing old answers (restart=${restart})`, async t => {
+  const f = await fixture(t, { memoryEnabled: false, worktree: restart });
+  f.user('Redo every preflight answer.'); await f.change(); await f.answer();
+  await f.answer([['Poco seguro'], ['Ninguno'], ['Interactivo'], ['Detallado'], ['Nada que agregar']]);
+  const accepted = await f.status();
+  assert.deepEqual(accepted.previousRuns[0].workflow.answers, answers);
+  assert.ok((await readdir(join(f.mainRoot, '.mdd'))).some(name => /^preferences-[a-f0-9]{64}\.json$/.test(name)), 'preferences use the shared repository anchor');
+  if (restart) assert.equal(fs.existsSync(join(f.root, '.mdd')), false);
+  await f.hooks.tool.mdd_reset.execute({ scope: 'run' }, f.context);
+  const hooks = restart ? await plugin(f.input) : f.hooks;
+  f.user('A new objective in this same conversation.');
+  const next = JSON.parse(await hooks.tool.mdd_start.execute({ requirements: f.parent[0].parts[0].text }, f.context));
+  assert.equal(next.state, 'ready');
+  assert.equal(next.workflow.answers.mode, 'interactive');
+  assert.equal(next.workflow.answers.summary, 'detailed');
+  assert.equal(next.workflow.answers.certainty, 'very-sure', 'objective certainty comes from the profile, not the previous run');
+  assert.equal(next.provenance.preflight, 'session-preference');
+  const other = { ...f.context, sessionID: 'ses_other_parent', messageID: 'msg_other_parent' };
+  const requirements = 'An independent objective in another parent.';
+  f.sessions.set(other.sessionID, { id: other.sessionID, agent: other.agent, directory: f.root, projectID: 'project' });
+  f.histories.set(other.sessionID, [
+    { info: { id: 'user_other', sessionID: other.sessionID, role: 'user' }, parts: [{ type: 'text', text: requirements, sessionID: other.sessionID, messageID: 'user_other' }] },
+    { info: { ...f.parent[1].info, id: other.messageID, sessionID: other.sessionID }, parts: [] },
+  ]);
+  const separate = JSON.parse(await hooks.tool.mdd_start.execute({ requirements }, other));
+  assert.deepEqual(separate.workflow.answers, answers, 'another parent inherits neither preferences nor receipts');
+});
 test('rejected material change restores exact answers, plan and pending approval', async t => {
   const f = await fixture(t, { mode: 'interactive' }); await f.phase();
   const old = await f.status();
@@ -1782,15 +1844,22 @@ test('rejected material change restores exact answers, plan and pending approval
   assert.equal(current.runID, old.runID); assert.deepEqual(current.workflow, old.workflow);
   assert.deepEqual(current.question, old.question); assert.deepEqual(current.acceptance, old.acceptance);
 });
-test('confirmed material change replans from new requirements after one grouped preflight', async t => {
-  const f = await fixture(t); const old = await f.status();
+test('confirmed material change reuses preferences and configured certainty without replaying approvals', async t => {
+  const f = await fixture(t, { mode: 'interactive', memoryEnabled: false }); const old = await f.status();
   f.user('Change the scope to include an integration.');
-  await f.change('material', 'New integration requirements.'); await f.answer(); await f.answer();
+  await f.change('material', 'New integration requirements.');
+  assert.equal((await f.status()).runID, old.runID, 'scope still needs fresh confirmation');
+  await f.answer();
   const next = await f.status();
+  assert.equal(next.question, undefined, 'accepted mode/summary and configured certainty are not repeated');
   assert.notEqual(next.runID, old.runID);
+  assert.deepEqual(next.workflow.answers, old.workflow.answers);
   assert.equal(next.workflow.results.length, 0); assert.equal(next.acceptance, undefined);
-  await f.phase();
+  await f.phase({ only: true });
   assert.match(f.delivered(), /New integration requirements/);
+  await f.phase({ only: true });
+  assert.equal((await f.status()).question.questions[0].header, 'Ruta', 'the new run still needs its own phase consent');
+  assert.equal(f.questions(), 1);
 });
 test('invalid change parameters and wrong user text do not poison a ready plan', async t => {
   const f = await fixture(t); const old = await f.status();
@@ -2164,6 +2233,36 @@ test('a new conversation finds a run recorded by another one and can take it ove
   assert.ok(!(later.workspaceRuns ?? []).some(run => run.sessionID === f.runtime.sessionID));
 });
 
+test('transfer keeps held run choices but does not inherit source session preference defaults', async t => {
+  const f = await fixture(t, { memoryEnabled: false });
+  f.user('Redo the preflight.'); await f.change(); await f.answer();
+  await f.answer([['Muy seguro'], ['Ninguno'], ['Automático'], ['Detallado'], ['Nada que agregar']]);
+  await f.phase();
+  const live = await f.status();
+  const other = 'ses_transfer_preferences';
+  const context = { ...f.context, sessionID: other, messageID: 'msg_transfer_preferences' };
+  f.sessions.set(other, { id: other, agent: 'mdd-orchestrator', directory: f.root, projectID: 'project' });
+  let ordinal = 0;
+  const say = text => f.histories.set(other, [
+    { info: { id: `transfer-user-${++ordinal}`, sessionID: other, role: 'user' }, parts: [{ type: 'text', text, sessionID: other, messageID: `transfer-user-${ordinal}` }] },
+    { info: { ...f.parent[1].info, id: context.messageID, sessionID: other }, parts: [] },
+  ]);
+  f.input.client.session.message = async ({ path }) => ({ data: f.histories.get(path.id)?.find(item => item.info.id === path.messageID) });
+  const request = `Continue sourceSessionID=${f.runtime.sessionID} runID=${live.runID}`;
+  say(request);
+  const moved = JSON.parse(await f.hooks.tool.mdd_transfer.execute({ sourceSessionID: f.runtime.sessionID, runID: live.runID, userText: request }, context));
+  assert.equal(moved.transfer?.state, 'confirmed');
+  assert.equal(moved.workflow.answers.summary, 'detailed', 'the transferred run remains immutable');
+  say('Discard this transferred run.');
+  await f.hooks.tool.mdd_reset.execute({ scope: 'run', userText: 'Discard this transferred run.' }, context);
+  say('A separate target objective.');
+  const restarted = await plugin(f.input);
+  const next = JSON.parse(await restarted.tool.mdd_start.execute({ requirements: 'A separate target objective.' }, context));
+  assert.equal(next.state, 'ready');
+  assert.equal(next.workflow.answers.summary, 'low', 'new target intake uses its own profile, not source defaults');
+  assert.equal(next.provenance.preflight, 'startup-profile');
+});
+
 test('a preserved run restores no approval and no live consent receipt', async t => {
   const f = await fixture(t, { mode: 'interactive', partial: true, memoryEnabled: false });
   await f.answer();
@@ -2195,7 +2294,9 @@ test('a preserved run restores no approval and no live consent receipt', async t
   // The new run wins its own preflight; the old confirmed requirements flag is not inherited.
   f.user('Empecemos de nuevo con este objetivo.');
   const fresh = JSON.parse(await restarted.tool.mdd_start.execute({ requirements: 'Empecemos de nuevo con este objetivo.' }, f.context));
-  assert.equal(fresh.state, 'question-ready');
+  assert.equal(fresh.state, 'ready', 'applied same-parent preferences survive data-only recovery');
+  assert.equal(fresh.workflow.answers.mode, 'interactive');
+  assert.equal(fresh.provenance.preflight, 'session-preference');
   assert.deepEqual(fresh.questionReceipts, []);
 });
 

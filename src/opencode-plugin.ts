@@ -11,6 +11,7 @@ import { loadGlobalSettings } from './global-settings.js';
 import { installationPaths } from './installation-paths.js';
 import { applyModelOverrides } from './native-models.js';
 import { NativeIntake } from './native-intake.js';
+import { SessionPreferenceStore } from './session-preferences.js';
 import type { IntakeInspect } from './native-intake.js';
 import { recordTelemetry } from './telemetry.js';
 import type { TelemetryUsage } from './telemetry.js';
@@ -803,7 +804,8 @@ const plugin: Plugin = async input => {
     lessons: (_directory, value, now) => recordLessonQuietly(dataRoot, value, now),
     ledger: (_directory, value, now) => recordRunQuietly(dataRoot, value, now),
   });
-  const intake = new NativeIntake(runner, inspector, settings, { checkpoint, questions: new QuestionCheckpointStore(dataRoot), ownership });
+  const intake = new NativeIntake(runner, inspector, settings, { checkpoint, questions: new QuestionCheckpointStore(dataRoot), ownership,
+    preferences: new SessionPreferenceStore(dataRoot) });
   if (workerHost) {
     workerHost.protectedParent = sessionID => runner.scopedWorkers(sessionID);
     workerHost.assignment = (sessionID, callID) => {

@@ -7,7 +7,7 @@ export class LocalFileError extends Error {
   constructor() { super('Local storage unavailable or unsafe. Check project permissions and local file types.'); }
 }
 
-type LocalName = 'mdd.config.json' | 'mdd/setup-assets.json' | '.mdd/.gitignore' | '.mdd/knowledge-cache.json' | '.mdd/telemetry.jsonl' | '.mdd/telemetry-rollup.json' | '.mdd/lessons.jsonl' | '.mdd/sessions.jsonl' | '.mdd/runs.jsonl' | `.mdd/progress-${string}.json` | `.mdd/run-${string}.json` | `.mdd/checkpoint-${string}.json` | `.mdd/question-${string}.json` | `.mdd/owner-${string}.json` | `.mdd/parent-owner-${string}.json` | `.mdd/intake-${string}.json`;
+type LocalName = 'mdd.config.json' | 'mdd/setup-assets.json' | '.mdd/.gitignore' | '.mdd/knowledge-cache.json' | '.mdd/telemetry.jsonl' | '.mdd/telemetry-rollup.json' | '.mdd/lessons.jsonl' | '.mdd/sessions.jsonl' | '.mdd/runs.jsonl' | `.mdd/progress-${string}.json` | `.mdd/run-${string}.json` | `.mdd/checkpoint-${string}.json` | `.mdd/question-${string}.json` | `.mdd/owner-${string}.json` | `.mdd/parent-owner-${string}.json` | `.mdd/intake-${string}.json` | `.mdd/preferences-${string}.json`;
 
 /**
  * A lock is only a cooperation hint between concurrent writers; atomicity comes from the
@@ -211,7 +211,7 @@ export class LocalFiles {
   #path(name: LocalName, create: boolean): string {
     if (name !== 'mdd.config.json' && name !== 'mdd/setup-assets.json' && name !== '.mdd/.gitignore' && name !== '.mdd/telemetry.jsonl' && name !== '.mdd/telemetry-rollup.json' &&
         name !== '.mdd/lessons.jsonl' && name !== '.mdd/sessions.jsonl' && name !== '.mdd/runs.jsonl' && name !== '.mdd/knowledge-cache.json' &&
-        !/^\.mdd\/progress-[a-f0-9]{64}\.json$/.test(name) && !/^\.mdd\/run-[a-f0-9]{64}(\.(discarded|continued))?\.json$/.test(name) && !/^\.mdd\/checkpoint-[a-f0-9]{64}\.json$/.test(name) && !/^\.mdd\/question-[a-f0-9]{64}\.json$/.test(name) && !/^\.mdd\/(?:parent-)?owner-[a-f0-9]{64}\.json$/.test(name) && !/^\.mdd\/intake-[a-f0-9]{64}\.json$/.test(name)) throw new LocalFileError();
+        !/^\.mdd\/progress-[a-f0-9]{64}\.json$/.test(name) && !/^\.mdd\/run-[a-f0-9]{64}(\.(discarded|continued))?\.json$/.test(name) && !/^\.mdd\/checkpoint-[a-f0-9]{64}\.json$/.test(name) && !/^\.mdd\/question-[a-f0-9]{64}\.json$/.test(name) && !/^\.mdd\/(?:parent-)?owner-[a-f0-9]{64}\.json$/.test(name) && !/^\.mdd\/intake-[a-f0-9]{64}\.json$/.test(name) && !/^\.mdd\/preferences-[a-f0-9]{64}\.json$/.test(name)) throw new LocalFileError();
     directory(this.#root);
     const path = join(this.#root, name);
     const parent = dirname(path);

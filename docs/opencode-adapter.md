@@ -859,9 +859,13 @@ validated strictly. No keyword scoring or automatic route replacement occurs.
 The existing native gate shows one exact confirmation. Keeping the current plan or dismissing
 the change leaves its answers, artifacts and pending approval unchanged. Words typed into the
 form instead keep the confirmation open, unchanged, until the user chooses; when they name one
-of its options, `mdd_answer` records it. Confirmation leads
-to **one grouped question containing every preflight field and the optional note**, even with a complete profile. Only
-accepted answers create the new planned run. Prior runs remain in `previousRuns` for live
+of its options, `mdd_answer` records it. An explicit **preflight rerun** leads to one grouped
+question containing every field and the optional note, even with a complete profile or saved
+session preferences. A **material replacement** reuses applied mode/summary and the current
+storage choice, refreshing only objective certainty; configured profile certainty may supply
+it. Only remaining fields are asked, and a complete resolved intake starts without another
+preference question. Scope confirmation still precedes replacement, and later interactive
+phases still require their own fresh consent. Prior runs remain in `previousRuns` for live
 inspection; no artifact or general-memory record is deleted. Identical proposals are not
 repeatedly presented without a new user request. Ordinary implementation choices and automatic
 phase progression never initiate this path.
@@ -870,8 +874,15 @@ A known failed phase can be explicitly replanned after its result and persistenc
 confirmed. Only a task that is actually running postpones a change request; a stopped or
 failed run is always changeable, and `mdd_reset` releases a dispatch that never reported.
 Harmless incorrect task/question parameters are rejected before effects without poisoning a
-ready plan. A completed run accepts a fresh next task through normal `mdd_start`, using the
-startup profile without an additional change confirmation. Delivering the recorded change —
+ready plan. A completed run accepts a fresh next task through normal `mdd_start`, using
+same-parent accepted mode/summary before the startup profile, without an additional change
+confirmation. The versioned local preference record survives process restart, binds the exact
+native directory/worktree and contains no objective or approval. Cancelled, stale or
+answered-but-unapplied callbacks publish no defaults; publication/readback failure is explicit.
+Transfer retains the source run's immutable choices but never copies its session defaults.
+Material replacement clears old objective context and deferred clarifications, retaining history;
+same-objective continuation, phase reset, rework and context edits retain certainty.
+Delivering the recorded change —
 committing it, pushing it, opening its PR — is not such a task: the coordinator never calls
 `mdd_start` or `mdd_change_request` for it and never repeats preflight. The user's explicit request
 is the separate decision drafting lacks; the coordinator performs only the actions it names with

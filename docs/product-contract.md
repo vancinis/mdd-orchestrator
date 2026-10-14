@@ -161,9 +161,17 @@ request. Missing fields alone are asked in original order, with no guessing, fol
 optional free-form note. Native before/after question metadata authorizes first execution;
 subsequent interactive Proceed/Stop receipts authorize only the waiting phase. Automatic mode
 does not ask phase approval questions. Complete native contract tests cover low/high routes,
-all artifact stores and exact approval slots through Apply/Verify. Answers are reused. Explicit
-reruns and material changes use the same native gate: confirmation, then one fresh grouped
-preflight. Rejection preserves the current plan. In-flight/uncertain work cannot
+all artifact stores and exact approval slots through Apply/Verify. Applied mode/summary are
+reusable same-parent, exact-worktree-bound preferences, persisted locally across process restart.
+Current accepted choices win over session preferences, which win over the frozen startup profile;
+missing fields require a question. Preferences never replay approval authority or write global
+settings, and another parent (including a transfer target) inherits no source defaults.
+Explicit reruns still ask every field after confirmation. Material changes require the same fresh
+scope confirmation but retain applied preferences/storage, refresh objective certainty (configured
+profile certainty may supply it), and discard old context/doubts rather than repeating preferences.
+Same-objective continuation, phase reset, rework and context edits retain certainty. Rejection or
+cancellation preserves defaults and the current plan; stale/unapplied answers cannot publish them.
+Failed preference publication/readback cannot be reported as durable. In-flight/uncertain work cannot
 be reset. Ordinary implementation choices and automatic progression add no change questions.
 
 Stable explicit inputs and versioned routing are implemented here. Any future automated complexity classifier must not be confused with deterministic scoring; classifier evidence/reconciliation and non-linear transitions still need design. Deterministic routing does not imply deterministic model output or statistical certainty.

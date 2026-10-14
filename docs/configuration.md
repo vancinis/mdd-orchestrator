@@ -109,6 +109,27 @@ Restart after changing them; never replace an in-flight workflow's answers. Gene
 Engram memory stays independent of artifacts, including `none`. The adapter verifies the
 exact registered runtime session/project/directory; it never fabricates a session.
 
+## Accepted session preferences
+
+Successfully applied native intake saves only **mode and summary** as version-1 session
+preferences. For a new intake, precedence is an accepted current choice, then same-parent
+session preferences, then the frozen startup profile, then a question for any missing field.
+This never writes global settings or changes a running workflow's immutable answers.
+
+Preferences survive new objectives, run resets and process restarts in the same parent.
+They live at `.mdd/preferences-<sha256-parent>.json` under the repository's local data anchor,
+including for linked worktrees, and bind the exact native directory/worktree pair. Another
+parent or a transferred source run supplies no inherited defaults. Invalid or unreadable
+records block reuse; failed publication/readback is reported, never claimed durable.
+
+A material replacement still requires scope confirmation. It refreshes objective certainty
+(an explicitly configured profile certainty may supply it) and clears old context/doubts,
+while retaining applied preferences and the current storage choice. New intakes use the
+existing profile/question storage behavior. Same-objective continuation, phase reset, rework
+and context edits retain certainty. An explicit preflight redo asks every field despite
+preferences/profile defaults; rejection or cancellation leaves accepted defaults unchanged.
+Preferences are data, not plan, scope or phase approval receipts.
+
 ## Worker preference and safe fallback
 
 Use `mdd-ai workers status` to read `{ "enabled": true }` or `{ "enabled": false }`
