@@ -11,6 +11,33 @@ import { applyModelOverrides } from '../dist/native-models.js';
 import { PHASE_AGENTS, CHECK_AGENTS, pinPhaseAgents } from '../dist/opencode-plugin.js';
 import { FIELD_SCHEMA } from '../dist/acceptance.js';
 
+test('evidence handoff: shipped prose keeps compact locators, uncertainty and independent verification', () => {
+  for (const path of ['assets/opencode/agents/mdd-orchestrator.md', 'assets/opencode/mdd-instructions.md']) {
+    const text = fs.readFileSync(path, 'utf8').replace(/\s+/g, ' ');
+    for (const pattern of [/finding/, /source locator/, /observed basis/, /freshness conditions and gaps/,
+      /commands\/results only when actually observed and relevant/, /load-bearing locator and uncertainty/,
+      /oldest-first compaction/, /Do not automatically duplicate raw outputs or entire source fragments/,
+      /start planning from relevant evidence/, /close phase-specific gaps/, /Prior evidence is not current proof/,
+      /Apply\/Verify must independently inspect current sources and run applicable checks/]) assert.match(text, pattern, path);
+  }
+});
+
+test('evidence handoff: storage docs distinguish exact readback from declared summary compaction', () => {
+  const artifacts = fs.readFileSync('docs/artifacts-and-actors.md', 'utf8').replace(/\s+/g, ' ');
+  assert.doesNotMatch(artifacts, /\b8,000\b|Do not substitute a digest or summary/);
+  assert.match(artifacts, /96,000 UTF-8 bytes/);
+  assert.match(artifacts, /38,000-byte/);
+  assert.match(artifacts, /oldest-first/);
+  assert.match(artifacts, /recorded summary and ref/);
+  assert.match(artifacts, /readback.*complete artifact/);
+  for (const path of ['docs/artifacts-and-actors.md', 'docs/opencode-adapter.md']) {
+    const text = fs.readFileSync(path, 'utf8').replace(/\s+/g, ' ');
+    assert.match(text, /load-bearing locator and uncertainty/, path);
+    assert.match(text, /Prior evidence is not current proof/, path);
+    assert.match(text, /not measured live actor compliance or token savings/, path);
+  }
+});
+
 test('checkout handoff: shipped guidance scopes negative capability observations without tool bans', () => {
   const coordinator = fs.readFileSync('assets/opencode/agents/mdd-orchestrator.md', 'utf8').replace(/\s+/g, ' ');
   const common = fs.readFileSync('assets/opencode/mdd-instructions.md', 'utf8').replace(/\s+/g, ' ');

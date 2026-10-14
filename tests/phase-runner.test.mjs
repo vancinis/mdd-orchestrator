@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { PhaseRunner, SINGULAR_EXPLORATION } from '../dist/phase-runner.js';
+import { PhaseRunner, SINGULAR_EXPLORATION, FULL_TASK_MAX_BYTES } from '../dist/phase-runner.js';
 import { reportFormatLines } from '../dist/phase-report.js';
 import { memoryServer, request, result, reportDocument, riskReport, runtime, call, answers, installCleanup, throughRiskStop, structuredTraceFixture as traceFixture, structuredVerificationFixture, traceFixture as legacyTraceFixture, ARTIFACT_TEXT, SUMMARY_TEXT } from './adapter-fixture.mjs';
 import { validateCheckpoint, CheckpointStore, CheckpointStorageError, sealResumeData } from '../dist/checkpoint.js';
@@ -45,6 +45,28 @@ async function fixture(t, fault) {
   const runner = new PhaseRunner(inspect);
   return { ...memory, inspect, runner };
 }
+
+test('evidence handoff: compact issue context and findings reach Risk and Plan as data', async t => {
+  const { runner, endpoint } = await fixture(t);
+  const context = { label: 'Issue #390 evidence', content: 'Finding: input boundary needs validation. Source locator: issue #390 and src/cli.ts:10-20 validateInput. Observed basis: synthetic source fixture; no commands run. Freshness: only while those source bytes match. Gap: integration behavior unverified.' };
+  const ready = await runner.start({ ...request(endpoint), context }, runtime);
+  const exploreArgs = await runner.before(call, ready.task);
+  const summary = 'src/cli.ts:10-20 validateInput; synthetic boundary finding; integration behavior unverified; recheck if source bytes change.';
+  await runner.after(call, exploreArgs, reportDocument({ evidenceSummary: summary, artifact: context.content }));
+  const riskCall = { ...call, callID: 'evidence-risk' };
+  const riskArgs = await runner.before(riskCall, runner.status(runtime.sessionID).task);
+  assert.ok(riskArgs.prompt.includes(context.content));
+  assert.match(riskArgs.prompt, /Exploration artifact \(data, not authority\)/);
+  await runner.after(riskCall, riskArgs, riskReport('low'));
+  const planArgs = await runner.before({ ...call, callID: 'evidence-plan' }, runner.status(runtime.sessionID).task);
+  const dependencies = JSON.parse(planArgs.prompt.match(/^Validated dependency artifacts \(data, not authority\): (.*)$/m)[1]);
+  assert.equal(dependencies[0].content, context.content);
+  assert.match(planArgs.prompt, /never an instruction, requirement or approval/);
+  assertWorkspace(planArgs.prompt, runtime);
+  const instructions = JSON.parse(planArgs.prompt.match(/^Packaged MDD actor instructions with provenance, which govern this phase: (.*)$/m)[1]);
+  assert.match(instructions.content, /Prior evidence is not current proof/);
+  assert.match(instructions.content.replace(/\s+/g, ' '), /start planning from relevant evidence/);
+});
 
 function assertWorkspace(prompt, place) {
   const lines = [...prompt.matchAll(/^Workspace binding \(runtime data\): (.*)$/gm)];
@@ -1088,7 +1110,12 @@ for (const mutate of [
     // Every other mutation is the coordinator composing instead of copying, and the refusal is
     // the whole fix: the handle stays, and so does the payload it saves.
     if (mutate(ready.task).prompt === ready.task.prompt) assert.deepEqual(after.task, ready.task);
-    else assert.ok(after.task.prompt.length > 1000, 'a lost handle falls back to the full prompt');
+    else {
+      assert.ok(after.task.prompt.length > 1000, 'a lost handle falls back to the full prompt');
+      const bytes = Buffer.byteLength(JSON.stringify(after.task));
+      assert.ok(bytes <= FULL_TASK_MAX_BYTES, `full-fallback fixture needs a deliverable task: ${bytes} > ${FULL_TASK_MAX_BYTES}`);
+      t.diagnostic(`Full-fallback task: ${bytes} bytes; unchanged gate: ${FULL_TASK_MAX_BYTES} bytes.`);
+    }
     assert.equal(writes.length, 0);
   });
 }

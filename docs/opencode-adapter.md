@@ -614,6 +614,19 @@ and project-knowledge freshness remains unchanged. Standalone receives workspace
 new observation storage channel. These instructions describe protocol duties, not measured live
 actor compliance or token savings.
 
+For general evidence, use compact existing context or artifact prose: finding, source locator
+(path with symbol/lines or an issue locator), observed basis, freshness conditions and gaps.
+Include only actually observed, relevant commands/results; do not automatically duplicate raw
+outputs or entire source fragments. Evidence summaries should retain a load-bearing locator and
+uncertainty when useful after the existing oldest-first compaction, so consumers can locate the
+claim and close phase-specific gaps rather than broadly rediscovering it. Prior evidence is not
+current proof: Apply/Verify independently inspect current sources and run applicable checks.
+Changed sources or environments can invalidate a claim; a summary or stale observation is a lead,
+not fresh verification. These are prose duties, not new report fields, permissions, approval or
+replacements for structured semantic coverage and project-knowledge freshness. Fixture tests
+cover downstream transport and announced compaction, not measured live actor compliance or token
+savings.
+
 Entries accumulate rather than replace, because useful context also appears after the run starts.
 A single entry is bounded to **96,000 UTF-8 bytes** — the same `PHASE_CONTEXT_MAX_BYTES` ceiling
 the composed phase prompt is checked against — rather than a smaller aggregate cap: the prompt is

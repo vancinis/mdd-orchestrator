@@ -22,6 +22,55 @@ import { ProgressGuard } from '../dist/progress.js';
 import { RunDossierStore } from '../dist/run-dossier.js';
 import { projectApprovalTransfer, projectTargetTransfer } from '../dist/transfer.js';
 import { Workflow } from '../dist/workflow.js';
+import { FULL_TASK_MAX_BYTES } from '../dist/phase-runner.js';
+
+test('evidence handoff: native downstream dispatch retains locator and limits through announced compaction', async t => {
+  const f = await fixture(t, { route: 'high', memoryEnabled: false });
+  const summary = 'feature.txt:1; synthetic read fixture saw pending state; valid only while source bytes match; gap: integration checks unrun.';
+  const artifact = `Artifact for mdd-explore: Finding: pending boundary. Source locator: feature.txt:1. Observed basis: synthetic read fixture, no commands run. Freshness: source bytes must match. Gap: integration checks unrun.\nFull-only exploration detail.`;
+  await f.phase({ only: true, large: true, artifact, narrative: { evidenceSummary: summary } });
+  let sawCompaction = false;
+  for (const phase of ['mdd-propose', 'mdd-spec', 'mdd-design', 'mdd-tasks', 'mdd-apply', 'mdd-verify']) {
+    await f.phase({ large: phase !== 'mdd-verify' });
+    const prompt = f.delivered();
+    assert.match(prompt, new RegExp(`Perform only ${phase}`));
+    const dependencies = JSON.parse(prompt.match(/^Validated dependency artifacts \(data, not authority\): (.*)$/m)[1]);
+    const exploration = dependencies[0];
+    if (exploration.inlined === false) {
+      sawCompaction = true;
+      assert.equal(exploration.summary, summary);
+      assert.ok(exploration.ref.recordID);
+      assert.match(exploration.ref.digest, /^[a-f0-9]{64}$/);
+      assert.match(prompt, /appear above as their recorded summary and ref/);
+      assert.doesNotMatch(prompt, /Full-only exploration detail/);
+    } else assert.equal(exploration.content.startsWith(artifact), true);
+    const evidence = exploration.summary ?? exploration.content;
+    for (const fragment of ['feature.txt:1', 'synthetic read fixture', 'source bytes', 'integration checks unrun']) assert.ok(evidence.includes(fragment));
+    const packaged = JSON.parse(prompt.match(/^Packaged MDD actor instructions with provenance, which govern this phase: (.*)$/m)[1]);
+    assert.equal(packaged.content, fs.readFileSync('assets/opencode/mdd-instructions.md', 'utf8'));
+    assert.equal(packaged.digest, createHash('sha256').update(packaged.content).digest('hex'));
+    assert.match(packaged.content.replace(/\s+/g, ' '), /Apply\/Verify must independently inspect current sources and run applicable checks/);
+    if (phase === 'mdd-verify') {
+      assert.match(prompt, /Run applicable tests and build checks/);
+      assert.match(prompt, /never repair sources/);
+    }
+  }
+  assert.equal(sawCompaction, true);
+  assert.equal((await f.status()).state, 'complete');
+});
+
+test('evidence handoff: prior successful check prose cannot complete Verify without current checks', async t => {
+  const f = await fixture(t, { memoryEnabled: false });
+  await f.hooks.tool.mdd_context.execute({ label: 'Prior synthetic check', content: 'Finding: a prior fixture check reported exit 0. Source locator: feature.txt:1. Observed basis: synthetic npm test result, not this Verify execution. Freshness: source changed after that check. Gap: current tests unrun.' }, f.context);
+  await f.phase();
+  await f.phase();
+  await assert.rejects(f.phase({ noChecks: true }));
+  const status = await f.status();
+  assert.notEqual(status.state, 'complete');
+  assert.equal(status.verification, undefined);
+  assert.ok(status.rejected.reason);
+  assert.match(f.delivered(), /Run applicable tests and build checks/);
+});
 
 test('checkout handoff: expanded native transport binds checkout and carries capability context through Verify', async t => {
   const f = await fixture(t, { memoryEnabled: false, distinctWorktree: true });
@@ -2969,6 +3018,9 @@ test('a handle that cannot travel falls back to the full prompt instead of block
   const after = await f.status();
   assert.equal(after.state, 'ready');
   assert.equal(after.dispatch, undefined, 'the fallback stops advertising a handle');
+  const bytes = Buffer.byteLength(JSON.stringify(after.task));
+  assert.ok(bytes <= FULL_TASK_MAX_BYTES, `full-fallback fixture needs a deliverable task: ${bytes} > ${FULL_TASK_MAX_BYTES}`);
+  t.diagnostic(`Full-fallback task: ${bytes} bytes; unchanged gate: ${FULL_TASK_MAX_BYTES} bytes.`);
   assert.match(after.task.prompt, /Perform only mdd-explore/);
   assert.deepEqual(after.nextAction.args, after.task);
   // And the phase still dispatches, which is the entire point of degrading rather than refusing.
@@ -3005,7 +3057,11 @@ test('phase reset restores a compact fresh handle after full-prompt fallback', a
   const ready = await f.status();
   await assert.rejects(f.hooks['tool.execute.before']({ ...f.runtime, callID: 'lost', tool: 'task' },
     { args: { ...ready.task, prompt: 'unknown substituted prompt' } }), /full phase prompt instead/);
-  assert.equal((await f.status()).dispatch, undefined);
+  const exposed = await f.status();
+  assert.equal(exposed.dispatch, undefined);
+  const bytes = Buffer.byteLength(JSON.stringify(exposed.task));
+  assert.ok(bytes <= FULL_TASK_MAX_BYTES, `full-fallback reset fixture needs a deliverable task: ${bytes} > ${FULL_TASK_MAX_BYTES}`);
+  t.diagnostic(`Full-fallback reset task: ${bytes} bytes; unchanged gate: ${FULL_TASK_MAX_BYTES} bytes.`);
 
   const resetRaw = await f.hooks.tool.mdd_reset.execute({ scope: 'phase' }, f.context);
   assert.ok(Buffer.byteLength(resetRaw) <= STATUS_BUDGET_BYTES);

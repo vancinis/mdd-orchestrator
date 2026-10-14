@@ -79,6 +79,22 @@ Report what you actually did. A command you did not run is not a check, an exit 
 semantic proof, and an unknown stays visible as an unknown. Use outcome `failed` when the phase
 could not be completed; an honest failure is worth more than an invented pass.
 
+Keep pertinent handoffs compact in existing artifact prose: finding, source locator (path with
+symbol/lines or an issue locator), observed basis, freshness conditions and gaps. Include
+commands/results only when actually observed and relevant. Do not automatically duplicate raw
+outputs or entire source fragments into context. Distinguish observation from inference; describe
+missing evidence rather than inventing it.
+
+Evidence summaries should retain a load-bearing locator and uncertainty when useful after
+oldest-first compaction. Do not imply omitted details were read. Consumers start planning from
+relevant evidence and close phase-specific gaps rather than broadly rediscovering the same material.
+
+Prior evidence is not current proof: Apply/Verify must independently inspect current sources and
+run applicable checks. Recheck load-bearing claims when their source or environment changes;
+stale evidence remains a lead, not fresh proof. This prose guidance adds no report fields,
+approval or authority and never substitutes for the required structured semantic coverage or
+project-knowledge freshness checks. Scoped-worker footprints and command limits still apply.
+
 ## Reporting
 
 Answer in the markdown form the task prompt specifies. The summary is prose a person reads
