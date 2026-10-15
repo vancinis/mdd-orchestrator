@@ -70,7 +70,7 @@ A run recorded before the risk stop existed keeps the route it recorded, includi
 |---|---|
 | `routingVersion` omitted | Retains historical fixed semantics permanently. Modern histories replay their low/high Risk events; older unmarked histories may infer the single known legacy route that fits. No version is stamped. |
 | `routingVersion: 2` | Explicit fixed contract with the same default evaluation and low/high tails. Recording preserves the pin; replay cannot fall back to legacy route inference. An explicitly recorded known legacy route still retains that route. |
-| `routingVersion: 3` | Native-only adaptive contract. Fixed evaluation, construction and replay refuse with `native-context-required`, never a fabricated fixed phase list or score. The internal native protocol below is usable; public registration remains inactive until AL-05c. |
+| `routingVersion: 3` | Active native-only adaptive contract through coordinator-only `mdd_adapt({payload:string})`. Fixed evaluation, construction and replay refuse with `native-context-required`, never a fabricated fixed phase list or score. |
 | Any other supplied value | Rejected, including null, strings and explicit undefined. |
 
 Resume checkpoint versions 2 and 3 integrity-bind an explicitly supplied routing discriminator.
@@ -82,31 +82,31 @@ The pure `parseFutureAssessment` reader in `dist/risk.js` accepts only
 `{ assessmentVersion: 1, complexity, impact }`, with each level independently `low`, `medium`
 or `high`. High impact with low complexity is valid in this separate future assessment; it is
 not a current Risk verdict and selects no route. Current `parseRiskVerdict` still requires
-equal low/high `route` and `complexity`. Public adaptive low and structured medium execution are
-not active. Summary level `medium` remains a presentation choice, not a runtime route.
+equal low/high `route` and `complexity`. Native version 3 derives actual low/medium/high depth
+without renaming historical routes. Summary level `medium` remains a separate presentation choice.
 
 ### Internal adaptive admission, evidence, recovery, transfer and continuation (AL-02/AL-04c)
 
-An unregistered internal lane supports `await-selection -> authorized-actor ->
+The native lane supports `await-selection -> authorized-actor ->
 await-result -> await-selection`. The parent selects one necessary Explore, Risk, Plan, Apply
 or Verify actor with a purpose and assignment identity; no fixed Workflow or omitted Plan
 receipt is fabricated. Selection boundaries carry no phase, workflow, phase report format
 or fixed-route visual. Status retains bounded selection metadata and the last actual receipt,
-not the full contract body. Public startup remains unchanged; fixed version-3 entry requires native context.
+not the full contract body. Public startup uses version 3; fixed version-3 entry requires native context.
 
 | Boundary | Internal guarantee |
 |---|---|
-| Admission | Intake proves genuine native objective text/message; runner independently rechecks it, exact coordinator/workspace, idle ownership and current local source fingerprints. Caller-supplied approval or provenance IDs are not proof. The legacy internal admission helper remains explicitly automatic-only; the separate inactive native policy bridge below supports configured interactive mode. |
+| Admission | Intake proves genuine native objective text/message; runner independently rechecks it, exact coordinator/workspace, idle ownership and current local source fingerprints. Public entry binds the actual host assistant caller to its latest native user lineage and requires the payload messageID to match that user. The legacy internal helper remains automatic-only; the native policy bridge supports configured interactive mode. |
 | Compact contract | Version 1, stable globally unique acceptance/decision/assignment/evidence IDs, exclusions, complete exact scopes, dependency-ordered assignments and source or real command obligations are validated and copied before native awaits. Contract-authored links do not claim Plan provenance. |
 | Selection | Unresolved product ambiguity pauses all actors. Technical uncertainty permits a brief scoped Explore only. Apply requires low impact independently of complexity, understood bounded dependencies, current fingerprints, completed prerequisites and real scoped-editor capability. |
 | Native execution | Exact issued handles are consumed once, with one actor/writer and existing native result/liveness inspection. Apply edits only through the existing single-child WorkerFence and `mdd_worker_edit`; generic editors, shell and out-of-scope writes remain denied. Unsafe bootstrap/config footprints and unsupported hosts have no serial fallback. |
 | Settlement | Every confirmed stopped actual actor returns to selection. Failed, malformed or absent receipts earn no progress or automatic retry; another writer requires an explicit repair reference. Reports cannot broaden acceptance/scope or decide product questions. Internal Risk uses the independent future assessment, never a historical Risk verdict. |
 | Persistence | Production injects a separate bounded adaptive record/store under the product data root, using existing LocalFiles protections. It is not a fixed checkpoint, dossier or fabricated phase artifact. Pending native intent is durable before provider arguments; an accepted receipt is durable before the settled marker and ownership release. The existing child marker remains `resumable:false` for fixed-checkpoint recovery. |
 
-#### Inactive native policy bridge (AL-05a)
+#### Native policy bridge (AL-05a, publicly activated in AL-05c)
 
-`NativeIntake.adaptiveInternal` is an internal bridge, not a registered tool or public version-3
-activation. It wraps admission, selection/repair, evidence, escalation, stopped-child recovery and
+`mdd_adapt` registers the bounded protocol through `NativeIntake.adaptiveInternal`. It wraps
+admission, selection/repair, evidence, escalation, stopped-child recovery and
 same-workspace transfer/recovery without executing commands or expanding native permissions.
 
 | Boundary | Policy guarantee |
@@ -120,21 +120,22 @@ same-workspace transfer/recovery without executing commands or expanding native 
 
 These are deterministic local native/runtime guarantees, not live-host/model approval, independent
 command attestation, or authentication against coordinated rewriting of all stored evidence.
-The internal operation-specific protocol below remains unregistered; atomic public activation belongs to AL-05c.
+The public registration adds no shell executor, arbitrary actor dispatch or permission expansion.
 
 Transfer and transfer-recovery retain the **current consumed operation proof** across native awaits
 and publication boundaries. Its source-byte/generation binding applies equally to automatic runs
 with no questions and interactive runs; an old question receipt never supplies or replaces it.
 Legacy internal transfers without a policy proof retain their existing selective invalidation.
 
-#### Inactive native JSON protocol (AL-05b)
+#### Native JSON protocol (AL-05b, publicly activated in AL-05c)
 
 The internal `NativeIntake.adaptiveInternal(jsonString, hostRuntime)` entry accepts exactly
 `{routingVersion:3,kind,args}` as a JSON **string**, at most 160,000 UTF-8 bytes. Host runtime is
 injected separately and validated against the actual native coordinator parent and exact workspace.
 Agent/session identity, approval booleans, native answers and capability tokens are not request fields.
-This is not a registered tool, public `mdd_status` replacement, or permission to execute version 3
-through the fixed CLI/Workflow. Existing internal object callers retain their compatibility contract.
+The registered tool accepts `{payload:string}`. Public `mdd_status` and settled task replies use
+the same projection for adaptive parents; explicit fixed runs retain their previous status.
+This grants no version-3 execution through the fixed CLI/Workflow. Internal object callers retain compatibility.
 
 | Operation | Required `args` keys | Optional keys |
 |---|---|---|
@@ -160,11 +161,11 @@ product answers still pass through the actual `beforeQuestion`/`afterQuestion` h
 The raw compact contract and evidence ceilings are 24,000 and 48,000 bytes respectively, checked
 before normalization. Every evidence field, including an empty `checks` array, must be supplied.
 
-Projection uses `routingVersion:3`, `registration:"inactive"`, actual `low`/`medium`/`high` continuation
+Public projection uses `routingVersion:3`, `registration:"active"`, actual `low`/`medium`/`high` continuation
 depth, frozen mode when known, current handle/generation, permitted-operation descriptors, evidence
 gaps and assurance limits. Every operation has an `inputRef` for complete nested required/optional
-keys, types, held readback, linked IDs and command history. `next` names an internal operation/input
-contract or an exact native question/task; it does not register or invent a public tool. Historical
+keys, types, held readback, linked IDs and command history. `next` names a public operation/input
+contract or an exact native question/task (V2 `subagent`). Historical
 fixed `route:"low"` remains low; summary level `medium` and historical Risk equality are unchanged.
 
 At a structured Verify boundary with unmatched parent evidence, ordinary Verify remains unavailable.
@@ -249,14 +250,15 @@ tampered proof and unsafe storage rather than treating them as empty.
 The injected-store path has deterministic native/runtime fault tests, not live-host or model
 attestation. Legacy in-process test hosts without a store remain volatile. An uncorrelated
 reservation or unsafe record remains fenced rather than granting automatic takeover.
-Public version-3 registration remains inactive. Structured continuation is internal only; public activation
-belongs to AL-05.
+Public version-3 registration exposes these same guarded operations through mdd_adapt.
+Terminal replacement preserves immutable archives and consumed user identities under parent/run locks;
+only exact closed current ownership can retire, and uncertain publication requires exact cold reconciliation.
 
 #### Internal native-proven transfer
 
-The unregistered intake/runner transfer moves adaptive **data**, not fixed checkpoints or a phase
-history. It requires the same exact workspace/worktree; there is no cross-worktree execution or
-new public tool. Both native parents are inspected before claims. The latest target-authored
+The intake/runner transfer exposed through mdd_adapt moves adaptive **data**, not fixed checkpoints or a phase
+history. It requires the same exact workspace/worktree; there is no cross-worktree execution.
+Both native parents are inspected before claims. The latest target-authored
 request must name the exact source/run, bind the immutable admission digest and objective, and
 explicitly preserve acceptance, scope, exclusions and decisions. Raw IDs, approval flags and
 caller-supplied text are not provenance.
@@ -330,7 +332,7 @@ const saved = evaluate({ profile: { answers } });
 | `answers` | Complete four-field answer object. Mutually exclusive with `profile`. The legacy `complexity` key is accepted and ignored if present. |
 | `profile` | Exactly `{ answers: <complete four-field object> }`. Uses the same answer validator and evaluator. |
 | `explore` | Optional boolean, accepted for saved requests; it no longer changes the first phase. |
-| `routingVersion` | Optional integer `2` pins the fixed contract; omission keeps historical semantics. Reserved `3` is inactive and rejected. Output remains `mdd-routing-v2`. |
+| `routingVersion` | Optional integer `2` pins the fixed contract; omission keeps historical semantics. Native-only `3` is refused with native-context-required here. Output remains `mdd-routing-v2`. |
 
 A request that still carries `config` (the old threshold and weights) is rejected with a `ValidationError` that says scoring was removed, rather than having its weights silently ignored; the CLI's `--config` flag is refused the same way.
 

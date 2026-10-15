@@ -42,7 +42,7 @@ test('AL-01: seal callers cannot silently ignore unsafe requests or invalid rout
     ...[undefined, null, '2', 1, 4].map(routingVersion => ({ ...request, routingVersion }))]) {
     assert.throws(() => sealResumeData({}, 'run-1', parent, [], undefined, input));
   }
-  assert.throws(() => sealResumeData({}, 'run-1', parent, [], undefined, { ...request, routingVersion: 3 }), /inactive/);
+  assert.throws(() => sealResumeData({}, 'run-1', parent, [], undefined, { ...request, routingVersion: 3 }), /native-context-required/);
 });
 
 for (const version of [2, 3]) {

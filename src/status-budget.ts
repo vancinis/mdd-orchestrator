@@ -25,6 +25,8 @@ export const STATUS_PROTECTED_FIELDS: readonly string[] = Object.freeze([
   // protocol: dropping either one puts the coordinator back to deriving the state machine from
   // prose, which is the guessing these fields exist to end.
   'nextAction', 'dispatch', 'lane', 'selection', 'lastReceipt',
+  'routingVersion', 'registration', 'protocol', 'route', 'generation', 'handle', 'operations', 'operationsRef', 'details',
+  'questionRef', 'taskRef', 'proposedOperation', 'evidenceRef', 'completion', 'assurance', 'continuation',
   // A run restated for a conversation the host just rewrote. It is a few hundred bytes and it is
   // the only description of the run that survives losing the transcript, so it is never shed.
   'runCard', 'compacted',

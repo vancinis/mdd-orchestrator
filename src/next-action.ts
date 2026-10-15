@@ -24,7 +24,7 @@
 const WRITTEN = 'If the user already answered it in their own words, typed inside the form or written in a message after it was shown, record that with mdd_answer instead of asking again.';
 
 export type NextAction = {
-  tool: 'question' | 'task' | 'mdd_start' | 'mdd_status' | 'mdd_prepare_advance' | 'mdd_phase_result' | 'mdd_reset';
+  tool: 'question' | 'task' | 'mdd_adapt' | 'mdd_start' | 'mdd_status' | 'mdd_prepare_advance' | 'mdd_phase_result' | 'mdd_reset';
   args?: Record<string, unknown>;
   calls?: Record<string, unknown>[];
   why: string;
@@ -104,6 +104,9 @@ export function nextAction(status: unknown): NextAction | undefined {
     return { tool: 'task', args: task,
       why: 'This phase is ready to delegate. Call the native task tool once, foreground, with exactly this object and no extra arguments. The prompt may be a single-use MDD dispatch handle; pass it through unchanged.' };
   }
+
+  if (value.lane === 'adaptive-native') return { tool: 'mdd_adapt',
+    why: 'Read workspaceRuns for relevant existing work before fresh entry; do not call mdd_start for continuation or fresh native work (explicit fixed compatibility only). Use the published version-3 operation descriptors and exact input/detail references. Compose only required data; never invent identity, preferences, approval, stopped proof or dispatch authority. Closed work stays closed; entry requires a genuine fresh current native request.' };
 
   // Its explicit internal next/input contract owns continuation. There is no public adapter yet.
   if (nativeProtocol) return undefined;

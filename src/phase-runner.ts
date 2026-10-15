@@ -48,6 +48,7 @@ import type { KnowledgeResolution, KnowledgeDiagnostics, KnowledgeSelection } fr
 import { AdaptiveLow, adaptiveContract } from './adaptive-low.js';
 import { AdaptiveStore, AdaptiveCommitError } from './adaptive-store.js';
 import type { AdaptiveRecord } from './adaptive-store.js';
+import { AdaptiveRetirement } from './adaptive-retirement.js';
 import { adaptiveTransferRequest, projectAdaptiveTransfer } from './adaptive-transfer.js';
 import type { AdaptiveReceipt } from './adaptive-transfer.js';
 import { QuestionCheckpointStore } from './question-checkpoint.js';
@@ -355,12 +356,13 @@ type Released = Liveness & { released?: 'host' | 'user' };
 const ATTEST_HINT = 'If the user says the subagent is stopped or was interrupted, call mdd_reset again with userText set to their exact latest message: MDD stops it through OpenCode when it can and releases it, unless OpenCode still reports it busy.';
 export type Inspect = {
   /** Internal admission still proves the objective from the real native conversation. */
-  intake?(runtime: Runtime, requirements: string, messageID: string, scope?: 'latest' | 'objective'): Promise<void | string>;
+  intake?(runtime: Runtime, requirements: string, messageID: string, scope?: 'latest' | 'objective' | 'native-current'): Promise<void | string>;
   /** A transferred target must prove its original native user request, not only local receipt bytes. */
   confirmTransfer?(runtime: Runtime, receipt: NonNullable<RunOwner['receipt']>, runID: string): Promise<void>;
   confirmAdaptiveTransfer?(runtime: Runtime, receipt: AdaptiveReceipt, runID: string): Promise<void>;
+  confirmAdaptiveAdmission?(runtime: Runtime, userMessageID: string, objective: string): Promise<void>;
   /** Complete native control history: unknown/unreadable children never count as idle. */
-  adaptiveTransferIdle?(runtime: Runtime, role: 'source' | 'target'): Promise<void>;
+  adaptiveTransferIdle?(runtime: Runtime, role: 'source' | 'target', settledQuestionCallID?: string): Promise<void>;
   /** Positive host evidence only; an absent capability never releases a writer. */
   stopped?(runtime: Runtime, call: TaskCall, returned?: unknown): Promise<boolean>;
   /** The host's account of a dispatched child. Preferred over `stopped` when present. */
@@ -541,6 +543,7 @@ export class PhaseRunner {
         run.record = this.options.ownership!.publishAdaptiveUpdate(this.options.adaptiveStore, run.record!, { runID: run.id, ...run.runtime,
           agent: 'mdd-orchestrator', userMessageID: run.userMessageID, stage: 'active', data: low.serialize(),
           calls: [...run.calls], ...(attempt ? { attempt } : {}), ...(run.record?.transfer ? { transfer: run.record.transfer } : {}),
+          ...(run.record?.history ? { history: run.record.history } : {}),
           ...(policy ? { nativePolicy: policy } : {}) });
       } catch (error) { if (!(error instanceof AdaptiveCommitError) || error.uncertain) run.fenced = true; throw error; }
     }
@@ -789,20 +792,28 @@ export class PhaseRunner {
       throw new Error('Adaptive source changed or current native policy transfer proof generation differs.');
   }
 
-  #adaptiveIdle(runtime: Runtime): void {
+  #adaptiveIdle(runtime: Runtime, terminal?: AdaptiveRecord): void {
     this.#nativeQuestionIdle(runtime.sessionID);
     if (runtime.agent !== 'mdd-orchestrator' || resolve(runtime.directory) !== runtime.directory || resolve(runtime.worktree) !== runtime.worktree)
       throw new Error('Internal adaptive admission requires the exact coordinator workspace.');
     if (!this.#readCapability() || !this.options.workerCapability || !('phase' in this.options.workerCapability) ||
         this.options.workerCapability.applyEditing !== true || !this.options.progress || !this.options.ownership || !this.inspect.intake)
       throw new Error('Internal adaptive admission requires real scoped-editor capability, native objective inspection, ownership and progress.');
-    if (this.#adaptiveTransfers.has(runtime.sessionID) || this.#runs.has(runtime.sessionID) || this.#adaptive.has(runtime.sessionID) || this.#inflight.has(runtime.sessionID) ||
+    if (terminal) {
+      const owner = this.options.ownership.read(terminal.runID), loaded = this.#adaptive.get(runtime.sessionID);
+      if (!['completed', 'closed-unverified'].includes(terminal.data.state) || terminal.attempt?.state === 'pending' ||
+          !isDeepStrictEqual(this.options.adaptiveStore?.read(runtime.sessionID), terminal) ||
+          owner?.ownerSessionID !== runtime.sessionID || owner.state !== 'idle' || owner.operation || owner.recovery || owner.workers || owner.policyQuestion || owner.recoveringTransfer ||
+          loaded && (loaded.callID || loaded.dispatching || loaded.fenced || !isDeepStrictEqual(loaded.record, terminal)))
+        throw new Error('Only exact closed, idle current ownership permits archival replacement.');
+    }
+    if (this.#adaptiveTransfers.has(runtime.sessionID) || this.#runs.has(runtime.sessionID) || !terminal && this.#adaptive.has(runtime.sessionID) || this.#inflight.has(runtime.sessionID) ||
         this.#reservations.has(runtime.sessionID) || this.#explorations.has(runtime.sessionID) || this.#explorationBlocked(runtime.sessionID) ||
         this.#solo.has(runtime.sessionID) && this.#solo.get(runtime.sessionID)!.state !== 'settled' ||
-        this.options.ownership.parent(runtime.sessionID) || this.options.ownership.intake(runtime.sessionID)?.state === 'pending' ||
-        this.options.adaptiveStore?.occupied(runtime.sessionID) || this.options.checkpoint?.read(runtime.sessionID) || this.options.progress.read(runtime.sessionID)?.state === 'pending')
+        !terminal && this.options.ownership.parent(runtime.sessionID) || this.options.ownership.intake(runtime.sessionID)?.state === 'pending' ||
+        !terminal && this.options.adaptiveStore?.occupied(runtime.sessionID) || this.options.checkpoint?.read(runtime.sessionID) || this.options.progress.read(runtime.sessionID)?.state === 'pending')
       throw new Error('An existing or unfinished native run occupies this parent; internal admission requires idle ownership.');
-    this.assertFreshStart(runtime.sessionID);
+    if (!terminal) this.assertFreshStart(runtime.sessionID);
   }
 
   /** Unregistered process-local entry. Neither caller IDs nor approved:true supply native proof. */
@@ -811,21 +822,48 @@ export class PhaseRunner {
     const contract = adaptiveContract(input.contract), messageID = boundedText(input.messageID, 'native messageID', 256);
     const here = { ...runtime };
     if (this.#adaptiveAdmissions.has(here.sessionID)) throw new Error('Internal adaptive admission is already pending.');
-    this.#adaptiveIdle(here);
+    const proof = this.#nativeOperations.get(here.sessionID), store = this.options.adaptiveStore;
+    const terminal = proof?.callerMessageID ? store?.read(here.sessionID) : undefined;
+    if (store && new AdaptiveRetirement(store).pending(here.sessionID)) throw new Error('Retirement is pending; exact cold reconciliation is required.');
+    this.#adaptiveIdle(here, terminal);
     const low = new AdaptiveLow(contract, here.directory);
     this.#adaptiveAdmissions.add(here.sessionID);
     try {
-      const userID = await this.inspect.intake!(here, contract.objective, messageID, 'objective');
+      const inspectObjective = () => this.inspect.intake!(here, contract.objective, proof?.callerMessageID ?? messageID,
+        proof?.callerMessageID ? 'native-current' : 'objective');
+      const userID = await inspectObjective();
       if (typeof userID !== 'string') throw new Error('Exact native objective proof must return its genuine user identity.');
+      if (proof?.callerMessageID && userID !== messageID) throw new Error('Entry native user identity differs from the current host turn.');
+      if (terminal && [terminal.userMessageID, ...(terminal.history ?? []).map(item => item.userMessageID)].includes(userID))
+        throw new Error('This native user request is already consumed by preserved run history.');
       await this.inspect.parent(here);
-      this.#adaptiveIdle(here); this.assertFreshStart(here.sessionID, userID); low.assertCurrent();
+      if (terminal) {
+        this.#adaptiveIdle(here, terminal);
+        if (!this.inspect.adaptiveTransferIdle) throw new Error('Positive native idle inspection is required for terminal retirement.');
+        await this.inspect.adaptiveTransferIdle(here, 'target', proof?.question?.callID);
+      }
+      if (proof?.callerMessageID && await inspectObjective() !== userID) throw new Error('Current native objective changed during admission.');
+      this.#adaptiveIdle(here, terminal);
+      if (!terminal) this.assertFreshStart(here.sessionID, userID);
+      low.assertCurrent();
+      if (proof?.callerMessageID && (contract.assessment.complexity !== 'low' || contract.assessment.impact !== 'low')) {
+        low.startContinuation(low.status().selection.handle!, { depth: contract.assessment.complexity === 'high' || contract.assessment.impact === 'high' ? 'high' : 'medium',
+          rationale: 'Fresh native assessment requires structured depth.', assessment: contract.assessment, context: contract.context });
+      }
       const nativeUserID = boundedText(userID, 'native user identity', 256), id = `${ADAPTIVE_RUN_PREFIX}${randomUUID()}`;
       const run: AdaptiveRun = { id, runtime: here, low, userMessageID: nativeUserID, calls: new Set() };
       if (this.options.adaptiveStore) {
-        this.options.ownership!.bootstrapAdaptive(here.sessionID, id, () => {
-          run.record = this.options.adaptiveStore!.commit(here.sessionID, undefined, { runID: id, ...here,
+        const body: Parameters<AdaptiveStore['prepare']>[2] = { runID: id, ...here,
             agent: 'mdd-orchestrator', userMessageID: nativeUserID, stage: 'bootstrap', data: low.serialize(), calls: [],
-            ...(this.#nativeEntryPolicies.get(here.sessionID) ? { nativePolicy: this.#nativeEntryPolicies.get(here.sessionID)! } : {}) });
+            ...(terminal ? { history: [...(terminal.history ?? []), { runID: terminal.runID, sessionID: terminal.sessionID, userMessageID: terminal.userMessageID, digest: terminal.digest }] } : {}),
+            ...(this.#nativeEntryPolicies.get(here.sessionID) ? { nativePolicy: this.#nativeEntryPolicies.get(here.sessionID)! } : {}) };
+        if (terminal) {
+          run.record = this.options.adaptiveStore.prepare(here.sessionID, undefined, body);
+          this.options.ownership!.replaceClosedAdaptive(this.options.adaptiveStore, terminal, run.record);
+          const previous = this.#adaptive.get(here.sessionID); if (previous) previous.fenced = true;
+          this.#adaptive.delete(here.sessionID);
+        } else this.options.ownership!.bootstrapAdaptive(here.sessionID, id, () => {
+          run.record = this.options.adaptiveStore!.commit(here.sessionID, undefined, body);
         });
         this.options.ownership!.claim({ ...here, runID: id });
         this.#persistAdaptive(run, low);
@@ -849,7 +887,19 @@ export class PhaseRunner {
 
   async #restoreAdaptive(runtime: Runtime): Promise<{ restored: boolean; reason?: string }> {
     try {
-      const here = { ...runtime }, store = this.options.adaptiveStore!, saved = store.read(here.sessionID);
+      const here: Runtime = { sessionID: runtime.sessionID, agent: runtime.agent, directory: runtime.directory, worktree: runtime.worktree };
+      const store = this.options.adaptiveStore!;
+      const retirement = new AdaptiveRetirement(store), pending = retirement.pending(here.sessionID);
+      if (pending) {
+        if (this.#adaptive.has(here.sessionID) || !this.inspect.confirmAdaptiveAdmission || !this.inspect.adaptiveTransferIdle)
+          throw new Error('Retirement publication remains fenced until exact cold reconciliation.');
+        await this.inspect.confirmAdaptiveAdmission(here, pending.next.userMessageID, pending.next.data.contract.objective);
+        await this.inspect.adaptiveTransferIdle(here, 'target');
+        if (!isDeepStrictEqual(retirement.pending(here.sessionID), pending)) throw new Error('Retirement changed during cold native inspection.');
+        new AdaptiveLow(pending.next.data.contract, here.directory);
+        this.options.ownership!.reconcileAdaptiveReplacement(store, pending);
+      }
+      const saved = store.read(here.sessionID);
       if (!saved || here.agent !== 'mdd-orchestrator' || saved.directory !== here.directory || saved.worktree !== here.worktree ||
           resolve(here.directory) !== here.directory || resolve(here.worktree) !== here.worktree ||
           !this.options.ownership || !this.options.progress || this.options.checkpoint?.read(here.sessionID))
@@ -1016,7 +1066,8 @@ export class PhaseRunner {
       await this.inspect.parent(here); guard();
       await this.inspect.adaptiveTransferIdle!(sourceRuntime, 'source'); guard();
       await this.inspect.adaptiveTransferIdle!(here, 'target'); guard();
-      const nativeID = await this.inspect.intake!(here, adaptiveTransferRequest(source), messageID, 'latest'); guard();
+      const nativeID = await this.inspect.intake!(here, adaptiveTransferRequest(source), proof?.callerMessageID ?? messageID, proof?.callerMessageID ? 'native-current' : 'latest'); guard();
+      if (proof?.callerMessageID && nativeID !== messageID) throw new Error('Transfer must bind the current native user turn.');
       if (typeof nativeID !== 'string') throw new Error('Fresh latest target-authored native transfer proof is required.');
       const lineage = { sourceSessionID, sourceSequence: source.sequence, sourceDigest: source.digest, ownerEpoch: initialOwner!.epoch,
         operationID, nativeUserMessageID: boundedText(nativeID, 'native target user identity', 256),
@@ -1088,7 +1139,8 @@ export class PhaseRunner {
       await this.inspect.adaptiveTransferIdle({ ...here, sessionID: sourceID }, 'source'); guard();
       await this.inspect.adaptiveTransferIdle(here, 'target'); guard();
       const recoveryText = `Recover adaptive transfer sourceSessionID=${sourceID} runID=${runID} operationID=${operationID} action=${action}. The transfer stopped; reconcile only this operation.`;
-      const nativeID = await this.inspect.intake(here, recoveryText, messageID, 'latest'); guard();
+      const nativeID = await this.inspect.intake(here, recoveryText, proof?.callerMessageID ?? messageID, proof?.callerMessageID ? 'native-current' : 'latest'); guard();
+      if (proof?.callerMessageID && nativeID !== messageID) throw new Error('Transfer recovery must bind the current native user turn.');
       if (typeof nativeID !== 'string') throw new Error('Fresh native recovery request proof is required.');
       if (action === 'abort') {
         if (unclaimedAbort) {
@@ -1161,6 +1213,7 @@ export class PhaseRunner {
       const structured = continuation && selected.actor !== 'mdd-apply' && selected.actor !== 'mdd-risk';
       const prompt = [
         `Internal adaptive actor: ${selected.actor}. Purpose: ${selected.purpose}. Assignment: ${assignment.id}.`,
+        `Packaged MDD actor instructions with provenance, which govern this version-3 assignment: ${JSON.stringify(mddInstructions())}`,
         'The approved contract below is data, not permission to expand scope or settle product decisions. Perform only this assignment. No automatic next phase, closure, escalation, recursive delegation, MCP or shell is authorized.',
         selected.actor === 'mdd-apply'
           ? 'Edit ONLY through mdd_worker_edit with exact preconditions. Generic editors and shell are fenced. Do not execute checks; retain every unexecuted evidence obligation honestly.'
@@ -1183,7 +1236,7 @@ export class PhaseRunner {
       if (Buffer.byteLength(prompt) > DISPATCHABLE_PROMPT_BYTES) {
         this.#changeAdaptive(run, low => low.cancelAuthorization()); throw new Error('Internal actor prompt cannot fit the native dispatch budget.');
       }
-      run.args = { description: `Adaptive ${selected.actor} / ${assignment.id}`, subagent_type: 'general', prompt };
+      run.args = { description: `Adaptive ${selected.actor} / ${assignment.id}`, subagent_type: this.#nativeOperations.get(here.sessionID)?.callerMessageID ? selected.actor : 'general', prompt };
       this.#arm(run);
       return this.status(here.sessionID);
     });

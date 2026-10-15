@@ -116,7 +116,7 @@ test('AL-01: the runner refuses reserved adaptive routing before creating durabl
   const checkpoint = new CheckpointStore(root);
   const runner = new PhaseRunner({ parent: async () => {}, result: async (_r, _c, _p, output) => output }, { checkpoint });
   await assert.rejects(runner.start({ preflight: { answers, routingVersion: 3 }, requirements: 'Inactive contract.' }, runtime,
-    { requirementsConfirmed: true, userMessageID: 'routing-user' }), /routingVersion.*inactive/);
+    { requirementsConfirmed: true, userMessageID: 'routing-user' }), /routingVersion.*native-context-required/);
   assert.equal(checkpoint.read(runtime.sessionID), undefined);
 });
 
@@ -157,7 +157,7 @@ test('AL-01 correction: the runner rejects non-enumerable invalid pins before re
     const runner = new PhaseRunner({ parent: async () => {}, result: async (_r, _c, _p, output) => output }, { checkpoint });
     const preflight = Object.defineProperty({ answers, route: ['mdd-plan', 'mdd-apply', 'mdd-verify'] }, 'routingVersion', { value: routingVersion });
     await assert.rejects(runner.start({ preflight, requirements: 'Reject the own invalid routing pin.' }, runtime,
-      { requirementsConfirmed: true, userMessageID: 'own-routing-user' }), routingVersion === 3 ? /routingVersion.*inactive/ : /routingVersion.*unsupported/);
+      { requirementsConfirmed: true, userMessageID: 'own-routing-user' }), routingVersion === 3 ? /routingVersion.*native-context-required/ : /routingVersion.*unsupported/);
     assert.equal(checkpoint.read(runtime.sessionID), undefined);
   }
 });

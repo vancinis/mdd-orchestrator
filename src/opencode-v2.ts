@@ -52,6 +52,7 @@ export function v2Payload(text: string): string {
   try { value = object(JSON.parse(text)); } catch { return text; }
   if (value.task) value.task = nativeTask(value.task);
   if (Array.isArray(value.tasks)) value.tasks = value.tasks.map(nativeTask);
+  if (value.lane === 'adaptive-native' && value.next && object(value.next).native === 'task') object(value.next).native = 'subagent';
   if (value.nextAction && object(value.nextAction).tool === 'task') {
     const next = object(value.nextAction);
     next.tool = 'subagent';
@@ -312,6 +313,14 @@ export async function setupV2(ctx: Plugin.Context, createMotor: LegacyPlugin): P
       workerHost.fence.settle(event.id);
     }
     if (audit || result.title === 'MDD security assessment') event.result = { content: String(result.output), output: { status: 'completed', output: String(result.output) } };
+    else if (typeof result.output === 'string') {
+      let status: ObjectValue | undefined;
+      try { status = object(JSON.parse(result.output)); } catch { /* Ordinary task/question results retain their original transport. */ }
+      if (status?.lane === 'adaptive-native') {
+        const content = v2Payload(result.output);
+        event.result = { ...event.result, content, output: { ...object(event.result.output), output: content } };
+      }
+    }
   });
   const stream = (async () => {
     try {

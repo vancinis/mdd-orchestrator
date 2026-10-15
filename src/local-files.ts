@@ -7,7 +7,8 @@ export class LocalFileError extends Error {
   constructor() { super('Local storage unavailable or unsafe. Check project permissions and local file types.'); }
 }
 
-type LocalName = 'mdd.config.json' | 'mdd/setup-assets.json' | '.mdd/.gitignore' | '.mdd/knowledge-cache.json' | '.mdd/telemetry.jsonl' | '.mdd/telemetry-rollup.json' | '.mdd/lessons.jsonl' | '.mdd/sessions.jsonl' | '.mdd/runs.jsonl' | `.mdd/progress-${string}.json` | `.mdd/run-${string}.json` | `.mdd/checkpoint-${string}.json` | `.mdd/question-${string}.json` | `.mdd/owner-${string}.json` | `.mdd/parent-owner-${string}.json` | `.mdd/intake-${string}.json` | `.mdd/adaptive-${string}.json`;
+type LocalName = 'mdd.config.json' | 'mdd/setup-assets.json' | '.mdd/.gitignore' | '.mdd/knowledge-cache.json' | '.mdd/telemetry.jsonl' | '.mdd/telemetry-rollup.json' | '.mdd/lessons.jsonl' | '.mdd/sessions.jsonl' | '.mdd/runs.jsonl' | `.mdd/progress-${string}.json` | `.mdd/run-${string}.json` | `.mdd/checkpoint-${string}.json` | `.mdd/question-${string}.json` | `.mdd/owner-${string}.json` | `.mdd/parent-owner-${string}.json` | `.mdd/intake-${string}.json` | `.mdd/adaptive-${string}.json`
+  | `.mdd/adaptive-archive-${string}.json` | `.mdd/adaptive-retirement-${string}.json`;
 
 /**
  * A lock is only a cooperation hint between concurrent writers; atomicity comes from the
@@ -211,7 +212,7 @@ export class LocalFiles {
   #path(name: LocalName, create: boolean): string {
     if (name !== 'mdd.config.json' && name !== 'mdd/setup-assets.json' && name !== '.mdd/.gitignore' && name !== '.mdd/telemetry.jsonl' && name !== '.mdd/telemetry-rollup.json' &&
         name !== '.mdd/lessons.jsonl' && name !== '.mdd/sessions.jsonl' && name !== '.mdd/runs.jsonl' && name !== '.mdd/knowledge-cache.json' &&
-        !/^\.mdd\/progress-[a-f0-9]{64}\.json$/.test(name) && !/^\.mdd\/run-[a-f0-9]{64}(\.(discarded|continued))?\.json$/.test(name) && !/^\.mdd\/checkpoint-[a-f0-9]{64}\.json$/.test(name) && !/^\.mdd\/question-[a-f0-9]{64}\.json$/.test(name) && !/^\.mdd\/(?:parent-)?owner-[a-f0-9]{64}\.json$/.test(name) && !/^\.mdd\/(?:intake|adaptive)-[a-f0-9]{64}\.json$/.test(name)) throw new LocalFileError();
+        !/^\.mdd\/progress-[a-f0-9]{64}\.json$/.test(name) && !/^\.mdd\/run-[a-f0-9]{64}(\.(discarded|continued))?\.json$/.test(name) && !/^\.mdd\/checkpoint-[a-f0-9]{64}\.json$/.test(name) && !/^\.mdd\/question-[a-f0-9]{64}\.json$/.test(name) && !/^\.mdd\/(?:parent-)?owner-[a-f0-9]{64}\.json$/.test(name) && !/^\.mdd\/(?:intake|adaptive|adaptive-archive|adaptive-retirement)-[a-f0-9]{64}\.json$/.test(name)) throw new LocalFileError();
     directory(this.#root);
     const path = join(this.#root, name);
     const parent = dirname(path);
@@ -274,7 +275,7 @@ export class LocalFiles {
    * torn one. Every ownership decision is still made under the writer lock by updateStrict.
    */
   readStrict(name: LocalName, limit: number): string | undefined {
-    if (!/^\.mdd\/(?:parent-)?owner-[a-f0-9]{64}\.json$/.test(name) && !/^\.mdd\/(?:intake|adaptive)-[a-f0-9]{64}\.json$/.test(name)) throw new LocalFileError();
+    if (!/^\.mdd\/(?:parent-)?owner-[a-f0-9]{64}\.json$/.test(name) && !/^\.mdd\/(?:intake|adaptive|adaptive-archive|adaptive-retirement)-[a-f0-9]{64}\.json$/.test(name)) throw new LocalFileError();
     return retryTransient(() => this.read(name, limit));
   }
 
@@ -295,7 +296,7 @@ export class LocalFiles {
 
   /** For single-writer ownership: no stale-lock timeout, no age-based takeover. */
   updateStrict(name: LocalName, change: (previous: string | undefined) => string | undefined, limit: number): void {
-    if (!/^\.mdd\/(?:parent-)?owner-[a-f0-9]{64}\.json$/.test(name) && !/^\.mdd\/(?:intake|adaptive)-[a-f0-9]{64}\.json$/.test(name)) throw new LocalFileError();
+    if (!/^\.mdd\/(?:parent-)?owner-[a-f0-9]{64}\.json$/.test(name) && !/^\.mdd\/(?:intake|adaptive|adaptive-archive|adaptive-retirement)-[a-f0-9]{64}\.json$/.test(name)) throw new LocalFileError();
     this.#update(name, change, limit, true);
   }
 

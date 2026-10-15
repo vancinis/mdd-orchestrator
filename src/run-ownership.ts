@@ -13,6 +13,7 @@ import type { AdaptiveRecord } from './adaptive-store.js';
 import { validateAdaptivePublication } from './adaptive-transfer.js';
 import type { AdaptiveReceipt } from './adaptive-transfer.js';
 import { AdaptiveLow } from './adaptive-low.js';
+import { AdaptiveRetirement } from './adaptive-retirement.js';
 import { questionEnvelope, answerFromLabel } from './preflight.js';
 
 export const RUN_OWNER_VERSION = 1;
@@ -326,6 +327,69 @@ export class RunOwnershipStore {
       return JSON.stringify({ sessionID, runID });
     }, LIMIT);
     if (this.parent(sessionID) !== runID) throw new Error('Adaptive bootstrap binding is unconfirmed.');
+  }
+  /** Parent -> run -> journal locks, matching adaptive bootstrap/publication ordering. */
+  replaceClosedAdaptive(store: AdaptiveStore, previous: AdaptiveRecord, next: AdaptiveRecord): void {
+    const sessionID = previous.sessionID;
+    this.#files.updateStrict(this.#parentName(sessionID), source => {
+      const claim = source === undefined ? undefined : parseParent(JSON.parse(source), sessionID), owner = this.read(previous.runID);
+      const progress = new ProgressGuard(this.#root).read(sessionID), question = new QuestionCheckpointStore(this.#root).read(sessionID);
+      if (!claim || claim.retired || claim.runID !== previous.runID || !owner || owner.ownerSessionID !== sessionID || owner.state !== 'idle' ||
+          owner.operation || owner.recovery || owner.recoveringTransfer || owner.workers || owner.policyQuestion ||
+          this.intake(sessionID)?.state === 'pending' || new CheckpointStore(this.#root).read(sessionID) ||
+          !isDeepStrictEqual(store.read(sessionID), previous)) throw new Error('Terminal replacement lost idle ownership or exact generation.');
+      if (previous.transfer) this.confirmAdaptiveReceipt(previous.runID, sessionID, store);
+      const retirement = new AdaptiveRetirement(store);
+      if (retirement.pending(sessionID)) throw new Error('Retirement publication is pending; exact cold reconciliation is required.');
+      const archive = retirement.prepare({ version: 1, previous, next, owner, claim, progress: progress ?? null, question: question ?? null });
+      this.#finishAdaptiveReplacement(store, archive);
+      return JSON.stringify({ sessionID, runID: next.runID });
+    }, LIMIT);
+    if (this.parent(sessionID) !== next.runID || !isDeepStrictEqual(store.read(sessionID), next))
+      throw new Error('Terminal replacement publication is unconfirmed; exact cold reconciliation is required.');
+  }
+  #finishAdaptiveReplacement(store: AdaptiveStore, archive: NonNullable<ReturnType<AdaptiveRetirement['intent']>>): void {
+    const { previous, next, owner } = archive, parent = previous.sessionID;
+    const fenced: RunOwner = { ...owner, state: 'reserved', epoch: owner.epoch + 1, callID: `retire-${next.runID}`,
+      operation: { name: 'adaptive-retirement', checkpointSequence: previous.sequence, checkpointDigest: previous.digest } };
+    this.#write(previous.runID, current => {
+      if (!isDeepStrictEqual(current, owner) && !isDeepStrictEqual(current, fenced)) throw new Error('Retirement owner CAS differs.');
+      if (!isDeepStrictEqual(new AdaptiveRetirement(store).intent(parent), archive)) throw new Error('Retirement archive changed.');
+      const live = store.read(parent);
+      if (!isDeepStrictEqual(live, previous) && !isDeepStrictEqual(live, next)) throw new Error('Retirement record generation changed.');
+      return fenced;
+    });
+    // The durable run reservation now fences every old-process writer and transfer callback.
+    const marker = new ProgressGuard(this.#root).read(parent);
+    if (marker) {
+      if (!isDeepStrictEqual(marker, archive.progress)) throw new Error('Retirement progress differs from its preserved archive.');
+      new ProgressGuard(this.#root).clear(parent);
+      if (new ProgressGuard(this.#root).read(parent)) throw new Error('Retirement marker cleanup is unconfirmed.');
+    }
+    if (isDeepStrictEqual(store.read(parent), previous)) store.replaceClosedIf(parent, previous, next);
+    if (!isDeepStrictEqual(store.read(parent), next)) throw new Error('Retirement bootstrap readback differs.');
+  }
+  /** Called only after cold native inspection confirms the exact archived fresh admission. */
+  reconcileAdaptiveReplacement(store: AdaptiveStore, expected: NonNullable<ReturnType<AdaptiveRetirement['pending']>>): void {
+    const parent = expected.previous.sessionID;
+    this.#files.updateStrict(this.#parentName(parent), source => {
+      const claim = source === undefined ? undefined : parseParent(JSON.parse(source), parent);
+      if (!isDeepStrictEqual(new AdaptiveRetirement(store).intent(parent), expected) ||
+          !isDeepStrictEqual(claim, expected.claim) && !isDeepStrictEqual(claim, { sessionID: parent, runID: expected.next.runID }) ||
+          this.intake(parent)?.state === 'pending' || new CheckpointStore(this.#root).read(parent)) throw new Error('Cold retirement binding, occupancy or generation differs.');
+      const nextOwner = this.read(expected.next.runID);
+      if (nextOwner && (!isDeepStrictEqual(claim, { sessionID: parent, runID: expected.next.runID }) ||
+          !isDeepStrictEqual(nextOwner, { version: RUN_OWNER_VERSION, runID: expected.next.runID, ownerSessionID: parent, originSessionID: parent,
+            directory: expected.next.directory, worktree: expected.next.worktree, epoch: 0, state: 'idle' })))
+        throw new Error('Cold replacement bootstrap owner is not the exact initial idle claim.');
+      const question = new QuestionCheckpointStore(this.#root).read(parent);
+      if (!isDeepStrictEqual(question ?? null, expected.question)) throw new Error('Cold retirement question generation changed.');
+      new AdaptiveRetirement(store).publishPointer(expected);
+      this.#finishAdaptiveReplacement(store, expected);
+      return JSON.stringify({ sessionID: parent, runID: expected.next.runID });
+    }, LIMIT);
+    if (this.parent(parent) !== expected.next.runID || !isDeepStrictEqual(store.read(parent), expected.next))
+      throw new Error('Cold retirement readback is unconfirmed.');
   }
   bindAdaptive(sessionID: string, runID: string): void {
     this.#files.updateStrict(this.#parentName(sessionID), source => {

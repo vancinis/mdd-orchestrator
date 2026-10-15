@@ -16,15 +16,26 @@ export type AdaptiveRecord = {
   calls: string[];
   transfer?: AdaptiveLineage;
   nativePolicy?: NativePolicy;
+  history?: { runID: string; sessionID: string; userMessageID: string; digest: string }[];
 };
 type Body = Omit<AdaptiveRecord, 'version' | 'sequence' | 'digest' | 'admissionDigest'>;
 const hash = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 function text(value: unknown, max = 256): value is string {
   return typeof value === 'string' && !!value.trim() && value.length <= max && !/[\x00-\x1f\x7f]/.test(value);
 }
-function parse(source: string, sessionID: string): AdaptiveRecord {
+export function parseAdaptiveRecord(source: string, sessionID: string): AdaptiveRecord {
   const item = objectWithKeys(JSON.parse(source), 'adaptive record', ['version', 'sequence', 'digest', 'admissionDigest', 'runID', 'sessionID',
-    'directory', 'worktree', 'agent', 'userMessageID', 'stage', 'data', 'attempt', 'calls', 'transfer', 'nativePolicy']);
+    'directory', 'worktree', 'agent', 'userMessageID', 'stage', 'data', 'attempt', 'calls', 'transfer', 'nativePolicy', 'history']);
+  if (item.history !== undefined) {
+    if (!Array.isArray(item.history) || item.history.length > 256) throw new Error('Adaptive history index exceeds its bound.');
+    const identities = new Set<string>();
+    for (const entry of item.history) {
+      const ref = objectWithKeys(entry, 'adaptive archive reference', ['runID', 'sessionID', 'userMessageID', 'digest']);
+      if (!text(ref.runID) || !text(ref.sessionID) || !text(ref.userMessageID) || identities.has(ref.runID) ||
+          typeof ref.digest !== 'string' || !/^[a-f0-9]{64}$/.test(ref.digest)) throw new Error('Invalid adaptive archive reference.');
+      identities.add(ref.runID);
+    }
+  }
   if (item.version !== 1 || !Number.isSafeInteger(item.sequence) || (item.sequence as number) < 0 || item.sessionID !== sessionID ||
       !text(item.runID) || !item.runID.startsWith('adaptive-internal-') || !text(item.userMessageID) ||
       !text(item.directory, 2048) || !text(item.worktree, 2048) || item.agent !== 'mdd-orchestrator' ||
@@ -77,13 +88,13 @@ export class AdaptiveStore {
   occupied(sessionID: string): boolean { return this.files.readStrict(this.#name(sessionID), LIMIT) !== undefined; }
   read(sessionID: string): AdaptiveRecord | undefined {
     const source = this.files.readStrict(this.#name(sessionID), LIMIT);
-    return source === undefined ? undefined : parse(source, sessionID);
+    return source === undefined ? undefined : parseAdaptiveRecord(source, sessionID);
   }
   /** Pure preparation lets the target claim bind the exact bytes before publication. */
   prepare(sessionID: string, previous: AdaptiveRecord | undefined, value: Body): AdaptiveRecord {
     const body = { version: 1 as const, sequence: (previous?.sequence ?? -1) + 1,
       admissionDigest: hash(value.data.contract), ...structuredClone(value) };
-    return parse(JSON.stringify({ ...body, digest: hash(body) }), sessionID);
+    return parseAdaptiveRecord(JSON.stringify({ ...body, digest: hash(body) }), sessionID);
   }
   commit(sessionID: string, previous: AdaptiveRecord | undefined, value: Body): AdaptiveRecord {
     const next = this.prepare(sessionID, previous, value);
@@ -93,11 +104,12 @@ export class AdaptiveStore {
           !isDeepStrictEqual(next.nativePolicy.configured, previous.nativePolicy.configured) || next.nativePolicy.profile !== previous.nativePolicy.profile ||
           !isDeepStrictEqual(next.nativePolicy.questions.slice(0, previous.nativePolicy.questions.length), previous.nativePolicy.questions))) ||
         !isDeepStrictEqual(next.transfer, previous.transfer) ||
+        !isDeepStrictEqual(next.history, previous.history) ||
         ['runID', 'sessionID', 'directory', 'worktree', 'agent', 'userMessageID'].some(key =>
           next[key as keyof AdaptiveRecord] !== previous[key as keyof AdaptiveRecord]))) throw new Error('Adaptive immutable binding changed.');
     try {
       this.files.updateStrict(this.#name(sessionID), source => {
-        const current = source === undefined ? undefined : parse(source, sessionID);
+        const current = source === undefined ? undefined : parseAdaptiveRecord(source, sessionID);
         if (!isDeepStrictEqual(current, previous)) throw new Error('Adaptive CAS lost to another writer.');
         return JSON.stringify(next);
       }, LIMIT);
@@ -111,10 +123,21 @@ export class AdaptiveStore {
     try { if (isDeepStrictEqual(this.read(sessionID), next)) return next; } catch { /* fenced below */ }
     throw new AdaptiveCommitError(true);
   }
+  /** Only the parent/run-locked terminal replacement transaction calls this exact-record CAS. */
+  replaceClosedIf(sessionID: string, expected: AdaptiveRecord, next: AdaptiveRecord): void {
+    if (!['completed', 'closed-unverified'].includes(expected.data.state) || expected.attempt?.state === 'pending' ||
+        next.stage !== 'bootstrap' || next.sequence !== 0 || next.sessionID !== sessionID || next.runID === expected.runID)
+      throw new Error('Adaptive replacement requires closed history and a fresh bootstrap.');
+    this.files.updateStrict(this.#name(sessionID), source => {
+      if (source === undefined || !isDeepStrictEqual(parseAdaptiveRecord(source, sessionID), expected)) throw new Error('Adaptive replacement CAS differs.');
+      return JSON.stringify(next);
+    }, LIMIT);
+    if (!isDeepStrictEqual(this.read(sessionID), next)) throw new Error('Adaptive replacement readback is unconfirmed.');
+  }
   /** Only an owner-reserved abort may call this exact-record CAS, never a broad reset. */
   retireIf(sessionID: string, expected: AdaptiveRecord): void {
     this.files.updateStrict(this.#name(sessionID), source => {
-      if (source === undefined || !isDeepStrictEqual(parse(source, sessionID), expected)) throw new Error('Adaptive retirement CAS differs.');
+      if (source === undefined || !isDeepStrictEqual(parseAdaptiveRecord(source, sessionID), expected)) throw new Error('Adaptive retirement CAS differs.');
       return undefined;
     }, LIMIT);
     if (this.occupied(sessionID)) throw new Error('Adaptive target retirement is unconfirmed.');

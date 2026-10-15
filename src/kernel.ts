@@ -28,7 +28,7 @@ export function requestRoutingVersion(value: unknown): typeof FIXED_ROUTING_VERS
   const request = objectWithKeys(value, 'request', ['answers', 'profile', 'explore', 'route', 'routingVersion']);
   if (!Object.hasOwn(request, 'routingVersion')) return undefined;
   if (request.routingVersion === FUTURE_ROUTING_VERSION) {
-    throw new ValidationError('request.routingVersion 3: native-context-required. Fixed evaluation and Workflow cannot execute the native adaptive protocol; public registration remains inactive.');
+    throw new ValidationError('request.routingVersion 3: native-context-required. Fixed evaluation and Workflow cannot execute the native adaptive protocol; use mdd_adapt in the native coordinator.');
   }
   if (request.routingVersion !== FIXED_ROUTING_VERSION) {
     throw new ValidationError('request.routingVersion is unsupported; omit it for historical semantics or supply integer 2 for fixed routing.');

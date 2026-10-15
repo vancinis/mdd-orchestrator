@@ -9,6 +9,7 @@ import { STATUS_BUDGET_BYTES } from './status-budget.js';
 import { objectWithKeys } from './validation.js';
 import { STRUCTURED_FIELD_SCHEMA } from './acceptance.js';
 import type { AdaptiveContract, AdaptiveData } from './adaptive-low.js';
+import { adaptiveTransferRequest } from './adaptive-transfer.js';
 
 const REQUEST_BYTES = 160000;
 const PAGE_CHARS = 6000;
@@ -146,7 +147,7 @@ type Document = { id: string; text: string };
 type Held = { stamp: string; runtime: Runtime; documents: Map<string, Document> };
 type Snapshot = ReturnType<PhaseRunner['adaptiveProtocolSnapshotInternal']> & ReturnType<AdaptiveNative['readbackInternal']>;
 
-/** Inactive internal adapter, not a registered tool. All execution still crosses AL05a's bridge. */
+/** Versioned native projection. Host caller identity is separate from JSON and policy authority. */
 export class AdaptiveProtocol {
   readonly #held = new Map<string, Held>();
   constructor(readonly runner: PhaseRunner, readonly native: AdaptiveNative) {}
@@ -168,20 +169,20 @@ export class AdaptiveProtocol {
     held.documents.set(name, document);
     return { kind: 'detail', args: { cursor: `${document.id}:0` }, encoding: 'json-text-pages', bytes: Buffer.byteLength(text) };
   }
-  #page(cursor: string, runtime: Runtime, snapshot: Snapshot): Record<string, unknown> {
+  #page(cursor: string, runtime: Runtime, snapshot: Snapshot, publicAdapter = false): Record<string, unknown> {
     const held = this.#held.get(runtime.sessionID), [id, offsetText, extra] = cursor.split(':');
     const document = held && [...held.documents.values()].find(item => item.id === id), offset = Number(offsetText);
     if (!held || !isDeepStrictEqual(held.runtime, runtime) || held.stamp !== this.#stamp(snapshot) || !document || extra !== undefined ||
         !/^(0|[1-9][0-9]*)$/.test(offsetText ?? '') || !Number.isSafeInteger(offset) || offset % PAGE_CHARS || offset >= document.text.length)
       throw new Error('Invalid, stale or cross-parent detail cursor. Read current status for fresh references.');
     const end = Math.min(offset + PAGE_CHARS, document.text.length);
-    return { routingVersion: 3, registration: 'inactive', encoding: 'json-text-pages', text: document.text.slice(offset, end),
+    return { routingVersion: 3, registration: publicAdapter ? 'active' : 'inactive', encoding: 'json-text-pages', text: document.text.slice(offset, end),
       ...(end < document.text.length ? { nextCursor: `${id}:${end}` } : {}) };
   }
-  async run(value: unknown, hostRuntime: Runtime): Promise<unknown> {
+  async run(value: unknown, hostRuntime: Runtime, callerMessageID?: string, publicAdapter = !!callerMessageID): Promise<unknown> {
     const request = decodeAdaptiveRequest(value), runtime = { ...hostRuntime };
     if (runtime.agent !== 'mdd-orchestrator') throw new Error('Only the native coordinator may use this protocol.');
-    if (request.kind === 'detail') return this.#page(String(request.args.cursor), runtime, await this.#read(runtime));
+    if (request.kind === 'detail') return this.#page(String(request.args.cursor), runtime, await this.#read(runtime), publicAdapter);
     if (request.kind !== 'status') {
       // Validate using the actual held model on an isolated copy, before any policy question/write.
       this.runner.validateAdaptiveProtocolInternal(request as NativeOperation, runtime);
@@ -190,11 +191,11 @@ export class AdaptiveProtocol {
       if (request.kind === 'select' && request.args.actor === 'mdd-apply' && request.args.repairOf !== undefined &&
           continuation?.next === 'mdd-verify' && before.model?.data.completed.some(item => item.assignmentID === request.args.assignmentID) &&
           request.args.context === undefined) throw new Error('Published continuation repair requires explicit current declared-source context.');
-      await this.native.run(request, runtime);
+      await this.native.run(request, runtime, callerMessageID);
     }
-    return this.#project(runtime, await this.#read(runtime));
+    return this.#project(runtime, await this.#read(runtime), publicAdapter);
   }
-  #project(runtime: Runtime, snapshot: Snapshot): Record<string, unknown> {
+  #project(runtime: Runtime, snapshot: Snapshot, publicAdapter = false): Record<string, unknown> {
     const stamp = this.#stamp(snapshot), old = this.#held.get(runtime.sessionID);
     const held: Held = old?.stamp === stamp && isDeepStrictEqual(old.runtime, runtime) ? old : { stamp, runtime, documents: new Map() };
     this.#held.set(runtime.sessionID, held);
@@ -219,11 +220,15 @@ export class AdaptiveProtocol {
     if (snapshot.record) details.journal = this.#reference(held, 'journal', snapshot.record);
     if (model) details.held = this.#reference(held, 'held', model);
     if (contract) details.contract = this.#reference(held, 'contract', contract);
+    if (publicAdapter && snapshot.record && snapshot.owner?.ownerSessionID === runtime.sessionID &&
+        ['await-selection', 'completed', 'closed-unverified'].includes(state)) details.transfer = this.#reference(held, 'transfer', {
+      sourceSessionID: runtime.sessionID, runID: snapshot.record.runID, nativeRequest: adaptiveTransferRequest(snapshot.record),
+      instruction: 'The target conversation must receive this exact genuine native user request. Its messageID and actual host caller are independently inspected; source IDs alone grant nothing.' });
     if (data?.snapshot) details.snapshot = this.#reference(held, 'snapshot', data.snapshot);
     if (snapshot.sourceRecord ?? snapshot.recoveryRecord) details.sourceJournal = this.#reference(held, 'sourceJournal', snapshot.sourceRecord ?? snapshot.recoveryRecord);
     const mode = policy?.answers?.mode ?? record?.nativePolicy?.answers.mode ?? this.native.profile.answers.mode;
-    const projection: Record<string, unknown> = { lane: 'adaptive-native-protocol-internal', routingVersion: 3, registration: 'inactive',
-      protocol: 'NativeIntake.adaptiveInternal JSON string; future public adapter is not registered.',
+    const projection: Record<string, unknown> = { lane: publicAdapter ? 'adaptive-native' : 'adaptive-native-protocol-internal', routingVersion: 3, registration: publicAdapter ? 'active' : 'inactive',
+      protocol: publicAdapter ? 'mdd_adapt({payload: JSON.stringify({routingVersion:3,kind,args})})' : 'NativeIntake.adaptiveInternal JSON string; future public adapter is not registered.',
       state, route: data?.continuation?.depth ?? 'low', ...(mode ? { mode } : {}),
       ...(record ? { runID: record.runID, generation: record.sequence } : {}),
       ...(handle ? { handle } : {}), operations, details,
@@ -270,7 +275,7 @@ export class AdaptiveProtocol {
           ...(repairAvailable ? { variant: 'repair' } : {}), inputContract: 'operations', automatic: false };
       }
       projection.next ??= { internal: operations[0]?.kind, inputContract: 'operations', automatic: false };
-    } else if (state === 'not-started') {
+    } else if (state === 'not-started' || publicAdapter && ['completed', 'closed-unverified'].includes(state)) {
       operation('entry'); operation('transfer', { runtime: 'target native parent; sourceSessionID/runID must identify held source authority' });
     }
     else if (['await-result', 'recovery-blocked'].includes(state)) {
@@ -307,19 +312,24 @@ export class AdaptiveProtocol {
     if (state === 'await-contract') { operation('entry'); projection.clarification = 'Read held native answers in details.policy; rebuild without expanding original authority.'; }
     if (snapshot.native) details.policy = this.#reference(held, 'policy', snapshot.native);
     operation('status'); operation('detail');
-    // Never emit an unlimited protected blob or a lossy selector. Large task handles stay exact.
-    if (Buffer.byteLength(JSON.stringify(projection)) > STATUS_BUDGET_BYTES) {
-      if (projection.task) { projection.taskRef = this.#reference(held, 'task', projection.task); delete projection.task;
+    if (publicAdapter && projection.next && typeof projection.next === 'object') {
+      const { internal, ...next } = projection.next as Record<string, unknown>;
+      projection.next = { ...next, ...(internal ? { operation: internal } : {}) };
+    }
+    // Leave room for nextAction and asset metadata before protecting exact descriptors.
+    const budget = STATUS_BUDGET_BYTES - (publicAdapter ? 5000 : 0);
+    if (Buffer.byteLength(JSON.stringify(projection)) > budget) {
+      if (projection.task && !publicAdapter) { projection.taskRef = this.#reference(held, 'task', projection.task); delete projection.task;
         projection.next = { native: 'task', source: 'taskRef', exact: true }; }
-      if (Buffer.byteLength(JSON.stringify(projection)) > STATUS_BUDGET_BYTES) {
+      if (Buffer.byteLength(JSON.stringify(projection)) > budget) {
         projection.operationsRef = this.#reference(held, 'operations', operations); delete projection.operations;
         if (projection.next && typeof projection.next === 'object') projection.next = { ...projection.next, inputContract: 'operationsRef' };
       }
-      if (Buffer.byteLength(JSON.stringify(projection)) > STATUS_BUDGET_BYTES && projection.evidence) {
+      if (Buffer.byteLength(JSON.stringify(projection)) > budget && projection.evidence) {
         projection.evidenceRef = this.#reference(held, 'evidence', projection.evidence);
         projection.evidence = { matched, snapshotID: data?.snapshot?.id, snapshotCurrent, completeReadback: projection.evidenceRef };
       }
-      if (Buffer.byteLength(JSON.stringify(projection)) > STATUS_BUDGET_BYTES) throw new Error('Native protocol descriptor exceeds its bounded status budget.');
+      if (Buffer.byteLength(JSON.stringify(projection)) > budget) throw new Error('Native protocol descriptor exceeds its bounded status budget.');
     }
     return projection;
   }

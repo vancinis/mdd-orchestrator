@@ -58,7 +58,7 @@ export function validateNativePolicy(value: unknown): NativePolicy {
   return { profile: item.profile, configured, answers: answers as NativePolicy['answers'], questions };
 }
 
-type Proof = { runtime: Runtime; operation: NativeOperation; policy: NativePolicy; binding?: AdaptiveQuestionBinding['generation']; question?: QuestionRecord };
+type Proof = { runtime: Runtime; operation: NativeOperation; policy: NativePolicy; binding?: AdaptiveQuestionBinding['generation']; question?: QuestionRecord; callerMessageID?: string };
 const proofs = new WeakMap<object, Proof>();
 /** Only the native lifecycle below can mint a proof; caller IDs and serialized flags cannot. */
 export function consumeNativeOperation(token: object, runtime: Runtime): Proof {
@@ -71,9 +71,10 @@ type Entry = {
   state: 'starting' | 'question-ready' | 'await-answer' | 'await-contract' | 'active' | 'blocked';
   record?: QuestionRecord; reason?: string;
   userMessageID?: string;
+  callerMessageID?: string;
 };
 
-/** Inactive native adapter. It selects guarded runner operations; it never executes commands. */
+/** Native policy bridge. It selects guarded runner operations; it never executes commands. */
 export class AdaptiveNative {
   readonly #entries = new Map<string, Entry>();
   constructor(readonly runner: PhaseRunner, readonly inspect: IntakeInspect, readonly profile: StartupProfile,
@@ -130,7 +131,7 @@ export class AdaptiveNative {
         !isDeepStrictEqual(record.adaptive?.generation, this.#binding(entry.operation, entry.runtime))))
       throw new Error('Native question or proposed operation generation changed; no authority was consumed.');
   }
-  async run(value: unknown, runtime: Runtime): Promise<unknown> {
+  async run(value: unknown, runtime: Runtime, callerMessageID?: string): Promise<unknown> {
     if (runtime.agent !== 'mdd-orchestrator') throw new Error('Only the native coordinator may propose adaptive operations.');
     const operation = nativeOperation(value), parent = runtime.sessionID, previous = this.#entries.get(parent);
     const held = this.questions.read(parent);
@@ -143,18 +144,20 @@ export class AdaptiveNative {
     const configured = structuredClone(this.profile.answers);
     const policy: NativePolicy = saved?.nativePolicy ? validateNativePolicy(saved.nativePolicy)
       : { profile: this.profile.name, configured, answers: { ...configured } as NativePolicy['answers'], questions: [] };
-    if (held?.version === 2 && held.state === 'settled' && held.nativeReceipt &&
+    if (operation.kind !== 'entry' && held?.version === 2 && held.state === 'settled' && held.nativeReceipt &&
         !policy.questions.some(question => question.parent === held.parent && question.callID === held.callID)) {
       const { nativeReceipt, ...historical } = held;
       policy.questions.push(validateQuestionRecord({ ...historical, state: 'answered', answer: nativeReceipt.answers }));
     }
-    const entry: Entry = { runtime: { ...runtime }, operation, policy, state: 'starting' };
+    const entry: Entry = { runtime: { ...runtime }, operation, policy, state: 'starting', ...(callerMessageID ? { callerMessageID } : {}) };
     this.#entries.set(parent, entry);
     try {
       if (operation.kind === 'entry') {
         const input = objectWithKeys(operation.args, 'native adaptive entry', ['contract', 'messageID', 'questions']);
         const draft = adaptiveContract(input.contract); entry.draft = draft;
-        const userID = typeof input.messageID === 'string' ? await this.inspect.intake(runtime, draft.objective, input.messageID, 'objective') : undefined;
+        const userID = typeof input.messageID === 'string' ? await this.inspect.intake(runtime, draft.objective,
+          callerMessageID ?? input.messageID, callerMessageID ? 'native-current' : 'objective') : undefined;
+        if (callerMessageID && userID !== input.messageID) throw new Error('Entry must bind the current native user turn, not a caller-chosen old identity.');
         if (typeof userID !== 'string')
           throw new Error('Native entry requires its exact original user authorization.');
         entry.userMessageID = userID;
@@ -304,6 +307,7 @@ export class AdaptiveNative {
     this.#current(entry);
     const token = {}, policy = validateNativePolicy(entry.policy), binding = this.#binding(entry.operation, entry.runtime);
     proofs.set(token, { runtime: entry.runtime, operation: entry.operation, policy, ...(binding ? { binding } : {}),
+      ...(entry.callerMessageID ? { callerMessageID: entry.callerMessageID } : {}),
       ...(entry.record ? { question: structuredClone(entry.record) } : {}) });
     entry.state = 'starting';
     try { await this.runner.executeAdaptiveNativeInternal(token, entry.runtime); entry.state = 'active'; return this.status(entry.runtime.sessionID); }

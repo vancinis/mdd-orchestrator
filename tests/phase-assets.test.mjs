@@ -307,7 +307,7 @@ test('Judgment Day routing is explicit, namespaced and precedes generic phase ro
   for (const trigger of ['judgment-day', 'judgment day', 'judment-day']) assert.ok(text.includes(trigger));
   assert.match(text, /skills\/mdd-judgment-day\/SKILL\.md/);
   assert.ok(text.indexOf('Standalone override:') < text.indexOf('Information-only requests'));
-  assert.ok(text.indexOf('Standalone override:') < text.indexOf('For any other implementation request'));
+  assert.ok(text.indexOf('Standalone override:') < text.indexOf('Fresh implementation, including precise edits'));
   assert.match(text, /no mdd_start or automatic review after Verify/);
   assert.match(text, /instead of phase\/status routing/);
   assert.match(text, /exceptions to phase-only dispatch/);
@@ -610,25 +610,25 @@ test('assets: the coordinator delivers a recorded run without a new run or prefl
   assert.match(text, /Delivering a recorded run's or a quick edit's change \(commit, push, open its PR\) is not a new objective/);
   assert.match(text, /never\ncall mdd_start or mdd_change_request for it, and never repeat preflight/);
   assert.match(text, /The user's explicit\nrequest is that decision: do only the actions it names/);
-  assert.match(text, /a fresh implementation task uses mdd_start normally/);
+  assert.match(text, /a fresh implementation task uses native version-3 entry/);
   const skill = fs.readFileSync('assets/opencode/skills/mdd-pr-body/SKILL.md', 'utf8');
   assert.match(skill, /A user request naming them is that authority/);
 });
 
-// "En /dashboard cambia el título de Hola X a Buen día X" asked five preflight questions and ran
-// explore, plan, apply and verify for a one-line edit: a precise, located change is not a run.
-test('assets: the coordinator makes a precise small edit directly, without preflight or phases', () => {
+// Precise edits use tracked need-driven low, not mandatory fixed phases or an untracked writer.
+test('assets: fresh implementation and precise edits share the guarded adaptive entry', () => {
   const text = fs.readFileSync('assets/opencode/agents/mdd-orchestrator.md', 'utf8');
-  assert.match(text, /Quick edits skip the run/);
-  // The dashboard title is one example; the rule covers any precise change, located or findable.
-  assert.match(text, /of any kind \(text,\nstyle, a value, a prop, a condition, a rename, a config key\)/);
-  assert.match(text, /named or findable\nfrom the request/);
-  assert.match(text, /never call mdd_start: no\npreflight, no phases/);
-  assert.match(text, /One unambiguous match: edit\nit right away/);
-  assert.match(text, /No match or\nseveral candidates: ask with the native question tool/);
-  assert.match(text, /If it proves larger[\s\S]*offer an MDD run with their text/);
-  assert.match(text, /Not while a phase task is in flight or an MDD question is\npending/);
-  assert.match(text, /For any other implementation request, call mdd_start once/);
+  assert.match(text, /Fresh implementation, including precise edits, uses mdd_adapt, never an untracked quick edit/);
+  assert.match(text, /current native USER request, not the assistant tool message/);
+  assert.match(text, /read-only mdd_contextual_explore before immutable admission/);
+  assert.match(text, /Plan and Verify are conditional in low; medium requires genuine Plan\/Apply\/Verify/);
+  assert.match(text, /mdd_start is an EXPLICIT fixed-version compatibility entry only/);
+  assert.doesNotMatch(text, /Quick edits skip the run|One unambiguous match: edit/);
+  for (const path of ['assets/opencode/mdd-instructions.md', 'assets/opencode/agents/mdd-apply.md', 'assets/opencode/agents/mdd-risk.md']) {
+    const actor = fs.readFileSync(path, 'utf8');
+    assert.match(actor, /Internal adaptive actor:/);
+    assert.match(actor, /mdd_worker_edit|assessmentVersion=1|versioned complexity\/impact assessment/);
+  }
 });
 
 // An interrupted subagent locked a conversation for good: the user knew it stopped, OpenCode had

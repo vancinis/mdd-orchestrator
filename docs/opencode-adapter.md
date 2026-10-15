@@ -480,19 +480,36 @@ with or without an accepted run, so a status block never leaves the conversation
 read-only answer. A quoted path neither changes the loaded workspace nor authorizes
 cross-project access or configuration edits.
 
-A precise, small change the user already spelled out is not a run either, whatever its kind:
-text, a style, a value, a prop, a condition, a rename or a configuration key, with its place
-either named or findable from the request itself ("change the `/dashboard` title to *Buen día X*"
-is one example among many). The coordinator skips `mdd_start`, preflight and every phase: it
-locates the target itself with search and read tools and, on one unambiguous match, edits it at
-once, including the places that repeat that value (a translation entry, a test asserting it). With no match or several
-candidates it asks through the native question tool, listing the `file:line` candidates, instead
-of guessing. If the change turns out larger than it was described — new logic, features,
-dependencies, data or security — it stops and offers a normal run with the user's own text. It
-never does this while a phase task is in flight or an MDD question is pending, and its reply is a
-few Spanish lines naming `file:line`, before and after. Native edit permissions still apply, and
-because no run is recorded there is no coverage or ledger row for it. Its PR body still comes from
-`mdd_pr_body`, with the files read from git instead of a run (see [PR-body drafts](#pr-body-drafts)).
+Fresh implementation, including precise edits, uses coordinator-only `mdd_adapt({payload:string})`.
+Read `mdd_status`, then supply `{routingVersion:3,kind,args}` as bounded JSON. Follow the emitted
+operation descriptors and paged input/detail references rather than guessing nested schemas.
+Entry and transfer `messageID` identify the current native **user**, while the SDK tool context's
+`messageID` identifies the **assistant**. The adapter supplies that host caller separately; native
+inspection proves its coordinator/workspace/current-user lineage, and the runner independently
+rechecks the objective and current source bytes before admission. Raw IDs, preferences, approval,
+stopped claims and caller-supplied runtime never establish authority.
+
+Unknown context may use idle read-only contextual Explore before immutable admission. Known,
+bounded low can dispatch Apply only; Explore/Risk/Plan/Verify are selected by need, not required.
+Medium runs genuine Plan/Apply/Verify; high runs Propose/Spec/Design/Tasks/Apply/Verify. Each child
+remains scoped and cannot use shell, MCP/custom tools or recursive agents; only Apply gets the
+existing scoped editor. Parent checks use ordinary native permissions. Verified closure requires
+complete current evidence, not a fabricated Verify result. Configured mode stays frozen; unset
+asks only mode and interactive operations require actual native question receipts.
+
+Completed and closed-unverified records do not reopen. A genuine fresh native request can replace
+the terminal live slot in the same parent after immutable archive readback and exact parent/run
+ownership CAS. Archives retain full records, receipts, evidence, owner/claim and settled bookkeeping;
+the new record retains consumed-message history (bounded to 256 predecessors). Old ownership stays
+reserved as a retirement tombstone. A bootstrap fault never enables a second writer: exact cold
+reconciliation confirms the archived native request and source bytes before finishing that same
+bootstrap. Unknown children, unresolved questions/intake, corrupt data, drift and transfers remain
+fenced. No archive is deleted or terminal scope silently amended.
+
+Public status, task replies and detail references are budgeted after public metadata. Historical
+unmarked/version-2 runs and explicit `mdd_start` retain fixed workflow/checkpoint semantics.
+Local deterministic tests establish adapter consistency, not live-model execution, independent
+command attestation or cryptographic authentication of all stored evidence.
 
 ### Complete Spanish clarification conversations
 

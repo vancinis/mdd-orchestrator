@@ -14,6 +14,17 @@ const reply = (tool, output, status_ = 'completed') => ({ type: 'tool', tool, ca
 const messages = (...parts) => parts.map((part, index) => ({ info: { id: `m${index}`, role: 'assistant' }, parts: [part] }));
 const outputs = list => list.flatMap(message => message.parts.map(part => part.state?.output));
 
+test('AL05c adaptive native task replies collapse only as versioned public projections', () => {
+  const adaptive = status('await-selection', undefined, { lane: 'adaptive-native', routingVersion: 3, registration: 'active',
+    operations: [{ kind: 'select', ids: { handle: 'old-handle' } }], details: { inputs: { args: { cursor: 'old-cursor:0' } } } });
+  const latest = status('await-selection', undefined, { lane: 'adaptive-native', routingVersion: 3, registration: 'active' });
+  const ordinary = status('ready', 'unrelated');
+  const list = messages(reply('task', adaptive), reply('task', ordinary), reply('mdd_adapt', latest));
+  assert.equal(collapseSupersededStatus(list), 1);
+  assert.doesNotMatch(outputs(list)[0], /old-handle|old-cursor|operations|details/);
+  assert.equal(outputs(list)[1], ordinary); assert.equal(outputs(list)[2], latest);
+});
+
 test('only the latest status reply stays whole; every earlier one becomes a placeholder', () => {
   const first = status('ready', 'mdd-explore'), second = status('ready', 'mdd-plan'), latest = status('ready', 'mdd-apply');
   const list = messages(reply('mdd_status', first), reply('mdd_status', second), reply('mdd_status', latest));

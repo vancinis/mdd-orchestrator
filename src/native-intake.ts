@@ -29,7 +29,7 @@ import { AdaptiveProtocol } from './adaptive-protocol.js';
 
 export type IntakeInspect = {
   setupPending?(runtime: Runtime, requirements?: string, messageID?: string): Promise<{ requirements: string; userMessageID: string } | undefined>;
-  intake(runtime: Runtime, requirements: string, messageID: string, scope?: 'latest' | 'objective'): Promise<void | string>;
+  intake(runtime: Runtime, requirements: string, messageID: string, scope?: 'latest' | 'objective' | 'native-current'): Promise<void | string>;
   question(runtime: Runtime, call: TaskCall, args: QuestionEnvelope): Promise<void>;
   /**
    * Proves `text` is exactly the user's latest message and, when `after` names question calls,
@@ -277,12 +277,17 @@ export class NativeIntake {
     return this.runner.admitAdaptiveInternal({ contract, messageID: nativeMessage }, here);
   }
 
-  /** Inactive AL05a policy bridge; public tool registration remains unchanged. */
-  async adaptiveInternal(value: unknown, runtime: Runtime): Promise<unknown> {
+  /** The public adapter supplies the actual assistant caller separately from untrusted JSON. */
+  async adaptiveInternal(value: unknown, runtime: Runtime, callerMessageID?: string): Promise<unknown> {
     if (!this.#adaptiveNative) throw new Error('Durable native policy bridge is unavailable.');
     if (this.#adaptiveTransfers.has(runtime.sessionID) || this.#sessions.has(runtime.sessionID))
       throw new Error('A native intake or transfer already occupies this parent.');
-    return typeof value === 'string' ? this.#adaptiveProtocol!.run(value, runtime) : this.#adaptiveNative.run(value, { ...runtime });
+    return typeof value === 'string' ? this.#adaptiveProtocol!.run(value, runtime, callerMessageID) : this.#adaptiveNative.run(value, { ...runtime });
+  }
+
+  async adaptiveStatus(runtime: Runtime): Promise<unknown> {
+    if (!this.#adaptiveProtocol) throw new Error('Durable native policy bridge is unavailable.');
+    return this.#adaptiveProtocol.run(JSON.stringify({ routingVersion: 3, kind: 'status', args: {} }), runtime, undefined, true);
   }
 
   /** Internal only. The runner independently proves both parents and the latest target request. */
