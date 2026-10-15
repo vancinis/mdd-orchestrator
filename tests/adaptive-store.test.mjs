@@ -48,7 +48,7 @@ function fixture(t) {
   const runner = new PhaseRunner(inspect, options), settings = defaultSettings(); settings.profiles.default.answers.mode = 'automatic';
   const intake = new NativeIntake(runner, inspect, settings), call = { sessionID: runtime.sessionID, callID: 'apply-1' };
   const handle = (r = runner) => r.status(runtime.sessionID).selection.handle;
-  const select = (r = runner, extra = {}) => r.selectAdaptiveInternal({ handle: handle(r), actor: 'mdd-apply', assignmentID: 'A1', purpose: 'Perform bounded replacement.', ...extra }, runtime);
+  const select = async (r = runner, extra = {}) => r.selectAdaptiveInternal({ handle: handle(r), actor: 'mdd-apply', assignmentID: 'A1', purpose: 'Perform bounded replacement.', ...extra }, runtime);
   const admit = () => intake.admitAdaptiveInternal({ contract }, runtime, 'native-message');
   const report = id => JSON.stringify({ outcome: 'passed', evidenceSummary: 'The assigned source was replaced.', artifact: 'Read back the bounded replacement.', completed: [id], changes: [contract.assignments.find(item => item.id === id).path], checks: [] });
   const apply = async (r = runner, id = 'A1', callID = 'apply-1') => {

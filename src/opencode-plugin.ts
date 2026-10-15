@@ -25,6 +25,7 @@ import { directChanges } from './pr-direct.js';
 import { TranslationError } from './pr-translation.js';
 import { mddDataRoot } from './engram-http.js';
 import { AdaptiveStore } from './adaptive-store.js';
+import { adaptiveTransferRequest } from './adaptive-transfer.js';
 import { statusPayload } from './status-budget.js';
 import type { StatusView } from './status-budget.js';
 import { phaseName } from './phase-assets.js';
@@ -542,6 +543,55 @@ export function createInspector(input: PluginInput, timeout = 5000, now: () => n
       if (checkpoint?.version === 3 && checkpoint.events.at(-1)?.kind === 'rework' &&
           !tokens.some(token => /^rework[.!?]?$/i.test(token)))
         throw new Error('Target rework lacks an explicit native rework request.');
+    },
+    async confirmAdaptiveTransfer(runtime, receipt, runID) {
+      await inspector.parent(runtime);
+      const saved = new AdaptiveStore(mddDataRoot(runtime.directory)).read(runtime.sessionID);
+      // Before publication recovery supplies a concrete receipt, but still reads the exact source.
+      const source = new AdaptiveStore(mddDataRoot(runtime.directory)).read(receipt.sourceSessionID);
+      if (!source || source.runID !== runID || source.directory !== runtime.directory || source.worktree !== runtime.worktree ||
+          source.admissionDigest !== receipt.admissionDigest || receipt.targetSessionID !== runtime.sessionID ||
+          saved && (saved.runID !== runID || saved.admissionDigest !== receipt.admissionDigest))
+        throw new Error('Adaptive transfer objective and exact workspace binding cannot be confirmed.');
+      const message = await exactMessage(runtime.sessionID, receipt.nativeUserMessageID, runtime.directory);
+      const info = record(message.info, 'adaptive transfer user');
+      const authored = authoredNativeText(list(message.parts, 'adaptive transfer parts', PARTS_MAX).filter(part => part.type === 'text'), runtime.sessionID, receipt.nativeUserMessageID);
+      const canonical = authored === undefined ? '' : canonicalNativeText(authored);
+      if (info.role !== 'user' || info.sessionID !== runtime.sessionID || canonical !== adaptiveTransferRequest(source) ||
+          createHash('sha256').update(canonical).digest('hex') !== receipt.requestDigest)
+        throw new Error('Adaptive transfer receipt lacks the exact native target-authored unchanged-objective authorization.');
+    },
+    async adaptiveTransferIdle(runtime, role) {
+      await inspector.parent(runtime);
+      const history = await messages(runtime.sessionID, runtime.directory);
+      if (history.length >= HISTORY_MAX || history.some(message => record(message.info).summary === true ||
+          list(message.parts, 'adaptive idle parts', PARTS_MAX).some(part => part.type === 'compaction')))
+        throw new Error('Complete native idle history is unavailable; unknown children remain fenced.');
+      const statuses = await readSdk(signal => input.client.session.status({ query: { directory: runtime.directory }, signal, throwOnError: true }), timeout);
+      const states = record(statuses.data, 'adaptive native statuses');
+      if (role === 'source' && states[runtime.sessionID] !== undefined &&
+          record(states[runtime.sessionID], 'adaptive source status').type !== 'idle')
+        throw new Error('The source native parent is running or unknown, not idle.');
+      for (const message of history) for (const part of list(message.parts, 'adaptive native controls', PARTS_MAX)) {
+        if (part.type !== 'tool' || !['task', 'question', 'mdd_transfer', 'mdd_transfer_recover'].includes(String(part.tool))) continue;
+        const state = record(part.state, 'adaptive control state'), info = record(message.info, 'adaptive control author');
+        if (info.role !== 'assistant' || info.sessionID !== runtime.sessionID || part.sessionID !== runtime.sessionID ||
+            part.messageID !== info.id || !['completed', 'error'].includes(String(state.status)))
+          throw new Error('Native control is running, unknown or belongs to another parent.');
+        if (part.tool !== 'task') continue;
+        const childID = record(state.metadata ?? {}, 'adaptive child metadata').sessionId;
+        if (typeof childID !== 'string') throw new Error('Native task has an unknown child; transfer cannot infer termination.');
+        const child = await session(childID, runtime.directory), childStatus = states[childID];
+        if (child.parentID !== runtime.sessionID || child.directory !== runtime.directory ||
+            childStatus !== undefined && record(childStatus, 'adaptive child status').type !== 'idle')
+          throw new Error('Native child is running, unknown or belongs to another workspace.');
+        const last = (await messages(childID, runtime.directory)).at(-1), terminal = record(last?.info, 'adaptive child terminal');
+        if (terminal.role !== 'assistant' || !record(terminal.time ?? {}).completed ||
+            !terminal.error && !['stop', 'end-turn'].includes(String(terminal.finish)) ||
+            list(last?.parts, 'adaptive child parts', PARTS_MAX).some(item => item.type === 'tool' &&
+              !['completed', 'error'].includes(String(record(item.state).status))))
+          throw new Error('Native child termination is unknown; no age-based transfer release is allowed.');
+      }
     },
     /**
      * Recovers the objective of a start that only failed because MDD was not set up yet. That is a

@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { LocalFiles } from './local-files.js';
 import { objectWithKeys } from './validation.js';
 import type { AdaptiveData } from './adaptive-low.js';
+import type { AdaptiveLineage } from './adaptive-transfer.js';
 
 const LIMIT = 8 * 1024 * 1024;
 export type AdaptiveRecord = {
@@ -11,6 +12,7 @@ export type AdaptiveRecord = {
   stage: 'bootstrap' | 'active'; data: AdaptiveData;
   attempt?: { callID: string; state: 'pending' | 'settled' };
   calls: string[];
+  transfer?: AdaptiveLineage;
 };
 type Body = Omit<AdaptiveRecord, 'version' | 'sequence' | 'digest' | 'admissionDigest'>;
 const hash = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -19,7 +21,7 @@ function text(value: unknown, max = 256): value is string {
 }
 function parse(source: string, sessionID: string): AdaptiveRecord {
   const item = objectWithKeys(JSON.parse(source), 'adaptive record', ['version', 'sequence', 'digest', 'admissionDigest', 'runID', 'sessionID',
-    'directory', 'worktree', 'agent', 'userMessageID', 'stage', 'data', 'attempt', 'calls']);
+    'directory', 'worktree', 'agent', 'userMessageID', 'stage', 'data', 'attempt', 'calls', 'transfer']);
   if (item.version !== 1 || !Number.isSafeInteger(item.sequence) || (item.sequence as number) < 0 || item.sessionID !== sessionID ||
       !text(item.runID) || !item.runID.startsWith('adaptive-internal-') || !text(item.userMessageID) ||
       !text(item.directory, 2048) || !text(item.worktree, 2048) || item.agent !== 'mdd-orchestrator' ||
@@ -27,6 +29,16 @@ function parse(source: string, sessionID: string): AdaptiveRecord {
       item.calls.some(call => !text(call)) || new Set(item.calls).size !== item.calls.length)
     throw new Error('Unsupported or invalid adaptive record.');
   const data = item.data as AdaptiveData;
+  if (item.transfer !== undefined) {
+    const lineage = objectWithKeys(item.transfer, 'adaptive transfer lineage', ['sourceSessionID', 'sourceSequence', 'sourceDigest',
+      'ownerEpoch', 'operationID', 'nativeUserMessageID', 'requestDigest']);
+    if (!text(lineage.sourceSessionID) || lineage.sourceSessionID === sessionID || !text(lineage.operationID) ||
+        lineage.nativeUserMessageID !== item.userMessageID || !text(lineage.nativeUserMessageID) ||
+        !Number.isSafeInteger(lineage.sourceSequence) || (lineage.sourceSequence as number) < 0 ||
+        !Number.isSafeInteger(lineage.ownerEpoch) || (lineage.ownerEpoch as number) < 0 ||
+        [lineage.sourceDigest, lineage.requestDigest].some(value => typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value)))
+      throw new Error('Invalid adaptive transfer lineage.');
+  }
   if (!data || typeof data !== 'object' || item.admissionDigest !== hash(data.contract)) throw new Error('Adaptive admission bytes were changed.');
   if (item.attempt !== undefined) {
     const attempt = objectWithKeys(item.attempt, 'adaptive attempt', ['callID', 'state']);
@@ -60,11 +72,16 @@ export class AdaptiveStore {
     const source = this.files.readStrict(this.#name(sessionID), LIMIT);
     return source === undefined ? undefined : parse(source, sessionID);
   }
-  commit(sessionID: string, previous: AdaptiveRecord | undefined, value: Body): AdaptiveRecord {
+  /** Pure preparation lets the target claim bind the exact bytes before publication. */
+  prepare(sessionID: string, previous: AdaptiveRecord | undefined, value: Body): AdaptiveRecord {
     const body = { version: 1 as const, sequence: (previous?.sequence ?? -1) + 1,
       admissionDigest: hash(value.data.contract), ...structuredClone(value) };
-    const next = parse(JSON.stringify({ ...body, digest: hash(body) }), sessionID);
+    return parse(JSON.stringify({ ...body, digest: hash(body) }), sessionID);
+  }
+  commit(sessionID: string, previous: AdaptiveRecord | undefined, value: Body): AdaptiveRecord {
+    const next = this.prepare(sessionID, previous, value);
     if (previous && (next.admissionDigest !== previous.admissionDigest ||
+        !isDeepStrictEqual(next.transfer, previous.transfer) ||
         ['runID', 'sessionID', 'directory', 'worktree', 'agent', 'userMessageID'].some(key =>
           next[key as keyof AdaptiveRecord] !== previous[key as keyof AdaptiveRecord]))) throw new Error('Adaptive immutable binding changed.');
     try {
@@ -82,5 +99,13 @@ export class AdaptiveStore {
     }
     try { if (isDeepStrictEqual(this.read(sessionID), next)) return next; } catch { /* fenced below */ }
     throw new AdaptiveCommitError(true);
+  }
+  /** Only an owner-reserved abort may call this exact-record CAS, never a broad reset. */
+  retireIf(sessionID: string, expected: AdaptiveRecord): void {
+    this.files.updateStrict(this.#name(sessionID), source => {
+      if (source === undefined || !isDeepStrictEqual(parse(source, sessionID), expected)) throw new Error('Adaptive retirement CAS differs.');
+      return undefined;
+    }, LIMIT);
+    if (this.occupied(sessionID)) throw new Error('Adaptive target retirement is unconfirmed.');
   }
 }

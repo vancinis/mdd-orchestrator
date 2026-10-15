@@ -85,7 +85,7 @@ not a current Risk verdict and selects no route. Current `parseRiskVerdict` stil
 equal low/high `route` and `complexity`. Public adaptive low and structured medium execution are
 not active. Summary level `medium` remains a presentation choice, not a runtime route.
 
-### Internal adaptive admission, evidence and recovery (AL-02/AL-04a)
+### Internal adaptive admission, evidence, recovery and transfer (AL-02/AL-04b)
 
 An unregistered internal lane supports `await-selection -> authorized-actor ->
 await-result -> await-selection`. The parent selects one necessary Explore, Risk, Plan, Apply
@@ -147,8 +147,32 @@ tampered proof and unsafe storage rather than treating them as empty.
 The injected-store path has deterministic native/runtime fault tests, not live-host or model
 attestation. Legacy in-process test hosts without a store remain volatile. An uncorrelated
 reservation or unsafe record remains fenced rather than granting automatic takeover.
-Public version 3 remains inactive. Adaptive transfer and executable escalation belong to
-AL-04b/AL-04c, and public activation belongs to AL-05.
+Public version 3 remains inactive. Executable escalation belongs to AL-04c, and public activation
+belongs to AL-05.
+
+#### Internal native-proven transfer
+
+The unregistered intake/runner transfer moves adaptive **data**, not fixed checkpoints or a phase
+history. It requires the same exact workspace/worktree; there is no cross-worktree execution or
+new public tool. Both native parents are inspected before claims. The latest target-authored
+request must name the exact source/run, bind the immutable admission digest and objective, and
+explicitly preserve acceptance, scope, exclusions and decisions. Raw IDs, approval flags and
+caller-supplied text are not provenance.
+
+| Transfer boundary | Guarantee |
+|---|---|
+| Idle proof | Source is actorless with no pending child, intake, question or writer. Complete native control history and positive child termination are required; truncated/compacted history and unknown/running children fail closed, with no age-based release. Target durable and volatile state is checked, including unreadable/future records and closed legacy claims. Native intake admission is excluded throughout asynchronous transfer inspection. |
+| Projection | `AdaptiveLow.restore` validates real receipts and selectively invalidates stale proof. Original admission, actual completion, failed checks and closure survive; invalidated verified closure stays closed-unverified. No omitted phase, PASS, consent, selection or dispatch capability is manufactured or reused. |
+| Publication | Target parent claim binds exact projected bytes; source owner epoch CAS fences the old parent; target publication/readback precedes a distinct adaptive ownership receipt. Receipt binds operation, source/target generations/digests, admission, native request and epoch. Fixed receipts and historical checkpoint digests retain their original interpretation. |
+| Authority | Adaptive record updates share the owner lock with transfer fencing. Status, selection, evidence, restore fast paths and callbacks also verify durable owner/parent/lineage and record generation. Fresh target runtime handles appear only after ownership commit and native parent/request readback. Cold target restore re-proves native provenance before exposing new handles. |
+| Interruption | There is no cross-file atomicity assumption or blind retry. Explicit exact-operation finish/abort requires fresh latest native recovery proof and rechecks after asynchronous inspection. Abort reserves durable cleanup authority before conditionally retiring only the exact unfinished target record and claim, then rotates the source generation before release. Late finish callbacks lose their CAS; committed target ownership cannot be aborted. |
+
+Divergent bytes, changed projection proof, unknown native state or failed readback stay fenced.
+Operation IDs may repeat across transfers: completed-receipt selection also requires the exact
+source/target endpoints and confirmed claim, epoch and generation/digest lineage. An earlier hop's
+receipt never substitutes for the current hop's native authorization during cold finish.
+An aborted target's retired claim is not treated as an empty transfer destination. Verification
+uses deterministic local native/runtime harnesses, not a live host, model or native approval.
 
 ## 3. Kernel API and validation
 

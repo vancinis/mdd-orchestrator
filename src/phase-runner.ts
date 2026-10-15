@@ -48,6 +48,9 @@ import type { KnowledgeResolution, KnowledgeDiagnostics, KnowledgeSelection } fr
 import { AdaptiveLow, adaptiveContract, adaptiveSelection } from './adaptive-low.js';
 import { AdaptiveStore, AdaptiveCommitError } from './adaptive-store.js';
 import type { AdaptiveRecord } from './adaptive-store.js';
+import { adaptiveTransferRequest, projectAdaptiveTransfer } from './adaptive-transfer.js';
+import type { AdaptiveReceipt } from './adaptive-transfer.js';
+import { QuestionCheckpointStore } from './question-checkpoint.js';
 
 export type Runtime = { sessionID: string; agent: string; directory: string; worktree: string };
 export type TaskCall = { sessionID: string; callID: string };
@@ -352,6 +355,9 @@ export type Inspect = {
   intake?(runtime: Runtime, requirements: string, messageID: string, scope?: 'latest' | 'objective'): Promise<void | string>;
   /** A transferred target must prove its original native user request, not only local receipt bytes. */
   confirmTransfer?(runtime: Runtime, receipt: NonNullable<RunOwner['receipt']>, runID: string): Promise<void>;
+  confirmAdaptiveTransfer?(runtime: Runtime, receipt: AdaptiveReceipt, runID: string): Promise<void>;
+  /** Complete native control history: unknown/unreadable children never count as idle. */
+  adaptiveTransferIdle?(runtime: Runtime, role: 'source' | 'target'): Promise<void>;
   /** Positive host evidence only; an absent capability never releases a writer. */
   stopped?(runtime: Runtime, call: TaskCall, returned?: unknown): Promise<boolean>;
   /** The host's account of a dispatched child. Preferred over `stopped` when present. */
@@ -494,6 +500,7 @@ export class PhaseRunner {
   readonly #runs = new Map<string, Run>();
   readonly #adaptive = new Map<string, AdaptiveRun>();
   readonly #adaptiveAdmissions = new Set<string>();
+  readonly #adaptiveTransfers = new Set<string>();
   readonly #previous = new Map<string, Run[]>();
   readonly #solo = new Map<string, Solo>();
   readonly #consent = new Map<string, Consent>();
@@ -514,14 +521,21 @@ export class PhaseRunner {
   #adaptiveCurrent(run: AdaptiveRun): void {
     if (run.fenced || run.record && !isDeepStrictEqual(this.options.adaptiveStore!.read(run.runtime.sessionID), run.record))
       throw new Error('Adaptive authority is stale or publication is unconfirmed; reconcile by native-proven restore.');
+    const ownership = this.options.ownership!, owner = ownership.read(run.id);
+    if (!owner || owner.ownerSessionID !== run.runtime.sessionID || ownership.parent(run.runtime.sessionID) !== run.id ||
+        owner.directory !== run.runtime.directory || owner.worktree !== run.runtime.worktree || owner.state === 'transferring' ||
+        owner.operation || owner.recovery || owner.recoveringTransfer || owner.workers ||
+        owner.state === 'reserved' && owner.callID !== run.callID && owner.callID !== this.#reservations.get(run.runtime.sessionID)?.callID)
+      throw new Error('Adaptive authority is fenced by durable ownership or the parent claim.');
+    if (run.record?.transfer) ownership.confirmAdaptiveReceipt(run.id, run.runtime.sessionID, this.options.adaptiveStore!);
   }
   #persistAdaptive(run: AdaptiveRun, low: AdaptiveLow, attempt = run.record?.attempt): void {
     this.#adaptiveCurrent(run);
     if (this.options.adaptiveStore) {
       try {
-        run.record = this.options.adaptiveStore.commit(run.runtime.sessionID, run.record, { runID: run.id, ...run.runtime,
+        run.record = this.options.ownership!.publishAdaptiveUpdate(this.options.adaptiveStore, run.record!, { runID: run.id, ...run.runtime,
           agent: 'mdd-orchestrator', userMessageID: run.userMessageID, stage: 'active', data: low.serialize(),
-          calls: [...run.calls], ...(attempt ? { attempt } : {}) });
+          calls: [...run.calls], ...(attempt ? { attempt } : {}), ...(run.record?.transfer ? { transfer: run.record.transfer } : {}) });
       } catch (error) { if (!(error instanceof AdaptiveCommitError) || error.uncertain) run.fenced = true; throw error; }
     }
     run.low = low;
@@ -542,7 +556,7 @@ export class PhaseRunner {
     if (!this.#readCapability() || !this.options.workerCapability || !('phase' in this.options.workerCapability) ||
         this.options.workerCapability.applyEditing !== true || !this.options.progress || !this.options.ownership || !this.inspect.intake)
       throw new Error('Internal adaptive admission requires real scoped-editor capability, native objective inspection, ownership and progress.');
-    if (this.#runs.has(runtime.sessionID) || this.#adaptive.has(runtime.sessionID) || this.#inflight.has(runtime.sessionID) ||
+    if (this.#adaptiveTransfers.has(runtime.sessionID) || this.#runs.has(runtime.sessionID) || this.#adaptive.has(runtime.sessionID) || this.#inflight.has(runtime.sessionID) ||
         this.#reservations.has(runtime.sessionID) || this.#explorations.has(runtime.sessionID) || this.#explorationBlocked(runtime.sessionID) ||
         this.#solo.has(runtime.sessionID) && this.#solo.get(runtime.sessionID)!.state !== 'settled' ||
         this.options.ownership.parent(runtime.sessionID) || this.options.ownership.intake(runtime.sessionID)?.state === 'pending' ||
@@ -584,7 +598,7 @@ export class PhaseRunner {
     this.#adaptiveCurrent(run);
     if (!isDeepStrictEqual(run.runtime, runtime)) throw new Error('Adaptive coordinator or workspace changed.');
     const owner = this.owner(runtime.sessionID);
-    if (this.#adaptive.get(runtime.sessionID) !== run || this.#adaptiveAdmissions.has(runtime.sessionID) || run.dispatching ||
+    if (this.#adaptive.get(runtime.sessionID) !== run || this.#adaptiveTransfers.has(runtime.sessionID) || this.#adaptiveAdmissions.has(runtime.sessionID) || run.dispatching ||
         run.callID || this.#inflight.has(runtime.sessionID) || this.#reservations.has(runtime.sessionID) ||
         this.options.ownership!.intake(runtime.sessionID)?.state === 'pending' ||
         owner?.state !== 'idle' || this.options.progress!.read(runtime.sessionID)?.state === 'pending')
@@ -606,6 +620,14 @@ export class PhaseRunner {
       // No caller proof or saved actor metadata can replace live native parent inspection.
       await this.inspect.parent(here);
       if (!isDeepStrictEqual(store.read(here.sessionID), saved)) throw new Error('Adaptive record changed during native parent inspection.');
+      if (saved.transfer) {
+        const receipt = this.options.ownership.confirmAdaptiveReceipt(saved.runID, here.sessionID, store);
+        if (!this.inspect.confirmAdaptiveTransfer) throw new Error('Native adaptive transfer provenance cannot be confirmed.');
+        await this.inspect.confirmAdaptiveTransfer(here, receipt, saved.runID);
+        if (!isDeepStrictEqual(store.read(here.sessionID), saved) ||
+            !isDeepStrictEqual(this.options.ownership.confirmAdaptiveReceipt(saved.runID, here.sessionID, store), receipt))
+          throw new Error('Adaptive transfer lineage changed during native inspection.');
+      }
       const low = AdaptiveLow.restore(saved.data, here.directory);
       let owner = this.options.ownership.read(saved.runID);
       if (saved.stage === 'bootstrap') {
@@ -698,6 +720,142 @@ export class PhaseRunner {
   submitAdaptiveEvidenceInternal(value: unknown, runtime: Runtime): Promise<unknown> { return this.#adaptiveEvidence(value, runtime, 'submit'); }
   closeAdaptiveInternal(value: unknown, runtime: Runtime): Promise<unknown> { return this.#adaptiveEvidence(value, runtime, 'close'); }
 
+  #adaptiveTransferTarget(runtime: Runtime): void {
+    const id = runtime.sessionID, root = this.options.adaptiveStore?.root;
+    if (!root || !this.options.ownership || !this.options.progress || !this.inspect.intake || !this.inspect.adaptiveTransferIdle ||
+        runtime.agent !== 'mdd-orchestrator' || resolve(runtime.directory) !== runtime.directory || resolve(runtime.worktree) !== runtime.worktree)
+      throw new Error('Adaptive transfer requires exact native idle proof, coordinator and injected durable stores.');
+    if (this.#runs.has(id) || this.#adaptive.has(id) || this.#previous.has(id) || this.#solo.has(id) || this.#consent.has(id) ||
+        this.#inflight.has(id) || this.#nativeDispatches.has(id) || this.#reservations.has(id) || this.#explorations.has(id) ||
+        this.#workerOperations.has(id) || this.#adaptiveAdmissions.has(id) || this.#explorationBlocked(id) ||
+        this.options.adaptiveStore!.occupied(id) || this.options.ownership.parentClaim(id) || this.options.ownership.intake(id) ||
+        this.options.checkpoint?.read(id) || this.options.progress.read(id) || new QuestionCheckpointStore(root).read(id))
+      throw new Error('Adaptive transfer target is occupied by durable or volatile native state.');
+  }
+
+  /** Internal native-proven move only; no tool registration, checkpoint replay or actor dispatch. */
+  async transferAdaptiveInternal(value: unknown, runtime: Runtime): Promise<unknown> {
+    const input = objectWithKeys(value, 'internal adaptive transfer', ['sourceSessionID', 'runID', 'operationID', 'messageID']);
+    const sourceSessionID = boundedText(input.sourceSessionID, 'sourceSessionID', 256), runID = boundedText(input.runID, 'runID', 256),
+      operationID = boundedText(input.operationID, 'operationID', 256), messageID = boundedText(input.messageID, 'native messageID', 256), here = { ...runtime };
+    this.#adaptiveTransferTarget(here);
+    if (sourceSessionID === here.sessionID || this.#adaptiveTransfers.has(sourceSessionID) || this.#adaptiveTransfers.has(here.sessionID))
+      throw new Error('Adaptive transfer already occupies this parent or source equals target.');
+    const store = this.options.adaptiveStore!, ownership = this.options.ownership!, source = store.read(sourceSessionID);
+    if (!source || source.runID !== runID || source.directory !== here.directory || source.worktree !== here.worktree)
+      throw new Error('Adaptive transfer source or exact workspace differs.');
+    const sourceRuntime: Runtime = { sessionID: sourceSessionID, directory: source.directory, worktree: source.worktree, agent: 'mdd-orchestrator' };
+    const initialOwner = ownership.read(runID), loaded = this.#adaptive.get(sourceSessionID);
+    const guard = () => {
+      this.#adaptiveTransferTarget(here);
+      if (!isDeepStrictEqual(store.read(sourceSessionID), source) || !isDeepStrictEqual(ownership.read(runID), initialOwner) ||
+          !initialOwner || initialOwner.ownerSessionID !== sourceSessionID || initialOwner.state !== 'idle' ||
+          this.#workerOperations.has(sourceSessionID) || this.#adaptiveAdmissions.has(sourceSessionID) ||
+          this.#inflight.has(sourceSessionID) || this.#reservations.has(sourceSessionID) ||
+          loaded && (loaded.dispatching || loaded.callID || loaded.low.state !== source.data.state))
+        throw new Error('Adaptive source changed or native work is pending during transfer proof.');
+      if (loaded) this.#adaptiveCurrent(loaded);
+      if (!['await-selection', 'completed', 'closed-unverified'].includes(source.data.state)) throw new Error('Adaptive source is not actorless idle.');
+    };
+    guard(); this.#adaptiveTransfers.add(sourceSessionID); this.#adaptiveTransfers.add(here.sessionID);
+    try {
+      await this.inspect.parent(sourceRuntime); guard();
+      await this.inspect.parent(here); guard();
+      await this.inspect.adaptiveTransferIdle!(sourceRuntime, 'source'); guard();
+      await this.inspect.adaptiveTransferIdle!(here, 'target'); guard();
+      const nativeID = await this.inspect.intake!(here, adaptiveTransferRequest(source), messageID, 'latest'); guard();
+      if (typeof nativeID !== 'string') throw new Error('Fresh latest target-authored native transfer proof is required.');
+      const lineage = { sourceSessionID, sourceSequence: source.sequence, sourceDigest: source.digest, ownerEpoch: initialOwner!.epoch,
+        operationID, nativeUserMessageID: boundedText(nativeID, 'native target user identity', 256),
+        requestDigest: createHash('sha256').update(adaptiveTransferRequest(source)).digest('hex') };
+      const target = projectAdaptiveTransfer(store, source, here, lineage);
+      ownership.claimAdaptiveTarget(store, source, target, initialOwner!.epoch);
+      ownership.beginAdaptiveTransfer(store, source, here.sessionID, operationID);
+      ownership.publishAdaptiveTransfer(store, source, target);
+      ownership.finishAdaptiveTransfer(store, source, target);
+      if (loaded) { loaded.fenced = true; delete loaded.args; delete loaded.token; }
+      const restored = await this.#restoreAdaptive(here);
+      if (!restored.restored) throw new Error(`Adaptive ownership moved but target restore is fenced: ${restored.reason}`);
+      return this.status(here.sessionID);
+    } finally { this.#adaptiveTransfers.delete(sourceSessionID); this.#adaptiveTransfers.delete(here.sessionID); }
+  }
+
+  /** Explicit exact-operation finish/abort; never implicitly retry an uncertain transfer. */
+  async recoverAdaptiveTransferInternal(value: unknown, runtime: Runtime): Promise<unknown> {
+    const input = objectWithKeys(value, 'internal adaptive transfer recovery', ['sourceSessionID', 'runID', 'operationID', 'action', 'messageID']);
+    const sourceID = boundedText(input.sourceSessionID, 'sourceSessionID', 256), runID = boundedText(input.runID, 'runID', 256),
+      operationID = boundedText(input.operationID, 'operationID', 256), messageID = boundedText(input.messageID, 'native messageID', 256), here = { ...runtime };
+    if (input.action !== 'finish' && input.action !== 'abort') throw new Error('Adaptive recovery requires explicit finish or abort.');
+    const action = input.action, store = this.options.adaptiveStore, ownership = this.options.ownership;
+    if (!store || !ownership || !this.inspect.intake || !this.inspect.confirmAdaptiveTransfer || !this.inspect.adaptiveTransferIdle || sourceID === here.sessionID ||
+        here.agent !== 'mdd-orchestrator' || this.#adaptiveTransfers.has(sourceID) || this.#adaptiveTransfers.has(here.sessionID))
+      throw new Error('Adaptive recovery authority is unavailable or another operation is active.');
+    const owner = ownership.read(runID), parent = ownership.parentClaim(here.sessionID), claim = parent?.transfer ?? owner?.recoveringTransfer;
+    const receipt = owner?.adaptiveReceipt;
+    let completedReceipt: AdaptiveReceipt | undefined;
+    const completedAbort = action === 'abort' && owner?.recoveredTransfer?.operationID === operationID &&
+      owner.recoveredTransfer.targetSessionID === here.sessionID && owner.ownerSessionID === sourceID && parent?.retired && parent.runID === runID;
+    if (receipt?.operationID === operationID && receipt.sourceSessionID === sourceID && receipt.targetSessionID === here.sessionID) {
+      if (action !== 'finish') throw new Error('Finished adaptive ownership cannot be aborted.');
+      completedReceipt = ownership.confirmAdaptiveReceipt(runID, here.sessionID, store);
+      if (!isDeepStrictEqual(completedReceipt, receipt)) throw new Error('Adaptive recovery receipt changed before native proof.');
+    } else if (!completedAbort &&
+        (!claim?.adaptive || claim.operationID !== operationID || claim.sourceSessionID !== sourceID || parent?.runID !== runID))
+      throw new Error('Adaptive recovery does not name the exact claimed operation.');
+    let source = store.read(sourceID);
+    if (!source || source.runID !== runID || source.directory !== here.directory || source.worktree !== here.worktree)
+      throw new Error('Adaptive recovery source or workspace differs.');
+    // An interrupted abort may already have rotated only the source generation, under its reservation.
+    const rotating = owner?.recoveringTransfer?.adaptive ? owner.recoveringTransfer : undefined;
+    if (rotating && source.sequence === rotating.sourceSequence + 1) {
+      const { version: _version, sequence: _sequence, digest: _digest, admissionDigest: _admission, ...body } = source;
+      source = store.prepare(sourceID, { ...source, sequence: rotating.sourceSequence - 1 }, body);
+      if (source.digest !== rotating.sourceDigest) throw new Error('Adaptive recovery source is not the exact rotated generation.');
+    }
+    const originalSource = source, actualSource = store.read(sourceID), actualTarget = store.read(here.sessionID);
+    const guard = () => {
+      if (!isDeepStrictEqual(ownership.read(runID), owner) || !isDeepStrictEqual(ownership.parentClaim(here.sessionID), parent) ||
+          !isDeepStrictEqual(store.read(sourceID), actualSource) || !isDeepStrictEqual(store.read(here.sessionID), actualTarget))
+        throw new Error('Adaptive recovery changed during native proof; no recovery mutation occurred.');
+    };
+    this.#adaptiveTransfers.add(sourceID); this.#adaptiveTransfers.add(here.sessionID);
+    try {
+      await this.inspect.parent({ ...here, sessionID: sourceID }); guard();
+      await this.inspect.parent(here); guard();
+      await this.inspect.adaptiveTransferIdle({ ...here, sessionID: sourceID }, 'source'); guard();
+      await this.inspect.adaptiveTransferIdle(here, 'target'); guard();
+      const recoveryText = `Recover adaptive transfer sourceSessionID=${sourceID} runID=${runID} operationID=${operationID} action=${action}. The transfer stopped; reconcile only this operation.`;
+      const nativeID = await this.inspect.intake(here, recoveryText, messageID, 'latest'); guard();
+      if (typeof nativeID !== 'string') throw new Error('Fresh native recovery request proof is required.');
+      if (action === 'abort') {
+        if (completedAbort) {
+          if (store.occupied(here.sessionID)) throw new Error('Completed adaptive abort target is occupied; no cleanup is repeated.');
+          return { state: 'adaptive-transfer-aborted', epoch: owner!.epoch };
+        }
+        const result = ownership.abortAdaptiveTransfer(store, originalSource, here.sessionID, operationID);
+        const loaded = this.#adaptive.get(sourceID); if (loaded) loaded.fenced = true;
+        return { state: 'adaptive-transfer-aborted', epoch: result.epoch };
+      }
+      if (completedReceipt) {
+        await this.inspect.confirmAdaptiveTransfer(here, completedReceipt, runID); guard();
+      } else {
+        const { adaptive: _adaptive, assistantMessageID: _assistant, ...lineage } = claim!;
+        const projected = projectAdaptiveTransfer(store, originalSource, here, lineage);
+        const proof: AdaptiveReceipt = { ...lineage, targetSessionID: here.sessionID, targetSequence: projected.sequence,
+          targetDigest: projected.digest, admissionDigest: projected.admissionDigest, verifiedEpoch: lineage.ownerEpoch + 2 };
+        await this.inspect.confirmAdaptiveTransfer(here, proof, runID); guard();
+        if (owner?.state === 'idle' && owner.ownerSessionID === sourceID && owner.epoch === lineage.ownerEpoch)
+          ownership.beginAdaptiveTransfer(store, originalSource, here.sessionID, operationID);
+        ownership.publishAdaptiveTransfer(store, originalSource, projected);
+        ownership.finishAdaptiveTransfer(store, originalSource, projected);
+      }
+      const loaded = this.#adaptive.get(sourceID); if (loaded) loaded.fenced = true;
+      const restored = await this.#restoreAdaptive(here);
+      if (!restored.restored) throw new Error(`Adaptive finish committed but restore remains fenced: ${restored.reason}`);
+      return this.status(here.sessionID);
+    } finally { this.#adaptiveTransfers.delete(sourceID); this.#adaptiveTransfers.delete(here.sessionID); }
+  }
+
   /** Parent need selects one actor; selection is not an exposed MDD tool or an approval token. */
   async selectAdaptiveInternal(value: unknown, runtime: Runtime): Promise<unknown> {
     const run = this.#adaptive.get(runtime.sessionID);
@@ -735,6 +893,7 @@ export class PhaseRunner {
 
   async #adaptiveBefore(run: AdaptiveRun, call: TaskCall, args: unknown): Promise<TaskArgs> {
     this.#adaptiveCurrent(run);
+    if (this.#adaptiveTransfers.has(call.sessionID)) throw new Error('Adaptive transfer inspection owns this boundary.');
     this.owner(call.sessionID);
     if (run.low.state !== 'authorized-actor' || run.dispatching) throw new Error('Adaptive actor is not ready; select once and wait for any in flight actor.');
     const ready = { ...run.args!, prompt: run.token! };
@@ -1389,10 +1548,13 @@ export class PhaseRunner {
 
   #status(sessionID: string) {
     const adaptive = this.#adaptive.get(sessionID);
-    if (adaptive) return { sessionID, reportDetail: undefined, runID: adaptive.id, ...adaptive.low.status(),
-      ...(adaptive.low.state === 'authorized-actor' && !adaptive.dispatching ? {
-        task: { ...adaptive.args!, prompt: adaptive.token! }, dispatch: { mode: 'handle' as const, note: DISPATCH_NOTE },
-      } : {}) };
+    if (adaptive) {
+      this.#adaptiveCurrent(adaptive);
+      return { sessionID, reportDetail: undefined, runID: adaptive.id, ...adaptive.low.status(),
+        ...(adaptive.low.state === 'authorized-actor' && !adaptive.dispatching ? {
+          task: { ...adaptive.args!, prompt: adaptive.token! }, dispatch: { mode: 'handle' as const, note: DISPATCH_NOTE },
+        } : {}) };
+    }
     const exploration = this.#explorations.get(sessionID);
     if (exploration) return { sessionID, reportDetail: undefined, runID: exploration.record.ownerRunID,
       ...(this.#runs.get(sessionID) ? { workflow: this.#runs.get(sessionID)!.workflow.snapshot() } : {}), ...exploration.status() };

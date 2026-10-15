@@ -37,7 +37,7 @@ export type IntakeInspect = {
   transferLiveness?(runtime: Runtime, sourceSessionID: string, runID: string, requestDigest: string,
     assistantMessageID?: string): Promise<'running' | 'stopped' | 'unknown'>;
 };
-type Runner = Pick<PhaseRunner, 'start' | 'status' | 'approveNative' | 'block'> & Partial<Pick<PhaseRunner, 'admitAdaptiveInternal' | 'approvalStopped' | 'assertChangeable' | 'assertFreshStart' | 'closeForFreshStart' | 'contribute' | 'explore' | 'movedAway' | 'priorGuards' | 'recordConsent' | 'reset' | 'failedVerification' | 'resumable' | 'submit' | 'owner' | 'reserve' | 'release' | 'handoffRecoveredQuestion' | 'forceRoute' | 'retryRisk' | 'chooseManualRoute' | 'openQuestions' | 'takeOpenQuestions'>>;
+type Runner = Pick<PhaseRunner, 'start' | 'status' | 'approveNative' | 'block'> & Partial<Pick<PhaseRunner, 'admitAdaptiveInternal' | 'transferAdaptiveInternal' | 'recoverAdaptiveTransferInternal' | 'approvalStopped' | 'assertChangeable' | 'assertFreshStart' | 'closeForFreshStart' | 'contribute' | 'explore' | 'movedAway' | 'priorGuards' | 'recordConsent' | 'reset' | 'failedVerification' | 'resumable' | 'submit' | 'owner' | 'reserve' | 'release' | 'handoffRecoveredQuestion' | 'forceRoute' | 'retryRisk' | 'chooseManualRoute' | 'openQuestions' | 'takeOpenQuestions'>>;
 /** The run and settled state a native question reserved the durable writer against. */
 type Reservation = NonNullable<QuestionRecord['reservation']>;
 /** `fields` counts a preflight envelope's leading field questions; the rest are its clarifications. */
@@ -234,6 +234,7 @@ export function nativeQuestionAnswers(args: QuestionEnvelope, raw: unknown, open
 
 export class NativeIntake {
   readonly #sessions = new Map<string, Intake>();
+  readonly #adaptiveTransfers = new Set<string>();
   readonly #reissued = new Set<string>();
   readonly #questionOwners = new Map<QuestionEnvelope, string>();
   readonly #settings;
@@ -253,15 +254,37 @@ export class NativeIntake {
     const input = objectWithKeys(value, 'internal adaptive intake', ['contract']);
     const contract = adaptiveContract(input.contract), here = { ...runtime };
     const nativeMessage = boundedText(messageID, 'native messageID', 256);
+    if (this.#adaptiveTransfers.has(here.sessionID)) throw new Error('Adaptive transfer owns this native intake boundary.');
     if (here.agent !== 'mdd-orchestrator' || this.#profile.answers.mode !== 'automatic')
       throw new Error('Internal adaptive intake requires the coordinator and an explicitly automatic native profile; interactive approval is not bypassed.');
     if (this.#sessions.has(here.sessionID) || this.#unresolved(here.sessionID)) throw new Error('A native intake or question already occupies this parent.');
     if (!this.runner.admitAdaptiveInternal) throw new Error('Internal adaptive runner admission is unavailable.');
     const identity = await this.inspect.intake(here, contract.objective, nativeMessage, 'objective');
+    if (this.#adaptiveTransfers.has(here.sessionID)) throw new Error('Adaptive transfer claimed this intake during native inspection.');
     if (typeof identity !== 'string') throw new Error('Exact native objective proof is required; caller-supplied provenance is insufficient.');
     if (this.#sessions.has(here.sessionID) || this.#unresolved(here.sessionID)) throw new Error('Native intake changed during objective inspection.');
     // Runner independently inspects the same native text/message, ownership and current source.
     return this.runner.admitAdaptiveInternal({ contract, messageID: nativeMessage }, here);
+  }
+
+  /** Internal only. The runner independently proves both parents and the latest target request. */
+  transferAdaptiveInternal(value: unknown, runtime: Runtime): Promise<unknown> {
+    return this.#adaptiveTransfer(value, runtime, false);
+  }
+  recoverAdaptiveTransferInternal(value: unknown, runtime: Runtime): Promise<unknown> {
+    return this.#adaptiveTransfer(value, runtime, true);
+  }
+  async #adaptiveTransfer(value: unknown, runtime: Runtime, recover: boolean): Promise<unknown> {
+    const input = objectWithKeys(value, 'internal adaptive transfer intake', ['sourceSessionID', 'runID', 'operationID', 'messageID', ...(recover ? ['action'] : [])]);
+    const source = boundedText(input.sourceSessionID, 'sourceSessionID', 256);
+    if (runtime.agent !== 'mdd-orchestrator' || this.#profile.answers.mode !== 'automatic' ||
+        [source, runtime.sessionID].some(id => this.#adaptiveTransfers.has(id) || this.#sessions.has(id) || this.#unresolved(id)))
+      throw new Error('Adaptive transfer requires idle native intakes and the existing automatic coordinator profile.');
+    const method = recover ? this.runner.recoverAdaptiveTransferInternal : this.runner.transferAdaptiveInternal;
+    if (!method) throw new Error('Internal adaptive transfer is unavailable.');
+    this.#adaptiveTransfers.add(source); this.#adaptiveTransfers.add(runtime.sessionID);
+    try { return await method.call(this.runner, structuredClone(input), { ...runtime }); }
+    finally { this.#adaptiveTransfers.delete(source); this.#adaptiveTransfers.delete(runtime.sessionID); }
   }
 
   /**
@@ -361,6 +384,7 @@ export class NativeIntake {
    * be treated as a fresh decision.
    */
   recover(runtime: Runtime): void {
+    if (this.#adaptiveTransfers.has(runtime.sessionID)) throw new Error('Adaptive transfer owns this native intake boundary.');
     if (this.#sessions.has(runtime.sessionID)) return;
     const status = this.runner.status(runtime.sessionID);
     if (!('workflow' in status)) return;
@@ -440,6 +464,7 @@ export class NativeIntake {
   }
 
   async start(value: unknown, runtime: Runtime, messageID: string): Promise<unknown> {
+    if (this.#adaptiveTransfers.has(runtime.sessionID)) throw new Error('Adaptive transfer owns this native intake boundary.');
     if (runtime.agent !== 'mdd-orchestrator') throw new Error('Only mdd-orchestrator may start MDD.');
     // The intake of a run that moved to another conversation governs nothing here any more.
     if (this.runner.movedAway?.(runtime.sessionID)) this.#forget(runtime.sessionID);
@@ -467,6 +492,7 @@ export class NativeIntake {
     const context = input.context === undefined ? undefined : (({ label, content }) => ({ label, content }))(runContext(input.context));
     const engram = this.#settings.engram;
     const pending = !failedTarget && !previous && this.runner.status?.(runtime.sessionID).state !== 'complete' ? await this.inspect.setupPending?.(runtime, requirements, boundedText(messageID, 'native messageID', 256)) : undefined;
+    if (this.#adaptiveTransfers.has(runtime.sessionID)) throw new Error('Adaptive transfer claimed this intake during setup inspection.');
     if (pending && pending.requirements !== requirements) throw new Error('The original objective is pending. Resubmit its exact pendingStart arguments, not continuation text. For a different objective, use a fresh parent.');
     this.runner.owner?.(runtime.sessionID);
     if (this.#sessions.get(runtime.sessionID) !== previous) throw new Error('Intake changed during setup inspection; read mdd_status.');

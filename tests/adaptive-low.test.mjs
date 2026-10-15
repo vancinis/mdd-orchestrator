@@ -614,9 +614,11 @@ test('AL-02: post-selection drift and lost ownership never admit a writer', asyn
   assert.equal(f.progress.read(f.runtime.sessionID), undefined);
   assert.equal(f.runner.status(f.runtime.sessionID).lastReceipt, undefined, 'no actor actually ran');
   const g = fixture(t); await g.admit(); await g.select();
+  const issued = g.runner.status(g.runtime.sessionID).task;
   const owner = g.runner.owner(g.runtime.sessionID);
   g.ownership.reserve(owner.runID, g.runtime.sessionID, 'other-process', owner.epoch);
-  await assert.rejects(g.runner.before(g.call, g.runner.status(g.runtime.sessionID).task), /ownership/);
+  assert.throws(() => g.runner.status(g.runtime.sessionID), /ownership/);
+  await assert.rejects(g.runner.before(g.call, issued), /ownership/);
 });
 
 test('AL-02: Risk uses independent future assessment and retains real command obligations without execution claims', async t => {

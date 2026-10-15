@@ -8,6 +8,9 @@ import { ProgressGuard } from './progress.js';
 import { QuestionCheckpointStore, retirableRiskRecovery, unresolvedQuestion } from './question-checkpoint.js';
 import { Workflow } from './workflow.js';
 import { AdaptiveStore } from './adaptive-store.js';
+import type { AdaptiveRecord } from './adaptive-store.js';
+import { validateAdaptivePublication } from './adaptive-transfer.js';
+import type { AdaptiveReceipt } from './adaptive-transfer.js';
 
 export const RUN_OWNER_VERSION = 1;
 const LIMIT = 4096;
@@ -29,7 +32,9 @@ export type RunOwner = {
   recoveredTransfer?: { operationID: string; targetSessionID: string; sourceSequence: number; sourceDigest: string;
     action: 'release-claim' | 'abort-fenced' };
   transfer?: { targetSessionID: string; sourceDigest: string; sourceSequence?: number;
-    intent?: { operationID: string; nativeUserMessageID: string; requestDigest: string; assistantMessageID?: string } };
+    intent?: { operationID: string; nativeUserMessageID: string; requestDigest: string; assistantMessageID?: string;
+      adaptive?: { targetDigest: string; admissionDigest: string } } };
+  adaptiveReceipt?: AdaptiveReceipt;
   receipt?: { operationID: string; nativeUserMessageID: string; requestDigest: string;
     sourceSessionID: string; sourceSequence: number; sourceDigest: string;
     targetSessionID: string; targetSequence: number; targetDigest: string; targetEventCount: number; targetEventDigest: string;
@@ -39,11 +44,18 @@ export type RunOwner = {
 };
 export type IntakeOwner = { version: 1; sessionID: string; token: string; userMessageID: string; state: 'pending' | 'settled' | 'retired' };
 export type TargetTransferClaim = { sourceSessionID: string; sourceSequence: number; sourceDigest: string;
-  ownerEpoch: number; operationID: string; nativeUserMessageID: string; requestDigest: string; assistantMessageID?: string };
+  ownerEpoch: number; operationID: string; nativeUserMessageID: string; requestDigest: string; assistantMessageID?: string;
+  adaptive?: { targetDigest: string; admissionDigest: string } };
 type ParentOwner = { sessionID: string; runID: string; retired?: true; transfer?: TargetTransferClaim };
 
 function text(value: unknown, max: number): value is string {
   return typeof value === 'string' && !!value.trim() && value.length <= max && !/[\x00-\x1f\x7f]/.test(value);
+}
+function adaptiveBinding(value: unknown): void {
+  if (value === undefined) return;
+  const binding = objectWithKeys(value, 'adaptive publication binding', ['targetDigest', 'admissionDigest']);
+  if ([binding.targetDigest, binding.admissionDigest].some(item => typeof item !== 'string' || !/^[a-f0-9]{64}$/.test(item)))
+    throw new Error('Invalid adaptive publication binding.');
 }
 function parseParent(value: unknown, sessionID: string): ParentOwner {
   const item = objectWithKeys(value, 'parent owner', ['sessionID', 'runID', 'retired', 'transfer']);
@@ -52,7 +64,8 @@ function parseParent(value: unknown, sessionID: string): ParentOwner {
     throw new ValidationError('Invalid parent owner.');
   if (item.transfer !== undefined) {
     const claim = objectWithKeys(item.transfer, 'target transfer claim', ['sourceSessionID', 'sourceSequence', 'sourceDigest',
-      'ownerEpoch', 'operationID', 'nativeUserMessageID', 'requestDigest', 'assistantMessageID']);
+      'ownerEpoch', 'operationID', 'nativeUserMessageID', 'requestDigest', 'assistantMessageID', 'adaptive']);
+    adaptiveBinding(claim.adaptive);
     if (!text(claim.sourceSessionID, 256) || claim.sourceSessionID === sessionID || !text(claim.operationID, 256) ||
         !text(claim.nativeUserMessageID, 256) || !Number.isSafeInteger(claim.sourceSequence) ||
         (claim.sourceSequence as number) < 0 || !Number.isSafeInteger(claim.ownerEpoch) || (claim.ownerEpoch as number) < 0 ||
@@ -63,7 +76,7 @@ function parseParent(value: unknown, sessionID: string): ParentOwner {
   return structuredClone(value) as ParentOwner;
 }
 function parse(value: unknown): RunOwner {
-  const item = objectWithKeys(value, 'run owner', ['version', 'runID', 'ownerSessionID', 'originSessionID', 'formerOwners', 'directory', 'worktree', 'epoch', 'state', 'callID', 'workers', 'transfer', 'operation', 'recovery', 'receipt', 'recoveringTransfer', 'recoveredTransfer']);
+  const item = objectWithKeys(value, 'run owner', ['version', 'runID', 'ownerSessionID', 'originSessionID', 'formerOwners', 'directory', 'worktree', 'epoch', 'state', 'callID', 'workers', 'transfer', 'operation', 'recovery', 'receipt', 'adaptiveReceipt', 'recoveringTransfer', 'recoveredTransfer']);
   if (item.formerOwners !== undefined && (!Array.isArray(item.formerOwners) || item.formerOwners.length > 64 ||
       item.formerOwners.some(entry => !text(entry, 256)) || new Set(item.formerOwners).size !== item.formerOwners.length ||
       item.formerOwners.includes(item.ownerSessionID))) throw new ValidationError('Invalid former owners.');
@@ -102,7 +115,8 @@ function parse(value: unknown): RunOwner {
   if (item.state !== 'reserved' && (item.operation !== undefined || item.recovery !== undefined)) throw new ValidationError('Unreserved owner holds an operation.');
   if (item.recoveringTransfer !== undefined) {
     const recovery = objectWithKeys(item.recoveringTransfer, 'transfer recovery', ['sourceSessionID', 'sourceSequence', 'sourceDigest',
-      'ownerEpoch', 'operationID', 'nativeUserMessageID', 'requestDigest', 'assistantMessageID', 'targetSessionID', 'action']);
+      'ownerEpoch', 'operationID', 'nativeUserMessageID', 'requestDigest', 'assistantMessageID', 'targetSessionID', 'action', 'adaptive']);
+    adaptiveBinding(recovery.adaptive);
     if (item.state !== 'reserved' || item.operation === undefined || !text(item.callID, 256) ||
         item.callID !== `transfer-recovery-${recovery.operationID}` || recovery.sourceSessionID !== item.ownerSessionID ||
         !text(recovery.targetSessionID, 256) || !['release-claim', 'abort-fenced'].includes(String(recovery.action)) ||
@@ -138,7 +152,18 @@ function parse(value: unknown): RunOwner {
         [receipt.sourceDigest, receipt.targetDigest, receipt.targetEventDigest, receipt.requestDigest].some(digest => typeof digest !== 'string' || !/^[a-f0-9]{64}$/.test(digest)))
       throw new ValidationError('Invalid transfer receipt.');
   }
-  if (item.originSessionID !== undefined && item.originSessionID !== item.ownerSessionID && item.receipt === undefined)
+  if (item.adaptiveReceipt !== undefined) {
+    const receipt = objectWithKeys(item.adaptiveReceipt, 'adaptive ownership receipt', ['sourceSessionID', 'sourceSequence', 'sourceDigest',
+      'ownerEpoch', 'operationID', 'nativeUserMessageID', 'requestDigest', 'targetSessionID', 'targetSequence', 'targetDigest', 'admissionDigest', 'verifiedEpoch']);
+    if (item.receipt !== undefined || !text(receipt.operationID, 256) || !text(receipt.nativeUserMessageID, 256) ||
+        receipt.sourceSessionID !== item.originSessionID || receipt.targetSessionID !== item.ownerSessionID ||
+        receipt.sourceSessionID === receipt.targetSessionID || !text(receipt.sourceSessionID, 256) ||
+        [receipt.sourceSequence, receipt.ownerEpoch, receipt.targetSequence, receipt.verifiedEpoch].some(number => !Number.isSafeInteger(number) || (number as number) < 0) ||
+        receipt.verifiedEpoch !== (receipt.ownerEpoch as number) + 2 ||
+        [receipt.sourceDigest, receipt.requestDigest, receipt.targetDigest, receipt.admissionDigest].some(digest => typeof digest !== 'string' || !/^[a-f0-9]{64}$/.test(digest)))
+      throw new Error('Invalid adaptive ownership receipt.');
+  }
+  if (item.originSessionID !== undefined && item.originSessionID !== item.ownerSessionID && item.receipt === undefined && item.adaptiveReceipt === undefined)
     throw new ValidationError('Transferred owner lacks a receipt.');
   if (item.state === 'transferring') {
     const transfer = objectWithKeys(item.transfer, 'run transfer', ['targetSessionID', 'sourceDigest', 'sourceSequence', 'intent']);
@@ -147,7 +172,8 @@ function parse(value: unknown): RunOwner {
     if (transfer.sourceSequence !== undefined && (!Number.isSafeInteger(transfer.sourceSequence) || (transfer.sourceSequence as number) < 0))
       throw new ValidationError('Invalid transfer checkpoint sequence.');
     if (transfer.intent !== undefined) {
-      const intent = objectWithKeys(transfer.intent, 'transfer intent', ['operationID', 'nativeUserMessageID', 'requestDigest', 'assistantMessageID']);
+      const intent = objectWithKeys(transfer.intent, 'transfer intent', ['operationID', 'nativeUserMessageID', 'requestDigest', 'assistantMessageID', 'adaptive']);
+      adaptiveBinding(intent.adaptive);
       if (!text(intent.operationID, 256) || !text(intent.nativeUserMessageID, 256) ||
           (intent.assistantMessageID !== undefined && !text(intent.assistantMessageID, 256)) ||
           typeof intent.requestDigest !== 'string' || !/^[a-f0-9]{64}$/.test(intent.requestDigest))
@@ -358,7 +384,10 @@ export class RunOwnershipStore {
   reserve(runID: string, sessionID: string, callID: string, epoch: number, operation?: RunOwner['operation']): RunOwner {
     if (!text(callID, 256)) throw new ValidationError('Invalid task call ID.');
     const current = this.read(runID);
-    if (current?.originSessionID && current.originSessionID !== current.ownerSessionID) this.confirmReceipt(runID, sessionID);
+    if (current?.originSessionID && current.originSessionID !== current.ownerSessionID) {
+      if (current.adaptiveReceipt) this.confirmAdaptiveReceipt(runID, sessionID, new AdaptiveStore(this.#root));
+      else this.confirmReceipt(runID, sessionID);
+    }
     return this.#write(runID, old => {
       if (!old || old.ownerSessionID !== sessionID || old.state !== 'idle' || old.epoch !== epoch) throw new Error('No idle owner at this epoch.');
       return { ...old, state: 'reserved', callID, epoch: epoch + 1, ...(operation ? { operation } : {}) };
@@ -409,6 +438,191 @@ export class RunOwnershipStore {
       if (!old || old.ownerSessionID !== sessionID || old.state !== 'reserved' || old.callID !== batchID || old.epoch !== epoch ||
           member?.state !== 'pending') throw new Error('Pending worker does not match.');
       return { ...old, epoch: epoch + 1, workers: old.workers!.map(member => member.callID === callID ? { ...member, state: 'settled' } : member) };
+    });
+  }
+  /** Adaptive writers share the owner lock with transfer fencing, not only a record CAS. */
+  publishAdaptiveUpdate(store: AdaptiveStore, previous: AdaptiveRecord, body: Parameters<AdaptiveStore['commit']>[2]): AdaptiveRecord {
+    return this.#underOwnerLock(previous.runID, owner => {
+      if (store.root !== this.#root || !owner || owner.ownerSessionID !== previous.sessionID ||
+          owner.state === 'transferring' || owner.recoveringTransfer || owner.operation || owner.recovery || owner.workers ||
+          this.parent(previous.sessionID) !== previous.runID || owner.directory !== previous.directory || owner.worktree !== previous.worktree)
+        throw new Error('Adaptive publication authority is fenced.');
+      if (previous.transfer) this.confirmAdaptiveReceipt(previous.runID, previous.sessionID, store);
+      return store.commit(previous.sessionID, previous, body);
+    });
+  }
+
+  #adaptiveSource(store: AdaptiveStore, source: AdaptiveRecord): void {
+    const marker = new ProgressGuard(this.#root).read(source.sessionID);
+    const question = new QuestionCheckpointStore(this.#root).read(source.sessionID);
+    if (store.root !== this.#root || !isDeepStrictEqual(store.read(source.sessionID), source) || source.stage !== 'active' ||
+        !['await-selection', 'completed', 'closed-unverified'].includes(source.data.state) || source.attempt?.state === 'pending' ||
+        this.parent(source.sessionID) !== source.runID || new CheckpointStore(this.#root).read(source.sessionID) ||
+        this.intake(source.sessionID)?.state === 'pending' || unresolvedQuestion(question) ||
+        (marker && (marker.state !== 'settled' || marker.runID !== source.runID || marker.userMessageID !== source.userMessageID ||
+          marker.callID !== source.attempt?.callID || marker.attemptID !== source.attempt?.callID || marker.resumable !== false)) ||
+        (source.attempt?.state === 'settled' && !marker)) throw new Error('Adaptive source generation or native idle boundary differs.');
+  }
+  #adaptiveTargetControls(sessionID: string): void {
+    if (new CheckpointStore(this.#root).read(sessionID) ||
+        new ProgressGuard(this.#root).read(sessionID) || new QuestionCheckpointStore(this.#root).read(sessionID) || this.intake(sessionID))
+      throw new Error('Adaptive transfer target is occupied.');
+  }
+  #adaptiveTargetEmpty(sessionID: string, store: AdaptiveStore): void {
+    this.#adaptiveTargetControls(sessionID);
+    if (store.occupied(sessionID)) throw new Error('Adaptive transfer target is occupied.');
+  }
+  claimAdaptiveTarget(store: AdaptiveStore, source: AdaptiveRecord, target: AdaptiveRecord, epoch: number): void {
+    this.#adaptiveSource(store, source); this.#adaptiveTargetEmpty(target.sessionID, store);
+    validateAdaptivePublication(store, source, target, target.transfer!);
+    const owner = this.read(source.runID);
+    if (!owner || owner.ownerSessionID !== source.sessionID || owner.state !== 'idle' || owner.epoch !== epoch ||
+        owner.directory !== source.directory || owner.worktree !== source.worktree || target.transfer?.ownerEpoch !== epoch)
+      throw new Error('Adaptive source owner changed before target claim.');
+    if (source.transfer) this.confirmAdaptiveReceipt(source.runID, source.sessionID, store);
+    const claim = { sessionID: target.sessionID, runID: source.runID, transfer: { ...target.transfer!,
+      adaptive: { targetDigest: target.digest, admissionDigest: target.admissionDigest } } };
+    this.#files.updateStrict(this.#parentName(target.sessionID), previous => {
+      if (previous !== undefined) throw new Error('Adaptive target parent claim is occupied, including closed legacy state.');
+      this.#adaptiveSource(store, source); this.#adaptiveTargetEmpty(target.sessionID, store);
+      if (!isDeepStrictEqual(this.read(source.runID), owner)) throw new Error('Adaptive source owner changed.');
+      return JSON.stringify(claim);
+    }, LIMIT);
+    if (!isDeepStrictEqual(this.parentClaim(target.sessionID), claim)) throw new Error('Adaptive target claim readback is unconfirmed.');
+  }
+  #adaptiveClaim(store: AdaptiveStore, source: AdaptiveRecord, targetSessionID: string, operationID: string): TargetTransferClaim {
+    this.#adaptiveSource(store, source);
+    const parent = this.parentClaim(targetSessionID), claim = parent?.transfer;
+    if (!parent || parent.retired || parent.runID !== source.runID || !claim?.adaptive || claim.operationID !== operationID ||
+        claim.sourceSessionID !== source.sessionID || claim.sourceSequence !== source.sequence || claim.sourceDigest !== source.digest ||
+        claim.adaptive.admissionDigest !== source.admissionDigest || new CheckpointStore(this.#root).read(targetSessionID) ||
+        new ProgressGuard(this.#root).read(targetSessionID) || new QuestionCheckpointStore(this.#root).read(targetSessionID) || this.intake(targetSessionID))
+      throw new Error('Adaptive transfer claim or native occupancy differs; keep both parents fenced.');
+    return claim;
+  }
+  beginAdaptiveTransfer(store: AdaptiveStore, source: AdaptiveRecord, targetSessionID: string, operationID: string): RunOwner {
+    return this.#write(source.runID, old => {
+      const claim = this.#adaptiveClaim(store, source, targetSessionID, operationID);
+      if (!old || old.ownerSessionID !== source.sessionID || old.state !== 'idle' || old.epoch !== claim.ownerEpoch ||
+          old.directory !== source.directory || old.worktree !== source.worktree) throw new Error('Adaptive source CAS differs.');
+      const { sourceSessionID: _session, sourceSequence, sourceDigest, ownerEpoch: _epoch, ...intent } = claim;
+      const { recoveredTransfer: _recovered, ...rest } = old;
+      return { ...rest, state: 'transferring', epoch: old.epoch + 1, transfer: { targetSessionID, sourceSequence, sourceDigest, intent } };
+    });
+  }
+  #adaptiveFenced(store: AdaptiveStore, source: AdaptiveRecord, targetSessionID: string, operationID: string): { owner: RunOwner; claim: TargetTransferClaim } {
+    const claim = this.#adaptiveClaim(store, source, targetSessionID, operationID), owner = this.read(source.runID);
+    const { sourceSessionID: _source, sourceSequence, sourceDigest, ownerEpoch, ...intent } = claim;
+    if (!owner || owner.ownerSessionID !== source.sessionID || owner.state !== 'transferring' || owner.epoch !== ownerEpoch + 1 ||
+        !isDeepStrictEqual(owner.transfer, { targetSessionID, sourceSequence, sourceDigest, intent }))
+      throw new Error('Adaptive transfer owner is no longer fenced for this exact operation.');
+    return { owner, claim };
+  }
+  publishAdaptiveTransfer(store: AdaptiveStore, source: AdaptiveRecord, target: AdaptiveRecord): AdaptiveRecord {
+    return this.#underOwnerLock(source.runID, () => {
+      const { claim } = this.#adaptiveFenced(store, source, target.sessionID, target.transfer!.operationID);
+      validateAdaptivePublication(store, source, target, target.transfer!);
+      if (target.digest !== claim.adaptive!.targetDigest) throw new Error('Adaptive target projection changed since claim.');
+      const actual = store.read(target.sessionID);
+      if (actual) {
+        if (!isDeepStrictEqual(actual, target)) throw new Error('Divergent adaptive target publication; nothing was replaced.');
+        return actual;
+      }
+      const { version: _version, sequence: _sequence, digest: _digest, admissionDigest: _admission, ...body } = target;
+      return store.commit(target.sessionID, undefined, body);
+    });
+  }
+  finishAdaptiveTransfer(store: AdaptiveStore, source: AdaptiveRecord, target: AdaptiveRecord): RunOwner {
+    const receipt: AdaptiveReceipt = { ...target.transfer!, targetSessionID: target.sessionID, targetSequence: target.sequence,
+      targetDigest: target.digest, admissionDigest: target.admissionDigest, verifiedEpoch: target.transfer!.ownerEpoch + 2 };
+    const current = this.read(source.runID);
+    if (current?.adaptiveReceipt?.operationID === receipt.operationID && isDeepStrictEqual(current.adaptiveReceipt, receipt)) {
+      this.confirmAdaptiveReceipt(source.runID, target.sessionID, store); return current;
+    }
+    return this.#write(source.runID, old => {
+      const fenced = this.#adaptiveFenced(store, source, target.sessionID, receipt.operationID);
+      validateAdaptivePublication(store, source, target, target.transfer!);
+      if (!isDeepStrictEqual(old, fenced.owner) || target.digest !== fenced.claim.adaptive!.targetDigest ||
+          !isDeepStrictEqual(store.read(target.sessionID), target)) throw new Error('Adaptive publication readback differs before ownership commit.');
+      const { transfer: _transfer, adaptiveReceipt: _prior, ...rest } = old!;
+      return { ...rest, originSessionID: source.sessionID, ownerSessionID: target.sessionID, epoch: receipt.verifiedEpoch,
+        state: 'idle', adaptiveReceipt: receipt, formerOwners: [...new Set([...(old!.formerOwners ?? []), source.sessionID])] };
+    });
+  }
+  confirmAdaptiveReceipt(runID: string, sessionID: string, store: AdaptiveStore): AdaptiveReceipt {
+    const owner = this.read(runID), receipt = owner?.adaptiveReceipt, parent = this.parentClaim(sessionID), record = store.read(sessionID);
+    if (store.root !== this.#root || !owner || !receipt || owner.ownerSessionID !== sessionID || owner.state === 'transferring' || owner.recoveringTransfer ||
+        receipt.targetSessionID !== sessionID || receipt.sourceSessionID !== owner.originSessionID || owner.epoch < receipt.verifiedEpoch ||
+        !parent || parent.retired || parent.runID !== runID || !record || record.runID !== runID ||
+        record.userMessageID !== receipt.nativeUserMessageID || record.admissionDigest !== receipt.admissionDigest ||
+        record.directory !== owner.directory || record.worktree !== owner.worktree ||
+        record.sequence < receipt.targetSequence || record.sequence === receipt.targetSequence && record.digest !== receipt.targetDigest)
+      throw new Error('Adaptive receipt cannot confirm target authority or record generation.');
+    const { targetSessionID: _target, targetSequence: _sequence, targetDigest, admissionDigest, verifiedEpoch: _verified, ...lineage } = receipt;
+    if (!isDeepStrictEqual(record.transfer, lineage) || !isDeepStrictEqual(parent.transfer, { ...lineage, adaptive: { targetDigest, admissionDigest } }))
+      throw new Error('Adaptive receipt lineage differs from the parent claim or durable record.');
+    return receipt;
+  }
+
+  /** Reserve abort authority BEFORE retiring target bytes; late finish callbacks lose their CAS. */
+  abortAdaptiveTransfer(store: AdaptiveStore, source: AdaptiveRecord, targetSessionID: string, operationID: string): RunOwner {
+    let owner = this.read(source.runID);
+    if (owner?.recoveredTransfer?.operationID === operationID && owner.recoveredTransfer.targetSessionID === targetSessionID &&
+        owner.recoveredTransfer.sourceDigest === source.digest && this.parentClaim(targetSessionID)?.retired) return owner;
+    if (!owner?.recoveringTransfer) {
+      owner = this.#write(source.runID, old => {
+        const claim = this.#adaptiveClaim(store, source, targetSessionID, operationID);
+        if (!old || old.ownerSessionID !== source.sessionID ||
+            !(old.state === 'idle' && old.epoch === claim.ownerEpoch || old.state === 'transferring' &&
+              isDeepStrictEqual(old, this.#adaptiveFenced(store, source, targetSessionID, operationID).owner)))
+          throw new Error('Adaptive abort cannot reserve this owner.');
+        const { transfer: _transfer, ...rest } = old;
+        return { ...rest, state: 'reserved', epoch: old.epoch + 1, callID: `transfer-recovery-${operationID}`,
+          operation: { name: 'adaptive-transfer-abort', checkpointSequence: source.sequence, checkpointDigest: source.digest },
+          recoveringTransfer: { ...claim, targetSessionID, action: old.state === 'idle' ? 'release-claim' : 'abort-fenced' } };
+      });
+    }
+    const recovery = owner.recoveringTransfer;
+    if (!recovery?.adaptive || recovery.operationID !== operationID || recovery.targetSessionID !== targetSessionID ||
+        recovery.sourceDigest !== source.digest || recovery.sourceSequence !== source.sequence || owner.ownerSessionID !== source.sessionID ||
+        owner.operation?.name !== 'adaptive-transfer-abort') throw new Error('Adaptive abort reservation differs; no cleanup occurred.');
+    this.#underOwnerLock(source.runID, current => {
+      if (!isDeepStrictEqual(current, owner)) throw new Error('Adaptive abort authority changed.');
+      this.#adaptiveTargetControls(targetSessionID);
+      const actual = store.read(source.sessionID);
+      if (!actual) throw new Error('Adaptive abort source generation is absent.');
+      const { version: _version, sequence: _sequence, digest: _digest, admissionDigest: _admission, ...body } = source;
+      if (!isDeepStrictEqual(actual, source) && !isDeepStrictEqual(actual, store.prepare(source.sessionID, source, body)))
+        throw new Error('Adaptive abort source generation or bytes diverged.');
+      this.#adaptiveSource(store, actual);
+      const parent = this.parentClaim(targetSessionID);
+      const { targetSessionID: _target, action: _action, ...claim } = recovery;
+      if (!parent || parent.runID !== source.runID || !parent.retired && !isDeepStrictEqual(parent.transfer, claim))
+        throw new Error('Adaptive target claim changed before retirement.');
+      const target = store.read(targetSessionID);
+      if (target) {
+        if (target.sequence !== 0 || target.digest !== recovery.adaptive!.targetDigest || target.runID !== source.runID)
+          throw new Error('Divergent target cannot be retired.');
+        store.retireIf(targetSessionID, target);
+      }
+      if (store.occupied(targetSessionID)) throw new Error('Adaptive target retirement readback failed.');
+      this.#adaptiveTargetEmpty(targetSessionID, store);
+      this.#files.updateStrict(this.#parentName(targetSessionID), previous => {
+        if (!isDeepStrictEqual(previous === undefined ? undefined : parseParent(JSON.parse(previous), targetSessionID), parent))
+          throw new Error('Adaptive parent retirement CAS differs.');
+        return JSON.stringify({ sessionID: targetSessionID, runID: source.runID, retired: true });
+      }, LIMIT);
+      if (!this.parentClaim(targetSessionID)?.retired) throw new Error('Adaptive parent retirement readback failed.');
+      // The source generation also rotates: a process holding the pre-transfer record cannot revive.
+      if (actual.sequence === source.sequence) {
+        store.commit(source.sessionID, source, body);
+      }
+    });
+    return this.#write(source.runID, old => {
+      if (!isDeepStrictEqual(old, owner)) throw new Error('Adaptive abort settlement CAS differs.');
+      const { callID: _call, operation: _operation, recoveringTransfer: _recovery, ...rest } = old!;
+      return { ...rest, state: 'idle', epoch: old!.epoch + 1, recoveredTransfer: { operationID, targetSessionID,
+        sourceSequence: source.sequence, sourceDigest: source.digest, action: recovery.action } };
     });
   }
   beginTransfer(runID: string, sourceSessionID: string, target: { sessionID: string; directory: string; worktree: string },
@@ -812,7 +1026,8 @@ export class RunOwnershipStore {
    */
   #movedFrom(sessionID: string, owner: RunOwner | undefined): boolean {
     if (!owner || owner.ownerSessionID === sessionID) return false;
-    return !!owner.formerOwners?.includes(sessionID) || (!!owner.receipt && owner.receipt.sourceSessionID === sessionID && owner.state !== 'transferring');
+    return !!owner.formerOwners?.includes(sessionID) || (!!owner.receipt && owner.receipt.sourceSessionID === sessionID && owner.state !== 'transferring') ||
+      (!!owner.adaptiveReceipt && owner.adaptiveReceipt.sourceSessionID === sessionID && owner.state !== 'transferring');
   }
 
   retireMovedAwayParent(sessionID: string, runID: string): void {
