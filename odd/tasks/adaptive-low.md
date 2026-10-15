@@ -33,7 +33,7 @@ Fresh low currently requires Explore -> Risk -> Plan -> Apply -> Verify. Small, 
 
 - Delivery strategy: `ask-on-risk`; chain strategy: `feature-branch-chain`, explicitly selected by the user as "Integración conjunta (Recomendado)". Keep the feature isolated until coherent integration. Future tracker/child PR creation requires separate publication authorization.
 - Forecast: original whole-feature estimate was 2,200-4,000 authored changed lines. Revised planning range: approximately 5,500-8,500, reflecting separately verified durability, transfer and structured-continuation boundaries and remaining public integration. Estimates exclude generated output and are not acceptance gates or authorization to expand behavior.
-- Running committed work-unit authored changed lines: 6,916 (AL-01 486; AL-02 1,024; AL-03 652; AL-04a 1,150; AL-04b 1,146; AL-04c 926; AL-05a 1,532), excluding generated output and tracking.
+- Running committed work-unit authored changed lines: 8,436 (AL-01 486; AL-02 1,024; AL-03 652; AL-04a 1,150; AL-04b 1,146; AL-04c 926; AL-05a 1,532; AL-05b 1,520), excluding generated output and tracking.
 - Work-unit commit: AL-01 `9874049bf3774c45a88ce55e6c936abd1a0a8187`, based on `683c745`. Future slice boundary: this coherent unit; no PR exists. Its 486-line footprint exceeds the advisory budget because the bounded pin-preservation correction requires five regression tests; retain tests and report the overage rather than cosmetic splitting.
 - Each task closes only after observed outcomes/checks and a local Conventional Commit with behavior, tests, and relevant docs. No AI attribution.
 
@@ -48,7 +48,7 @@ Fresh low currently requires Explore -> Risk -> Plan -> Apply -> Verify. Small, 
   - [x] **AL-04c — Executable escalation.** Real medium Plan / high Propose-Spec-Design-Tasks continuation and structured Verify, retained-work validation and only missing/invalidated scoped Apply; no fabricated predecessor results or scope expansion. Commit: `4833376b03a7b4ce997155bb9a026fd1e13b038d`.
 - [ ] **AL-05 — Activate the coherent public contract.** Expose coordinator-only selection/close/escalation operation, new fresh-run version, medium validation, adequate status and prompts, and aligned precise-edit entry. Route: delegated; triggers: multi-file plugin/schema/assets/docs integration. Acceptance: mocked native end-to-end scenarios work under configured automatic/interactive approval policies without silently changing the user's mode; historical runs remain bound to their own semantics; no new Security/JD permissions or arbitrary actor dispatch are introduced. Commit: pending.
   - [x] **AL-05a — Native policy bridge, inactive.** Configured mode/preferences frozen; unset mode asks only the existing native mode question. Durable single-use interactive approval binds actual question result, exact operation, current run/generation/handle/source bytes. Product questions resolve before immutable admission or pause via actual actor receipt links; no raw approval flag/user-text provenance. Public registration unchanged. Commit: `553d944c85103be09067040ded3e60d493d09d78`.
-  - [ ] **AL-05b — Usable versioned protocol, inactive.** Strict operation-specific request decoding, bounded protected operation descriptors and detail readback, honest version-3 native-context-required kernel/CLI projection, legacy semantics unchanged.
+  - [x] **AL-05b — Usable versioned protocol, inactive.** Strict operation-specific request decoding, bounded protected operation descriptors and detail readback, honest version-3 native-context-required kernel/CLI projection implemented; legacy semantics unchanged. Commit: `f9746cf7e74a42de282875bef0f9026e7a3d3f27`.
   - [ ] **AL-05c — Atomic public activation.** Register coordinator-only native tool once complete, update version-specific agents/shared instructions, replace untracked precise-edit implementation policy, and prove actual registered-tool/hook scenarios before declaring active.
 
 ## Applicable checks
@@ -76,7 +76,7 @@ git diff --check
 
 ## Progress and next action
 
-AL-01 through AL-04 and subunit AL-05a implementation, applicable checks and local work-unit commits are complete. AL-05 stays open for AL-05b/05c. Internal adaptive work includes native interactive policy, but no public adaptive execution or medium route is active yet.
+AL-01 through AL-04 and subunits AL-05a/05b implementation, applicable checks and local work-unit commits are complete. AL-05 stays open only for AL-05c. Internal native protocol is ready, but no public adaptive execution or medium route is active yet.
 
 ### AL-01 observed evidence
 
@@ -195,4 +195,20 @@ Public registration alone would leave automatic-only internal admission and fixe
 - Frozen interactive preferences survive transfer; actual mode answers selecting automatic remain preferences, not invented approval. Interrupted questions do not resume as live consent. Actor answers add linked context without changing held business authority or earning completion.
 - Limits: internal unregistered bridge only; local runtime/synthetic SDK evidence, not live host/model approval, command attestation or coordinated whole-file rewrite authentication. Public protocol/projection and registration are still AL-05b/05c obligations. Post-commit state showed only tracking modified; no source-changing hooks. Mirror pending known binding mismatch.
 
-Next: AL-05b strict protocol/status/detail readback, then AL-05c atomic public activation. Continue cached feature-branch-chain without asking again. No push, PR creation, merge, or global installation authorized. Mirror remains pending after the full-document save refused with the existing project/session binding mismatch.
+### AL-05b implementation boundary
+
+Next prerequisite is a strict native operation protocol and usable bounded projection. Decode operation-specific bounded JSON before policy questions or mutations; runtime/coordinator identity and approvals are never payload claims. Protect current version/route/mode/handle, permitted operation and exact required IDs/fields; provide guarded bounded detail readback for larger held evidence instead of truncating authoritative selectors or inlining unlimited reports. Version 3 requires native context, not a fabricated fixed phase list; unmarked/explicit-2 evaluation and historical checkpoint semantics remain unchanged. Keep current registration unchanged until AL-05c can expose a complete tested route.
+
+### AL-05b observed evidence
+
+- Source commit: `f9746cf7e74a42de282875bef0f9026e7a3d3f27`, sixteen files +1,494/-26 (1,520 authored changed lines). Strict protocol, canonical bounded detail projection, fixed native-context-required CLI diagnostics and real native recovery/repair coverage retained together.
+- Initial RED eight total/one passed/seven failed; further meaningful protocol RED thirteen passed/nine failed. A missing dedicated test file in an intermediate passing command was disclosed; the file was subsequently authored, explicitly checked and executed. No missing-file pass was used as final proof.
+- Parent-authorized narrow CLI and ownership surfaces completed explicit version-pin parsing and exact interactive abort reservation reconciliation after target retirement/source rotation. Pre-final one-failure suite was not waived. Ownership RED fifteen passed/three failed; expanded controls twenty-seven passed.
+- Initial final writer focused 369/full 2,440 total, 2,437 passed, zero failed, three baseline skips passed. Native assessment high/unassessable due new helper/tests; RDD remained off and independent verification applied.
+- Independent four original runtime probes passed, but source inspection identified hidden valid structured repairs when unmatched evidence suppressed Verify and the entire select descriptor. Writer reproduced medium/high crossed with failed/stale proof: four RED missing repair descriptors, then four RED omitted-context acceptance, then four GREEN.
+- Correction publishes only model-eligible latest-receipt-bound repairs with required guarded current context, while premature Verify stays unavailable. Unrelated retained work remains completed; refreshed matching parent proof and a new actual structured Verify are required after repair.
+- Final build/typecheck/diff check passed; focused eight-file command 373 passed, zero failed/skipped; full npm test 2,444 total, 2,441 passed, zero failed, three unchanged baseline skips, 366.48 seconds.
+- Independent targeted recheck passed build/focused 373/diff check and four descriptor-only medium/high failed/stale repair repros. Missing/forged receipt/context/foreign assignment rejected without state changes. Parent final typecheck/diff check and structural source/CLI/protocol readback passed.
+- Limits: inactive registration until AL-05c, deterministic local runtime/synthetic SDK proof, no live-host/model approval or independent command attestation. Post-commit state showed only tracking modified, no source-changing hook. Mirror remains pending known binding mismatch.
+
+Next: AL-05c atomic public activation and final registered-tool/hook regressions. Continue cached feature-branch-chain without asking again. No push, PR creation, merge, or global installation authorized. Mirror remains pending after the full-document save refused with the existing project/session binding mismatch.
