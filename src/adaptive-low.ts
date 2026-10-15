@@ -50,6 +50,8 @@ type EvidenceReport = { snapshotID: string; readback: { acceptance: Acceptance; 
   scenarios: (SemanticAssessment & { requirementID: string; scenarioID: string; assignmentID: string })[];
   decisions: (SemanticAssessment & { decisionID: string })[]; checks: ReturnType<typeof executed>;
   checkResults: ReturnType<typeof checkAccounting>['checkResults']; supplementalChecks: ReturnType<typeof checkAccounting>['supplementalChecks']; limits: string[] };
+export const ADAPTIVE_EVIDENCE_FIELDS = Object.freeze(['snapshotID', 'readback', 'inventory', 'exclusions', 'sources', 'assignments',
+  'scenarios', 'decisions', 'checks', 'checkResults', 'supplementalChecks', 'limits'] as const);
 type HistoricalChecks = { snapshot: Snapshot; checks: ReturnType<typeof executed> };
 type PrerequisiteReceipt = { assignmentID: string; receiptID: string };
 export type AdaptiveData = {
@@ -503,6 +505,24 @@ export class AdaptiveLow {
   contract(): AdaptiveContract { return structuredClone({ ...this.#contract, assignments: this.#assignments(), context: this.#context, assessment: this.#assessment }); }
   selection(): AdaptiveSelection | undefined { return structuredClone(this.#selection); }
   assignment(): Assignment | undefined { return structuredClone(this.#assignments().find(item => item.id === this.#selection?.assignmentID)); }
+  /** Read-only candidates, not authorization: the same selection guards run on isolated copies. */
+  continuationRepairs() {
+    if (!this.#continuation || this.#state !== 'await-selection') return undefined;
+    const current = { technical: this.#context.technical, dependencies: this.#context.dependencies, fingerprints: this.policySources() };
+    const repairs: { assignmentID: string; repairOf: string }[] = [];
+    for (const assignment of this.#assignments().filter(item => this.#completed.has(item.id))) {
+      const receipt = this.#receipts.findLast(item => item.actor === 'mdd-apply' && item.assignmentID === assignment.id);
+      if (!receipt) continue;
+      try {
+        const candidate = this.copy();
+        candidate.select(candidate.selectionInput({ handle: candidate.#handle, actor: 'mdd-apply', assignmentID: assignment.id,
+          purpose: 'Inspect bounded repair eligibility without authorizing work.', repairOf: receipt.id,
+          context: { ...current, reason: this.#context.reason } }));
+        repairs.push({ assignmentID: assignment.id, repairOf: receipt.id });
+      } catch { /* Failed/stale proof, prerequisites, repair budget and frozen-stage guards remain authoritative. */ }
+    }
+    return { repairs, current };
+  }
   selectionInput(value: unknown): AdaptiveSelection {
     if (!this.#continuation) return adaptiveSelection(value, this.#contract);
     const input = objectWithKeys(value, 'continuation selection', ['handle', 'actor', 'assignmentID', 'purpose', 'context', 'repairOf']);
@@ -637,8 +657,7 @@ export class AdaptiveLow {
   submitEvidence(handle: string, value: unknown): void {
     this.assertBoundary(handle); this.assertEvidenceCurrent();
     this.#matched = false;
-    const input = objectWithKeys(value, 'adaptive evidence', ['snapshotID', 'readback', 'inventory', 'exclusions', 'sources', 'assignments',
-      'scenarios', 'decisions', 'checks', 'checkResults', 'supplementalChecks', 'limits']);
+    const input = objectWithKeys(value, 'adaptive evidence', ADAPTIVE_EVIDENCE_FIELDS);
     if (input.snapshotID !== this.#snapshot!.id) throw new Error('Evidence belongs to another prepared snapshot.');
     const readback = objectWithKeys(input.readback, 'parent contract readback', ['acceptance', 'scope', 'exclusions', 'decisions']);
     const expected = { acceptance: this.#contract.acceptance, scope: this.#contract.scope, exclusions: this.#contract.exclusions, decisions: this.#contract.decisions };

@@ -42,6 +42,19 @@ test('CLI emits JSON for explicit answers and byte-identical complete profile ou
   assert.equal('route' in result, false);
 });
 
+test('AL05b CLI: explicit version two preserves output; version three requires native context without fixed execution', () => {
+  const ordinary = invoke('--answers', answers);
+  assert.equal(invoke('--answers', answers, '--routing-version', '2').stdout, ordinary.stdout);
+  assert.equal(invoke('--profile', profile, '--routing-version', '2').stdout, ordinary.stdout);
+  const native = invoke('--answers', answers, '--routing-version', '3');
+  assert.equal(native.status, 2); assert.equal(native.stdout, '');
+  assert.match(native.stderr, /native-context-required/);
+  for (const args of [['--routing-version'], ['--routing-version', '3', '--routing-version', '2'], ['--routing-version', '3.0'], ['--routing-version', '4']]) {
+    const result = invoke('--answers', answers, ...args);
+    assert.equal(result.status, 2); assert.equal(result.stdout, '');
+  }
+});
+
 test('CLI accepts the legacy explore flag and refuses the removed scoring config', t => {
   const explored = invoke('--explore', '--answers', answers);
   assert.equal(explored.status, 0);

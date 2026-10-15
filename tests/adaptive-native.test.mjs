@@ -56,6 +56,97 @@ function output(args, answers) {
     metadata: { answers, truncated: false } };
 }
 
+const wire = (kind, args = {}) => JSON.stringify({ routingVersion: 3, kind, args });
+
+test('AL05b: real native protocol admits, selects and retains actual native dispatch', async t => {
+  const f = fixture(t, 'automatic');
+  const status = await f.gate.adaptiveInternal(wire('entry', { contract: f.contract, messageID: 'native-message' }), f.runtime);
+  assert.equal(status.routingVersion, 3);
+  assert.equal(status.registration, 'inactive');
+  assert.equal(status.route, 'low');
+  assert.equal(status.mode, 'automatic');
+  assert.equal(status.handle, f.runner.status('parent').selection.handle);
+  assert.deepEqual(status.operations.find(op => op.kind === 'select').required, ['handle', 'actor', 'assignmentID', 'purpose']);
+  assert.deepEqual(status.operations.find(op => op.kind === 'select').ids.assignmentID, ['A1']);
+  const selected = await f.gate.adaptiveInternal(wire('select', f.operation().args), f.runtime);
+  assert.deepEqual(selected.task, f.runner.status('parent').task);
+  const call = { sessionID: 'parent', callID: 'protocol-child' };
+  const sent = await f.runner.before(call, selected.task);
+  await f.runner.after(call, sent, JSON.stringify({ outcome: 'failed', evidenceSummary: 'Stopped without edits.', artifact: 'No source changes.', completed: [], changes: [], checks: [], noChangeReason: 'Stopped.' }));
+  const idle = await f.gate.adaptiveInternal(wire('status'), f.runtime);
+  assert.equal(idle.state, 'await-selection');
+  assert.equal(idle.lastReceipt.callID, 'protocol-child');
+});
+
+test('AL05b: malformed operation-specific wire input has no native questions or durable writes', async t => {
+  const f = fixture(t, 'interactive');
+  for (const request of [wire('entry', { contract: f.contract, messageID: 'native-message', approved: true }),
+    wire('entry', { contract: f.contract, messageID: 42 }), wire('select', { handle: 'x', actor: 'mdd-apply' }),
+    wire('recover', { agent: 'mdd-orchestrator' }), wire('status', { sessionID: 'parent' }), '{', ' '.repeat(160001)]) {
+    await assert.rejects(f.gate.adaptiveInternal(request, f.runtime));
+    assert.equal(f.questions.read('parent'), undefined);
+    assert.equal(f.store.read('parent'), undefined);
+  }
+  await assert.rejects(f.gate.adaptiveInternal(wire('status'), { ...f.runtime, agent: 'general' }), /coordinator/);
+});
+
+test('AL05b: large native approval is complete through guarded paged detail and actual hooks', async t => {
+  const f = fixture(t, 'interactive');
+  f.contract.objective = 'Bounded objective '.repeat(600);
+  const status = await f.gate.adaptiveInternal(wire('entry', { contract: f.contract, messageID: 'native-message' }), f.runtime);
+  assert.ok(Buffer.byteLength(JSON.stringify(status)) <= 46000);
+  const args = status.question ?? await readDetail(f, status.questionRef);
+  assert.deepEqual(args, f.gate.status('parent').question);
+  const before = f.questions.read('parent');
+  await f.gate.adaptiveInternal(wire('status'), f.runtime);
+  assert.deepEqual(f.questions.read('parent'), before, 'status cannot answer or consume consent');
+  await f.gate.beforeQuestion({ sessionID: 'parent', callID: 'wire-approval' }, args);
+  await f.gate.afterQuestion({ sessionID: 'parent', callID: 'wire-approval' }, args, output(args, [['Approve operation']]));
+  assert.equal(f.store.read('parent').nativePolicy.questions[0].callID, 'wire-approval');
+});
+
+async function readDetail(f, ref, runtime = f.runtime) {
+  let text = '', cursor = ref.args.cursor;
+  while (cursor) {
+    const page = await f.gate.adaptiveInternal(wire('detail', { cursor }), runtime);
+    assert.ok(Buffer.byteLength(JSON.stringify(page)) <= 46000);
+    text += page.text; cursor = page.nextCursor;
+  }
+  return JSON.parse(text);
+}
+
+test('AL05b: canonical held journal detail rejects cross-parent, forged and stale cursors without writes', async t => {
+  const f = fixture(t, 'automatic'); await f.admit();
+  const status = await f.gate.adaptiveInternal(wire('status'), f.runtime);
+  const before = f.store.read('parent');
+  const held = await readDetail(f, status.details.journal);
+  assert.deepEqual(held, before);
+  await assert.rejects(readDetail(f, status.details.journal, { ...f.runtime, sessionID: 'foreign' }), /cursor|parent/);
+  await assert.rejects(f.gate.adaptiveInternal(wire('detail', { cursor: 'forged:0' }), f.runtime), /cursor/);
+  await assert.rejects(f.gate.adaptiveInternal(wire('detail', { cursor: status.details.journal.args.cursor.replace(/:0$/, ':1') }), f.runtime), /cursor/);
+  assert.deepEqual(f.store.read('parent'), before);
+  await f.gate.adaptiveInternal(f.operation(), f.runtime);
+  await assert.rejects(readDetail(f, status.details.journal), /stale|cursor/);
+});
+
+test('AL05b: readback guards native awaits and workspace without changing authority', async t => {
+  const f = fixture(t, 'automatic'); await f.admit();
+  await assert.rejects(f.gate.adaptiveInternal(wire('status'), { ...f.runtime, directory: f.root + '-other' }), /workspace/);
+  const parent = f.inspect.parent;
+  f.inspect.parent = async () => { f.inspect.parent = parent; await f.gate.adaptiveInternal(f.operation(), f.runtime); };
+  await assert.rejects(f.gate.adaptiveInternal(wire('status'), f.runtime), /changed|stale/);
+  f.inspect.parent = parent;
+});
+
+test('AL05b: escalation projection uses actual medium depth, never historical low relabeling', async t => {
+  const f = fixture(t, 'automatic'); await f.admit();
+  const status = await f.gate.adaptiveInternal(wire('escalate', { handle: f.operation().args.handle, depth: 'medium',
+    rationale: 'Structured remaining plan.', assessment: { assessmentVersion: 1, complexity: 'medium', impact: 'low' }, context: f.contract.context }), f.runtime);
+  assert.equal(status.route, 'medium');
+  assert.equal(status.continuation.next, 'mdd-plan');
+  assert.deepEqual(status.operations.find(op => op.kind === 'select').ids.actor, ['mdd-plan']);
+});
+
 test('AL05a: configured interactive entry asks exact operation approval before admission', async t => {
   const f = fixture(t, 'interactive'); const result = await f.admit();
   assert.equal(result.state, 'question-ready'); assert.equal(f.store.read('parent'), undefined);

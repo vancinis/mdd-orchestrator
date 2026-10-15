@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { adaptiveContract, adaptiveQuestionsEnvelope } from './adaptive-low.js';
 import type { AdaptiveContract } from './adaptive-low.js';
@@ -92,6 +92,28 @@ export class AdaptiveNative {
       ...(entry.state === 'question-ready' ? { question: structuredClone(entry.record!.slot.args) } : {}),
       ...(entry.reason ? { reason: entry.reason } : {}), nativePolicy: structuredClone(entry.policy),
       ...(entry.state === 'await-contract' ? { clarificationAnswers: structuredClone(entry.policy.questions.at(-1)?.answer) } : {}) };
+  }
+  /** A projection may read a proposal, never silently rebind it to a newer source or fence. */
+  readbackInternal(runtime: Runtime) {
+    const entry = this.#entries.get(runtime.sessionID), questionRecord = this.questions.read(runtime.sessionID);
+    if (entry && !isDeepStrictEqual(entry.runtime, runtime) || questionRecord?.adaptive &&
+        (questionRecord.adaptive.directory !== runtime.directory || questionRecord.adaptive.worktree !== runtime.worktree))
+      throw new Error('Native protocol question parent or workspace differs.');
+    const pending = entry && ['question-ready', 'await-answer', 'await-contract'].includes(entry.state);
+    if (pending) this.#current(entry);
+    const transfer = entry && ['transfer', 'transfer-recovery'].includes(entry.operation.kind);
+    const sourceRecord = transfer ? this.store.read(String(entry.operation.args.sourceSessionID)) : undefined;
+    const sourceOwner = sourceRecord ? this.runner.options.ownership?.read(sourceRecord.runID) : undefined;
+    const generation = transfer ? this.#binding(entry.operation, runtime) : undefined;
+    if (pending && transfer) {
+      const binding = questionRecord!.adaptive!, held = binding.generation!;
+      const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+      const expected = { parent: runtime.sessionID, nonce: binding.nonce, sequence: held.sequence, digest: held.digest,
+        epoch: held.epoch, operationDigest: digest(binding.operation), generationDigest: digest(held), state: 'prepared' };
+      if (!isDeepStrictEqual(sourceOwner?.policyQuestion, expected)) throw new Error('Native protocol source policy fence changed.');
+    }
+    return { native: this.status(runtime.sessionID), questionRecord, proposal: entry ? structuredClone(entry.operation) : undefined,
+      sourceRecord, sourceOwner, generation, sourceClaim: sourceRecord ? this.runner.options.ownership?.parentClaim(sourceRecord.sessionID) : undefined };
   }
   #binding(operation: NativeOperation, runtime: Runtime): AdaptiveQuestionBinding['generation'] {
     if (operation.kind === 'entry') return undefined;

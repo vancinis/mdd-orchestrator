@@ -566,8 +566,118 @@ export class PhaseRunner {
     const saved = this.options.adaptiveStore?.read(sessionID);
     if (!saved) throw new Error('Native policy source is absent.');
     const run = this.#adaptive.get(sessionID), low = run?.low ?? AdaptiveLow.restore(saved.data, saved.directory, false);
-    const handle = low.status().selection.handle;
+    // Restoring data for inspection must not mint a different capability on every read.
+    const handle = run && !run.fenced && isDeepStrictEqual(run.record, saved) &&
+      this.options.ownership?.read(saved.runID)?.ownerSessionID === sessionID ? run.low.status().selection.handle : undefined;
     return { ...(handle ? { handle } : {}), sources: low.policySources() };
+  }
+  /** Read-only native protocol view. It neither restores a run nor consumes policy authority. */
+  adaptiveProtocolSnapshotInternal(runtime: Runtime) {
+    if (runtime.agent !== 'mdd-orchestrator' || resolve(runtime.directory) !== runtime.directory || resolve(runtime.worktree) !== runtime.worktree)
+      throw new Error('Native protocol requires the exact coordinator workspace.');
+    const run = this.#adaptive.get(runtime.sessionID), record = this.options.adaptiveStore?.read(runtime.sessionID);
+    if (record && (record.directory !== runtime.directory || record.worktree !== runtime.worktree)) throw new Error('Native protocol workspace differs.');
+    const heldClaim = this.options.ownership?.parentClaim(runtime.sessionID), heldOwner = heldClaim && this.options.ownership?.read(heldClaim.runID);
+    const abort = heldOwner?.recoveringTransfer;
+    if (!run && abort?.adaptive && abort.targetSessionID === runtime.sessionID) {
+      const source = this.options.adaptiveStore?.read(abort.sourceSessionID);
+      const { targetSessionID: _target, action: _action, ...claim } = abort;
+      if (!source || !heldOwner || source.runID !== heldClaim?.runID || source.directory !== runtime.directory || source.worktree !== runtime.worktree ||
+          source.admissionDigest !== abort.adaptive.admissionDigest || heldOwner.ownerSessionID !== source.sessionID || heldOwner.state !== 'reserved' ||
+          heldOwner.directory !== runtime.directory || heldOwner.worktree !== runtime.worktree || heldOwner.callID !== `transfer-recovery-${abort.operationID}` ||
+          heldOwner.operation?.name !== 'adaptive-transfer-abort' || heldOwner.operation.checkpointSequence !== abort.sourceSequence ||
+          heldOwner.operation.checkpointDigest !== abort.sourceDigest || !heldClaim.retired && !isDeepStrictEqual(heldClaim.transfer, claim) ||
+          record && (heldClaim.retired || record.sequence !== 0 || record.digest !== abort.adaptive.targetDigest || record.runID !== source.runID))
+        throw new Error('Native protocol abort recovery lineage or cleanup reservation is fenced.');
+      this.#adaptiveRecoverySource(source, abort);
+      const low = AdaptiveLow.restore((record ?? source).data, runtime.directory, false);
+      return { record, status: { state: 'transfer-recovery-required' } as Record<string, unknown>,
+        model: { contract: low.contract(), data: low.serialize(), evidence: low.evidence() }, sources: low.policySources(), owner: heldOwner, claim: heldClaim,
+        recoveryRecord: source, recovery: { sourceSessionID: source.sessionID, runID: source.runID, operationID: abort.operationID }, recoveryActions: ['abort'] as const };
+    }
+    if (run) {
+      if (!isDeepStrictEqual(run.runtime, runtime)) throw new Error('Native protocol parent or workspace differs.');
+      this.#adaptiveCurrent(run);
+    } else if (record) {
+      const owner = this.options.ownership?.read(record.runID), claim = this.options.ownership?.parentClaim(runtime.sessionID);
+      if (record.transfer && owner?.ownerSessionID === runtime.sessionID && owner.state === 'idle') {
+        const receipt = this.options.ownership!.confirmAdaptiveReceipt(record.runID, runtime.sessionID, this.options.adaptiveStore!);
+        const low = AdaptiveLow.restore(record.data, runtime.directory, false);
+        return { record, status: { state: 'transfer-recovery-required' } as Record<string, unknown>,
+          model: { contract: low.contract(), data: low.serialize(), evidence: low.evidence() }, sources: low.policySources(), owner, claim,
+          recovery: { sourceSessionID: receipt.sourceSessionID, runID: record.runID, operationID: receipt.operationID }, recoveryActions: ['finish'] as const };
+      }
+      const transfer = claim?.transfer, source = record.transfer && this.options.adaptiveStore!.read(record.transfer.sourceSessionID);
+      const { adaptive: _adaptive, assistantMessageID: _assistant, ...lineage } = transfer ?? {};
+      const { sourceSessionID: _source, sourceSequence, sourceDigest, ownerEpoch, ...intent } = transfer ?? {};
+      if (!source || !transfer?.adaptive || claim?.retired || claim?.runID !== record.runID || record.sequence !== 0 ||
+          record.digest !== transfer.adaptive.targetDigest || record.admissionDigest !== transfer.adaptive.admissionDigest ||
+          source.runID !== record.runID || source.sequence !== transfer.sourceSequence || source.digest !== transfer.sourceDigest ||
+          source.directory !== runtime.directory || source.worktree !== runtime.worktree || !isDeepStrictEqual(record.transfer, lineage) ||
+          !owner || owner.ownerSessionID !== source.sessionID || owner.directory !== runtime.directory || owner.worktree !== runtime.worktree ||
+          owner.state !== 'transferring' || owner.epoch !== ownerEpoch! + 1 ||
+          !isDeepStrictEqual(owner.transfer, { targetSessionID: runtime.sessionID, sourceSequence, sourceDigest, intent }))
+        throw new Error('Restore the durable native parent before protocol readback; partial transfer lineage is fenced.');
+      const low = AdaptiveLow.restore(record.data, runtime.directory, false);
+      return { record, status: { state: 'transfer-recovery-required' } as Record<string, unknown>,
+        model: { contract: low.contract(), data: low.serialize(), evidence: low.evidence() }, sources: low.policySources(), owner, claim,
+        recovery: { sourceSessionID: source.sessionID, runID: record.runID, operationID: transfer.operationID }, recoveryActions: ['finish', 'abort'] as const };
+    }
+    if (!run && !record) {
+      const claim = this.options.ownership?.parentClaim(runtime.sessionID), transfer = claim?.transfer;
+      if (transfer?.adaptive && !claim?.retired) {
+        const source = this.options.adaptiveStore?.read(transfer.sourceSessionID), owner = claim && this.options.ownership?.read(claim.runID);
+        const { sourceSessionID: _source, sourceSequence, sourceDigest, ownerEpoch, ...intent } = transfer;
+        const idle = owner?.state === 'idle' && owner.epoch === ownerEpoch;
+        const fenced = owner?.state === 'transferring' && owner.epoch === ownerEpoch + 1 &&
+          isDeepStrictEqual(owner.transfer, { targetSessionID: runtime.sessionID, sourceSequence, sourceDigest, intent });
+        if (!source || claim?.runID !== source.runID || source.sequence !== sourceSequence || source.digest !== sourceDigest ||
+            source.admissionDigest !== transfer.adaptive.admissionDigest || source.directory !== runtime.directory || source.worktree !== runtime.worktree ||
+            owner?.ownerSessionID !== source.sessionID || owner.directory !== runtime.directory || owner.worktree !== runtime.worktree || !idle && !fenced)
+          throw new Error('Native protocol transfer claim, source generation or workspace is fenced.');
+        const low = AdaptiveLow.restore(source.data, runtime.directory, false);
+        return { record, status: { state: 'transfer-recovery-required' } as Record<string, unknown>,
+          model: { contract: low.contract(), data: low.serialize(), evidence: low.evidence() }, sources: low.policySources(), owner, claim,
+          recoveryRecord: source, recovery: { sourceSessionID: source.sessionID, runID: source.runID, operationID: transfer.operationID },
+          recoveryActions: ['finish', 'abort'] as const };
+      }
+    }
+    const status = this.status(runtime.sessionID);
+    if (!run && status.state !== 'not-started') throw new Error('Native protocol cannot project a fixed workflow.');
+    return { record, status: status as Record<string, unknown>, ...(run ? { model: { contract: run.low.contract(), data: run.low.serialize(),
+      evidence: run.low.evidence() }, sources: run.low.policySources(), owner: this.options.ownership?.read(run.id),
+      claim: this.options.ownership?.parentClaim(runtime.sessionID) } : {}) };
+  }
+  /** Same exact-generation reconstruction used by the existing interrupted-abort controller. */
+  #adaptiveRecoverySource(source: AdaptiveRecord, binding: { sourceSequence: number; sourceDigest: string }): AdaptiveRecord {
+    if (source.sequence === binding.sourceSequence && source.digest === binding.sourceDigest) return source;
+    if (source.sequence === binding.sourceSequence + 1) {
+      const { version: _version, sequence: _sequence, digest: _digest, admissionDigest: _admission, ...body } = source;
+      const previous = this.options.adaptiveStore!.prepare(source.sessionID, { ...source, sequence: binding.sourceSequence - 1 }, body);
+      if (previous.digest === binding.sourceDigest) return previous;
+    }
+    throw new Error('Adaptive recovery source is not the exact rotated generation.');
+  }
+  /** Reuse model validators on a copy before the native bridge can ask a policy question. */
+  validateAdaptiveProtocolInternal(operation: NativeOperation, runtime: Runtime): void {
+    if (runtime.agent !== 'mdd-orchestrator') throw new Error('Native coordinator is required.');
+    if (operation.kind === 'entry' || ['transfer', 'transfer-recovery'].includes(operation.kind)) return;
+    const run = this.#adaptive.get(runtime.sessionID);
+    if (!run || !isDeepStrictEqual(run.runtime, runtime)) throw new Error('Restore the exact native parent and workspace before a protocol operation.');
+    this.#adaptiveCurrent(run);
+    const low = run.low.copy(), args = operation.args;
+    if (operation.kind === 'select') low.select(low.selectionInput(args));
+    else if (operation.kind === 'prepare') { low.assertBoundary(String(args.handle)); low.assertPreparationCurrent(); }
+    else if (operation.kind === 'submit') low.submitEvidence(String(args.handle), args.evidence);
+    else if (operation.kind === 'close') low.close(String(args.handle), args.outcome, args.limits);
+    else if (operation.kind === 'questions') {
+      const pending = low.pendingQuestions();
+      if (!pending || pending.receiptID !== args.receiptID || pending.callID !== args.callID)
+        throw new Error('Question receipt or actual native actor call differs.');
+    }
+    else if (operation.kind === 'escalate') {
+      const { handle, ...request } = args; low.startContinuation(String(handle), request);
+    }
   }
   prepareAdaptiveNativeQuestionInternal(question: QuestionRecord): void {
     const parent = String(question.adaptive?.operation.args.sourceSessionID), source = this.options.adaptiveStore?.read(parent);
@@ -594,11 +704,15 @@ export class PhaseRunner {
     if (operation.kind === 'transfer') this.#adaptiveTransferTarget(runtime, source, String(operation.args.operationID), true);
     else {
       const claim = this.options.ownership?.parentClaim(runtime.sessionID), owner = this.options.ownership?.read(source.runID);
+      const abort = owner?.recoveringTransfer;
+      const abortRecovery = abort?.adaptive && abort.targetSessionID === runtime.sessionID && abort.sourceSessionID === source.sessionID &&
+        abort.operationID === operation.args.operationID && owner?.operation?.name === 'adaptive-transfer-abort' && claim?.runID === source.runID;
+      if (abortRecovery && operation.args.action !== 'abort') throw new Error('Interrupted abort permits only exact abort recovery, never finish.');
       if (this.options.checkpoint?.read(runtime.sessionID) || this.options.ownership?.intake(runtime.sessionID) || this.#runs.has(runtime.sessionID) ||
           claim && claim.runID !== source.runID || !(claim?.transfer?.sourceSessionID === source.sessionID && claim.transfer.operationID === operation.args.operationID ||
             owner?.adaptiveReceipt?.sourceSessionID === source.sessionID && owner.adaptiveReceipt.targetSessionID === runtime.sessionID && owner.adaptiveReceipt.operationID === operation.args.operationID ||
             (!claim || claim.retired) && owner?.recoveredTransfer?.targetSessionID === runtime.sessionID && owner.recoveredTransfer.operationID === operation.args.operationID ||
-            operation.args.action === 'abort' && this.options.ownership!.unclaimedAdaptivePolicyProposal(source, runtime.sessionID, String(operation.args.operationID))))
+             abortRecovery || operation.args.action === 'abort' && this.options.ownership!.unclaimedAdaptivePolicyProposal(source, runtime.sessionID, String(operation.args.operationID))))
         throw new Error('Adaptive recovery target is occupied or belongs to another operation.');
     }
   }
@@ -956,9 +1070,7 @@ export class PhaseRunner {
     // An interrupted abort may already have rotated only the source generation, under its reservation.
     const rotating = owner?.recoveringTransfer?.adaptive ? owner.recoveringTransfer : undefined;
     if (rotating && source.sequence === rotating.sourceSequence + 1) {
-      const { version: _version, sequence: _sequence, digest: _digest, admissionDigest: _admission, ...body } = source;
-      source = store.prepare(sourceID, { ...source, sequence: rotating.sourceSequence - 1 }, body);
-      if (source.digest !== rotating.sourceDigest) throw new Error('Adaptive recovery source is not the exact rotated generation.');
+      source = this.#adaptiveRecoverySource(source, rotating);
     }
     const originalSource = source, actualSource = store.read(sourceID), actualTarget = store.read(here.sessionID);
     const proof = this.#nativeOperations.get(sourceID), operation = nativeOperation({ kind: 'transfer-recovery', args: input });

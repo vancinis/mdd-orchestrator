@@ -25,6 +25,7 @@ import { typedSelections } from './typed-answer.js';
 import type { TypedEvidence } from './typed-answer.js';
 import { adaptiveContract } from './adaptive-low.js';
 import { AdaptiveNative } from './adaptive-native.js';
+import { AdaptiveProtocol } from './adaptive-protocol.js';
 
 export type IntakeInspect = {
   setupPending?(runtime: Runtime, requirements?: string, messageID?: string): Promise<{ requirements: string; userMessageID: string } | undefined>;
@@ -242,14 +243,17 @@ export class NativeIntake {
   readonly #profile;
   readonly #managed;
   readonly #adaptiveNative?: AdaptiveNative;
+  readonly #adaptiveProtocol?: AdaptiveProtocol;
   constructor(readonly runner: Runner, readonly inspect: IntakeInspect, settings: unknown,
     readonly durable: { questions?: QuestionCheckpointStore; checkpoint?: CheckpointStore; ownership?: RunOwnershipStore } = {}) {
     this.#settings = parseSettings(settings);
     this.#profile = freezeProfile(this.#settings);
     this.#managed = this.#settings.engram && 'mode' in this.#settings.engram ? new ManagedMemory(this.#settings.engram) : undefined;
     const nativeRunner = runner as PhaseRunner;
-    if (durable.questions && nativeRunner.options?.adaptiveStore && typeof nativeRunner.executeAdaptiveNativeInternal === 'function')
+    if (durable.questions && nativeRunner.options?.adaptiveStore && typeof nativeRunner.executeAdaptiveNativeInternal === 'function') {
       this.#adaptiveNative = new AdaptiveNative(nativeRunner, inspect, this.#profile, durable.questions, nativeRunner.options.adaptiveStore);
+      this.#adaptiveProtocol = new AdaptiveProtocol(nativeRunner, this.#adaptiveNative);
+    }
   }
 
   async close(): Promise<void> { await this.#managed?.close(); }
@@ -274,11 +278,11 @@ export class NativeIntake {
   }
 
   /** Inactive AL05a policy bridge; public tool registration remains unchanged. */
-  adaptiveInternal(value: unknown, runtime: Runtime): Promise<unknown> {
+  async adaptiveInternal(value: unknown, runtime: Runtime): Promise<unknown> {
     if (!this.#adaptiveNative) throw new Error('Durable native policy bridge is unavailable.');
     if (this.#adaptiveTransfers.has(runtime.sessionID) || this.#sessions.has(runtime.sessionID))
       throw new Error('A native intake or transfer already occupies this parent.');
-    return this.#adaptiveNative.run(value, { ...runtime });
+    return typeof value === 'string' ? this.#adaptiveProtocol!.run(value, runtime) : this.#adaptiveNative.run(value, { ...runtime });
   }
 
   /** Internal only. The runner independently proves both parents and the latest target request. */

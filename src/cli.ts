@@ -16,8 +16,8 @@ Uso:
   mdd-ai telemetry status | report | on | off | clear
   mdd-ai lessons report | list [texto] | mark <id> | clear
   mdd-ai retro               qué viene pasando: ejecuciones, fallos y automejoras
-  node dist/cli.js --answers <archivo.json> [--explore]
-  node dist/cli.js --profile <archivo.json> [--explore]
+  node dist/cli.js --answers <archivo.json> [--explore] [--routing-version 2|3]
+  node dist/cli.js --profile <archivo.json> [--explore] [--routing-version 2|3]
   node dist/cli.js --help
 
 El comando global se instala como mdd-ai; los mismos comandos funcionan con
@@ -45,6 +45,8 @@ y también vos cuando pedís que algo quede registrado. Son locales al workspace
 Answers: los cuatro campos del preflight. Profile: { "answers": { ... } }.
 Las respuestas no se puntúan: toda ejecución empieza explorando y la evaluación
 de riesgo elige la ruta. Ver docs/product-contract.md.
+Version 2 preserves fixed evaluation. Version 3 requires native context and
+cannot execute or simulate a fixed phase list from this CLI.
 Usá exactamente una fuente. Las rutas son relativas al directorio actual.
 Códigos de salida: 0 éxito o ayuda; 2 error de uso, JSON o validación; 1 error de
 E/S o falla inesperada.
@@ -53,8 +55,16 @@ E/S o falla inesperada.
 function parseArguments(args: string[]): Record<string, unknown> {
   const paths = new Map<string, string>();
   let explore = false;
+  let routingVersion: number | undefined;
   for (let index = 0; index < args.length; index++) {
     const flag = args[index];
+    if (flag === '--routing-version') {
+      if (routingVersion !== undefined) throw new ValidationError('Duplicate --routing-version.');
+      const version = args[++index];
+      if (version !== '2' && version !== '3') throw new ValidationError('--routing-version requires integer 2 or 3.');
+      routingVersion = Number(version);
+      continue;
+    }
     if (flag === '--explore') {
       if (explore) throw new ValidationError('Opción duplicada: --explore.');
       explore = true;
@@ -74,7 +84,7 @@ function parseArguments(args: string[]): Record<string, unknown> {
   if (paths.has('--answers') === paths.has('--profile')) {
     throw new ValidationError('Pasá exactamente una de --answers o --profile.');
   }
-  const request: Record<string, unknown> = { explore };
+  const request: Record<string, unknown> = { explore, ...(routingVersion === undefined ? {} : { routingVersion }) };
   for (const [flag, path] of paths) {
     const text = readFileSync(path, 'utf8');
     try {

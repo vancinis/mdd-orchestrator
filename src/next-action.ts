@@ -50,6 +50,7 @@ export function nextAction(status: unknown): NextAction | undefined {
   const value = object(status);
   if (!value) return undefined;
   const state = typeof value.state === 'string' ? value.state : '';
+  const nativeProtocol = value.lane === 'adaptive-native-protocol-internal';
 
   if (value.lane === 'adaptive-low-internal' && ['completed', 'closed-unverified'].includes(state)) return { tool: 'mdd_status',
     why: 'Internal closure retains reported coverage, failures and assurance limits. It grants no Plan, Verify, review authority, new work, public activation or durable resume; unverified closure is not verified completion.' };
@@ -60,7 +61,8 @@ export function nextAction(status: unknown): NextAction | undefined {
   const question = object(value.question);
   if (question) {
     return { tool: 'question', args: question,
-      why: `A native question is pending. Ask it once, exactly as it is here, and answer nothing on the user's behalf. While it is pending it is the only question the user should see. ${WRITTEN}` };
+      why: nativeProtocol ? 'Ask this exact native envelope once. Only the actual native before/after question hooks can supply its answer; payload approval flags or raw text cannot authorize an operation.'
+        : `A native question is pending. Ask it once, exactly as it is here, and answer nothing on the user's behalf. While it is pending it is the only question the user should see. ${WRITTEN}` };
   }
 
   if (state === 'review-ready') return { tool: 'mdd_prepare_advance',
@@ -102,6 +104,9 @@ export function nextAction(status: unknown): NextAction | undefined {
     return { tool: 'task', args: task,
       why: 'This phase is ready to delegate. Call the native task tool once, foreground, with exactly this object and no extra arguments. The prompt may be a single-use MDD dispatch handle; pass it through unchanged.' };
   }
+
+  // Its explicit internal next/input contract owns continuation. There is no public adapter yet.
+  if (nativeProtocol) return undefined;
 
   if (value.lane === 'adaptive-low-internal') return { tool: 'mdd_status',
     why: 'An internal adaptive actor is authorized or in flight. Wait for its exact stopped-child receipt; never enter fixed-phase reset, redispatch, start or complete automatically.' };

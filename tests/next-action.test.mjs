@@ -21,6 +21,17 @@ for (const state of ['completed', 'closed-unverified']) test(`AL-03: internal ${
 });
 const question = { questions: [{ header: 'Aprobación', question: '¿Continuar?', multiple: false, options: [] }] };
 
+test('AL05b: inactive native projection never falls into public fixed reset or startup routing', () => {
+  const base = { lane: 'adaptive-native-protocol-internal', routingVersion: 3, registration: 'inactive' };
+  for (const state of ['blocked', 'not-started', 'recovery-blocked', 'await-selection', 'await-result', 'transfer-recovery-required']) {
+    assert.equal(nextAction({ ...base, state, next: { internal: 'status', inputContract: 'operations' } }), undefined);
+  }
+  assert.deepEqual(nextAction({ ...base, state: 'question-ready', question }).args, question);
+  assert.doesNotMatch(nextAction({ ...base, state: 'question-ready', question }).why, /mdd_answer/);
+  assert.deepEqual(nextAction({ ...base, state: 'authorized-actor', task }).args, task);
+  assert.equal(nextAction({ ...base, state: 'question-ready', questionRef: { args: { cursor: 'held:0' } } }), undefined);
+});
+
 test('SA-3: failed Verify offers explicit actions without fabricating the next phase or consent', () => {
   const action = nextAction({ state: 'blocked', reworkable: 'mdd-apply', runID: 'failed' });
   assert.equal(action.tool, 'mdd_reset');

@@ -67,7 +67,7 @@ test('AL-01 correction: own inactive and unsupported pins cannot disappear throu
   for (const routingVersion of [3, undefined, null, '2', 4]) {
     for (const route of [undefined, low, ['mdd-explore', ...low], ['mdd-explore', ...high]]) {
       const request = Object.defineProperty({ answers, ...(route ? { route } : {}) }, 'routingVersion', { value: routingVersion });
-      const error = routingVersion === 3 ? /routingVersion.*inactive/ : /routingVersion.*unsupported/;
+      const error = routingVersion === 3 ? /native-context-required/ : /routingVersion.*unsupported/;
       assert.throws(() => new Workflow(request), error);
       assert.throws(() => Workflow.replay(request, []), error);
       assert.throws(() => Workflow.recordedRequest(request, new Workflow({ answers })), error);
@@ -75,10 +75,10 @@ test('AL-01 correction: own inactive and unsupported pins cannot disappear throu
   }
 });
 
-test('AL-01: reserved adaptive routing is inactive at construction and replay', () => {
+test('AL05b: version three requires native context at fixed evaluation, construction and replay', () => {
   const request = { answers, routingVersion: 3 };
   for (const read of [() => evaluate(request), () => new Workflow(request), () => Workflow.replay(request, [])]) {
-    assert.throws(read, /routingVersion.*inactive/);
+    assert.throws(read, /native-context-required/);
   }
 });
 

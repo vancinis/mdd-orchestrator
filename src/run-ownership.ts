@@ -511,15 +511,47 @@ export class RunOwnershipStore {
   assertAdaptivePolicyProposalAvailable(sessionID: string, operation: { kind: string; args: Record<string, unknown> }, targetSessionID: string): void {
     const runID = this.parent(sessionID), owner = runID ? this.read(runID) : undefined, fence = owner?.policyQuestion;
     if (!fence) return;
-    const prior = new QuestionCheckpointStore(this.#root).read(targetSessionID), claim = this.parentClaim(targetSessionID)?.transfer;
+    const prior = new QuestionCheckpointStore(this.#root).read(targetSessionID), parent = this.parentClaim(targetSessionID), claim = parent?.transfer;
     const source = new AdaptiveStore(this.#root).read(sessionID);
     const unclaimedAbort = operation.args.action === 'abort' && source && this.unclaimedAdaptivePolicyProposal(source, targetSessionID, String(operation.args.operationID));
-    const knownOperation = unclaimedAbort || claim?.sourceSessionID === sessionID && claim.operationID === operation.args.operationID ||
+    // Retirement removes the claim before abort settlement. Only that exact reserved cleanup
+    // may propose a fresh question; an older receipt cannot bypass its current reservation.
+    const retiredReservation = parent?.retired && owner?.recoveringTransfer;
+    const knownOperation = retiredReservation ? !!(source && prior && owner && parent &&
+      this.#retiredAdaptiveAbortProposal(source, owner, parent, prior, operation, targetSessionID))
+      : unclaimedAbort || claim?.sourceSessionID === sessionID && claim.operationID === operation.args.operationID ||
       owner?.adaptiveReceipt?.sourceSessionID === sessionID && owner.adaptiveReceipt.targetSessionID === targetSessionID && owner.adaptiveReceipt.operationID === operation.args.operationID ||
       owner?.recoveredTransfer?.targetSessionID === targetSessionID && owner.recoveredTransfer.operationID === operation.args.operationID;
     if (operation.kind !== 'transfer-recovery' || operation.args.sourceSessionID !== sessionID || operation.args.runID !== runID ||
         fence.state !== 'consumed' || fence.parent !== targetSessionID || !prior || fence.receiptDigest !== policyDigest(prior) || !knownOperation)
       throw new Error('An adaptive policy question fences this source parent.');
+  }
+  #retiredAdaptiveAbortProposal(source: AdaptiveRecord, owner: RunOwner, parent: ParentOwner, question: QuestionRecord,
+    operation: { kind: string; args: Record<string, unknown> }, targetSessionID: string): boolean {
+    const recovery = owner.recoveringTransfer, fence = owner.policyQuestion, binding = question.adaptive, generation = binding?.generation;
+    if (!recovery?.adaptive || !parent.retired || parent.runID !== source.runID || owner.runID !== source.runID ||
+        owner.state !== 'reserved' || owner.ownerSessionID !== source.sessionID || owner.directory !== source.directory || owner.worktree !== source.worktree ||
+        recovery.sourceSessionID !== source.sessionID || recovery.targetSessionID !== targetSessionID || recovery.operationID !== operation.args.operationID ||
+        operation.kind !== 'transfer-recovery' || operation.args.action !== 'abort' ||
+        owner.callID !== `transfer-recovery-${recovery.operationID}` || owner.operation?.name !== 'adaptive-transfer-abort' ||
+        owner.operation.checkpointSequence !== recovery.sourceSequence || owner.operation.checkpointDigest !== recovery.sourceDigest ||
+        owner.epoch !== recovery.ownerEpoch + (recovery.action === 'abort-fenced' ? 2 : 1) ||
+        !fence || fence.state !== 'consumed' || owner.epoch !== fence.epoch + 1 || fence.parent !== targetSessionID ||
+        question.version !== 2 || question.state !== 'settled' || question.runID !== source.runID || question.parent !== targetSessionID ||
+        !binding || binding.purpose !== 'operation' || binding.directory !== source.directory || binding.worktree !== source.worktree ||
+        binding.operation.kind !== 'transfer-recovery' || binding.operation.args.action !== 'abort' ||
+        binding.operation.args.sourceSessionID !== source.sessionID || binding.operation.args.runID !== source.runID ||
+        binding.operation.args.operationID !== recovery.operationID || !nativePolicyDecision(question) ||
+        fence.nonce !== binding.nonce || fence.callID !== question.callID || fence.receiptDigest !== policyDigest(question) ||
+        fence.operationDigest !== policyDigest(binding.operation) || fence.generationDigest !== policyDigest(generation) ||
+        !generation || generation.runID !== source.runID || generation.sequence !== recovery.sourceSequence || generation.digest !== recovery.sourceDigest ||
+        generation.epoch !== fence.epoch || fence.sequence !== recovery.sourceSequence || fence.digest !== recovery.sourceDigest ||
+        source.sequence !== recovery.sourceSequence + 1 || source.admissionDigest !== recovery.adaptive.admissionDigest ||
+        new AdaptiveStore(this.#root).occupied(targetSessionID) || new CheckpointStore(this.#root).read(targetSessionID) ||
+        new ProgressGuard(this.#root).read(targetSessionID) || this.intake(targetSessionID)) return false;
+    const { version: _version, sequence: _sequence, digest: _digest, admissionDigest: _admission, ...body } = source;
+    const original = new AdaptiveStore(this.#root).prepare(source.sessionID, { ...source, sequence: recovery.sourceSequence - 1 }, body);
+    return original.digest === recovery.sourceDigest;
   }
   unclaimedAdaptivePolicyProposal(source: AdaptiveRecord, targetSessionID: string, operationID: string): boolean {
     const owner = this.read(source.runID), fence = owner?.policyQuestion, question = new QuestionCheckpointStore(this.#root).read(targetSessionID);
