@@ -17,7 +17,14 @@ export const CLARIFICATION_ANSWERS_MAX = 64;
 const QUESTIONS_MAX = 24;
 /** A multi-choice answer may add the user's own words to every option; anything past this is not an answer. */
 const SELECTIONS_MAX = 64;
-type Kind = 'preflight' | 'approval' | 'change' | 'clarification' | 'route' | 'risk-recovery';
+type Kind = 'preflight' | 'approval' | 'change' | 'clarification' | 'route' | 'risk-recovery' | 'adaptive';
+export type AdaptiveQuestionBinding = {
+  directory: string; worktree: string; nonce: string;
+  purpose: 'mode' | 'product' | 'operation';
+  operation: { kind: string; args: Record<string, unknown> };
+  generation?: { runID: string; sequence: number; digest: string; epoch: number; handle?: string;
+    sources?: { path: string; digest: string | null }[] };
+};
 /**
  * A question the coordinator (or a phase, through it) needs the user to decide. `header` is the
  * short topic shown above it, `why` says what depends on the answer, `multiple` allows several
@@ -29,7 +36,9 @@ export type Clarification = {
   multiple?: boolean; deferrable?: boolean; note?: boolean;
 };
 export type QuestionRecord = {
-  version: 1; parent: string; sequence: number; runID?: string;
+  version: 1 | 2; parent: string; sequence: number; runID?: string;
+  adaptive?: AdaptiveQuestionBinding;
+  nativeReceipt?: { callID: string; answers: string[][] };
   requirements: string; userMessageID?: string; known: Partial<Answers>; context?: { label: string; content: string };
   checkpoint?: { sequence: number; digest: string };
   /**
@@ -68,7 +77,7 @@ function envelope(value: unknown, kind: Kind, fields: unknown): { args: Question
   const item = objectWithKeys(value, 'question envelope', ['questions']);
   const questions = array(item.questions, QUESTIONS_MAX);
   if (!questions.length) throw new ValidationError('Empty native question envelope.');
-  let openFrom = kind === 'clarification' ? 0 : questions.length;
+  let openFrom = kind === 'clarification' || kind === 'adaptive' ? 0 : questions.length;
   if (fields !== undefined) {
     if (kind !== 'preflight' || !Number.isSafeInteger(fields) || (fields as number) < 0 || (fields as number) > questions.length) throw new ValidationError('Invalid preflight field count.');
     openFrom = fields as number;
@@ -103,8 +112,8 @@ function clarification(value: unknown): void {
 
 export function validateQuestionRecord(value: unknown): QuestionRecord {
   const item = objectWithKeys(value, 'native question record', ['version', 'parent', 'sequence', 'runID', 'requirements', 'userMessageID', 'known', 'context', 'checkpoint', 'reservation', 'state', 'slot',
-    'clarifications', 'deferred', 'clarificationAnswers', 'callID', 'answer', 'retiredCalls']);
-  if (item.version !== QUESTION_CHECKPOINT_VERSION || !text(item.parent, 256) ||
+    'clarifications', 'deferred', 'clarificationAnswers', 'callID', 'answer', 'retiredCalls', 'adaptive', 'nativeReceipt']);
+  if (![QUESTION_CHECKPOINT_VERSION, 2].includes(item.version as number) || !text(item.parent, 256) ||
       !Number.isSafeInteger(item.sequence) || (item.sequence as number) < 0 ||
       Buffer.byteLength(JSON.stringify(value) ?? '') > QUESTION_CHECKPOINT_BYTES ||
       !['prepared', 'pending', 'answered', 'cancelled', 'settled', 'withdrawn'].includes(String(item.state))) throw new ValidationError('Invalid native question record.');
@@ -115,13 +124,45 @@ export function validateQuestionRecord(value: unknown): QuestionRecord {
     const context = objectWithKeys(item.context, 'native question context', ['label', 'content']);
     if (!text(context.label, 200) || !text(context.content, 96000)) throw new ValidationError('Invalid native question context.');
   }
-  if (!['preflight', 'approval', 'change', 'clarification', 'route', 'risk-recovery'].includes(String(slot.kind))) throw new ValidationError('Invalid native question kind.');
-  const { args, openFrom } = envelope(slot.args, slot.kind as Kind, slot.fields);
+  if (!['preflight', 'approval', 'change', 'clarification', 'route', 'risk-recovery', 'adaptive'].includes(String(slot.kind))) throw new ValidationError('Invalid native question kind.');
+  if ((item.version === 2) !== (slot.kind === 'adaptive') || (item.version === 2) !== (item.adaptive !== undefined))
+    throw new ValidationError('Adaptive questions require their explicit versioned binding.');
+  let adaptive: AdaptiveQuestionBinding | undefined;
+  if (item.version === 2) {
+    const binding = objectWithKeys(item.adaptive, 'adaptive native binding', ['directory', 'worktree', 'nonce', 'purpose', 'operation', 'generation']);
+    const operation = objectWithKeys(binding.operation, 'adaptive proposed operation', ['kind', 'args']);
+    if (!text(binding.directory, 2048) || !text(binding.worktree, 2048) || !text(binding.nonce, 256) ||
+        !['mode', 'product', 'operation'].includes(String(binding.purpose)) || !text(operation.kind, 64) ||
+        !operation.args || typeof operation.args !== 'object' || Array.isArray(operation.args) ||
+        item.checkpoint !== undefined || item.reservation !== undefined || slot.phase !== undefined || slot.fields !== undefined || slot.requirements !== undefined)
+      throw new ValidationError('Invalid adaptive native question binding.');
+    if (binding.generation !== undefined) {
+      const generation = objectWithKeys(binding.generation, 'adaptive question generation', ['runID', 'sequence', 'digest', 'epoch', 'handle', 'sources']);
+      if (!text(generation.runID, 256) || generation.runID !== item.runID ||
+          !Number.isSafeInteger(generation.sequence) || (generation.sequence as number) < 0 ||
+          !Number.isSafeInteger(generation.epoch) || (generation.epoch as number) < 0 ||
+          typeof generation.digest !== 'string' || !/^[a-f0-9]{64}$/.test(generation.digest) ||
+          generation.handle !== undefined && !text(generation.handle, 256)) throw new ValidationError('Invalid adaptive question generation.');
+      if (generation.sources !== undefined) {
+        const sources = array(generation.sources, 128);
+        for (const raw of sources) {
+          const source = objectWithKeys(raw, 'adaptive policy source', ['path', 'digest']);
+          if (!text(source.path, 2048) || source.digest !== null && (typeof source.digest !== 'string' || !/^[a-f0-9]{64}$/.test(source.digest)))
+            throw new ValidationError('Invalid adaptive policy source binding.');
+        }
+        if (new Set(sources.map(source => (source as { path: string }).path)).size !== sources.length) throw new ValidationError('Duplicate policy source binding.');
+      }
+    } else if (item.runID !== undefined) throw new ValidationError('Adaptive question lacks its run generation.');
+    adaptive = binding as AdaptiveQuestionBinding;
+  }
+  const { args, openFrom: fixedOpenFrom } = envelope(slot.args, slot.kind as Kind, slot.fields);
+  const openFrom = adaptive ? adaptive.purpose === 'product' ? 0 : args.questions.length : fixedOpenFrom;
+  if (adaptive && adaptive.purpose !== 'product' && args.questions.some(question => question.multiple)) throw new ValidationError('Policy questions require a single selection.');
   if (slot.phase !== undefined && !PHASES.includes(String(slot.phase))) throw new ValidationError('Invalid question phase.');
   if ((slot.kind === 'approval' || slot.kind === 'clarification' || slot.kind === 'route') !== (slot.phase !== undefined) ||
       (slot.kind === 'change') !== (slot.requirements !== undefined) ||
       (slot.requirements !== undefined && !text(slot.requirements, 12000))) throw new ValidationError('Question slot does not match its kind.');
-  if ((slot.kind === 'preflight') !== (item.runID === undefined) ||
+  if ((item.version === 1 && (slot.kind === 'preflight') !== (item.runID === undefined)) ||
       (item.runID !== undefined && !text(item.runID, 256))) throw new ValidationError('Question run binding is missing.');
   if (item.reservation !== undefined) {
     const reservation = objectWithKeys(item.reservation, 'question reservation', ['runID', 'stable']);
@@ -146,6 +187,11 @@ export function validateQuestionRecord(value: unknown): QuestionRecord {
       return selection.length !== 1 || !text(selection[0], 12000) || !question.options.some(option => option.label === selection[0]);
     })) throw new ValidationError('Invalid native answer.');
   } else if (item.answer !== undefined) throw new ValidationError('Historical answer cannot authorize another question.');
+  if (item.nativeReceipt !== undefined) {
+    const receipt = objectWithKeys(item.nativeReceipt, 'historical native result', ['callID', 'answers']);
+    if (item.version !== 2 || item.state !== 'settled' || receipt.callID !== item.callID) throw new ValidationError('Invalid historical native result.');
+    validateQuestionRecord({ ...item, state: 'answered', answer: receipt.answers, nativeReceipt: undefined });
+  }
   if (item.retiredCalls !== undefined) {
     const retired = array(item.retiredCalls, 64);
     if (retired.some(call => !text(call, 256)) || new Set(retired).size !== retired.length || retired.includes(item.callID)) throw new ValidationError('Invalid retired native call IDs.');
@@ -199,6 +245,10 @@ export class QuestionCheckpointStore {
       this.#files.update(this.#name(parent), previous => {
         if (previous !== undefined) {
           const old = validateQuestionRecord(JSON.parse(previous));
+          const { sequence: _oldSequence, ...oldData } = old;
+          const { sequence: _newSequence, ...newData } = record;
+          if (old.version === 2 && old.state === 'settled' && record.state === 'settled' && !isDeepStrictEqual(oldData, newData))
+            throw new Error('Settled adaptive native receipt is immutable.');
           if (old.parent !== parent || old.sequence >= record.sequence ||
               (old.runID !== record.runID && !['answered', 'settled', 'cancelled'].includes(old.state)) ||
               (old.state === 'pending' && !['answered', 'cancelled', 'prepared'].includes(record.state)) ||
@@ -209,15 +259,17 @@ export class QuestionCheckpointStore {
               (['prepared', 'pending'].includes(old.state) && record.state !== 'prepared' &&
                 (!isDeepStrictEqual(old.slot, record.slot) || old.runID !== record.runID ||
                   old.requirements !== record.requirements || old.userMessageID !== record.userMessageID ||
-                  !isDeepStrictEqual(old.known, record.known) || !isDeepStrictEqual(old.context, record.context))) ||
+                   !isDeepStrictEqual(old.known, record.known) || !isDeepStrictEqual(old.context, record.context) ||
+                   !isDeepStrictEqual(old.adaptive, record.adaptive))) ||
               // Issuing a prepared question binds it to the checkpoint as it is now, never an older one.
               (old.state === 'prepared' && record.state !== 'prepared' && old.checkpoint && record.checkpoint &&
                 record.checkpoint.sequence < old.checkpoint.sequence) ||
               // An issued question's outcome keeps exactly the binding and reservation it was issued with.
               (old.state === 'pending' && record.state !== 'prepared' &&
                 (!isDeepStrictEqual(old.checkpoint, record.checkpoint) || !isDeepStrictEqual(old.reservation, record.reservation))) ||
-              (old.state === 'answered' && record.state === 'settled' &&
-                (!isDeepStrictEqual(old.slot, record.slot) || old.callID !== record.callID || old.runID !== record.runID)) ||
+               (old.state === 'answered' && record.state === 'settled' &&
+                (!isDeepStrictEqual(old.slot, record.slot) || !isDeepStrictEqual(old.adaptive, record.adaptive) || old.callID !== record.callID || old.runID !== record.runID ||
+                  old.version === 2 && !isDeepStrictEqual(record.nativeReceipt, { callID: old.callID, answers: old.answer }))) ||
               (old.state === 'pending' && record.state === 'prepared' &&
                 (old.runID !== record.runID || old.slot.kind !== record.slot.kind || old.slot.phase !== record.slot.phase ||
                   isDeepStrictEqual(old.slot.args, record.slot.args) || !record.retiredCalls?.includes(old.callID!))) ||

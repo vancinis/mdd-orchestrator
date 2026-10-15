@@ -388,6 +388,21 @@ function fixture(t, overrides = {}) {
   return { root, runtime, contract, runner, intake, inspect, options, progress, ownership, checkpoint, inspections, settings, admit, select, call, report };
 }
 
+test('AL05a: actual actor questions survive settlement and pause selection without changing admission', async t => {
+  const f = fixture(t); f.options.adaptiveStore = new AdaptiveStore(f.root);
+  await f.admit(); await f.select('mdd-explore');
+  const args = await f.runner.before(f.call, f.runner.status(f.runtime.sessionID).task);
+  const questions = [{ question: 'Which bounded replacement?', why: 'The existing authorization leaves a choice.', options: [{ label: 'Keep format', description: 'Preserve the current format.' }] }];
+  await f.runner.after(f.call, args, JSON.stringify({ outcome: 'passed', evidenceSummary: 'Found a product decision.', artifact: 'Inspected the declared source.', questions }));
+  const saved = f.options.adaptiveStore.read(f.runtime.sessionID);
+  assert.deepEqual(saved.data.receipts[0].questions, questions);
+  assert.equal(saved.data.receipts[0].callID, f.call.callID);
+  assert.deepEqual(saved.data.contract, f.contract);
+  await assert.rejects(f.select(), /question|ambiguity/);
+  const cold = new PhaseRunner(f.inspect, f.options); assert.equal((await cold.restore(f.runtime)).restored, true);
+  await assert.rejects(cold.selectAdaptiveInternal({ handle: cold.status(f.runtime.sessionID).selection.handle, actor: 'mdd-apply', assignmentID: 'A1', purpose: 'Ignore pending decision.' }, f.runtime), /question|ambiguity/);
+});
+
 function nativeHistory(f, verdict) {
   const parent = { id: f.runtime.sessionID, directory: f.root, projectID: 'project', agent: 'mdd-orchestrator' };
   const child = { id: 'bound-native-child', parentID: parent.id, directory: f.root, projectID: 'project', agent: 'general' };

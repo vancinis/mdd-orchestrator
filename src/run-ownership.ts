@@ -6,15 +6,31 @@ import { CheckpointStore, STABLE_CHECKPOINT_VERSION } from './checkpoint.js';
 import type { StableCheckpoint, StableRunnerState } from './checkpoint.js';
 import { ProgressGuard } from './progress.js';
 import { QuestionCheckpointStore, retirableRiskRecovery, unresolvedQuestion } from './question-checkpoint.js';
+import type { QuestionRecord } from './question-checkpoint.js';
 import { Workflow } from './workflow.js';
 import { AdaptiveStore } from './adaptive-store.js';
 import type { AdaptiveRecord } from './adaptive-store.js';
 import { validateAdaptivePublication } from './adaptive-transfer.js';
 import type { AdaptiveReceipt } from './adaptive-transfer.js';
+import { AdaptiveLow } from './adaptive-low.js';
+import { questionEnvelope, answerFromLabel } from './preflight.js';
 
 export const RUN_OWNER_VERSION = 1;
 const LIMIT = 4096;
 type Identity = { runID: string; sessionID: string; directory: string; worktree: string };
+type PolicyQuestion = { parent: string; nonce: string; sequence: number; digest: string; epoch: number;
+  operationDigest: string; generationDigest: string; state: 'prepared' | 'consumed'; receiptDigest?: string; callID?: string };
+const policyDigest = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+function nativePolicyDecision(question: QuestionRecord): boolean {
+  if (question.adaptive?.purpose === 'operation')
+    return isDeepStrictEqual(question.nativeReceipt, { callID: question.callID, answers: [['Approve operation']] });
+  if (question.adaptive?.purpose !== 'mode') return false;
+  const mode = questionEnvelope().questions.find(question => question.header === 'Modo')!;
+  mode.question += ` [MDD adaptive ${question.adaptive.nonce}]`;
+  const selected = question.nativeReceipt?.answers;
+  return isDeepStrictEqual(question.slot.args, { questions: [mode] }) && question.nativeReceipt?.callID === question.callID &&
+    selected?.length === 1 && selected[0]?.length === 1 && answerFromLabel('mode', selected[0][0]) === 'automatic';
+}
 export type RunOwner = {
   version: 1; runID: string; ownerSessionID: string; directory: string; worktree: string; epoch: number;
   originSessionID?: string;
@@ -24,6 +40,7 @@ export type RunOwner = {
    */
   formerOwners?: string[];
   state: 'idle' | 'reserved' | 'transferring';
+  policyQuestion?: PolicyQuestion;
   callID?: string;
   workers?: { taskID: string; state: 'ready' | 'pending' | 'settled'; callID?: string }[];
   operation?: { name: string; checkpointSequence: number; checkpointDigest: string };
@@ -76,7 +93,15 @@ function parseParent(value: unknown, sessionID: string): ParentOwner {
   return structuredClone(value) as ParentOwner;
 }
 function parse(value: unknown): RunOwner {
-  const item = objectWithKeys(value, 'run owner', ['version', 'runID', 'ownerSessionID', 'originSessionID', 'formerOwners', 'directory', 'worktree', 'epoch', 'state', 'callID', 'workers', 'transfer', 'operation', 'recovery', 'receipt', 'adaptiveReceipt', 'recoveringTransfer', 'recoveredTransfer']);
+  const item = objectWithKeys(value, 'run owner', ['version', 'runID', 'ownerSessionID', 'originSessionID', 'formerOwners', 'directory', 'worktree', 'epoch', 'state', 'callID', 'workers', 'transfer', 'operation', 'recovery', 'receipt', 'adaptiveReceipt', 'recoveringTransfer', 'recoveredTransfer', 'policyQuestion']);
+  if (item.policyQuestion !== undefined) {
+    const question = objectWithKeys(item.policyQuestion, 'adaptive policy question fence', ['parent', 'nonce', 'sequence', 'digest', 'epoch', 'operationDigest', 'generationDigest', 'state', 'receiptDigest', 'callID']);
+    if (!text(question.parent, 256) || !text(question.nonce, 256) || !['prepared', 'consumed'].includes(String(question.state)) ||
+        [question.sequence, question.epoch].some(number => !Number.isSafeInteger(number) || (number as number) < 0) ||
+        [question.digest, question.operationDigest, question.generationDigest].some(digest => typeof digest !== 'string' || !/^[a-f0-9]{64}$/.test(digest)) ||
+        (question.state === 'consumed' ? !text(question.callID, 256) || typeof question.receiptDigest !== 'string' || !/^[a-f0-9]{64}$/.test(question.receiptDigest)
+          : question.callID !== undefined || question.receiptDigest !== undefined)) throw new ValidationError('Invalid adaptive policy question fence.');
+  }
   if (item.formerOwners !== undefined && (!Array.isArray(item.formerOwners) || item.formerOwners.length > 64 ||
       item.formerOwners.some(entry => !text(entry, 256)) || new Set(item.formerOwners).size !== item.formerOwners.length ||
       item.formerOwners.includes(item.ownerSessionID))) throw new ValidationError('Invalid former owners.');
@@ -389,7 +414,7 @@ export class RunOwnershipStore {
       else this.confirmReceipt(runID, sessionID);
     }
     return this.#write(runID, old => {
-      if (!old || old.ownerSessionID !== sessionID || old.state !== 'idle' || old.epoch !== epoch) throw new Error('No idle owner at this epoch.');
+      if (!old || old.ownerSessionID !== sessionID || old.state !== 'idle' || old.policyQuestion || old.epoch !== epoch) throw new Error('No idle owner at this epoch; a policy question may fence it.');
       return { ...old, state: 'reserved', callID, epoch: epoch + 1, ...(operation ? { operation } : {}) };
     });
   }
@@ -418,7 +443,7 @@ export class RunOwnershipStore {
     const current = this.read(runID);
     if (current?.originSessionID && current.originSessionID !== current.ownerSessionID) this.confirmReceipt(runID, sessionID);
     return this.#write(runID, old => {
-      if (!old || old.ownerSessionID !== sessionID || old.state !== 'idle' || old.epoch !== epoch) throw new Error('No idle worker owner.');
+      if (!old || old.ownerSessionID !== sessionID || old.state !== 'idle' || old.policyQuestion || old.epoch !== epoch) throw new Error('No idle worker owner.');
       return { ...old, state: 'reserved', callID: batchID, epoch: epoch + 1,
         workers: taskIDs.map(taskID => ({ taskID, state: 'ready' })) };
     });
@@ -444,12 +469,136 @@ export class RunOwnershipStore {
   publishAdaptiveUpdate(store: AdaptiveStore, previous: AdaptiveRecord, body: Parameters<AdaptiveStore['commit']>[2]): AdaptiveRecord {
     return this.#underOwnerLock(previous.runID, owner => {
       if (store.root !== this.#root || !owner || owner.ownerSessionID !== previous.sessionID ||
-          owner.state === 'transferring' || owner.recoveringTransfer || owner.operation || owner.recovery || owner.workers ||
+          owner.state === 'transferring' || owner.policyQuestion || owner.recoveringTransfer || owner.operation || owner.recovery || owner.workers ||
           this.parent(previous.sessionID) !== previous.runID || owner.directory !== previous.directory || owner.worktree !== previous.worktree)
         throw new Error('Adaptive publication authority is fenced.');
       if (previous.transfer) this.confirmAdaptiveReceipt(previous.runID, previous.sessionID, store);
       return store.commit(previous.sessionID, previous, body);
     });
+  }
+
+  /** A target-side question also fences its source under the existing owner lock. Epoch is unchanged:
+   * the question binds that epoch, while the new latch invalidates concurrent owner snapshots. */
+  prepareAdaptivePolicyQuestion(store: AdaptiveStore, source: AdaptiveRecord, question: QuestionRecord): void {
+    const binding = question.adaptive, generation = binding?.generation, operation = binding?.operation;
+    this.#write(source.runID, owner => {
+      const prior = owner?.policyQuestion;
+      const completed = operation?.kind === 'transfer-recovery' && owner?.ownerSessionID === question.parent &&
+        owner.adaptiveReceipt?.sourceSessionID === source.sessionID && owner.adaptiveReceipt.operationID === operation.args.operationID;
+      if (store.root !== this.#root || !owner || owner.ownerSessionID !== source.sessionID && !completed ||
+          owner.directory !== source.directory || owner.worktree !== source.worktree ||
+          !isDeepStrictEqual(store.read(source.sessionID), source) || question.version !== 2 || question.state !== 'prepared' ||
+          !binding || !['operation', 'mode'].includes(binding.purpose) || !generation || generation.runID !== source.runID ||
+          generation.sequence !== source.sequence || generation.digest !== source.digest || generation.epoch !== owner.epoch ||
+          binding.directory !== source.directory || binding.worktree !== source.worktree || !generation.sources ||
+          !isDeepStrictEqual(generation.sources, AdaptiveLow.restore(source.data, source.directory, false).policySources()) ||
+          !operation || !['transfer', 'transfer-recovery'].includes(operation.kind) || operation.args.sourceSessionID !== source.sessionID ||
+          operation.args.runID !== source.runID || question.parent === source.sessionID ||
+          !isDeepStrictEqual(new QuestionCheckpointStore(this.#root).read(question.parent), question) ||
+          (operation.kind === 'transfer' ? owner.state !== 'idle' || owner.operation || owner.recovery || owner.workers || prior !== undefined
+            : prior !== undefined && (prior.state !== 'consumed' || prior.parent !== question.parent || !question.retiredCalls?.includes(prior.callID!))))
+        throw new Error('Adaptive policy question source or target binding changed.');
+      const fence: PolicyQuestion = { parent: question.parent, nonce: binding.nonce, sequence: source.sequence, digest: source.digest,
+        epoch: owner.epoch, operationDigest: policyDigest(operation), generationDigest: policyDigest(generation), state: 'prepared' };
+      return { ...owner, policyQuestion: fence };
+    });
+  }
+  assertAdaptivePolicyAvailable(sessionID: string, operation?: unknown): void {
+    const runID = this.parent(sessionID), fence = runID ? this.read(runID)?.policyQuestion : undefined;
+    if (fence && !(fence.state === 'consumed' && operation !== undefined && fence.operationDigest === policyDigest(operation)))
+      throw new Error('An adaptive policy question fences this source parent.');
+  }
+  assertAdaptivePolicyProposalAvailable(sessionID: string, operation: { kind: string; args: Record<string, unknown> }, targetSessionID: string): void {
+    const runID = this.parent(sessionID), owner = runID ? this.read(runID) : undefined, fence = owner?.policyQuestion;
+    if (!fence) return;
+    const prior = new QuestionCheckpointStore(this.#root).read(targetSessionID), claim = this.parentClaim(targetSessionID)?.transfer;
+    const source = new AdaptiveStore(this.#root).read(sessionID);
+    const unclaimedAbort = operation.args.action === 'abort' && source && this.unclaimedAdaptivePolicyProposal(source, targetSessionID, String(operation.args.operationID));
+    const knownOperation = unclaimedAbort || claim?.sourceSessionID === sessionID && claim.operationID === operation.args.operationID ||
+      owner?.adaptiveReceipt?.sourceSessionID === sessionID && owner.adaptiveReceipt.targetSessionID === targetSessionID && owner.adaptiveReceipt.operationID === operation.args.operationID ||
+      owner?.recoveredTransfer?.targetSessionID === targetSessionID && owner.recoveredTransfer.operationID === operation.args.operationID;
+    if (operation.kind !== 'transfer-recovery' || operation.args.sourceSessionID !== sessionID || operation.args.runID !== runID ||
+        fence.state !== 'consumed' || fence.parent !== targetSessionID || !prior || fence.receiptDigest !== policyDigest(prior) || !knownOperation)
+      throw new Error('An adaptive policy question fences this source parent.');
+  }
+  unclaimedAdaptivePolicyProposal(source: AdaptiveRecord, targetSessionID: string, operationID: string): boolean {
+    const owner = this.read(source.runID), fence = owner?.policyQuestion, question = new QuestionCheckpointStore(this.#root).read(targetSessionID);
+    const operation = question?.adaptive?.operation;
+    return !!(owner?.state === 'idle' && owner.ownerSessionID === source.sessionID && fence?.state === 'consumed' &&
+      fence.parent === targetSessionID && question?.state === 'settled' && fence.receiptDigest === policyDigest(question) &&
+      question.runID === source.runID && operation?.args.sourceSessionID === source.sessionID && operation.args.operationID === operationID &&
+      !this.parentClaim(targetSessionID) && !new AdaptiveStore(this.#root).occupied(targetSessionID) &&
+      !new CheckpointStore(this.#root).read(targetSessionID) && !new ProgressGuard(this.#root).read(targetSessionID) && !this.intake(targetSessionID));
+  }
+  abortAdaptivePolicyProposal(store: AdaptiveStore, source: AdaptiveRecord, targetSessionID: string, operationID: string): RunOwner {
+    return this.#write(source.runID, owner => {
+      const question = new QuestionCheckpointStore(this.#root).read(targetSessionID);
+      if (!owner || !this.unclaimedAdaptivePolicyProposal(source, targetSessionID, operationID) ||
+          !this.matchingAdaptivePolicyQuestion(store, source, targetSessionID, operationID) ||
+          question?.adaptive?.operation.kind !== 'transfer-recovery' || question.adaptive.operation.args.action !== 'abort')
+        throw new Error('Unclaimed adaptive proposal requires a fresh exact native abort receipt.');
+      const { policyQuestion: _question, ...rest } = owner;
+      return { ...rest, epoch: owner.epoch + 1, recoveredTransfer: { operationID, targetSessionID,
+        sourceSequence: source.sequence, sourceDigest: source.digest, action: 'release-claim' } };
+    });
+  }
+  finishAdaptivePolicyQuestion(runID: string, targetSessionID: string, operationID: string): void {
+    const owner = this.read(runID);
+    if (!owner?.policyQuestion) return;
+    this.#write(runID, current => {
+      if (!current || !isDeepStrictEqual(current, owner) || current.policyQuestion?.state !== 'consumed' || current.policyQuestion.parent !== targetSessionID ||
+          !(current.adaptiveReceipt?.operationID === operationID && current.adaptiveReceipt.targetSessionID === targetSessionID ||
+            current.recoveredTransfer?.operationID === operationID && current.recoveredTransfer.targetSessionID === targetSessionID))
+        throw new Error('Native policy fence cannot settle an unfinished transfer.');
+      const { policyQuestion: _question, ...rest } = current; return rest;
+    });
+  }
+  consumeAdaptivePolicyQuestion(store: AdaptiveStore, source: AdaptiveRecord, question: QuestionRecord): void {
+    this.#write(source.runID, owner => {
+      const fence = owner?.policyQuestion, binding = question.adaptive;
+      if (!owner || !fence || fence.state !== 'prepared' || !binding || fence.parent !== question.parent || fence.nonce !== binding.nonce ||
+          fence.sequence !== source.sequence || fence.digest !== source.digest || fence.epoch !== owner.epoch ||
+          fence.operationDigest !== policyDigest(binding.operation) || fence.generationDigest !== policyDigest(binding.generation) ||
+          !isDeepStrictEqual(store.read(source.sessionID), source) || question.state !== 'settled' || question.version !== 2 ||
+          !nativePolicyDecision(question) ||
+          !isDeepStrictEqual(new QuestionCheckpointStore(this.#root).read(question.parent), question))
+        throw new Error('The exact settled native policy answer cannot be consumed.');
+      return { ...owner, policyQuestion: { ...fence, state: 'consumed', callID: question.callID!, receiptDigest: policyDigest(question) } };
+    });
+  }
+  releaseAdaptivePolicyQuestion(question: QuestionRecord): void {
+    if (!question.runID) return;
+    this.#write(question.runID, owner => {
+      const fence = owner?.policyQuestion;
+      if (!owner || !fence || fence.parent !== question.parent || fence.nonce !== question.adaptive?.nonce ||
+          fence.state !== 'prepared' || !['cancelled', 'settled'].includes(question.state) ||
+          !isDeepStrictEqual(new QuestionCheckpointStore(this.#root).read(question.parent), question))
+        throw new Error('A different adaptive policy question owns this source fence.');
+      const { policyQuestion: _question, ...rest } = owner; return rest;
+    });
+  }
+  /** Narrow occupancy exception: a retained exact receipt is data, not a reusable approval flag. */
+  matchingAdaptivePolicyQuestion(store: AdaptiveStore, source: AdaptiveRecord, targetSessionID: string, operationID: string): boolean {
+    const owner = this.read(source.runID), fence = owner?.policyQuestion;
+    const question = new QuestionCheckpointStore(this.#root).read(targetSessionID), binding = question?.adaptive;
+    const actual = store.read(source.sessionID);
+    return !!(store.root === this.#root && owner && fence?.state === 'consumed' && actual &&
+      owner.directory === source.directory && owner.worktree === source.worktree && actual.runID === source.runID &&
+      (owner.ownerSessionID === source.sessionID || owner.ownerSessionID === targetSessionID &&
+        owner.adaptiveReceipt?.sourceSessionID === source.sessionID && owner.adaptiveReceipt.operationID === operationID) &&
+      question?.version === 2 && question.state === 'settled' && question.runID === source.runID && binding && nativePolicyDecision(question) &&
+      question.parent === targetSessionID && fence.parent === targetSessionID && fence.nonce === binding.nonce &&
+      (owner.state === 'idle' && owner.epoch === fence.epoch || owner.state === 'transferring' &&
+        [fence.epoch, fence.epoch + 1].includes(owner.epoch) || owner.recoveringTransfer && owner.epoch >= fence.epoch && owner.epoch <= fence.epoch + 1) &&
+      fence.receiptDigest === policyDigest(question) && fence.callID === question.callID &&
+      binding.directory === source.directory && binding.worktree === source.worktree &&
+      binding.generation?.sequence === actual.sequence && binding.generation.digest === actual.digest && binding.generation.runID === source.runID &&
+      fence.sequence === binding.generation.sequence && fence.digest === binding.generation.digest &&
+      isDeepStrictEqual(binding.generation.sources, AdaptiveLow.restore(actual.data, actual.directory, false).policySources()) &&
+      fence.generationDigest === policyDigest(binding.generation) && fence.epoch === binding.generation.epoch &&
+      fence.operationDigest === policyDigest(binding.operation) && ['transfer', 'transfer-recovery'].includes(binding.operation.kind) &&
+      binding.operation.args.sourceSessionID === source.sessionID && binding.operation.args.runID === source.runID &&
+      binding.operation.args.operationID === operationID);
   }
 
   #adaptiveSource(store: AdaptiveStore, source: AdaptiveRecord): void {
@@ -463,17 +612,19 @@ export class RunOwnershipStore {
           marker.callID !== source.attempt?.callID || marker.attemptID !== source.attempt?.callID || marker.resumable !== false)) ||
         (source.attempt?.state === 'settled' && !marker)) throw new Error('Adaptive source generation or native idle boundary differs.');
   }
-  #adaptiveTargetControls(sessionID: string): void {
+  #adaptiveTargetControls(sessionID: string, store: AdaptiveStore, source: AdaptiveRecord, operationID: string): void {
+    const question = new QuestionCheckpointStore(this.#root).read(sessionID), fence = this.read(source.runID)?.policyQuestion;
     if (new CheckpointStore(this.#root).read(sessionID) ||
-        new ProgressGuard(this.#root).read(sessionID) || new QuestionCheckpointStore(this.#root).read(sessionID) || this.intake(sessionID))
+        new ProgressGuard(this.#root).read(sessionID) || this.intake(sessionID) ||
+        (question || fence) && !this.matchingAdaptivePolicyQuestion(store, source, sessionID, operationID))
       throw new Error('Adaptive transfer target is occupied.');
   }
-  #adaptiveTargetEmpty(sessionID: string, store: AdaptiveStore): void {
-    this.#adaptiveTargetControls(sessionID);
+  #adaptiveTargetEmpty(sessionID: string, store: AdaptiveStore, source: AdaptiveRecord, operationID: string): void {
+    this.#adaptiveTargetControls(sessionID, store, source, operationID);
     if (store.occupied(sessionID)) throw new Error('Adaptive transfer target is occupied.');
   }
   claimAdaptiveTarget(store: AdaptiveStore, source: AdaptiveRecord, target: AdaptiveRecord, epoch: number): void {
-    this.#adaptiveSource(store, source); this.#adaptiveTargetEmpty(target.sessionID, store);
+    this.#adaptiveSource(store, source); this.#adaptiveTargetEmpty(target.sessionID, store, source, target.transfer!.operationID);
     validateAdaptivePublication(store, source, target, target.transfer!);
     const owner = this.read(source.runID);
     if (!owner || owner.ownerSessionID !== source.sessionID || owner.state !== 'idle' || owner.epoch !== epoch ||
@@ -484,7 +635,7 @@ export class RunOwnershipStore {
       adaptive: { targetDigest: target.digest, admissionDigest: target.admissionDigest } } };
     this.#files.updateStrict(this.#parentName(target.sessionID), previous => {
       if (previous !== undefined) throw new Error('Adaptive target parent claim is occupied, including closed legacy state.');
-      this.#adaptiveSource(store, source); this.#adaptiveTargetEmpty(target.sessionID, store);
+      this.#adaptiveSource(store, source); this.#adaptiveTargetEmpty(target.sessionID, store, source, target.transfer!.operationID);
       if (!isDeepStrictEqual(this.read(source.runID), owner)) throw new Error('Adaptive source owner changed.');
       return JSON.stringify(claim);
     }, LIMIT);
@@ -495,9 +646,9 @@ export class RunOwnershipStore {
     const parent = this.parentClaim(targetSessionID), claim = parent?.transfer;
     if (!parent || parent.retired || parent.runID !== source.runID || !claim?.adaptive || claim.operationID !== operationID ||
         claim.sourceSessionID !== source.sessionID || claim.sourceSequence !== source.sequence || claim.sourceDigest !== source.digest ||
-        claim.adaptive.admissionDigest !== source.admissionDigest || new CheckpointStore(this.#root).read(targetSessionID) ||
-        new ProgressGuard(this.#root).read(targetSessionID) || new QuestionCheckpointStore(this.#root).read(targetSessionID) || this.intake(targetSessionID))
+        claim.adaptive.admissionDigest !== source.admissionDigest)
       throw new Error('Adaptive transfer claim or native occupancy differs; keep both parents fenced.');
+    this.#adaptiveTargetControls(targetSessionID, store, source, operationID);
     return claim;
   }
   beginAdaptiveTransfer(store: AdaptiveStore, source: AdaptiveRecord, targetSessionID: string, operationID: string): RunOwner {
@@ -544,7 +695,7 @@ export class RunOwnershipStore {
       validateAdaptivePublication(store, source, target, target.transfer!);
       if (!isDeepStrictEqual(old, fenced.owner) || target.digest !== fenced.claim.adaptive!.targetDigest ||
           !isDeepStrictEqual(store.read(target.sessionID), target)) throw new Error('Adaptive publication readback differs before ownership commit.');
-      const { transfer: _transfer, adaptiveReceipt: _prior, ...rest } = old!;
+      const { transfer: _transfer, adaptiveReceipt: _prior, policyQuestion: _question, ...rest } = old!;
       return { ...rest, originSessionID: source.sessionID, ownerSessionID: target.sessionID, epoch: receipt.verifiedEpoch,
         state: 'idle', adaptiveReceipt: receipt, formerOwners: [...new Set([...(old!.formerOwners ?? []), source.sessionID])] };
     });
@@ -588,7 +739,7 @@ export class RunOwnershipStore {
         owner.operation?.name !== 'adaptive-transfer-abort') throw new Error('Adaptive abort reservation differs; no cleanup occurred.');
     this.#underOwnerLock(source.runID, current => {
       if (!isDeepStrictEqual(current, owner)) throw new Error('Adaptive abort authority changed.');
-      this.#adaptiveTargetControls(targetSessionID);
+      this.#adaptiveTargetControls(targetSessionID, store, source, operationID);
       const actual = store.read(source.sessionID);
       if (!actual) throw new Error('Adaptive abort source generation is absent.');
       const { version: _version, sequence: _sequence, digest: _digest, admissionDigest: _admission, ...body } = source;
@@ -606,7 +757,7 @@ export class RunOwnershipStore {
         store.retireIf(targetSessionID, target);
       }
       if (store.occupied(targetSessionID)) throw new Error('Adaptive target retirement readback failed.');
-      this.#adaptiveTargetEmpty(targetSessionID, store);
+      this.#adaptiveTargetEmpty(targetSessionID, store, source, operationID);
       this.#files.updateStrict(this.#parentName(targetSessionID), previous => {
         if (!isDeepStrictEqual(previous === undefined ? undefined : parseParent(JSON.parse(previous), targetSessionID), parent))
           throw new Error('Adaptive parent retirement CAS differs.');
@@ -620,7 +771,7 @@ export class RunOwnershipStore {
     });
     return this.#write(source.runID, old => {
       if (!isDeepStrictEqual(old, owner)) throw new Error('Adaptive abort settlement CAS differs.');
-      const { callID: _call, operation: _operation, recoveringTransfer: _recovery, ...rest } = old!;
+      const { callID: _call, operation: _operation, recoveringTransfer: _recovery, policyQuestion: _question, ...rest } = old!;
       return { ...rest, state: 'idle', epoch: old!.epoch + 1, recoveredTransfer: { operationID, targetSessionID,
         sourceSequence: source.sequence, sourceDigest: source.digest, action: recovery.action } };
     });

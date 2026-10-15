@@ -14,6 +14,11 @@ import { applyScopeFiles, explorationFiles, parseParallelScope, scopePath } from
 import { objectWithKeys } from './validation.js';
 import { AdaptiveContinuation, continuationRequest } from './adaptive-continuation.js';
 import type { ContinuationActor, ContinuationData } from './adaptive-continuation.js';
+import { openQuestions } from './open-questions.js';
+import type { OpenQuestion } from './open-questions.js';
+import { validateQuestionRecord } from './question-checkpoint.js';
+import type { QuestionRecord } from './question-checkpoint.js';
+import type { QuestionEnvelope } from './preflight.js';
 
 export type AdaptiveActor = 'mdd-explore' | 'mdd-risk' | 'mdd-plan' | 'mdd-apply' | 'mdd-verify' | ContinuationActor;
 type Scope = { complete: true; reads: string[]; writes: string[] };
@@ -30,7 +35,7 @@ export type AdaptiveSelection = { handle: string; actor: AdaptiveActor; assignme
 type Receipt = { id: string; actor: AdaptiveActor; assignmentID: string; purpose: string; outcome: 'passed' | 'failed';
   summary: string; artifact?: string; changes?: string[]; assessment?: FutureAssessment; failure?: string;
   callID?: string; proof?: { path: string; digest: string | null }[];
-  accepted?: { fields: Record<string, unknown>; verifyContext?: VerifyContext } };
+  accepted?: { fields: Record<string, unknown>; verifyContext?: VerifyContext }; questions?: OpenQuestion[] };
 type VerifyContext = { snapshotID: string; checks: ReturnType<typeof executed> };
 const ACTORS: readonly AdaptiveActor[] = ['mdd-explore', 'mdd-risk', 'mdd-plan', 'mdd-apply', 'mdd-verify'];
 const CONTRACT_BYTES = 24000;
@@ -58,7 +63,17 @@ export type AdaptiveData = {
   retainedProof: AdaptiveData['completed']; priorEvidence?: { snapshot: Snapshot; report: EvidenceReport; invalidatedAssignments: string[]; assignments?: Assignment[] };
   checkHistory: ReturnType<typeof executed>; historicalChecks: HistoricalChecks[];
   continuation?: ContinuationData;
+  questionAnswers?: { receiptID: string; native: QuestionRecord }[];
 };
+
+/** Exact display mapping: every native option retains its original label and description. */
+export function adaptiveQuestionsEnvelope(questions: OpenQuestion[], nonce: string): QuestionEnvelope {
+  return { questions: questions.map((question, index) => ({ header: 'Product decision',
+    question: `${question.question}\nWhy: ${question.why}${index === 0 ? ` [MDD adaptive ${nonce}]` : ''}`,
+    multiple: question.multiple === true,
+    options: question.options.length ? question.options.map(({ label, description }) => ({ label, description }))
+      : [{ label: 'Pause', description: 'Leave this product decision unresolved.' }] })) };
+}
 const RESTORE = Symbol('validated adaptive data');
 
 function entries(value: unknown, label: string): unknown[] {
@@ -226,6 +241,7 @@ export class AdaptiveLow {
   #selection: AdaptiveSelection | undefined;
   #dispatchPrerequisites: PrerequisiteReceipt[] = [];
   #handle = randomUUID();
+  #questionAnswers: NonNullable<AdaptiveData['questionAnswers']> = [];
   constructor(value: unknown, readonly root: string, restoration?: typeof RESTORE) {
     this.#contract = adaptiveContract(value); this.#context = this.#contract.context; this.#assessment = this.#contract.assessment;
     applyScopeFiles(root, this.#contract.scope); if (restoration !== RESTORE) this.assertCurrent();
@@ -243,7 +259,8 @@ export class AdaptiveLow {
       ...(this.#completion ? { completion: this.#completion } : {}), repairs: this.#repairs,
       invalidatedAssignments: this.#invalidatedAssignments, retainedProof: this.#retainedProof,
       ...(this.#priorEvidence ? { priorEvidence: this.#priorEvidence } : {}), checkHistory: this.#checkHistory, historicalChecks: this.#historicalChecks,
-      ...(this.#continuation ? { continuation: this.#continuation.serialize() } : {}) });
+      ...(this.#continuation ? { continuation: this.#continuation.serialize() } : {}),
+      ...(this.#questionAnswers.length ? { questionAnswers: this.#questionAnswers } : {}) });
   }
   /** In-process transactional copy only. No serialized record can retain a handle or authorization. */
   copy(): AdaptiveLow {
@@ -254,7 +271,7 @@ export class AdaptiveLow {
   static restore(value: unknown, root: string, reconcile = true): AdaptiveLow {
     if (Buffer.byteLength(JSON.stringify(value)) > 8 * 1024 * 1024) throw new Error('Adaptive data exceeds its bounded restore budget.');
     const data = objectWithKeys(value, 'adaptive data', ['contract', 'context', 'assessment', 'state', 'receipts', 'completed', 'pending',
-      'snapshot', 'report', 'matched', 'completion', 'repairs', 'invalidatedAssignments', 'retainedProof', 'priorEvidence', 'checkHistory', 'historicalChecks', 'continuation']);
+      'snapshot', 'report', 'matched', 'completion', 'repairs', 'invalidatedAssignments', 'retainedProof', 'priorEvidence', 'checkHistory', 'historicalChecks', 'continuation', 'questionAnswers']);
     const low = new AdaptiveLow(data.contract, root, RESTORE), contract = low.#contract;
     low.#context = context(data.context, contract.scope); low.#assessment = parseFutureAssessment(data.assessment);
     if (!['await-selection', 'await-result', 'completed', 'closed-unverified'].includes(String(data.state)) || typeof data.matched !== 'boolean' ||
@@ -274,7 +291,7 @@ export class AdaptiveLow {
     });
     low.#invalidatedAssignments = ids(data.invalidatedAssignments); low.#repairs = data.repairs as number;
     const receipts = entries(data.receipts, 'actual actor receipts').map(value => {
-      const item = objectWithKeys(value, 'actual actor receipt', ['id', 'actor', 'assignmentID', 'purpose', 'outcome', 'summary', 'artifact', 'changes', 'assessment', 'failure', 'callID', 'proof', 'accepted']);
+      const item = objectWithKeys(value, 'actual actor receipt', ['id', 'actor', 'assignmentID', 'purpose', 'outcome', 'summary', 'artifact', 'changes', 'assessment', 'failure', 'callID', 'proof', 'accepted', 'questions']);
       const assignment = contract.assignments.find(assignment => assignment.id === item.assignmentID);
       if (!assignment || ![...ACTORS, ...(data.continuation ? ['mdd-propose', 'mdd-spec', 'mdd-design', 'mdd-tasks'] : [])].includes(item.actor as AdaptiveActor) || !['passed', 'failed'].includes(String(item.outcome))) throw new Error('Invalid actual actor receipt.');
       const receipt: Receipt = { id: shortText(item.id, 'receipt ID', 100), actor: item.actor as AdaptiveActor,
@@ -307,11 +324,18 @@ export class AdaptiveLow {
       }
       if (receipt.actor === 'mdd-apply' && receipt.outcome === 'passed' && !receipt.proof || receipt.actor === 'mdd-risk' && receipt.outcome === 'passed' && !receipt.assessment)
         throw new Error('Passed actor receipt omits its actual result.');
+      if (item.questions !== undefined) receipt.questions = openQuestions(item.questions);
+      if (receipt.accepted && !isDeepStrictEqual(openQuestions(receipt.accepted.fields.questions), receipt.questions ?? []))
+        throw new Error('Actor questions contradict the accepted native payload.');
       return receipt;
     });
     if (new Set(receipts.map(item => item.id)).size !== receipts.length || new Set(receipts.map(item => item.callID)).size !== receipts.length)
       throw new Error('Adaptive receipts repeat identities.');
     low.#receipts.push(...receipts);
+    for (const value of entries(data.questionAnswers ?? [], 'native product answers')) {
+      const answer = objectWithKeys(value, 'native product answer', ['receiptID', 'native']);
+      low.answerQuestions(shortText(answer.receiptID, 'question receipt ID', 100), validateQuestionRecord(answer.native));
+    }
     if (data.continuation !== undefined) {
       low.#continuation = AdaptiveContinuation.restore(data.continuation, contract, receipts);
       const continuation = low.#continuation.serialize();
@@ -424,7 +448,7 @@ export class AdaptiveLow {
       });
       exactCoverage(low.#dispatchPrerequisites.map(item => item.assignmentID),
         low.#selection.actor === 'mdd-apply' ? low.#prerequisiteIDs(own) : [], 'Pending dispatch prerequisites');
-      if (contract.productQuestions.length || receipts.length >= 64 || low.#context.technical === 'uncertain' && low.#selection.actor !== 'mdd-explore')
+      if (contract.productQuestions.length || low.pendingQuestions() || receipts.length >= 64 || low.#context.technical === 'uncertain' && low.#selection.actor !== 'mdd-explore')
         throw new Error('Pending actor contradicts selection eligibility.');
       if (low.#selection.actor === 'mdd-apply' && (!low.#continuation && low.#assessment.impact !== 'low' || low.#context.dependencies !== 'bounded' ||
           low.#completed.has(own.id) ||
@@ -546,6 +570,30 @@ export class AdaptiveLow {
   assertBoundary(handle: string): void {
     if (handle !== this.#handle) throw new Error('Evidence or selection handle is stale or consumed.');
     if (this.#state !== 'await-selection') throw new Error('Evidence requires an actorless nonterminal boundary, not a completed or pending actor.');
+    if (this.pendingQuestions()) throw new Error('Actual actor questions pause this boundary.');
+  }
+  pendingQuestions(): { receiptID: string; callID: string; questions: OpenQuestion[] } | undefined {
+    const receipt = this.#receipts.find(item => item.questions?.length && !this.#questionAnswers.some(answer => answer.receiptID === item.id));
+    return receipt ? structuredClone({ receiptID: receipt.id, callID: receipt.callID!, questions: receipt.questions! }) : undefined;
+  }
+  /** Answers provide context only. Held acceptance, scope, decisions and successful work never change. */
+  answerQuestions(receiptID: string, native: QuestionRecord): void {
+    const pending = this.pendingQuestions();
+    if (!pending || pending.receiptID !== receiptID || native.version !== 2 || native.state !== 'answered' ||
+        native.adaptive?.purpose !== 'product' || native.adaptive.operation.kind !== 'questions' ||
+        native.adaptive.operation.args.receiptID !== receiptID || native.adaptive.operation.args.callID !== pending.callID ||
+        !isDeepStrictEqual(native.slot.args, adaptiveQuestionsEnvelope(pending.questions, native.adaptive.nonce)) ||
+        !native.answer || native.answer.some((answers, index) => !answers.length ||
+          answers.some(answer => /^(pause|decline|stop)$/i.test(answer.trim()) || !pending.questions[index]!.options.some(option => option.label === answer))))
+      throw new Error('Product answers require the exact actual actor receipt and complete native selections; free text or pause leaves questions unresolved.');
+    this.#questionAnswers.push({ receiptID, native: structuredClone(native) });
+    this.#handle = randomUUID();
+  }
+  questionContext(): NonNullable<AdaptiveData['questionAnswers']> { return structuredClone(this.#questionAnswers); }
+  /** A native policy proposal binds the actual local footprint, not a claim of whole-file authentication. */
+  policySources(): { path: string; digest: string | null }[] {
+    applyScopeFiles(this.root, this.#contract.scope);
+    return [...new Set([...this.#contract.scope.reads, ...this.#contract.scope.writes])].map(path => ({ path, digest: fingerprint(this.root, path) }));
   }
   #assertCompleted(): void {
     if (this.#validating) return;
@@ -702,6 +750,7 @@ export class AdaptiveLow {
     if (this.#state !== 'await-selection') throw new Error('Selection requires an actorless boundary; a task is already authorized or in flight.');
     if (this.#receipts.length >= 64) throw new Error('Volatile receipt budget is exhausted; no automatic closure or escalation.');
     if (this.#contract.productQuestions.length) throw new Error('Unresolved product ambiguity pauses actor selection.');
+    if (this.pendingQuestions()) throw new Error('Actual actor questions pause selection until a native answer is linked.');
     if (this.#continuation) {
       this.selectionInput(value);
       if (!(value.actor === 'mdd-apply' && value.repairOf)) this.#assertContinuationCurrent(value.context ?? this.#context);
@@ -798,6 +847,8 @@ export class AdaptiveLow {
     try {
       if (failure || text === undefined) throw new Error(failure ?? 'Native result inspection failed.');
       const fields = selected.actor === 'mdd-risk' ? parseRiskReport(text) : parsePhaseReport(text, selected.actor);
+      const questions = openQuestions(fields.questions);
+      if (questions.length) receipt.questions = questions;
       if (this.#continuation && selected.actor !== 'mdd-apply') {
         receipt.summary = shortText(fields.evidenceSummary, 'actual phase summary');
         if (typeof fields.artifact === 'string' && Buffer.byteLength(fields.artifact) <= 12000) { assertNoTraceSection(fields.artifact); receipt.artifact = fields.artifact; }
@@ -821,7 +872,7 @@ export class AdaptiveLow {
         return;
       }
       const input = objectWithKeys(fields, 'adaptive actor receipt', ['outcome', 'evidenceSummary', 'artifact', 'phase', 'runID', 'callID',
-        'how', 'purpose', 'openItems', 'learnings', 'confidence', ...(selected.actor === 'mdd-apply' ? ['completed', 'changes', 'noChangeReason', 'checks'] : []),
+        'how', 'purpose', 'openItems', 'learnings', 'confidence', 'questions', ...(selected.actor === 'mdd-apply' ? ['completed', 'changes', 'noChangeReason', 'checks'] : []),
         ...(selected.actor === 'mdd-risk' ? ['assessment'] : [])]);
       if (input.phase !== undefined && input.phase !== selected.actor || input.runID !== undefined && input.runID !== runID ||
           input.callID !== undefined && input.callID !== callID) throw new Error('Receipt is bound to another actor, run or native call.');
@@ -865,7 +916,8 @@ export class AdaptiveLow {
           prerequisitesComplete: item.dependsOn.every(id => this.#completed.has(id)),
           obligations: { source: item.obligations.source.length, checks: item.obligations.checks.length,
             executed: this.#report ? item.obligations.checks.filter(check => this.#report!.checkResults.find(result => result.checkID === check.id)!.executions.length).length : 0 } })),
-        ...(this.#contract.productQuestions.length ? { blocked: 'product-ambiguity' } : {}) },
+        ...(this.#contract.productQuestions.length || this.pendingQuestions() ? { blocked: 'product-ambiguity' } : {}) },
+      ...(this.pendingQuestions() ? { productQuestions: this.pendingQuestions() } : {}),
       ...(this.#selection ? { actor: this.#selection.actor, assignmentID: this.#selection.assignmentID } : {}),
       ...(last ? { lastReceipt: { id: last.id, actor: last.actor, assignmentID: last.assignmentID, outcome: last.outcome,
         summary: last.summary, ...(last.failure ? { failure: last.failure } : {}) } } : {}),

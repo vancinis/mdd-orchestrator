@@ -96,12 +96,36 @@ not the full contract body. Public startup and the inactive `routingVersion: 3` 
 
 | Boundary | Internal guarantee |
 |---|---|
-| Admission | Intake proves genuine native objective text/message; runner independently rechecks it, exact coordinator/workspace, idle ownership and current local source fingerprints. Caller-supplied approval or provenance IDs are not proof. The initial intake supports only explicitly automatic profiles; interactive or unspecified modes are refused rather than bypassed. |
+| Admission | Intake proves genuine native objective text/message; runner independently rechecks it, exact coordinator/workspace, idle ownership and current local source fingerprints. Caller-supplied approval or provenance IDs are not proof. The legacy internal admission helper remains explicitly automatic-only; the separate inactive native policy bridge below supports configured interactive mode. |
 | Compact contract | Version 1, stable globally unique acceptance/decision/assignment/evidence IDs, exclusions, complete exact scopes, dependency-ordered assignments and source or real command obligations are validated and copied before native awaits. Contract-authored links do not claim Plan provenance. |
 | Selection | Unresolved product ambiguity pauses all actors. Technical uncertainty permits a brief scoped Explore only. Apply requires low impact independently of complexity, understood bounded dependencies, current fingerprints, completed prerequisites and real scoped-editor capability. |
 | Native execution | Exact issued handles are consumed once, with one actor/writer and existing native result/liveness inspection. Apply edits only through the existing single-child WorkerFence and `mdd_worker_edit`; generic editors, shell and out-of-scope writes remain denied. Unsafe bootstrap/config footprints and unsupported hosts have no serial fallback. |
 | Settlement | Every confirmed stopped actual actor returns to selection. Failed, malformed or absent receipts earn no progress or automatic retry; another writer requires an explicit repair reference. Reports cannot broaden acceptance/scope or decide product questions. Internal Risk uses the independent future assessment, never a historical Risk verdict. |
 | Persistence | Production injects a separate bounded adaptive record/store under the product data root, using existing LocalFiles protections. It is not a fixed checkpoint, dossier or fabricated phase artifact. Pending native intent is durable before provider arguments; an accepted receipt is durable before the settled marker and ownership release. The existing child marker remains `resumable:false` for fixed-checkpoint recovery. |
+
+#### Inactive native policy bridge (AL-05a)
+
+`NativeIntake.adaptiveInternal` is an internal bridge, not a registered tool or public version-3
+activation. It wraps admission, selection/repair, evidence, escalation, stopped-child recovery and
+same-workspace transfer/recovery without executing commands or expanding native permissions.
+
+| Boundary | Policy guarantee |
+|---|---|
+| Preferences | Freeze the actual configured profile answers. Preserve absent certainty, artifact storage and summary preferences as absent. If mode is unset, ask only the existing native mode question; a clear request does not require the four-field fixed preflight. Configured automatic mode invents neither human consent nor redundant per-operation approvals. |
+| Interactive operations | The actual before/after native-question hooks inspect the exact running parent/call/envelope and parse its result. Approval binds the run, durable record generation, owner epoch, current handle, actual declared source bytes and complete canonical proposed operation. A private single-use capability connects that inspected result to the guarded runner operation; serialized flags, raw user text and caller IDs cannot replace it. |
+| Question journal | Explicit question-record version 2 carries adaptive bindings, never a fabricated fixed phase or checkpoint. CAS transitions and readback precede authority changes. Actual answers remain historical receipts; interrupted prepared, pending or unapplied answered questions stay blocked and never resume as live consent. Existing fixed-question semantics remain version 1. |
+| Product decisions | Ask genuine product questions before immutable admission, preserving complete offered choices and their display/answer mapping. A rebuilt draft must retain original objective, acceptance, scope, exclusions and decisions; broader business authorization needs an explicit revised native request. Actual pre-admission answers reach the scoped actor as data. Actor-raised questions retain their actual receipt/call identity and durably pause selection. Native answers add linked context, never silently amend the held business contract or earn completion. Free-text approval, pause, decline and unresolved actor questions authorize no operation. |
+| Transfer policy | A target-side policy question also holds a durable source-owner fence. Other intake, actor admission and publication cannot overlap it. Source generation, handle, epoch, declared bytes and both parent boundaries are rechecked through native reply and asynchronous transfer proof. The target occupancy exception accepts only the exact consumed adaptive receipt for that operation and current source binding; pending, unrelated, stale, foreign and fixed questions remain blockers. An actual mode answer selecting automatic is a policy preference, not invented human operation approval; selecting interactive requires its own subsequent operation approval. Receipts are retained, not deleted. |
+| Recovery | Frozen preferences and actual question history survive ordinary restore and transfer without restoring approval. Interrupted transfers require a fresh native decision and existing positive native idle/request proof. An unclaimed failed policy proposal can be explicitly aborted only against its own fresh inspected recovery receipt; no target publication or successful work is invented. Unknown outcomes and failed durability remain fenced rather than being retried blindly. |
+
+These are deterministic local native/runtime guarantees, not live-host/model approval, independent
+command attestation, or authentication against coordinated rewriting of all stored evidence.
+Operation-specific public protocol/status and atomic public registration remain AL-05b/AL-05c work.
+
+Transfer and transfer-recovery retain the **current consumed operation proof** across native awaits
+and publication boundaries. Its source-byte/generation binding applies equally to automatic runs
+with no questions and interactive runs; an old question receipt never supplies or replaces it.
+Legacy internal transfers without a policy proof retain their existing selective invalidation.
 
 Scoped actors cannot execute commands. Real planned checks retain their requiredness and
 applicability as unexecuted obligations; source-only work uses a separate small source-obligation

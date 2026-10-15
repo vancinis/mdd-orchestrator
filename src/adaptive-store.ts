@@ -4,6 +4,8 @@ import { LocalFiles } from './local-files.js';
 import { objectWithKeys } from './validation.js';
 import type { AdaptiveData } from './adaptive-low.js';
 import type { AdaptiveLineage } from './adaptive-transfer.js';
+import { validateNativePolicy } from './adaptive-native.js';
+import type { NativePolicy } from './adaptive-native.js';
 
 const LIMIT = 8 * 1024 * 1024;
 export type AdaptiveRecord = {
@@ -13,6 +15,7 @@ export type AdaptiveRecord = {
   attempt?: { callID: string; state: 'pending' | 'settled' };
   calls: string[];
   transfer?: AdaptiveLineage;
+  nativePolicy?: NativePolicy;
 };
 type Body = Omit<AdaptiveRecord, 'version' | 'sequence' | 'digest' | 'admissionDigest'>;
 const hash = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -21,7 +24,7 @@ function text(value: unknown, max = 256): value is string {
 }
 function parse(source: string, sessionID: string): AdaptiveRecord {
   const item = objectWithKeys(JSON.parse(source), 'adaptive record', ['version', 'sequence', 'digest', 'admissionDigest', 'runID', 'sessionID',
-    'directory', 'worktree', 'agent', 'userMessageID', 'stage', 'data', 'attempt', 'calls', 'transfer']);
+    'directory', 'worktree', 'agent', 'userMessageID', 'stage', 'data', 'attempt', 'calls', 'transfer', 'nativePolicy']);
   if (item.version !== 1 || !Number.isSafeInteger(item.sequence) || (item.sequence as number) < 0 || item.sessionID !== sessionID ||
       !text(item.runID) || !item.runID.startsWith('adaptive-internal-') || !text(item.userMessageID) ||
       !text(item.directory, 2048) || !text(item.worktree, 2048) || item.agent !== 'mdd-orchestrator' ||
@@ -29,6 +32,10 @@ function parse(source: string, sessionID: string): AdaptiveRecord {
       item.calls.some(call => !text(call)) || new Set(item.calls).size !== item.calls.length)
     throw new Error('Unsupported or invalid adaptive record.');
   const data = item.data as AdaptiveData;
+  const policy = item.nativePolicy === undefined ? undefined : validateNativePolicy(item.nativePolicy);
+  if (data?.questionAnswers?.some(answer => answer.native.runID !== item.runID ||
+      !policy?.questions.some(question => isDeepStrictEqual(question, answer.native))))
+    throw new Error('Adaptive product answer lacks its actual native policy receipt.');
   if (item.transfer !== undefined) {
     const lineage = objectWithKeys(item.transfer, 'adaptive transfer lineage', ['sourceSessionID', 'sourceSequence', 'sourceDigest',
       'ownerEpoch', 'operationID', 'nativeUserMessageID', 'requestDigest']);
@@ -81,6 +88,10 @@ export class AdaptiveStore {
   commit(sessionID: string, previous: AdaptiveRecord | undefined, value: Body): AdaptiveRecord {
     const next = this.prepare(sessionID, previous, value);
     if (previous && (next.admissionDigest !== previous.admissionDigest ||
+        (previous.nativePolicy !== undefined && (next.nativePolicy === undefined ||
+          !isDeepStrictEqual(next.nativePolicy.answers, previous.nativePolicy.answers) ||
+          !isDeepStrictEqual(next.nativePolicy.configured, previous.nativePolicy.configured) || next.nativePolicy.profile !== previous.nativePolicy.profile ||
+          !isDeepStrictEqual(next.nativePolicy.questions.slice(0, previous.nativePolicy.questions.length), previous.nativePolicy.questions))) ||
         !isDeepStrictEqual(next.transfer, previous.transfer) ||
         ['runID', 'sessionID', 'directory', 'worktree', 'agent', 'userMessageID'].some(key =>
           next[key as keyof AdaptiveRecord] !== previous[key as keyof AdaptiveRecord]))) throw new Error('Adaptive immutable binding changed.');

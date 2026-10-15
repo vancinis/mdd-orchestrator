@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, rmSync, writeFileSync, utimesSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, utimesSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -14,6 +14,10 @@ import { ProgressGuard } from '../dist/progress.js';
 import { QuestionCheckpointStore } from '../dist/question-checkpoint.js';
 import { riskRecoveryEnvelope, routeEnvelope } from '../dist/native-intake.js';
 import { assessTransfer } from '../dist/transfer.js';
+import { AdaptiveLow } from '../dist/adaptive-low.js';
+import { AdaptiveStore } from '../dist/adaptive-store.js';
+import { projectAdaptiveTransfer, adaptiveTransferRequest } from '../dist/adaptive-transfer.js';
+import { nativeOperation } from '../dist/adaptive-native.js';
 
 const runID = 'run-owned';
 const sourceID = 'ses-source';
@@ -21,6 +25,92 @@ const targetID = 'ses-target';
 function root(t) { const path = mkdtempSync(join(tmpdir(), 'mdd-owner-')); t.after(() => rmSync(path, { recursive: true, force: true })); return path; }
 function ownerPath(root) { return join(root, '.mdd', `owner-${createHash('sha256').update(runID).digest('hex')}.json`); }
 function claim(store, directory) { return store.claim({ runID, sessionID: sourceID, directory, worktree: directory }); }
+
+function policyTransfer(t) {
+  const directory = root(t); writeFileSync(join(directory, 'own.txt'), 'original');
+  const scope = { complete: true, reads: ['own.txt'], writes: ['own.txt'] };
+  const contract = { contractVersion: 1, objective: 'Replace bounded text.',
+    acceptance: { goal: 'Replacement', requirements: [{ id: 'R1', description: 'Replace text', scenarios: [{ id: 'S1', given: 'Original', when: 'Replaced', then: 'Updated' }] }] },
+    exclusions: [], decisions: [], productQuestions: [], scope,
+    context: { technical: 'understood', dependencies: 'bounded', reason: 'Inspected source.', fingerprints: [{ path: 'own.txt', digest: createHash('sha256').update('original').digest('hex') }] },
+    assessment: { assessmentVersion: 1, complexity: 'low', impact: 'low' },
+    assignments: [{ id: 'A1', path: 'own.txt', description: 'Replace text', scenarios: ['S1'], decisions: [], dependsOn: [], scope,
+      obligations: { source: [{ id: 'E1', description: 'Read source', paths: ['own.txt'] }], checks: [] } }] };
+  const low = new AdaptiveLow(contract, directory), store = new AdaptiveStore(directory), ownership = new RunOwnershipStore(directory), questions = new QuestionCheckpointStore(directory);
+  const id = 'adaptive-internal-policy-unit';
+  const source = store.commit(sourceID, undefined, { runID: id, sessionID: sourceID, directory, worktree: directory, agent: 'mdd-orchestrator', userMessageID: 'source-user', stage: 'active', data: low.serialize(), calls: [] });
+  ownership.claim({ runID: id, sessionID: sourceID, directory, worktree: directory }); ownership.bindAdaptive(sourceID, id);
+  const operation = nativeOperation({ kind: 'transfer', args: { sourceSessionID: sourceID, runID: id, operationID: 'policy-hop', messageID: 'target-message' } });
+  let record = { version: 2, parent: targetID, sequence: 0, runID: id, requirements: contract.objective, known: { mode: 'interactive' },
+    adaptive: { directory, worktree: directory, nonce: 'exact-policy-question', purpose: 'operation', operation,
+      generation: { runID: id, sequence: source.sequence, digest: source.digest, epoch: 0, handle: low.status().selection.handle, sources: low.policySources() } },
+    state: 'prepared', slot: { kind: 'adaptive', args: { questions: [{ header: 'Approval', question: 'Authorize this exact bounded transfer?', multiple: false, options: [{ label: 'Approve operation', description: 'Authorize only this operation.' }] }] } }, clarifications: [], deferred: [], clarificationAnswers: [] };
+  questions.write(targetID, record); ownership.prepareAdaptivePolicyQuestion(store, source, record);
+  record = { ...record, sequence: 1, state: 'pending', callID: 'native-question-call' }; questions.write(targetID, record);
+  record = { ...record, sequence: 2, state: 'answered', answer: [['Approve operation']] }; questions.write(targetID, record);
+  const { answer, ...rest } = record; record = { ...rest, sequence: 3, state: 'settled', nativeReceipt: { callID: rest.callID, answers: answer } }; questions.write(targetID, record);
+  const lineage = { sourceSessionID: sourceID, sourceSequence: source.sequence, sourceDigest: source.digest, ownerEpoch: 0,
+    operationID: 'policy-hop', nativeUserMessageID: 'target-user', requestDigest: createHash('sha256').update(adaptiveTransferRequest(source)).digest('hex') };
+  const target = projectAdaptiveTransfer(store, source, { sessionID: targetID, directory, worktree: directory, agent: 'mdd-orchestrator' }, lineage);
+  return { directory, store, ownership, questions, source, target, record };
+}
+
+test('AL05a ownership: only a consumed exact policy receipt is exempt from target occupancy', t => {
+  const f = policyTransfer(t);
+  assert.throws(() => f.ownership.claimAdaptiveTarget(f.store, f.source, f.target, 0), /occupied/);
+  f.ownership.consumeAdaptivePolicyQuestion(f.store, f.source, f.record);
+  assert.equal(f.ownership.matchingAdaptivePolicyQuestion(f.store, f.source, targetID, 'policy-hop'), true);
+  f.ownership.claimAdaptiveTarget(f.store, f.source, f.target, 0);
+  f.ownership.beginAdaptiveTransfer(f.store, f.source, targetID, 'policy-hop');
+  f.ownership.publishAdaptiveTransfer(f.store, f.source, f.target);
+  f.ownership.finishAdaptiveTransfer(f.store, f.source, f.target);
+  assert.equal(f.ownership.read(f.source.runID).policyQuestion, undefined);
+  assert.deepEqual(f.questions.read(targetID), f.record, 'consumed approval receipt must never be swept or deleted');
+});
+
+test('AL05a ownership: the durable prepared source fence prevents actor reservation and unapproved publication', t => {
+  const f = policyTransfer(t), owner = f.ownership.read(f.source.runID);
+  const cold = new RunOwnershipStore(f.directory);
+  assert.throws(() => cold.reserve(f.source.runID, sourceID, 'competing-actor', owner.epoch), /unconfirmed/);
+  assert.throws(() => cold.publishAdaptiveUpdate(f.store, f.source, { ...f.source }));
+  const foreign = { ...f.record, adaptive: { ...f.record.adaptive, nonce: 'another-question' } };
+  assert.throws(() => cold.releaseAdaptivePolicyQuestion(foreign), /unconfirmed/);
+  assert.deepEqual(cold.read(f.source.runID), owner);
+});
+
+for (const field of ['digest', 'sequence', 'owner', 'workspace']) test(`AL05a ownership: a changed source fence ${field} cannot match a retained receipt`, t => {
+  const f = policyTransfer(t); f.ownership.consumeAdaptivePolicyQuestion(f.store, f.source, f.record);
+  const path = join(f.directory, '.mdd', `owner-${createHash('sha256').update(f.source.runID).digest('hex')}.json`);
+  const owner = JSON.parse(readFileSync(path, 'utf8'));
+  if (field === 'digest') owner.policyQuestion.digest = 'f'.repeat(64);
+  if (field === 'sequence') owner.policyQuestion.sequence++;
+  if (field === 'owner') owner.ownerSessionID = 'foreign-owner';
+  if (field === 'workspace') owner.directory += '-foreign';
+  writeFileSync(path, JSON.stringify(owner));
+  if (field === 'owner') assert.throws(() => f.ownership.matchingAdaptivePolicyQuestion(f.store, f.source, targetID, 'policy-hop'), /cannot be confirmed/);
+  else assert.equal(f.ownership.matchingAdaptivePolicyQuestion(f.store, f.source, targetID, 'policy-hop'), false);
+  assert.throws(() => f.ownership.claimAdaptiveTarget(f.store, f.source, f.target, 0));
+  assert.equal(f.ownership.parentClaim(targetID), undefined);
+});
+
+for (const kind of ['pending', 'unrelated', 'stale', 'foreign', 'fixed', 'changed workspace', 'changed handle', 'changed answer', 'changed call'])
+  test(`AL05a ownership: ${kind} question never receives the consumed-approval occupancy exception`, t => {
+    const f = policyTransfer(t); f.ownership.consumeAdaptivePolicyQuestion(f.store, f.source, f.record);
+    let record = structuredClone(f.record);
+    if (kind === 'pending') { record.state = 'pending'; delete record.nativeReceipt; }
+    if (kind === 'unrelated') record.adaptive.operation.args.operationID = 'other-operation';
+    if (kind === 'stale') record.adaptive.generation.sequence++;
+    if (kind === 'foreign') record.adaptive.operation.args.sourceSessionID = 'another-source';
+    if (kind === 'changed workspace') record.adaptive.directory += '-foreign';
+    if (kind === 'changed handle') record.adaptive.generation.handle = 'another-handle';
+    if (kind === 'changed answer') record.nativeReceipt.answers = [['Pause']];
+    if (kind === 'changed call') { record.callID = 'other-call'; record.nativeReceipt.callID = 'other-call'; }
+    if (kind === 'fixed') record = { version: 1, parent: targetID, sequence: 4, requirements: 'Legacy preflight', known: {}, state: 'prepared', slot: { kind: 'preflight', args: f.record.slot.args }, clarifications: [], deferred: [], clarificationAnswers: [] };
+    const name = `.mdd/question-${createHash('sha256').update(targetID).digest('hex')}.json`;
+    new LocalFiles(f.directory).update(name, () => JSON.stringify(record), 160000);
+    assert.throws(() => f.ownership.claimAdaptiveTarget(f.store, f.source, f.target, 0));
+    assert.equal(f.ownership.parentClaim(targetID), undefined);
+  });
 
 test('worker reservation holds both calls through reverse settlement and rejects stale CAS', t => {
   const directory = root(t); const store = new RunOwnershipStore(directory);
