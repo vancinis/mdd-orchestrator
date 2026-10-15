@@ -167,7 +167,7 @@ not a complete task artifact store.
   - Commit: `adfe216f331ae3bbae95b06c4c4c4cb264b09f88`
     (`feat(preflight): resolve task storage automatically`).
 
-- [ ] **PF-4 — Integrate current main and publish the verified combined work.**
+- [x] **PF-4 — Integrate current main and publish the verified combined work.**
   - Authorized by explicit user request and native "Autorizar Git configurado".
   - Incoming main: `2721c54ae1c7e620d094352f168c035c4a09a751`; local boundary:
     `c0fa226`. Both sides have four commits beyond their common base.
@@ -190,7 +190,11 @@ not a complete task artifact store.
   - Independent verification preserved both parents' features, found no integration
     blocker, passed typecheck and 105 focused tests, and verified source/index
     hashes unchanged. No conflict markers or unmerged index entries remain.
-  - Merge commit and normal remote publication: pending.
+  - Merge commit: `b1d1d42e89da2064f5792d942332d8fa7b475d48`
+    (`chore: integrate main with preflight improvements`).
+  - Fresh fetch confirmed incoming main was included. Normal `HEAD:main` push
+    succeeded and `git ls-remote origin refs/heads/main` confirmed the exact merge
+    identity. No force push, credential inspection, PR or active installation.
 
 ## Verification and closure
 
@@ -220,9 +224,10 @@ not a complete task artifact store.
 - PF-3 implemented and verified: automatic storage, no new native storage question,
   compatible legacy readers, explicit block on historical unresolved envelopes.
 - PF-3 committed as `adfe216f331ae3bbae95b06c4c4c4cb264b09f88`.
-- Implementation complete. Closeout is documentation-only; preserve the final
-  functional evidence above. No push, PR, migration or active installation done.
+- Implementation and authorized direct-main delivery complete. Closeout is
+  documentation-only; preserve the functional evidence above. No PR, migration
+  or active installation performed.
 - Pending external checks: live-host/model proof and opt-in managed Engram smoke
   were not run; two Windows symlink tests remain skipped due privilege limitations.
-- Engram full task mirror remains pending; local document is complete and
-  session summaries were saved. Publishing/installing requires user authorization.
+- Engram full task mirror remains pending; local document is complete and session
+  summaries were saved. Active installation still requires separate authorization.
