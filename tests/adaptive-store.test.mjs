@@ -15,6 +15,45 @@ import { RunOwnershipStore } from '../dist/run-ownership.js';
 import { defaultSettings } from '../dist/settings.js';
 
 const hash = value => createHash('sha256').update(typeof value === 'string' ? value : JSON.stringify(value)).digest('hex');
+
+for (const boundary of ['freeze', 'pending', 'settlement']) for (const mode of ['before', 'after', 'readback'])
+  test(`AL-04c store: ${mode} ${boundary} fault preserves structured stage and publication fences`, async t => {
+    const f = fixture(t); await f.admit();
+    const start = () => f.runner.escalateAdaptiveInternal({ handle: f.handle(), depth: 'high',
+      rationale: 'Positive technical complexity requires deep planning.', assessment: { assessmentVersion: 1, complexity: 'high', impact: 'low' },
+      context: f.contract.context }, f.runtime);
+    const original = f.store.read('parent').admissionDigest;
+    if (boundary === 'freeze') f.fault.mode = mode;
+    if (boundary === 'freeze' && mode !== 'after') await assert.rejects(start(), /publication|write|unconfirmed/);
+    else await start();
+    let args;
+    if (boundary !== 'freeze') {
+      await f.select(f.runner, { actor: 'mdd-propose' });
+      if (boundary === 'pending') f.fault.mode = mode;
+      if (boundary === 'pending' && mode !== 'after') await assert.rejects(f.runner.before(f.call, f.runner.status('parent').task), /publication|write|unconfirmed/);
+      else args = await f.runner.before(f.call, f.runner.status('parent').task);
+      if (boundary === 'settlement') {
+        f.fault.mode = mode;
+        const settle = () => f.runner.after(f.call, args, JSON.stringify({ verificationVersion: 1, outcome: 'passed',
+          evidenceSummary: 'Real proposal completed.', artifact: 'Proposal for the held objective only.' }));
+        if (mode === 'after') await settle(); else await assert.rejects(settle(), /publication|write|unconfirmed/);
+      }
+    }
+    const saved = f.store.read('parent'); assert.equal(saved.admissionDigest, original);
+    assert.equal(saved.data.receipts.some(item => item.actor === 'mdd-apply'), false);
+    if (boundary === 'freeze') assert.equal(!!saved.data.continuation, mode !== 'before');
+    if (boundary === 'pending' && mode !== 'after') assert.equal(args, undefined, 'failed pending publication exposes no provider arguments');
+    const cold = f.cold(), restored = await cold.restore(f.runtime);
+    if (saved.data.state === 'await-result') {
+      assert.equal(restored.restored, false); assert.match(restored.reason, /quarantined/);
+      await cold.recoverAdaptiveInternal(f.runtime);
+    } else assert.equal(restored.restored, true, restored.reason);
+    const status = cold.status('parent');
+    if (saved.data.continuation) assert.equal(status.continuation.next,
+      boundary === 'settlement' && mode !== 'before' ? 'mdd-spec' : 'mdd-propose');
+    assert.equal(status.task, undefined);
+  });
+
 function fixture(t) {
   const temp = mkdtempSync(join(tmpdir(), 'mdd-durable-adaptive-')), root = join(temp, 'source'), storage = join(temp, 'runtime');
   mkdirSync(root); mkdirSync(storage); t.after(() => rmSync(temp, { recursive: true, force: true }));

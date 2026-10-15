@@ -15,6 +15,45 @@ import { defaultSettings } from '../dist/settings.js';
 import { LocalFiles } from '../dist/local-files.js';
 
 const hash = value => createHash('sha256').update(typeof value === 'string' ? value : JSON.stringify(value)).digest('hex');
+
+test('AL-04c transfer: chained native hops retain actual planning reports, source proof and frozen depth', async t => {
+  const f = fixture(t); await f.admit(); await f.apply();
+  await f.runner.escalateAdaptiveInternal({ handle: f.handle(), depth: 'high', rationale: 'Deep coordination is needed for the remaining technical proof.',
+    assessment: { assessmentVersion: 1, impact: 'low', complexity: 'high' },
+    context: { ...f.contract.context, fingerprints: [{ path: 'own.txt', digest: hash('updated') }] } }, f.runtime);
+  await f.select(f.runner, f.runtime, { actor: 'mdd-propose' });
+  const call = { sessionID: 'source', callID: 'actual-propose' }, args = await f.runner.before(call, f.runner.status('source').task);
+  await f.runner.after(call, args, JSON.stringify({ verificationVersion: 1, outcome: 'passed', evidenceSummary: 'Actual proposal retained.', artifact: 'A real bounded technical proposal.' }));
+  const initial = f.store.read('source'), old = f.handle(); await f.transfer('same-operation');
+  assert.deepEqual(f.store.read('target').data.continuation, initial.data.continuation);
+  assert.notEqual(f.handle(f.runner, f.target), old); assert.equal(f.runner.status('target').continuation.next, 'mdd-spec');
+  const third = { ...f.target, sessionID: 'third' }, source = f.store.read('target');
+  f.inspect.intake = async (here, text, messageID, scope) => {
+    assert.deepEqual(here, third); assert.equal(scope, 'latest'); assert.equal(messageID, 'third-message');
+    assert.equal(text, f.request('target')); return 'third-user';
+  };
+  f.inspect.confirmAdaptiveTransfer = async (here, receipt, runID) => {
+    assert.deepEqual(here, third); assert.equal(runID, source.runID);
+    assert.equal(receipt.sourceSessionID, 'target'); assert.equal(receipt.targetSessionID, 'third');
+    assert.equal(receipt.sourceSequence, source.sequence); assert.equal(receipt.sourceDigest, source.digest);
+    assert.equal(receipt.nativeUserMessageID, 'third-user'); assert.equal(receipt.requestDigest, hash(f.request('target')));
+    assert.deepEqual(f.ownership.confirmAdaptiveReceipt(runID, 'third', f.store), receipt);
+  };
+  await f.runner.transferAdaptiveInternal({ sourceSessionID: 'target', runID: source.runID, operationID: 'same-operation', messageID: 'third-message' }, third);
+  assert.deepEqual(f.store.read('third').data.continuation, initial.data.continuation);
+  assert.equal(f.store.read('third').admissionDigest, initial.admissionDigest);
+  assert.deepEqual(f.runner.status('third').selection.completed, ['A1']);
+  assert.throws(() => f.runner.status('target'), /stale|fenced|authority/);
+  const cold = f.cold(), restored = await cold.restore(third); assert.equal(restored.restored, true, restored.reason);
+  await f.select(cold, third, { actor: 'mdd-spec' });
+  const spec = { sessionID: 'third', callID: 'actual-spec' }, sent = await cold.before(spec, cold.status('third').task);
+  assert.match(sent.prompt, /A real bounded technical proposal/);
+  await cold.after(spec, sent, JSON.stringify({ verificationVersion: 1, outcome: 'passed', evidenceSummary: 'Actual held specification.',
+    artifact: 'The held acceptance was specified without expansion.', domain: 'project', acceptance: f.contract.acceptance }));
+  assert.equal(cold.status('third').continuation.next, 'mdd-design');
+  await assert.rejects(f.runner.after(call, args, '{}'), /stale|fenced|authority/);
+});
+
 function fixture(t) {
   const temp = mkdtempSync(join(tmpdir(), 'mdd-adaptive-transfer-')), root = join(temp, 'source'), storage = join(temp, 'runtime');
   mkdirSync(root); mkdirSync(storage); writeFileSync(join(root, 'own.txt'), 'original');

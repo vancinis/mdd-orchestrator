@@ -85,7 +85,7 @@ not a current Risk verdict and selects no route. Current `parseRiskVerdict` stil
 equal low/high `route` and `complexity`. Public adaptive low and structured medium execution are
 not active. Summary level `medium` remains a presentation choice, not a runtime route.
 
-### Internal adaptive admission, evidence, recovery and transfer (AL-02/AL-04b)
+### Internal adaptive admission, evidence, recovery, transfer and continuation (AL-02/AL-04c)
 
 An unregistered internal lane supports `await-selection -> authorized-actor ->
 await-result -> await-selection`. The parent selects one necessary Explore, Risk, Plan, Apply
@@ -123,7 +123,7 @@ epoch), absence of pending intake/child admission, and native parent inspection 
 | Commands | Reuse structured chronological execution and held-check accounting. Required applicable failed, interrupted or blocked checks prevent verified closure; missing dispositions are rejected. Optional failures remain visible. Unconditional checks cannot be waived, command mismatches require an explicit supported replacement, and retries retain complete attempts and reasons. Supplemental entries cannot hide a held command retry. Re-preparing unchanged source cannot erase execution history; a malformed disposition does not erase an otherwise readable reported attempt. |
 | Source-only proof | Separate obligation readback and linked source assessments can support verified semantic rows without invented command IDs. Command-backed rows cite actual reported successful final execution IDs. All held source and semantic links must be covered exactly; exit codes alone do not prove acceptance. |
 | Freshness and assurance | Submission and verified closure independently recheck the prepared local fingerprints and completed prerequisites. This is structured parent-reported consistency, **not independent execution or applicability attestation**. Any malformed resubmission removes the current match until corrected. |
-| Closure | All assignments must have actual accepted Apply completion and all required evidence/semantic links must match. No Plan or Verify receipt is mandatory. `completed` records snapshot-bound reported verification; `closed-unverified` requires explicit remaining limits and never earns verified completion. Terminal status retains coverage, failed/optional dispositions, limits and assurance; next-action grants no new work or review authority. |
+| Closure | All effective assignments must have actual accepted Apply completion and all required evidence/semantic links must match. Un-escalated low requires neither Plan nor Verify; structured continuation additionally requires its actual planning sequence and current structured Verify. `completed` records snapshot-bound reported verification; `closed-unverified` requires explicit remaining limits and never earns verified completion. Terminal status grants no new work or review authority. |
 | Explicit repair | A completed writer can be selected again only for failed or stale evidence, referencing its latest actual Apply receipt. Reinspect only its existing footprint, invalidate overlap/dependency-sensitive completion and proof, and retain unrelated completed fingerprints and prior evidence. Old command proof is invalidated conservatively; checks must follow a fresh final snapshot. There are at most four completed-assignment repairs and 64 actor receipts, with no automatic retry or new scope. Overlapping prerequisites must be explicitly repaired first. |
 
 #### Durable same-parent recovery
@@ -147,7 +147,7 @@ tampered proof and unsafe storage rather than treating them as empty.
 The injected-store path has deterministic native/runtime fault tests, not live-host or model
 attestation. Legacy in-process test hosts without a store remain volatile. An uncorrelated
 reservation or unsafe record remains fenced rather than granting automatic takeover.
-Public version 3 remains inactive. Executable escalation belongs to AL-04c, and public activation
+Public version 3 remains inactive. Structured continuation is internal only; public activation
 belongs to AL-05.
 
 #### Internal native-proven transfer
@@ -173,6 +173,36 @@ source/target endpoints and confirmed claim, epoch and generation/digest lineage
 receipt never substitutes for the current hop's native authorization during cold finish.
 An aborted target's retired claim is not treated as an empty transfer destination. Verification
 uses deterministic local native/runtime harnesses, not a live host, model or native approval.
+
+#### Internal executable structured continuation
+
+The coordinator may freeze **medium: Plan → remaining scoped Apply → Verify**, or **high:
+Propose → Spec → Design → Tasks → remaining scoped Apply → Verify**. Each stage still requires
+an explicit parent selection and a fresh native dispatch handle. Nothing dispatches automatically.
+Closed runs cannot reopen, and ordinary low selection retains its five-actor allowlist.
+
+| Boundary | Guarantee |
+|---|---|
+| Freeze | The internal escalation operation serializes with selection/evidence, proves the exact native parent/workspace, checks idle ownership and its epoch after inspection, and validates current source and retained completion. Positive impact or complexity, explicit parent rationale and understood bounded context are required. Unknown context alone is neither high classification nor expanded authorization. |
+| Immutable authority | Depth, actual reports, remaining-work revision, retained source proof and semantic bindings live outside the original admission contract. Its digest and diff baseline never change. Acceptance, exclusions, business decisions, assignment IDs, scenario/decision links, exact footprints and source obligations remain held. Scope or business expansion requires a native user decision, never an approval flag. |
+| Real planning | Actors receive their actual structured phase format and real predecessor reports. Plan/Spec must preserve held acceptance; Plan/Design must preserve held decisions. Plan/Tasks report only unfinished held IDs, preserving source bindings, dependencies and checks while refining technical descriptions or adding dependencies/checks. The combined real retained-plus-remaining plan must cover every scenario and applicable decision. An empty remaining plan is valid only when all work is retained. |
+| Effective execution | Validated remaining deliverables replace the remaining assignment view, rather than merely summarize it. Readiness, scoped editing, transitive dispatch prerequisites, evidence coverage and closure all use that view. Retained valid writers cannot repeat or overlap remaining outputs. Changed proof requires explicit reinspection and bounded repair, never silent PASS or automatic redo. |
+| Verify and closure | Structured Verify is mandatory and checks every effective assignment, scenario and decision using the existing structured verification contract. Its reported executions must exactly match actual parent-reported check history; scoped children still cannot execute commands. Parent final snapshot/readback/check accounting remain separately necessary. A changed snapshot or command history requires another actual Verify. Source-only low closure remains unchanged; structured verified rows require real successful command references, not invented checks. |
+| Recovery and transfer | Reports are bounded journal data, not external fixed-phase artifact identities. Restoration revalidates actual chronological receipt links, stage-specific fields, full held semantics and effective work before exposing fresh handles. Pending Plan/high/Verify actors remain quarantined until exact native stopped proof, then receive an interrupted failure, never a fake Apply. Existing CAS/readback, former-owner fences and exact-hop transfer lineage apply unchanged. |
+
+This internal controller is not a second Workflow, graph scheduler, public tool, command executor,
+permission expansion, Security/Judgment Day entry point or live-model assurance claim. Existing
+receipt, report and source budgets may refuse an oversized prompt without dispatching it.
+
+Each successful structured native receipt separately retains the accepted parsed report payload.
+Verify also freezes its snapshot identity and exact parent command history before native arguments
+are exposed, rechecks that context at acceptance, and retains it in the accepted receipt. Restore
+requires continuation projections to equal those receipt payloads and contexts, with parent snapshot
+and execution-history links preserved. Recomputing a journal checksum cannot make a projection-only
+Plan rewrite or moved Verify snapshot agree with the unchanged native receipt. Historical ordinary
+low receipts remain compatible; structured receipts lacking the accepted payload fail closed.
+These are relational consistency checks, not cryptographic authentication against an attacker who
+rewrites every receipt and evidence source, nor independent command-execution attestation.
 
 ## 3. Kernel API and validation
 
