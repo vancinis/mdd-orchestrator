@@ -9,12 +9,14 @@ import { NativeIntake } from '../dist/native-intake.js';
 import { ProgressGuard } from '../dist/progress.js';
 import { RunOwnershipStore } from '../dist/run-ownership.js';
 import { CheckpointStore } from '../dist/checkpoint.js';
+import { AdaptiveStore } from '../dist/adaptive-store.js';
 import { WorkerFence } from '../dist/worker-fence.js';
 import { defaultSettings } from '../dist/settings.js';
 import { createInspector } from '../dist/opencode-plugin.js';
 
-async function applied(t, checks = []) {
+async function applied(t, checks = [], durable = false) {
   const f = fixture(t); f.contract.assignments[0].obligations.checks = checks;
+  if (durable) f.options.adaptiveStore = new AdaptiveStore(f.root);
   await f.admit(); await f.select();
   const args = await f.runner.before(f.call, f.runner.status(f.runtime.sessionID).task);
   writeFileSync(join(f.root, 'own.txt'), 'after');
@@ -322,6 +324,29 @@ test('AL-03: malformed disposition cannot erase a newly reported failed command 
 });
 
 const digest = text => createHash('sha256').update(text).digest('hex');
+test('AL-04a: cold restore retains changed Apply output without duplicating the completed assignment', async t => {
+  const f = await applied(t, [], true), oldHandle = f.handle();
+  const cold = new PhaseRunner(f.inspect, f.options);
+  assert.equal((await cold.restore(f.runtime)).restored, true);
+  const restored = cold.status(f.runtime.sessionID);
+  assert.deepEqual(restored.selection.completed, ['A1']);
+  assert.notEqual(restored.selection.handle, oldHandle);
+  assert.equal(restored.task, undefined);
+  await assert.rejects(cold.selectAdaptiveInternal({ handle: restored.selection.handle, actor: 'mdd-apply',
+    assignmentID: 'A1', purpose: 'Do not duplicate completed work.' }, f.runtime), /repair|completed/);
+  assert.equal(readFileSync(join(f.root, 'own.txt'), 'utf8'), 'after');
+});
+
+test('AL-04a: a never-started selected actor restores actorlessly without its dispatch token', async t => {
+  const f = fixture(t); f.options.adaptiveStore = new AdaptiveStore(f.root); await f.admit(); await f.select();
+  const old = f.runner.status(f.runtime.sessionID).task;
+  const cold = new PhaseRunner(f.inspect, f.options);
+  assert.equal((await cold.restore(f.runtime)).restored, true);
+  assert.equal(cold.status(f.runtime.sessionID).state, 'await-selection');
+  assert.equal(cold.status(f.runtime.sessionID).task, undefined);
+  await assert.rejects(cold.before(f.call, old), /ready|select|handle|dispatch/);
+});
+
 function fixture(t, overrides = {}) {
   const root = mkdtempSync(join(tmpdir(), 'mdd-adaptive-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));

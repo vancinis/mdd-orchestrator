@@ -85,9 +85,9 @@ not a current Risk verdict and selects no route. Current `parseRiskVerdict` stil
 equal low/high `route` and `complexity`. Public adaptive low and structured medium execution are
 not active. Summary level `medium` remains a presentation choice, not a runtime route.
 
-### Internal adaptive admission and evidence (AL-02/AL-03)
+### Internal adaptive admission, evidence and recovery (AL-02/AL-04a)
 
-An unregistered, process-local lane now supports `await-selection -> authorized-actor ->
+An unregistered internal lane supports `await-selection -> authorized-actor ->
 await-result -> await-selection`. The parent selects one necessary Explore, Risk, Plan, Apply
 or Verify actor with a purpose and assignment identity; no fixed Workflow or omitted Plan
 receipt is fabricated. Selection boundaries carry no phase, workflow, phase report format
@@ -101,7 +101,7 @@ not the full contract body. Public startup and the inactive `routingVersion: 3` 
 | Selection | Unresolved product ambiguity pauses all actors. Technical uncertainty permits a brief scoped Explore only. Apply requires low impact independently of complexity, understood bounded dependencies, current fingerprints, completed prerequisites and real scoped-editor capability. |
 | Native execution | Exact issued handles are consumed once, with one actor/writer and existing native result/liveness inspection. Apply edits only through the existing single-child WorkerFence and `mdd_worker_edit`; generic editors, shell and out-of-scope writes remain denied. Unsafe bootstrap/config footprints and unsupported hosts have no serial fallback. |
 | Settlement | Every confirmed stopped actual actor returns to selection. Failed, malformed or absent receipts earn no progress or automatic retry; another writer requires an explicit repair reference. Reports cannot broaden acceptance/scope or decide product questions. Internal Risk uses the independent future assessment, never a historical Risk verdict. |
-| Volatility | Before execution the existing pending-child marker is written with `resumable:false`. No adaptive checkpoint, dossier, stored artifact or durable completion receipt is emitted. Process loss retains stopped-child protection and data-only recovery, never contract replay. |
+| Persistence | Production injects a separate bounded adaptive record/store under the product data root, using existing LocalFiles protections. It is not a fixed checkpoint, dossier or fabricated phase artifact. Pending native intent is durable before provider arguments; an accepted receipt is durable before the settled marker and ownership release. The existing child marker remains `resumable:false` for fixed-checkpoint recovery. |
 
 Scoped actors cannot execute commands. Real planned checks retain their requiredness and
 applicability as unexecuted obligations; source-only work uses a separate small source-obligation
@@ -126,8 +126,29 @@ epoch), absence of pending intake/child admission, and native parent inspection 
 | Closure | All assignments must have actual accepted Apply completion and all required evidence/semantic links must match. No Plan or Verify receipt is mandatory. `completed` records snapshot-bound reported verification; `closed-unverified` requires explicit remaining limits and never earns verified completion. Terminal status retains coverage, failed/optional dispositions, limits and assurance; next-action grants no new work or review authority. |
 | Explicit repair | A completed writer can be selected again only for failed or stale evidence, referencing its latest actual Apply receipt. Reinspect only its existing footprint, invalidate overlap/dependency-sensitive completion and proof, and retain unrelated completed fingerprints and prior evidence. Old command proof is invalidated conservatively; checks must follow a fresh final snapshot. There are at most four completed-assignment repairs and 64 actor receipts, with no automatic retry or new scope. Overlapping prerequisites must be explicitly repaired first. |
 
-Public version 3 remains inactive. Internal contracts and closure are volatile; full durable
-resume, transfer and escalation belong to AL-04, and public activation belongs to AL-05.
+#### Durable same-parent recovery
+
+Adaptive record version 1 carries immutable original admission bytes, current context and
+assessment, actual correlated receipts, completed output and unchanged-input fingerprints,
+source snapshots and evidence matches, historical failed checks, invalidation/repair counts,
+closure, consumed call IDs and a sequence/digest. Ordinary status is not the serialization
+contract. Bounds and relational validation reject unsupported versions, contradictory completion,
+tampered proof and unsafe storage rather than treating them as empty.
+
+| Recovery boundary | Guarantee |
+|---|---|
+| Publication | Parent-locked bootstrap intent precedes parent binding and owner claim. Every journal change uses staged CAS and exact readback before in-memory authority changes. An ambiguous outcome fences authority until reconciliation, never a blind retry. Fixed admission/reset/transfer cannot bypass occupied adaptive data, including unreadable records. |
+| Fresh authority | Restoration proves the native parent, exact workspace and current ownership after asynchronous inspection. Settled or unstarted records restore actorlessly with fresh selection handles; dispatch tokens, provider arguments, native approvals and selected actor capabilities are never deserialized. CAS generation changes fence old-process callbacks and handles. |
+| Pending children | Unknown or running attempts retain quarantine and reservation. Even a stopped child requires explicit recovery with actual native stopped proof; user attestation or abort acknowledgment alone is insufficient. Recovery records a failed interrupted receipt before release, preserves partial source, and never automatically retries Apply. |
+| Dispatch-time prerequisites | Pending Apply retains exact successful receipt links for its complete prerequisite chain. These validated historical admission links survive current proof invalidation, so an interrupted child can roundtrip and settle as failed after native stopped proof. They never restore completion or authorize a new writer; fresh Apply still requires current completed prerequisites and explicit repair. |
+| Retained work | Changed settled output is compared with its settled proof, not its original admission digest. Stale output, unchanged eligibility input, overlap and dependent proof invalidate affected completion without refreshing stale context or redoing unrelated work. Original admission bytes remain the final diff baseline. |
+| Evidence and closure | Failed attempts remain snapshot-bound historical evidence, not current PASS. Stale proof loses its match; verified closure becomes closed-unverified without reopening execution. Repair still requires the latest actual Apply receipt, current source context and the finite repair budget. |
+
+The injected-store path has deterministic native/runtime fault tests, not live-host or model
+attestation. Legacy in-process test hosts without a store remain volatile. An uncorrelated
+reservation or unsafe record remains fenced rather than granting automatic takeover.
+Public version 3 remains inactive. Adaptive transfer and executable escalation belong to
+AL-04b/AL-04c, and public activation belongs to AL-05.
 
 ## 3. Kernel API and validation
 

@@ -46,6 +46,8 @@ import { relative, resolve } from 'node:path';
 import { supplementKnowledge } from './project-knowledge.js';
 import type { KnowledgeResolution, KnowledgeDiagnostics, KnowledgeSelection } from './project-knowledge.js';
 import { AdaptiveLow, adaptiveContract, adaptiveSelection } from './adaptive-low.js';
+import { AdaptiveStore, AdaptiveCommitError } from './adaptive-store.js';
+import type { AdaptiveRecord } from './adaptive-store.js';
 
 export type Runtime = { sessionID: string; agent: string; directory: string; worktree: string };
 export type TaskCall = { sessionID: string; callID: string };
@@ -264,7 +266,8 @@ type Solo = {
   findings: { explorationID: string; outcome: 'passed' | 'failed'; summary: string; findings: string; concerns: Concern[] }[];
 };
 type AdaptiveRun = { id: string; runtime: Runtime; low: AdaptiveLow; userMessageID: string; calls: Set<string>;
-  args?: TaskArgs; token?: string; callID?: string; dispatchedArgs?: TaskArgs; ownerEpoch?: number; dispatching?: true };
+  args?: TaskArgs; token?: string; callID?: string; dispatchedArgs?: TaskArgs; ownerEpoch?: number; dispatching?: true;
+  record?: AdaptiveRecord; fenced?: true; cold?: true };
 const SOLO_FINDINGS_KEPT = 4;
 /** Consent-side material the intake owns; the runner only carries it into the preserved record. */
 export type Consent = { questionReceipts: PriorReceipt[]; usedMessages: string[]; proposed: string[] };
@@ -506,7 +509,30 @@ export class PhaseRunner {
     knowledge?: (runtime: Runtime, selection: KnowledgeSelection, memory?: EngramHttp) => Promise<KnowledgeResolution>;
     /** Phase-scoped production read fence. confined:true is retained only for legacy synthetic Apply hosts. */
     workerCapability?: Readonly<{ confined: true } | { phase: 'mdd-explore'; readOnly: true; applyEditing?: true }>;
-    now?: () => number; progress?: ProgressGuard; dossier?: RunDossierStore; checkpoint?: CheckpointStore; ownership?: RunOwnershipStore; telemetry?: (root: string, value: TelemetryEvent, now: number) => TelemetryResult; lessons?: (root: string, value: LessonInput, now: number) => void; ledger?: (root: string, value: RunLedgerInput, now: number) => void } = {}) {}
+    now?: () => number; progress?: ProgressGuard; dossier?: RunDossierStore; checkpoint?: CheckpointStore; ownership?: RunOwnershipStore; adaptiveStore?: AdaptiveStore; telemetry?: (root: string, value: TelemetryEvent, now: number) => TelemetryResult; lessons?: (root: string, value: LessonInput, now: number) => void; ledger?: (root: string, value: RunLedgerInput, now: number) => void } = {}) {}
+
+  #adaptiveCurrent(run: AdaptiveRun): void {
+    if (run.fenced || run.record && !isDeepStrictEqual(this.options.adaptiveStore!.read(run.runtime.sessionID), run.record))
+      throw new Error('Adaptive authority is stale or publication is unconfirmed; reconcile by native-proven restore.');
+  }
+  #persistAdaptive(run: AdaptiveRun, low: AdaptiveLow, attempt = run.record?.attempt): void {
+    this.#adaptiveCurrent(run);
+    if (this.options.adaptiveStore) {
+      try {
+        run.record = this.options.adaptiveStore.commit(run.runtime.sessionID, run.record, { runID: run.id, ...run.runtime,
+          agent: 'mdd-orchestrator', userMessageID: run.userMessageID, stage: 'active', data: low.serialize(),
+          calls: [...run.calls], ...(attempt ? { attempt } : {}) });
+      } catch (error) { if (!(error instanceof AdaptiveCommitError) || error.uncertain) run.fenced = true; throw error; }
+    }
+    run.low = low;
+  }
+  #changeAdaptive(run: AdaptiveRun, change: (low: AdaptiveLow) => void): void {
+    const low = run.low.copy(); let failure: unknown;
+    try { change(low); } catch (error) { failure = error; }
+    // Failed report submissions can deliberately revoke a match and retain failed attempts.
+    if (!failure || !isDeepStrictEqual(low.serialize(), run.low.serialize())) this.#persistAdaptive(run, low);
+    if (failure) throw failure;
+  }
 
   #captureWorkers(): WorkerPolicy { return Object.freeze({ enabled: this.options.workers?.enabled ?? true }); }
 
@@ -520,7 +546,7 @@ export class PhaseRunner {
         this.#reservations.has(runtime.sessionID) || this.#explorations.has(runtime.sessionID) || this.#explorationBlocked(runtime.sessionID) ||
         this.#solo.has(runtime.sessionID) && this.#solo.get(runtime.sessionID)!.state !== 'settled' ||
         this.options.ownership.parent(runtime.sessionID) || this.options.ownership.intake(runtime.sessionID)?.state === 'pending' ||
-        this.options.checkpoint?.read(runtime.sessionID) || this.options.progress.read(runtime.sessionID)?.state === 'pending')
+        this.options.adaptiveStore?.occupied(runtime.sessionID) || this.options.checkpoint?.read(runtime.sessionID) || this.options.progress.read(runtime.sessionID)?.state === 'pending')
       throw new Error('An existing or unfinished native run occupies this parent; internal admission requires idle ownership.');
     this.assertFreshStart(runtime.sessionID);
   }
@@ -540,13 +566,22 @@ export class PhaseRunner {
       await this.inspect.parent(here);
       this.#adaptiveIdle(here); this.assertFreshStart(here.sessionID, userID); low.assertCurrent();
       const nativeUserID = boundedText(userID, 'native user identity', 256), id = `${ADAPTIVE_RUN_PREFIX}${randomUUID()}`;
-      this.options.ownership!.claim({ ...here, runID: id }); this.options.ownership!.bindParent(here.sessionID, id);
-      this.#adaptive.set(here.sessionID, { id, runtime: here, low, userMessageID: nativeUserID, calls: new Set() });
+      const run: AdaptiveRun = { id, runtime: here, low, userMessageID: nativeUserID, calls: new Set() };
+      if (this.options.adaptiveStore) {
+        this.options.ownership!.bootstrapAdaptive(here.sessionID, id, () => {
+          run.record = this.options.adaptiveStore!.commit(here.sessionID, undefined, { runID: id, ...here,
+            agent: 'mdd-orchestrator', userMessageID: nativeUserID, stage: 'bootstrap', data: low.serialize(), calls: [] });
+        });
+        this.options.ownership!.claim({ ...here, runID: id });
+        this.#persistAdaptive(run, low);
+      } else { this.options.ownership!.claim({ ...here, runID: id }); this.options.ownership!.bindParent(here.sessionID, id); }
+      this.#adaptive.set(here.sessionID, run);
       return this.status(here.sessionID);
     } finally { this.#adaptiveAdmissions.delete(here.sessionID); }
   }
 
   #adaptiveRuntime(run: AdaptiveRun, runtime: Runtime): void {
+    this.#adaptiveCurrent(run);
     if (!isDeepStrictEqual(run.runtime, runtime)) throw new Error('Adaptive coordinator or workspace changed.');
     const owner = this.owner(runtime.sessionID);
     if (this.#adaptive.get(runtime.sessionID) !== run || this.#adaptiveAdmissions.has(runtime.sessionID) || run.dispatching ||
@@ -554,6 +589,85 @@ export class PhaseRunner {
         this.options.ownership!.intake(runtime.sessionID)?.state === 'pending' ||
         owner?.state !== 'idle' || this.options.progress!.read(runtime.sessionID)?.state === 'pending')
       throw new Error('Internal selection requires idle ownership; a native actor is in flight.');
+  }
+
+  async #restoreAdaptive(runtime: Runtime): Promise<{ restored: boolean; reason?: string }> {
+    try {
+      const here = { ...runtime }, store = this.options.adaptiveStore!, saved = store.read(here.sessionID);
+      if (!saved || here.agent !== 'mdd-orchestrator' || saved.directory !== here.directory || saved.worktree !== here.worktree ||
+          resolve(here.directory) !== here.directory || resolve(here.worktree) !== here.worktree ||
+          !this.options.ownership || !this.options.progress || this.options.checkpoint?.read(here.sessionID))
+        throw new Error('Adaptive record, native coordinator, workspace or fixed occupancy differs.');
+      const existing = this.#adaptive.get(here.sessionID);
+      if (existing && !existing.fenced && (!existing.callID || existing.low.state === 'await-result') && isDeepStrictEqual(existing.record, saved)) {
+        this.#adaptiveCurrent(existing);
+        return { restored: existing.low.state !== 'await-result', ...(existing.low.state === 'await-result' ? { reason: 'Pending native attempt remains quarantined; explicit stopped recovery is required.' } : {}) };
+      }
+      // No caller proof or saved actor metadata can replace live native parent inspection.
+      await this.inspect.parent(here);
+      if (!isDeepStrictEqual(store.read(here.sessionID), saved)) throw new Error('Adaptive record changed during native parent inspection.');
+      const low = AdaptiveLow.restore(saved.data, here.directory);
+      let owner = this.options.ownership.read(saved.runID);
+      if (saved.stage === 'bootstrap') {
+        this.options.ownership.bindAdaptive(here.sessionID, saved.runID);
+        owner ??= this.options.ownership.claim({ ...here, runID: saved.runID });
+      }
+      if (!owner || owner.runID !== saved.runID || owner.ownerSessionID !== here.sessionID || owner.directory !== here.directory ||
+          owner.worktree !== here.worktree || this.options.ownership.parent(here.sessionID) !== saved.runID || owner.state === 'transferring' || owner.operation || owner.recovery || owner.workers)
+        throw new Error('Adaptive owner or runtime binding differs; no authority restored.');
+      const marker = this.options.progress.read(here.sessionID), attempt = saved.attempt;
+      const priorMarker = attempt?.state === 'pending' && marker?.state === 'settled' &&
+        marker.callID === saved.data.receipts.at(-1)?.callID && marker.attemptID === marker.callID;
+      if (marker && (marker.runID !== saved.runID || marker.userMessageID !== saved.userMessageID || marker.resumable !== false ||
+          !priorMarker && (marker.callID !== attempt?.callID || marker.attemptID !== attempt?.callID))) throw new Error('Adaptive progress and native attempt disagree.');
+      const run: AdaptiveRun = { id: saved.runID, runtime: here, userMessageID: saved.userMessageID, low,
+        calls: new Set(saved.calls), record: saved };
+      if (attempt?.state === 'pending') {
+        if (owner.state !== 'reserved' || owner.callID !== attempt.callID) throw new Error('Pending adaptive attempt lost its reserved native owner.');
+        run.callID = attempt.callID; run.ownerEpoch = owner.epoch; run.cold = true;
+        // Repair only a missing marker for the already durable pending intent; never dispatch.
+        if (!marker || priorMarker) this.#adaptiveMarker(run, attempt.callID, 'pending');
+        else if (marker.state !== 'pending') throw new Error('Pending adaptive attempt has a contradictory settled marker.');
+        // A fresh CAS generation fences callbacks still held by the original process, even
+        // though the actual child remains reserved and no new dispatch is authorized.
+        this.#persistAdaptive(run, low);
+        this.#adaptive.set(here.sessionID, run);
+        return { restored: false, reason: 'Pending native attempt remains quarantined; explicit stopped recovery is required.' };
+      }
+      if (owner.state === 'reserved' && (attempt?.state !== 'settled' || owner.callID !== attempt.callID))
+        throw new Error('An uncorrelated reservation remains quarantined; no automatic retry or release.');
+      // A confirmed accepted receipt precedes these bookkeeping writes. Interrupted settlement is
+      // reconciled from that exact record, not from a marker alone or a second provider callback.
+      if (attempt?.state === 'settled') {
+        this.#adaptiveMarker(run, attempt.callID, 'settled');
+        if (owner.state === 'reserved') this.options.ownership.release(run.id, here.sessionID, attempt.callID, owner.epoch);
+      }
+      this.#persistAdaptive(run, low);
+      this.#inflight.delete(here.sessionID); this.#reservations.delete(here.sessionID);
+      this.#adaptive.set(here.sessionID, run);
+      return { restored: true };
+    } catch (error) { return { restored: false, reason: error instanceof Error ? error.message : 'Adaptive restoration refused.' }; }
+  }
+
+  #adaptiveMarker(run: AdaptiveRun, callID: string, state: 'pending' | 'settled'): void {
+    const marker = { runID: run.id, userMessageID: run.userMessageID, callID, attemptID: callID, state, resumable: false as const };
+    this.options.progress!.write(run.runtime.sessionID, marker);
+    if (!isDeepStrictEqual(this.options.progress!.read(run.runtime.sessionID), marker)) throw new Error('Adaptive marker readback differs.');
+  }
+
+  /** Explicit same-parent recovery only. Unknown/running liveness and abort acknowledgments do not release it. */
+  recoverAdaptiveInternal(runtime: Runtime): Promise<Liveness> {
+    return this.#workerOperation(runtime.sessionID, async () => {
+      const run = this.#adaptive.get(runtime.sessionID);
+      if (!run || !run.callID || !isDeepStrictEqual(run.runtime, runtime)) throw new Error('Restore the exact quarantined adaptive parent before recovery.');
+      this.#adaptiveCurrent(run);
+      await this.inspect.parent(runtime);
+      this.#adaptiveCurrent(run);
+      const call = { sessionID: runtime.sessionID, callID: run.callID }, seen = await this.#liveness(runtime, call);
+      if (seen.verdict !== 'stopped') return seen;
+      await this.#adaptiveAfter(run, call, run.dispatchedArgs, undefined, 'Native inspection confirmed the exact interrupted child stopped. Inspect partial source before explicit repair.');
+      return seen;
+    });
   }
 
   /** Guarded parent evidence only: existing tools execute checks; this adds no executor or attestation. */
@@ -572,9 +686,11 @@ export class PhaseRunner {
       await this.inspect.parent(here);
       guard();
       if (!isDeepStrictEqual(this.owner(here.sessionID), owner)) throw new Error('Adaptive ownership changed during evidence inspection.');
-      if (operation === 'prepare') run.low.prepareEvidence(handle);
-      else if (operation === 'submit') run.low.submitEvidence(handle, payload);
-      else { const close = payload as { outcome: unknown; limits: unknown }; run.low.close(handle, close.outcome, close.limits); }
+      this.#changeAdaptive(run, low => {
+        if (operation === 'prepare') low.prepareEvidence(handle);
+        else if (operation === 'submit') low.submitEvidence(handle, payload);
+        else { const close = payload as { outcome: unknown; limits: unknown }; low.close(handle, close.outcome, close.limits); }
+      });
       return { ...this.status(here.sessionID), evidence: run.low.evidence() };
     });
   }
@@ -591,7 +707,7 @@ export class PhaseRunner {
       this.#adaptiveRuntime(run, here);
       if (run.dispatching) throw new Error('A native admission is in flight.');
       await this.inspect.parent(here);
-      this.#adaptiveRuntime(run, here); run.low.select(selected);
+      this.#adaptiveRuntime(run, here); this.#changeAdaptive(run, low => low.select(selected));
       const assignment = run.low.assignment()!;
       const prompt = [
         `Internal adaptive actor: ${selected.actor}. Purpose: ${selected.purpose}. Assignment: ${assignment.id}.`,
@@ -609,7 +725,7 @@ export class PhaseRunner {
         `Selected assignment: ${JSON.stringify(assignment)}`,
       ].filter(Boolean).join('\n');
       if (Buffer.byteLength(prompt) > DISPATCHABLE_PROMPT_BYTES) {
-        run.low.cancelAuthorization(); throw new Error('Internal actor prompt cannot fit the native dispatch budget.');
+        this.#changeAdaptive(run, low => low.cancelAuthorization()); throw new Error('Internal actor prompt cannot fit the native dispatch budget.');
       }
       run.args = { description: `Adaptive ${selected.actor} / ${assignment.id}`, subagent_type: 'general', prompt };
       this.#arm(run);
@@ -618,6 +734,7 @@ export class PhaseRunner {
   }
 
   async #adaptiveBefore(run: AdaptiveRun, call: TaskCall, args: unknown): Promise<TaskArgs> {
+    this.#adaptiveCurrent(run);
     this.owner(call.sessionID);
     if (run.low.state !== 'authorized-actor' || run.dispatching) throw new Error('Adaptive actor is not ready; select once and wait for any in flight actor.');
     const ready = { ...run.args!, prompt: run.token! };
@@ -631,20 +748,30 @@ export class PhaseRunner {
       const owner = this.owner(call.sessionID, call.callID)!;
       run.low.assertReady();
       const sent = { ...run.args!, prompt: `${run.args!.prompt}\nNative callID=${JSON.stringify(call.callID)}` };
-      this.options.progress!.write(call.sessionID, { runID: run.id, callID: call.callID, attemptID: call.callID,
-        userMessageID: run.userMessageID, state: 'pending', resumable: false });
-      run.low.begin(); run.callID = call.callID; run.dispatchedArgs = sent; run.ownerEpoch = owner.epoch;
+      const pending = run.low.copy(); pending.begin();
+      this.#persistAdaptive(run, pending, { callID: call.callID, state: 'pending' });
+      this.#adaptiveMarker(run, call.callID, 'pending');
+      run.callID = call.callID; run.dispatchedArgs = sent; run.ownerEpoch = owner.epoch;
       delete run.token; this.#inflight.set(call.sessionID, call.callID); this.#trackNative(call, sent);
       return structuredClone(sent);
     } catch (error) {
       // No returned native arguments means no child was started. A failed marker remains protective.
-      run.low.cancelAuthorization(); delete run.args; delete run.token;
-      this.release(call.sessionID, call.callID);
+      if (!run.fenced && run.low.state === 'authorized-actor') {
+        // Known pre-write refusal preserves the selected handle; it did not authorize a child.
+        if (!(error instanceof AdaptiveCommitError)) {
+          this.#changeAdaptive(run, low => low.cancelAuthorization()); delete run.args; delete run.token;
+        }
+        this.release(call.sessionID, call.callID);
+      } else {
+        run.fenced = true; delete run.args; delete run.token;
+      }
       throw error;
     } finally { delete run.dispatching; }
   }
 
   async #adaptiveAfter(run: AdaptiveRun, call: TaskCall, args: unknown, output: unknown, nativeFailure?: string): Promise<void> {
+    this.#adaptiveCurrent(run);
+    if (run.cold && !nativeFailure) throw new Error('Cold pending attempts require explicit native stopped recovery, never receipt replay.');
     this.owner(call.sessionID, call.callID);
     if (run.low.state !== 'await-result' || run.callID !== call.callID || !isDeepStrictEqual(args, run.dispatchedArgs))
       throw new Error('This receipt does not match the exact active adaptive dispatch.');
@@ -655,11 +782,14 @@ export class PhaseRunner {
     if (live?.verdict === 'running' || live?.verdict !== 'stopped' && await this.inspect.stopped?.(run.runtime, call, output) !== true)
       throw new Error('Native child termination is not confirmed; the writer remains pending until stopped.');
     this.owner(call.sessionID, call.callID);
-    this.options.progress!.write(call.sessionID, { runID: run.id, callID: call.callID, attemptID: call.callID,
-      userMessageID: run.userMessageID, state: 'settled', resumable: false });
-    run.low.settle(text, run.id, call.callID, failure);
-    this.#inflight.delete(call.sessionID); this.release(call.sessionID, call.callID);
+    const settled = run.low.copy(); settled.settle(text, run.id, call.callID, failure);
+    this.#persistAdaptive(run, settled, { callID: call.callID, state: 'settled' });
+    this.#adaptiveMarker(run, call.callID, 'settled');
+    this.#inflight.delete(call.sessionID);
+    if (run.cold) this.options.ownership!.release(run.id, call.sessionID, call.callID, run.ownerEpoch!);
+    else this.release(call.sessionID, call.callID);
     delete run.args; delete run.dispatchedArgs; delete run.callID; delete run.ownerEpoch;
+    delete run.cold;
   }
 
   async #knowledge(runtime: Runtime, selection: KnowledgeSelection, memory?: EngramHttp): Promise<KnowledgeResolution> {
@@ -792,6 +922,7 @@ export class PhaseRunner {
   owner(sessionID: string, callID?: string): RunOwner | undefined {
     const adaptive = this.#adaptive.get(sessionID);
     if (adaptive) {
+      this.#adaptiveCurrent(adaptive);
       const owner = this.options.ownership!.read(adaptive.id);
       const held = this.#reservations.get(sessionID);
       if (!owner || this.options.ownership!.parent(sessionID) !== adaptive.id || owner.ownerSessionID !== sessionID ||
@@ -1020,6 +1151,7 @@ export class PhaseRunner {
    * discard may proceed past an unreadable checkpoint when the parent claim's owner is idle here.
    */
   authorizeReset(sessionID: string, discard: boolean): void {
+    if (this.options.adaptiveStore?.occupied(sessionID)) throw new Error('Adaptive data requires explicit internal recovery, not fixed reset or discard.');
     try { this.owner(sessionID); }
     catch (error) {
       if (!discard || this.#runs.has(sessionID) || !this.options.ownership) throw error;
@@ -1091,7 +1223,8 @@ export class PhaseRunner {
 
   /** Opt-in, same-parent recovery of a fully settled ready phase. No saved ref is a capability. */
   async restore(runtime: Runtime, bindMemory?: (project: string) => Promise<EngramHttp>): Promise<{ restored: boolean; reason?: string }> {
-    if (this.#adaptive.has(runtime.sessionID)) return { restored: false, reason: 'Internal adaptive contracts are volatile and never checkpointed.' };
+    if (this.options.adaptiveStore?.occupied(runtime.sessionID)) return this.#workerOperation(runtime.sessionID, () => this.#restoreAdaptive(runtime));
+    if (this.#adaptive.has(runtime.sessionID)) return { restored: false, reason: 'This internal adaptive contract has no durable store.' };
     if (this.#continuedRetirement(runtime.sessionID)) return { restored: false };
     if (!this.#explorations.has(runtime.sessionID) && this.#explorationBlocked(runtime.sessionID))
       return { restored: false, reason: 'Exploration progress authority was lost; retained member evidence must not automatically replay.' };
@@ -1414,6 +1547,7 @@ export class PhaseRunner {
 
   /** Standalone work reads authority but never reserves, advances or records a workflow phase. */
   guardStandalone(sessionID: string, fix = false): void {
+    if (this.options.adaptiveStore?.occupied(sessionID)) throw new Error('Adaptive data occupies this parent; standalone work cannot bypass it.');
     if (this.#adaptive.has(sessionID) || this.#adaptiveAdmissions.has(sessionID)) throw new Error('The internal adaptive lane owns native actor selection; standalone work cannot bypass it.');
     this.#refuseMovedAway(sessionID);
     this.owner(sessionID);
@@ -1508,7 +1642,13 @@ export class PhaseRunner {
    * it unless the host still reports it busy. Returns what the host said, for the caller to show.
    */
   async confirmStopped(sessionID: string, runtime?: Runtime, attested = false, resetCallID?: string): Promise<Liveness | undefined> {
+    if (!this.#adaptive.has(sessionID) && this.options.adaptiveStore?.occupied(sessionID)) {
+      if (!runtime || runtime.sessionID !== sessionID) throw new Error('Durable adaptive recovery requires the exact native parent runtime.');
+      const result = await this.restore(runtime);
+      if (!this.#adaptive.has(sessionID)) throw new Error(result.reason ?? 'Adaptive restoration could not confirm native recovery authority.');
+    }
     const adaptive = this.#adaptive.get(sessionID);
+    if (adaptive?.cold) return this.recoverAdaptiveInternal(runtime ?? adaptive.runtime);
     if (adaptive?.callID) return this.#workerOperation(sessionID, async () => {
       const call = { sessionID, callID: adaptive.callID! };
       const seen = await this.#liveness(adaptive.runtime, call);
@@ -1672,6 +1812,7 @@ export class PhaseRunner {
   }
 
   async start(value: unknown, runtime: Runtime, trusted?: { requirementsConfirmed: true; replace?: true; userMessageID?: string; authorityCallID?: string }): Promise<unknown> {
+    if (this.options.adaptiveStore?.occupied(runtime.sessionID)) throw new Error('Adaptive data occupies this parent; fixed startup is refused.');
     if (this.#adaptive.has(runtime.sessionID) || this.#adaptiveAdmissions.has(runtime.sessionID)) throw new Error('An internal adaptive run occupies this parent; public startup is unchanged.');
     if (runtime.agent !== 'mdd-orchestrator') throw new ValidationError('Only mdd-orchestrator may start MDD.');
     const previous = this.#runs.get(runtime.sessionID);
@@ -2688,6 +2829,7 @@ export class PhaseRunner {
   reset(sessionID: string, scope: 'phase' | 'run' | 'rework' | 'continue', consent?: {
     runID: string; userMessageID: string; userText: string; kind: 'continue' | 'new-task';
   }): { scope: 'phase' | 'run' | 'rework' | 'continue'; phase?: Phase; approval?: true; preserved?: { file: string; runID: string } } {
+    if (this.options.adaptiveStore?.occupied(sessionID)) throw new Error('Adaptive records cannot enter fixed reset or discard.');
     if (this.#adaptive.has(sessionID) || this.#adaptiveAdmissions.has(sessionID)) throw new Error('Live internal adaptive selection cannot enter public fixed-phase reset.');
     if (this.#workerOperations.has(sessionID)) throw new ValidationError('Wait for pending worker persistence before resetting.');
     if (this.#inflight.has(sessionID)) throw new ValidationError(`The child may still be running: OpenCode has not confirmed it stopped. ${ATTEST_HINT}`);
@@ -2956,6 +3098,7 @@ export class PhaseRunner {
   }
 
   assertFreshStart(sessionID: string, userMessageID?: string): void {
+    if (this.options.adaptiveStore?.occupied(sessionID)) throw new Error('Durable adaptive data already occupies this parent.');
     if (this.#adaptive.has(sessionID)) throw new Error('An internal adaptive contract already occupies this parent.');
     if (this.#runs.has(sessionID)) return;
     // Before the native objective is proven nothing is mutated; a closable claim only passes.

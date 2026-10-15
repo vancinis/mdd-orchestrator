@@ -24,6 +24,7 @@ import { directPRRequest, prBodyRequest, renderDirectPRBody, renderPRBody } from
 import { directChanges } from './pr-direct.js';
 import { TranslationError } from './pr-translation.js';
 import { mddDataRoot } from './engram-http.js';
+import { AdaptiveStore } from './adaptive-store.js';
 import { statusPayload } from './status-budget.js';
 import type { StatusView } from './status-budget.js';
 import { phaseName } from './phase-assets.js';
@@ -799,7 +800,7 @@ const plugin: Plugin = async input => {
     telemetry: (_directory, value, now) => recordTelemetry(dataRoot, value, now),
     progress: new ProgressGuard(dataRoot),
     dossier,
-    checkpoint, ownership,
+    checkpoint, ownership, adaptiveStore: new AdaptiveStore(dataRoot),
     lessons: (_directory, value, now) => recordLessonQuietly(dataRoot, value, now),
     ledger: (_directory, value, now) => recordRunQuietly(dataRoot, value, now),
   });

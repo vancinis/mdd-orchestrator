@@ -7,6 +7,7 @@ import type { StableCheckpoint, StableRunnerState } from './checkpoint.js';
 import { ProgressGuard } from './progress.js';
 import { QuestionCheckpointStore, retirableRiskRecovery, unresolvedQuestion } from './question-checkpoint.js';
 import { Workflow } from './workflow.js';
+import { AdaptiveStore } from './adaptive-store.js';
 
 export const RUN_OWNER_VERSION = 1;
 const LIMIT = 4096;
@@ -240,6 +241,7 @@ export class RunOwnershipStore {
     if (!text(sessionID, 256) || !text(runID, 256)) throw new ValidationError('Invalid parent owner claim.');
     try {
       this.#files.updateStrict(this.#parentName(sessionID), source => {
+        if (new AdaptiveStore(this.#root).occupied(sessionID)) throw new Error('Adaptive data occupies this parent.');
         const old = source === undefined ? undefined : parseParent(JSON.parse(source), sessionID);
         if (old?.transfer) throw new Error('Target transfer claim cannot become a fresh run.');
         if (old?.retired === true ? previous !== undefined : old?.runID !== previous) throw new Error('Parent already has another run.');
@@ -252,6 +254,7 @@ export class RunOwnershipStore {
     if (!text(sessionID, 256) || !text(runID, 256)) throw new ValidationError('Invalid parent binding.');
     try {
       this.#files.updateStrict(this.#parentName(sessionID), source => {
+        if (new AdaptiveStore(this.#root).occupied(sessionID)) throw new Error('Adaptive data cannot bind a fixed run.');
         if (source !== undefined) {
           const old = parseParent(JSON.parse(source), sessionID);
           if (old.sessionID !== sessionID || old.runID !== runID || old.retired !== undefined) throw new Error('Parent binding differs.');
@@ -262,7 +265,29 @@ export class RunOwnershipStore {
       if (this.parent(sessionID) !== runID) throw new Error('Parent binding readback mismatch.');
     } catch { throw new Error('Parent run binding is unconfirmed; no task may be exposed.'); }
   }
+  /** Parent-lock ordering makes bootstrap intent visible before either lane can claim a writer. */
+  bootstrapAdaptive(sessionID: string, runID: string, intent: () => void): void {
+    this.#files.updateStrict(this.#parentName(sessionID), source => {
+      const old = source === undefined ? undefined : parseParent(JSON.parse(source), sessionID);
+      if (old && !old.retired || new CheckpointStore(this.#root).read(sessionID) || new AdaptiveStore(this.#root).occupied(sessionID))
+        throw new Error('A fixed or adaptive run already occupies this parent.');
+      intent();
+      return JSON.stringify({ sessionID, runID });
+    }, LIMIT);
+    if (this.parent(sessionID) !== runID) throw new Error('Adaptive bootstrap binding is unconfirmed.');
+  }
+  bindAdaptive(sessionID: string, runID: string): void {
+    this.#files.updateStrict(this.#parentName(sessionID), source => {
+      const old = source === undefined ? undefined : parseParent(JSON.parse(source), sessionID);
+      const record = new AdaptiveStore(this.#root).read(sessionID);
+      if (!record || record.runID !== runID || old && (old.retired || old.transfer || old.runID !== runID) || new CheckpointStore(this.#root).read(sessionID))
+        throw new Error('Adaptive bootstrap or parent binding differs.');
+      return JSON.stringify({ sessionID, runID });
+    }, LIMIT);
+    if (this.parent(sessionID) !== runID) throw new Error('Adaptive parent readback differs.');
+  }
   retireParent(sessionID: string, runID: string): void {
+    if (new AdaptiveStore(this.#root).occupied(sessionID)) throw new Error('Adaptive state cannot be discarded through fixed recovery.');
     try {
       this.#files.updateStrict(this.#parentName(sessionID), source => {
         const old = source === undefined ? undefined : parseParent(JSON.parse(source), sessionID);
@@ -322,6 +347,8 @@ export class RunOwnershipStore {
   claim(value: Identity): RunOwner {
     if (![value.runID, value.sessionID].every(item => text(item, 256)) ||
         !text(value.directory, 2048) || !text(value.worktree, 2048)) throw new ValidationError('Invalid run owner claim.');
+    const adaptive = new AdaptiveStore(this.#root);
+    if (adaptive.occupied(value.sessionID) && adaptive.read(value.sessionID)?.runID !== value.runID) throw new Error('Adaptive data occupies this parent.');
     return this.#write(value.runID, old => {
       if (old) throw new Error('Run already has an owner.');
       return { version: RUN_OWNER_VERSION, runID: value.runID, ownerSessionID: value.sessionID, originSessionID: value.sessionID,
@@ -408,6 +435,8 @@ export class RunOwnershipStore {
   claimTargetForTransfer(runID: string, sourceSessionID: string,
     target: { sessionID: string; directory: string; worktree: string }, expected: { sequence: number; digest: string },
     epoch: number, intent: NonNullable<RunOwner['transfer']>['intent']): ParentOwner {
+    if (new AdaptiveStore(this.#root).occupied(target.sessionID) || new AdaptiveStore(this.#root).occupied(sourceSessionID))
+      throw new Error('Adaptive data cannot participate in fixed transfer.');
     if (!intent || !text(intent.operationID, 256) || !text(intent.nativeUserMessageID, 256) ||
         typeof intent.requestDigest !== 'string' || !/^[a-f0-9]{64}$/.test(intent.requestDigest) ||
         (intent.assistantMessageID !== undefined && !text(intent.assistantMessageID, 256)) ||
@@ -437,6 +466,7 @@ export class RunOwnershipStore {
     let confirmed: ParentOwner;
     try {
       this.#files.updateStrict(this.#parentName(target.sessionID), previous => {
+        if (new AdaptiveStore(this.#root).occupied(target.sessionID)) throw new Error('Adaptive target intent appeared.');
         const old = previous === undefined ? undefined : parseParent(JSON.parse(previous), target.sessionID);
         if (old && !old.retired) throw new Error('Target already has a parent claim.');
         return JSON.stringify(claim);
