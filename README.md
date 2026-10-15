@@ -118,7 +118,7 @@ Errors go to stderr; no decision JSON is emitted on failure. A proof `--profile`
 - Low: `mdd-explore`, `mdd-plan`, `mdd-apply`, `mdd-verify`.
 - High: `mdd-explore`, `mdd-propose`, `mdd-spec`, `mdd-design`, `mdd-tasks`, `mdd-apply`, `mdd-verify`.
 - The certainty answer reaches `mdd-risk` as the user's statement of how clear the requirements are; it is weighed, never obeyed. (The legacy `complexity` preflight field is accepted but ignored.)
-- Engram installation and use are optional. With memory off, choose OpenSpec or live-only `none`; Engram and Both require an opted-in backend.
+- New native runs use configured, validated Engram automatically; with memory off they preserve complete task evidence locally. Storage is not a preflight question. Configured Engram failures block without local fallback.
 
 See the [product contract](docs/product-contract.md) for every stable input token, validation constraint, kernel API, and deferred product requirement.
 
@@ -145,7 +145,7 @@ Preflight reuse and state inspection work only within the live controller. New r
 
 ### Resuming after a restart, or in a new conversation
 
-The OpenCode adapter checkpoints every settled step of a run. After OpenCode restarts, ask for the status in the same conversation and the run continues where it settled: a ready phase can be dispatched again, a pending approval is asked again, and nothing that was in flight is replayed — if a subagent or question was interrupted, MDD waits until OpenCode confirms it stopped or you say so yourself (`mdd_reset` with your own message). If a checkpoint cannot be written, the run keeps going and a restart falls back to showing its evidence as read-only data.
+The OpenCode adapter checkpoints every settled step of a run. After OpenCode restarts, ask for the status in the same conversation and the run continues where it settled: a ready phase can be dispatched again, a pending approval is asked again, and nothing that was in flight is replayed — if a subagent or question was interrupted, MDD waits until OpenCode confirms it stopped or you say so yourself (`mdd_reset` with your own message). Unconfirmed local task publication blocks advancement and automatic retry; retained evidence does not become approval.
 
 To continue a run in a **new conversation**, read `mdd_status` in the old one for its `sessionID` and `runID`, then write in the new conversation something like `Continue sourceSessionID=<sessionID> runID=<runID> here.` The coordinator transfers the run with `mdd_transfer`: the old conversation is fenced, the evidence moves, and any approval is asked again. An interrupted transfer is resolved with `mdd_transfer_recover` on your explicit request. See [the adapter guide](docs/opencode-adapter.md#restart-resume).
 
@@ -164,12 +164,13 @@ To continue a run in a **new conversation**, read `mdd_status` in the old one fo
 | Validation boundary | Contract suites and model-free startup checks do not prove real model output quality or permission UI behavior. User-authorized model-backed E2E/final review remains pending. |
 | Deliberately unsupported | Resuming a run after process loss and exactly-once guarantees (its evidence is preserved and reported as read-only data instead), delivery/publication automation, and non-OpenCode provider adapters. |
 
-The adapter uses Engram as optional general memory independently of artifact storage. Omit
-`engram` settings to keep memory off: no HTTP, service startup or session registration occurs.
-Native validation and local progress protection still run. Every
-phase writes dedicated artifacts only to the selected backend; `openspec` or `both`
-explicitly creates the documented OpenSpec paths. `none` retains full artifact text only
-in live state. General receipts contain a bounded summary and artifact reference, not the
+The adapter selects new-run storage from MDD's frozen `engram` settings, not ambient MCP tools
+or deprecated profile storage answers. Omit `engram` to keep memory off: no HTTP, service startup
+or session registration occurs. Complete local artifacts and progress then live under the
+repository anchor at `.mdd/tasks/<safe-objective-slug>-<run-UUID>/`. Inspect
+`mdd_status.storage.backend` and `storage.taskDirectory` for the actual backend/location.
+Existing Engram/OpenSpec/Both/None/local runs keep their pinned backend on restart and transfer;
+there is no migration. General Engram receipts contain a bounded summary and artifact reference, not the
 full artifact. Only a final successful Verify reaches `complete`. Evidence flags describe what
 each phase reported, not independent proof, and coverage is not correctness probability.
 

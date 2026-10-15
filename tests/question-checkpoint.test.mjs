@@ -10,6 +10,39 @@ import { Workflow } from '../dist/workflow.js';
 import { defaultSettings } from '../dist/settings.js';
 import { answers, runtime } from './adapter-fixture.mjs';
 
+for (const state of ['pending', 'answered']) test(`PF-3: historical storage-containing ${state} preflight stays frozen across restart until explicit discard`, async t => {
+  const f = fixture(t);
+  const labels = [['Muy seguro'], ['Ninguno'], ['Interactivo'], ['Bajo']];
+  const args = { questions: ['Certeza', 'Artefactos', 'Modo', 'Resumen'].map((header, i) => ({
+    header, question: `Historical ${header} [MDD intake old]`, multiple: false,
+    options: [{ label: labels[i][0], description: 'Historical choice.' }],
+  })) };
+  const prepared = { version: 1, parent: runtime.sessionID, sequence: 0, requirements: 'Original objective.',
+    userMessageID: 'old-native-user', known: {}, state: 'prepared', slot: { kind: 'preflight', fields: 4, args },
+    clarifications: [], deferred: [], clarificationAnswers: [] };
+  f.store.write(runtime.sessionID, prepared);
+  const pending = { ...prepared, sequence: 1, state: 'pending', callID: 'old-native-call' };
+  f.store.write(runtime.sessionID, pending);
+  if (state === 'answered') f.store.write(runtime.sessionID, { ...pending, sequence: 2, state, answer: labels });
+  const frozen = f.store.read(runtime.sessionID);
+  const restarted = f.gate();
+  const status = restarted.status(runtime.sessionID);
+  assert.equal(status.state, 'recovery-blocked');
+  assert.equal(status.question, undefined);
+  assert.match(status.reason, /frozen preflight field order.*unapplied answer.*never interpreted/);
+  await assert.rejects(restarted.start({ requirements: 'Original objective.' }, runtime, 'new-user'), /unresolved outcome/);
+  await restarted.afterQuestion({ sessionID: runtime.sessionID, callID: pending.callID }, args, output(args, labels));
+  assert.deepEqual(f.store.read(runtime.sessionID), frozen, 'old field order, count, correlation and unapplied answer remain untouched');
+  assert.equal(f.workflow(), undefined);
+  assert.equal(f.approvals(), 0);
+  restarted.reset(runtime, 'run');
+  f.settings.profiles.default.answers = {};
+  const fresh = await f.gate().start({ requirements: 'New objective.' }, runtime, 'new-user');
+  assert.deepEqual(fresh.question.questions.map(q => q.header), ['Certeza', 'Modo', 'Resumen', 'Notas']);
+  assert.equal(fresh.storage.backend, 'local');
+  assert.equal(f.store.read(runtime.sessionID).answer, undefined, 'discard never reapplies old selections');
+});
+
 /** Drives a fresh workflow through the mandatory exploration and risk stop every run now starts with. */
 function throughRisk(workflow, route = 'low') {
   workflow.start('mdd-explore');

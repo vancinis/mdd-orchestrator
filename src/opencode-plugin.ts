@@ -11,6 +11,7 @@ import { loadGlobalSettings } from './global-settings.js';
 import { installationPaths } from './installation-paths.js';
 import { applyModelOverrides } from './native-models.js';
 import { NativeIntake } from './native-intake.js';
+import { SessionPreferenceStore } from './session-preferences.js';
 import type { IntakeInspect } from './native-intake.js';
 import { recordTelemetry } from './telemetry.js';
 import type { TelemetryUsage } from './telemetry.js';
@@ -885,7 +886,8 @@ const plugin: Plugin = async input => {
     lessons: (_directory, value, now) => recordLessonQuietly(dataRoot, value, now),
     ledger: (_directory, value, now) => recordRunQuietly(dataRoot, value, now),
   });
-  const intake = new NativeIntake(runner, inspector, settings, { checkpoint, questions: new QuestionCheckpointStore(dataRoot), ownership });
+  const intake = new NativeIntake(runner, inspector, settings, { checkpoint, questions: new QuestionCheckpointStore(dataRoot), ownership,
+    preferences: new SessionPreferenceStore(dataRoot) });
   if (workerHost) {
     workerHost.protectedParent = sessionID => runner.scopedWorkers(sessionID);
     workerHost.assignment = (sessionID, callID) => {
@@ -1727,6 +1729,7 @@ const plugin: Plugin = async input => {
           // workflow at a state with its own native recovery, such as blocked-risk after an
           // exhausted mdd-risk fallback; that recovery is armed here too, not only on success.
           try { await runner.after(input, input.args, output); }
+          catch (error) { intake.storageFailed(input.sessionID); throw error; }
           finally { try { intake.phaseRecorded(input.sessionID); } catch { /* best effort re-arm; the original outcome still propagates. */ } }
           const current = runner.status(input.sessionID);
           if ('lane' in current && current.lane === 'adaptive-low-internal') {

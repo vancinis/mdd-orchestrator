@@ -1,16 +1,22 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { ANSWER_FIELDS, questionEnvelope, answersFromLabels, resolvePreflight, parsePartialAnswers, answerFromLabel } from '../dist/preflight.js';
+import { ANSWER_FIELDS, PREFLIGHT_FIELDS, questionEnvelope, answersFromLabels, resolvePreflight, parsePartialAnswers, answerFromLabel } from '../dist/preflight.js';
 import { evaluate } from '../dist/kernel.js';
 import { Workflow } from '../dist/workflow.js';
 
 const answers = { certainty: 'very-sure', artifactStore: 'none', mode: 'interactive', summary: 'low' };
 const labels = [['Muy seguro'], ['Ninguno'], ['Interactivo'], ['Bajo']];
 
+test('PF-3: new envelopes omit deprecated storage while resolved legacy label vectors remain parseable', () => {
+  assert.deepEqual(questionEnvelope().questions.map(q => q.header), ['Certeza', 'Modo', 'Resumen']);
+  assert.deepEqual(answersFromLabels({}, labels), answers, 'standalone historical vector retains its field order');
+  assert.deepEqual(parsePartialAnswers({ artifactStore: 'both' }), { artifactStore: 'both' });
+});
+
 test('native envelope uses only supported question and option fields in original order', () => {
   const envelope = questionEnvelope();
   assert.deepEqual(Object.keys(envelope), ['questions']);
-  assert.deepEqual(envelope.questions.map(q => q.header), ['Certeza', 'Artefactos', 'Modo', 'Resumen']);
+  assert.deepEqual(envelope.questions.map(q => q.header), ['Certeza', 'Modo', 'Resumen']);
   for (const question of envelope.questions) {
     assert.deepEqual(Object.keys(question).sort(), ['header', 'multiple', 'options', 'question']);
     assert.equal(question.multiple, false);
@@ -26,8 +32,9 @@ test('every partial subset asks all and only missing fields together, preserving
     const known = Object.fromEntries(ANSWER_FIELDS.filter((_, i) => mask & (1 << i)).map(field => [field, answers[field]]));
     const missing = labels.filter((_, i) => !(mask & (1 << i)));
     const envelope = questionEnvelope(known);
-    assert.equal(envelope.questions.length, missing.length);
-    assert.deepEqual(envelope.questions, questionEnvelope().questions.filter((_, i) => !(mask & (1 << i))));
+    const missingUserFields = PREFLIGHT_FIELDS.filter(field => !Object.hasOwn(known, field));
+    assert.equal(envelope.questions.length, missingUserFields.length);
+    assert.deepEqual(envelope.questions, questionEnvelope().questions.filter((_, i) => missingUserFields.includes(PREFLIGHT_FIELDS[i])));
     assert.deepEqual(answersFromLabels(known, missing), answers);
     assert.deepEqual(resolvePreflight(known, missing).evaluation, evaluate({ answers }));
     assert.deepEqual(known, Object.fromEntries(ANSWER_FIELDS.filter((_, i) => mask & (1 << i)).map(field => [field, answers[field]])));
@@ -58,7 +65,7 @@ test('legacy complexity answer is accepted but ignored, never asked and never sc
   assert.deepEqual(parsePartialAnswers({ complexity: 'very-complex' }), {});
   assert.deepEqual(parsePartialAnswers({ ...answers, complexity: 'very-complex' }), answers);
   assert.deepEqual(questionEnvelope({ complexity: 'very-complex' }).questions.map(q => q.header),
-    ['Certeza', 'Artefactos', 'Modo', 'Resumen']);
+    ['Certeza', 'Modo', 'Resumen']);
   assert.deepEqual(resolvePreflight({ complexity: 'very-complex' }, labels).evaluation, evaluate({ answers }));
 });
 

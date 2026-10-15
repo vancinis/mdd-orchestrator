@@ -452,7 +452,7 @@ test('plugin contract: scoped tools, in-place native args, result gating, no nat
   const status = JSON.parse(await hooks.tool.mdd_status.execute({}, context));
   assert.equal(status.state, 'ready');
   assert.equal(status.workflow.results.length, 1);
-  assert.equal(writes.length, 2);
+  assert.equal(writes.length, 3, 'automatic Engram saves the artifact as well as startup/result evidence');
   await hooks['tool.execute.before']({ tool: 'read', sessionID: 'other', callID: 'other' }, { args: {} });
 });
 
@@ -899,8 +899,8 @@ function answeredAfterQuestion(f, text, { before = false } = {}) {
   f.parentMessages.splice(-1, 0, ...(before ? [user, shown] : [shown, user]));
 }
 
-const PREFLIGHT_TEXT = '1. algo seguro 2. ninguno 3. automatico 4. medio 5. nada que agregar.';
-const PREFLIGHT_READING = [{ labels: ['Algo seguro'] }, { labels: ['Ninguno'] }, { labels: ['Automático'] }, { labels: ['Medio'] }, { labels: ['Nada que agregar'] }];
+const PREFLIGHT_TEXT = '1. algo seguro 2. automatico 3. medio 4. nada que agregar.';
+const PREFLIGHT_READING = [{ labels: ['Algo seguro'] }, { labels: ['Automático'] }, { labels: ['Medio'] }, { labels: ['Nada que agregar'] }];
 
 // 2026-10-08: the preflight form was interrupted, OpenCode restarted, and the user typed the
 // answers. The new process refused to start again ("Native intake reservation is unconfirmed")

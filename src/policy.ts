@@ -9,10 +9,12 @@ export const FIXED_ROUTING_VERSION = 2;
 export const FUTURE_ROUTING_VERSION = 3;
 /** Vocabulary for future assessments only; current runtime routes remain low or high. */
 export type AssessmentLevel = 'low' | 'medium' | 'high';
+export type LegacyArtifactStore = 'engram' | 'openspec' | 'both' | 'none';
+export type ArtifactBackend = LegacyArtifactStore | 'local';
 
 export type Answers = {
   certainty: 'very-sure' | 'somewhat-sure' | 'not-sure';
-  artifactStore: 'engram' | 'openspec' | 'both' | 'none';
+  artifactStore: ArtifactBackend;
   mode: 'interactive' | 'automatic';
   summary: 'detailed' | 'medium' | 'low';
 };

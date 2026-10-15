@@ -6,7 +6,8 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { runConfigUI } from '../dist/config-ui.js';
-import { loadSettings, MODEL_ROLES } from '../dist/settings.js';
+import { loadSettings, defaultSettings, MODEL_ROLES } from '../dist/settings.js';
+import { saveGlobalSettings } from '../dist/global-settings.js';
 
 const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
 function fixture(t) {
@@ -37,12 +38,14 @@ function invoke(root, ...args) {
 test('scripted terminal creates profile, edits every model and preflight field, Engram setup and saves', async t => {
   const root = fixture(t);
   const script = scripted(['1', '1', 'work', '2', ...MODEL_ROLES.map(() => 'provider/team/model'),
-    '3', '1', '4', '1', '3', '4', '1', 'http://127.0.0.1:7437', '5', '2', '6']);
+    '3', '1', '1', '3', '4', '1', 'http://127.0.0.1:7437', '5', '2', '6']);
   assert.equal(await runConfigUI(root, script.io, noCatalog), 'saved');
   const settings = loadSettings(root);
   assert.equal(settings.activeProfile, 'work');
   assert.deepEqual(settings.profiles.work.models, Object.fromEntries(MODEL_ROLES.map(role => [role, 'provider/team/model'])));
-  assert.deepEqual(settings.profiles.work.answers, { certainty: 'very-sure', artifactStore: 'none', mode: 'interactive', summary: 'low' });
+  assert.deepEqual(settings.profiles.work.answers, { certainty: 'very-sure', mode: 'interactive', summary: 'low' });
+  assert.doesNotMatch(script.prompts.join(''), /Dónde guardar|4\/4/);
+  assert.match(script.output.join(''), /3\/3 respondidas/);
   assert.deepEqual(settings.engram, { endpoint: 'http://127.0.0.1:7437' });
   assert.equal(settings.telemetry.enabled, false);
   assert.match(script.output.join(''), /Reiniciá OpenCode/);
@@ -51,14 +54,26 @@ test('scripted terminal creates profile, edits every model and preflight field, 
 
 test('terminal edits existing profile, clears answers/models and switches active profile', async t => {
   const root = fixture(t);
-  await runConfigUI(root, scripted(['1', '1', 'work', '2', ...MODEL_ROLES.map(() => 'p/m'), '3', '1', '4', '1', '3', '6']).io, noCatalog);
-  await runConfigUI(root, scripted(['2', '-', ...MODEL_ROLES.slice(1).map(() => ''), '3', '4', '', '', '', '1', '2', 'default', '6']).io, noCatalog);
+  await runConfigUI(root, scripted(['1', '1', 'work', '2', ...MODEL_ROLES.map(() => 'p/m'), '3', '1', '1', '3', '6']).io, noCatalog);
+  await runConfigUI(root, scripted(['2', '-', ...MODEL_ROLES.slice(1).map(() => ''), '3', '4', '', '', '1', '2', 'default', '6']).io, noCatalog);
   const settings = loadSettings(root);
   assert.equal(settings.activeProfile, 'default');
   assert.equal(settings.profiles.work.models.orchestrator, undefined);
   assert.equal(settings.profiles.work.models['mdd-verify'], 'p/m');
   assert.equal(settings.profiles.work.answers.certainty, undefined);
   assert.equal(settings.profiles.work.answers.mode, 'interactive');
+});
+
+test('PF-3: profile editor preserves deprecated storage data without offering its selection', async t => {
+  const root = fixture(t);
+  const settings = defaultSettings();
+  settings.profiles.default.answers = { artifactStore: 'both' };
+  saveGlobalSettings(settings);
+  const script = scripted(['3', '1', '1', '3', '6']);
+  assert.equal(await runConfigUI(root, script.io), 'saved');
+  assert.deepEqual(loadSettings(root).profiles.default.answers, { artifactStore: 'both', certainty: 'very-sure', mode: 'interactive', summary: 'low' });
+  assert.doesNotMatch(script.prompts.join(''), /Dónde guardar/);
+  assert.match(script.output.join(''), /local automático/);
 });
 
 test('cancel and EOF discard all draft edits, both absent and existing settings', async t => {
@@ -75,7 +90,7 @@ test('cancel and EOF discard all draft edits, both absent and existing settings'
 
 test('invalid edits are actionable; partial answers stay unanswered on Enter', async t => {
   const root = fixture(t);
-  const script = scripted(['1', '1', '../bad', '3', '', '', '', '', '6']);
+  const script = scripted(['1', '1', '../bad', '3', '', '', '', '6']);
   assert.equal(await runConfigUI(root, script.io, noCatalog), 'saved');
   assert.match(script.output.join(''), /safe/);
   assert.deepEqual(loadSettings(root).profiles.default.answers, {});

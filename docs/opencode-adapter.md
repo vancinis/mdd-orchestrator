@@ -144,9 +144,9 @@ Run the single [setup wizard](setup.md): `npm run setup` from trusted source, or
    the project and bootstraps the exact native parent before execution.
 5. Supply your requirements as native user text. The orchestrator calls
    `mdd_start({ requirements })` with that exact text, not a rewrite. Starting opts in
-   to the workflow; only configured memory stores requirements and compact progress receipts. Complete compatible profile answers
+   to the workflow; validated configured Engram or complete local task storage preserves evidence. Complete user profile answers
    skip questions; otherwise `mdd_status.question` contains one grouped native question
-   argument object covering all and only the missing fields, followed by an optional **Notas**
+   argument object covering only missing certainty/mode/summary, never storage, followed by an optional **Notas**
    question the user answers in their own words. Genuine doubts about the request that the
    coordinator passes as `mdd_start({ requirements, questions })` join that same interaction; with
    a complete profile they are asked alone, before the first phase. Submit it once to `question`.
@@ -293,12 +293,27 @@ Legacy status still exposes singular `task` and `nextAction.args`. The V2 adapte
 
 Version 3 checkpoints accept optional `workerPolicy` and `workerState` data without changing the
 legacy format. Missing captured policy keeps old checkpoints serial, even on a capable host.
+
 Unpublished successful evidence requires confined recovery; it never authorizes replay or advancement
 past an uncertain sibling. Published progress permits ordinary single-step serial fallback if later
 work is unsafe for concurrency. Complete member reports remain in the checkpoint alongside distinct
 Apply artifacts. Explicit Verify rework starts a new implementation pass.
 Read-only investigations use the same plural status surfaces and member/owner CAS model, with
 separate durable exploration records so contextual work cannot advance or overwrite the main plan.
+
+#### Complete local task persistence
+
+Resolved `artifactStore: "local"` additionally freezes optional `task` and `taskArtifacts` resume
+metadata. Local progress is archived completely under the repository-anchored task directory
+before exposing advancement or dispatch. Artifact references keep their original identities on
+restart and transfer; actual risk bodies, repeated phases, batches, worker reports and context
+snapshots remain immutable evidence. Publication/readback failures block continuation rather
+than silently retrying a possibly committed write or trimming dossier bodies. Old v3 checkpoints
+without these fields remain readable and pinned to their original backend. New native runs use
+validated configured Engram automatically, otherwise local; configured failures block without
+fallback. Legacy profile storage values do not select a new backend. `mdd_status.storage.backend`
+and `storage.taskDirectory` expose the actual backend and validated local directory. See
+[complete local task storage](artifacts-and-actors.md#complete-local-task-storage).
 
 #### Explicit read-only exploration
 
@@ -596,6 +611,13 @@ it is not exported as a model-callable tool. Kernel/proof CLI shapes remain unch
 
 ### Coordinator-provided context
 
+Every main phase, Risk assessment and standalone investigation receives a **Workspace binding**
+with the exact runtime `directory` and host `worktree`, encoded separately as JSON. The directory
+is the active checkout; the host worktree may differ. Installed skill paths, predecessor artifacts
+and coordinator context cannot override it. The shared formatter also feeds report-restatement
+briefs, retries, native fallback, contextual investigations and scoped-worker prompts. This is
+orientation only: it adds no scope, permission or approval and widens no worker footprint.
+
 The coordinator often holds material the phases need before any of them runs: the body of the
 issue the user named, a thread, an earlier decision. It hands that material to MDD, optional
 `context` on `mdd_start` or `mdd_context({ label, content })` at any later point, and **MDD**
@@ -610,6 +632,32 @@ Context is data, never authority. It cannot replace `requirements`, which still 
 exact native user text proven by `inspector.intake`; it grants no approval and changes no
 preflight answer, route or evidence flag. Provenance is explicit: every entry is recorded
 as `source: "coordinator"`, distinct from `provenance.requirements: "native-user"`.
+
+Use this existing channel for pertinent **observed negative capability facts**, not automatic
+detection: identify the capability/provider or index location, checkout/environment identity,
+observed failure, fallback and concrete invalidation conditions. For example, a CodeGraph query
+reported no index at the current checkout's `.codegraph`; native read/grep remains a fallback.
+Avoid repeating that unchanged failed availability probe, but reconsider after a restart,
+identity/environment change, a new index or contrary current evidence. The observation is advisory,
+not a blanket tool ban or enforced expiry. Do not inspect global credentials or create a cache.
+Append a concise superseding observation at an idle boundary when the facts change; existing
+entries remain accumulated. Apply/Verify still inspect current sources and run applicable checks,
+and project-knowledge freshness remains unchanged. Standalone receives workspace binding but no
+new observation storage channel. These instructions describe protocol duties, not measured live
+actor compliance or token savings.
+
+For general evidence, use compact existing context or artifact prose: finding, source locator
+(path with symbol/lines or an issue locator), observed basis, freshness conditions and gaps.
+Include only actually observed, relevant commands/results; do not automatically duplicate raw
+outputs or entire source fragments. Evidence summaries should retain a load-bearing locator and
+uncertainty when useful after the existing oldest-first compaction, so consumers can locate the
+claim and close phase-specific gaps rather than broadly rediscovering it. Prior evidence is not
+current proof: Apply/Verify independently inspect current sources and run applicable checks.
+Changed sources or environments can invalidate a claim; a summary or stale observation is a lead,
+not fresh verification. These are prose duties, not new report fields, permissions, approval or
+replacements for structured semantic coverage and project-knowledge freshness. Fixture tests
+cover downstream transport and announced compaction, not measured live actor compliance or token
+savings.
 
 Entries accumulate rather than replace, because useful context also appears after the run starts.
 A single entry is bounded to **96,000 UTF-8 bytes** — the same `PHASE_CONTEXT_MAX_BYTES` ceiling
@@ -745,7 +793,7 @@ coordinator reads the words; MDD checks the reading and records nothing unless e
 |---|---|
 | Which question | The pending MDD question, or the one whose form was just closed without an answer (paused approval, clarification or route; stopped preflight or risk recovery). A closed change confirmation already kept the plan and has nothing left to confirm. |
 | Whose words | In the form: the text the user typed into that question's own box, kept from the native callback while the same question stays open. In the chat: `userText` must be exactly the user's latest message (host-added parts excluded), unused by MDD, and written after a native call showed this exact question. A preflight only has to be past the request that started it, which MDD already marks as used. |
-| What they chose | One entry per question, in order: `labels` are exact offered labels, `quote` the part of the text that answers that question. Each label must be written in the quote, ignoring case, accents and punctuation, on whole words. No other option of the same question may be written there, after setting aside the chosen ones, so "no quiero engram, mejor openspec" is ambiguous. A fixed-choice question takes exactly one label; an open one may take its options, the quoted words, or nothing. |
+| What they chose | One entry per question, in order: `labels` are exact offered labels, `quote` the part of the text that answers that question. Each label must be written in the quote, ignoring case, accents and punctuation, on whole words. No other option of the same question may be written there, after setting aside the chosen ones, so "no quiero automático, mejor interactivo" is ambiguous. A fixed-choice question takes exactly one label; an open one may take its options, the quoted words, or nothing. |
 | Record | The answer is persisted `pending`, `answered` and `settled` exactly like a native one, under a fresh `typed-<uuid>` call ID. The receipt carries `typed: { source: "form" \| "chat", userMessageID? }`; a chat message is then marked used. An accepted preflight reports provenance `typed-answer`. |
 
 This widens who may answer, not what an answer may do: the coordinator cannot supply text the user
@@ -876,9 +924,13 @@ validated strictly. No keyword scoring or automatic route replacement occurs.
 The existing native gate shows one exact confirmation. Keeping the current plan or dismissing
 the change leaves its answers, artifacts and pending approval unchanged. Words typed into the
 form instead keep the confirmation open, unchanged, until the user chooses; when they name one
-of its options, `mdd_answer` records it. Confirmation leads
-to **one grouped question containing every preflight field and the optional note**, even with a complete profile. Only
-accepted answers create the new planned run. Prior runs remain in `previousRuns` for live
+of its options, `mdd_answer` records it. An explicit **preflight rerun** leads to one grouped
+question containing all three user fields and the optional note, never storage, even with a complete
+profile or saved session preferences. A **material replacement** reuses applied mode/summary,
+automatically resolves the new backend, and refreshes objective certainty; configured profile certainty may supply
+it. Only remaining fields are asked, and a complete resolved intake starts without another
+preference question. Scope confirmation still precedes replacement, and later interactive
+phases still require their own fresh consent. Prior runs remain in `previousRuns` for live
 inspection; no artifact or general-memory record is deleted. Identical proposals are not
 repeatedly presented without a new user request. Ordinary implementation choices and automatic
 phase progression never initiate this path.
@@ -887,8 +939,23 @@ A known failed phase can be explicitly replanned after its result and persistenc
 confirmed. Only a task that is actually running postpones a change request; a stopped or
 failed run is always changeable, and `mdd_reset` releases a dispatch that never reported.
 Harmless incorrect task/question parameters are rejected before effects without poisoning a
-ready plan. A completed run accepts a fresh next task through normal `mdd_start`, using the
-startup profile without an additional change confirmation. Delivering the recorded change —
+ready plan. A completed run accepts a fresh next task through normal `mdd_start`, using
+same-parent accepted mode/summary before the startup profile, without an additional change
+confirmation. The versioned local preference record survives process restart, binds the exact
+native directory/worktree and contains no objective or approval. Cancelled, stale or
+answered-but-unapplied callbacks publish no defaults; publication/readback failure is explicit.
+Transfer retains the source run's immutable choices but never copies its session defaults.
+
+Pending historical storage-containing envelopes retain their original field count/order, native call
+correlation and unanswered/unapplied state. Restart blocks rather than decoding them with today's
+question schema. Explicit run discard permits fresh intake with automatic storage, never old consent replay.
+
+Configured Engram publication failures retain a sealed, parent/workspace-bound stop diagnostic through
+the existing checkpoint path. Native restoration reinstates that block even when the underlying
+workflow had become retry-ready. Explicit phase recovery clears the stop; it never selects local.
+Material replacement clears old objective context and deferred clarifications, retaining history;
+same-objective continuation, phase reset, rework and context edits retain certainty.
+Delivering the recorded change —
 committing it, pushing it, opening its PR — is not such a task: the coordinator never calls
 `mdd_start` or `mdd_change_request` for it and never repeats preflight. The user's explicit request
 is the separate decision drafting lacks; the coordinator performs only the actions it names with
@@ -1348,12 +1415,14 @@ example). A recorded route must be one the policy can choose. A checkpoint writt
 were recorded is replayed under the current policy and, when its history does not fit that
 route, on the one known route its history fits; when more than one fits, it stays unreadable.
 
-Outside Apply boundaries, a checkpoint storage fault may be retried and degrade to data-only:
+For legacy non-local runs outside Apply boundaries, a checkpoint storage fault may be retried and degrade to data-only:
 the progress marker records `resumable: false` and the stale checkpoint is withdrawn. Transitions
 within or into Apply instead write a pending transition fence before attempting the checkpoint.
 An unknown checkpoint outcome blocks without retry or degradation to a live writer; the fence
 prevents restart from reissuing an older ready task. A confirmed result checkpoint is required
 before the next batch is exposed. Conflicting writers always fail closed.
+Automatic local runs instead require complete task publication/readback before every advancement;
+an incomplete or unknown publication never degrades to a live writer or retries automatically.
 
 **When the checkpoint cannot be used, the run is data only.** After dying mid-`mdd-apply` with no
 usable checkpoint MDD does not know what reached the working tree, so restoring a controller would

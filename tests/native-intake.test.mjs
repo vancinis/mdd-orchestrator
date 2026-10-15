@@ -20,6 +20,51 @@ test('AL-02: internal intake refuses supplied approval before inspecting native 
 });
 
 // State-level native hook contracts, not model execution or permission UI proof.
+for (const configured of [false, true]) for (const legacy of ['engram', 'openspec', 'both', 'none', 'local']) {
+  test(`PF-3: new native run resolves storage automatically (configured=${configured}, profile=${legacy})`, async t => {
+    const settings = defaultSettings();
+    if (configured) settings.engram = { endpoint: (await memoryServer(t)).endpoint };
+    else t.mock.method(globalThis, 'fetch', () => assert.fail('Absent MDD integration must not use ambient memory'));
+    settings.profiles.default.answers = { ...answers, artifactStore: legacy };
+    const original = structuredClone(settings);
+    let started;
+    const gate = new NativeIntake({
+      async start(input) { started = input; },
+      status: () => started ? { state: 'ready', workflow: { answers: started.preflight.answers } } : { state: 'not-started' },
+      block() {},
+    }, { async intake() { return 'actual-user'; } }, settings);
+    const status = await gate.start({ requirements: 'Actual objective.' }, runtime, 'native-message');
+    assert.equal(status.question, undefined);
+    assert.equal(started.preflight.answers.artifactStore, configured ? 'engram' : 'local');
+    assert.equal(status.storage.backend, configured ? 'engram' : 'local');
+    assert.deepEqual(settings, original, 'legacy saved settings are not rewritten');
+  });
+}
+
+test('PF-3: fresh preflight asks only user fields and notes without a saved storage answer', async () => {
+  const gate = new NativeIntake({ status: () => ({ state: 'not-started' }) }, {
+    async intake() { return 'actual-user'; },
+  }, defaultSettings());
+  const status = await gate.start({ requirements: 'Actual objective.' }, runtime, 'native-message');
+  assert.deepEqual(status.question.questions.map(q => q.header), ['Certeza', 'Modo', 'Resumen', 'Notas']);
+  assert.equal(status.storage.backend, 'local');
+});
+
+for (const store of ['engram', 'openspec', 'both', 'none', 'local']) test(`PF-3: recovery keeps the existing ${store} backend without resolving a new run`, async t => {
+  t.mock.method(globalThis, 'fetch', () => assert.fail('Recovery must not activate new storage'));
+  const workflow = new Workflow({ answers: { ...answers, artifactStore: store, mode: 'interactive' } });
+  workflow.start('mdd-explore'); workflow.recordResult({ phase: 'mdd-explore', outcome: 'passed', evidenceSummary: 'Historical exploration.' });
+  workflow.startRisk(); workflow.recordRiskResult({ outcome: 'passed', evidenceSummary: 'Historical assessment.', route: 'low' });
+  const before = workflow.snapshot();
+  const gate = new NativeIntake({
+    status: () => ({ state: 'await-approval', runID: 'old-run', workflow: workflow.snapshot() }),
+  }, {}, defaultSettings(), { checkpoint: { read: () => ({ checkpoint: { version: 3, runID: 'old-run', parent: runtime.sessionID, stable: {},
+    data: { requirements: 'Original objective.', directory: runtime.directory, worktree: runtime.worktree, usedMessages: [], proposed: [] } } }) } });
+  gate.recover(runtime);
+  assert.equal(gate.status(runtime.sessionID).storage.backend, store);
+  assert.deepEqual(workflow.snapshot(), before, 'backend and approvals remain pinned');
+});
+
 function output(args, selections) {
   const formatted = args.questions.map((q, i) => `"${q.question}"="${selections[i]?.length ? selections[i].join(', ') : 'Unanswered'}"`).join(', ');
   return { title: `Asked ${args.questions.length} question${args.questions.length > 1 ? 's' : ''}`, output: `User has answered your questions: ${formatted}. You can now continue with the user's answers in mind.`, metadata: { answers: selections, truncated: false } };
@@ -92,15 +137,15 @@ for (const known of [{}, { certainty: 'very-sure', artifactStore: 'none', summar
     const status = await f.start();
     assert.equal(status.state, 'question-ready');
     // The missing fields, then the free-form note that rides on every preflight that is asked.
-    assert.equal(status.question.questions.length, 4 - Object.keys(known).length + 1);
+    assert.equal(status.question.questions.length, 3 - ['certainty', 'mode', 'summary'].filter(key => Object.hasOwn(known, key)).length + 1);
     assert.equal(status.question.questions.at(-1).header, 'Notas');
     assert.deepEqual(status.question.questions.at(-1).options.map(option => option.label), [CLARIFICATION_LABELS.nothing]);
     assert.equal(f.starts(), 0);
-    const labels = { Certeza: 'Muy seguro', Artefactos: 'Ninguno', Modo: 'Automático', Resumen: 'Bajo', Notas: CLARIFICATION_LABELS.nothing };
+    const labels = { Certeza: 'Muy seguro', Modo: 'Automático', Resumen: 'Bajo', Notas: CLARIFICATION_LABELS.nothing };
     const selections = status.question.questions.map(q => [labels[q.header]]);
     status.question.questions[0].question = 'mutated snapshot';
     await f.answer(selections);
-    assert.deepEqual(f.workflow().snapshot().answers, answers);
+    assert.deepEqual(f.workflow().snapshot().answers, { ...answers, artifactStore: 'engram' });
     assert.equal(f.gate.status(runtime.sessionID).provenance.preflight, 'native-question');
     assert.equal(f.checks.filter(check => check[0] === 'question').length, 2);
     assert.equal(f.starts(), 1);
@@ -159,14 +204,41 @@ test('protected intake: model-supplied answers and setup overrides rejected', as
   assert.equal(f.starts(), 0);
 });
 
-test('protected intake: absent Engram is off and asks only supported artifact choices', async t => {
+test('session preferences: material replacement refreshes only objective certainty and drops old doubts', async t => {
+  const f = await fixture(t, {});
+  f.inspect.intake = async (_runtime, _text, id) => id;
+  const inputs = [];
+  const start = f.runner.start;
+  f.runner.start = async input => { inputs.push(input); await start(input); };
+  await f.gate.start({ requirements: 'Human requirements', context: { label: 'Old context', content: 'Old objective only.' },
+    questions: [{ question: 'Old unresolved detail?', options: [], deferrable: true }] }, runtime, 'original');
+  await f.answer([['Poco seguro'], ['Interactivo'], ['Detallado'], [CLARIFICATION_LABELS.defer], [CLARIFICATION_LABELS.nothing]]);
+  const before = f.workflow().snapshot();
+  await f.gate.changeRequest({ kind: 'material', userText: 'Replace the objective.', requirements: 'A separate objective.' }, runtime, 'replacement');
+  assert.deepEqual(f.workflow().snapshot(), before);
+  await f.answer([[CHANGE_LABELS.confirm]]);
+  const pending = f.gate.status(runtime.sessionID);
+  assert.deepEqual(pending.question.questions.map(q => q.header), ['Certeza', 'Notas']);
+  assert.deepEqual(pending.pendingClarifications, []);
+  assert.deepEqual(pending.clarificationAnswers, []);
+  await f.answer([['Muy seguro'], [CLARIFICATION_LABELS.nothing]]);
+  assert.equal(inputs[1].context, undefined, 'objective-specific context is not carried into replacement');
+  assert.ok(f.gate.status(runtime.sessionID).questionReceipts.some(item => item.answers.some(answer => answer.includes(CLARIFICATION_LABELS.defer))), 'previous answers remain history, not pending doubts');
+  assert.deepEqual(f.workflow().snapshot().answers, { ...answers, artifactStore: 'engram', mode: 'interactive', summary: 'detailed' });
+  f.pass();
+  assert.equal(f.gate.status(runtime.sessionID).state, 'review-ready');
+  assert.equal(f.workflow().nextAction().kind, 'approve');
+});
+
+test('protected intake: absent Engram is off and selects local without a storage question', async t => {
   t.mock.method(globalThis, 'fetch', () => { throw new Error('Memory off must not fetch'); });
   const gate = new NativeIntake({}, { async intake() { return 'native-original'; } }, defaultSettings());
   const stopped = await gate.start({ requirements: 'Human requirements' }, runtime, 'msg_start');
   assert.equal(stopped.state, 'question-ready');
   assert.equal(stopped.memory, 'off');
   assert.equal(stopped.setup, undefined);
-  assert.deepEqual(stopped.question.questions[1].options.map(option => option.label), ['OpenSpec', 'Ninguno']);
+  assert.equal(stopped.storage.backend, 'local');
+  assert.deepEqual(stopped.question.questions.map(question => question.header), ['Certeza', 'Modo', 'Resumen', 'Notas']);
 });
 
 test('memory-off intake cannot replace a pending native objective', async () => {
@@ -464,7 +536,7 @@ test('unrelated native questions cannot compete during MDD accepting or await-an
   await assert.rejects(f.gate.beforeQuestion({ sessionID: runtime.sessionID, callID: 'other-awaiting' }, other), /already pending/);
   assert.equal(f.gate.status(runtime.sessionID).state, 'await-answer');
   f.inspect.question = async () => {};
-  await f.gate.afterQuestion(call, args, output(args, [['Muy seguro'], ['Ninguno'], ['Automático'], ['Bajo'], [CLARIFICATION_LABELS.nothing]]));
+  await f.gate.afterQuestion(call, args, output(args, [['Muy seguro'], ['Automático'], ['Bajo'], [CLARIFICATION_LABELS.nothing]]));
   assert.equal(f.starts(), 1);
 });
 
@@ -545,7 +617,7 @@ test('the detail choice is conditional and does not grant approval', async t => 
   assert.match(f.gate.status(runtime.sessionID).notice, /expandedReport|full/);
 });
 
-for (const selections of [[], [['forged']], [['Muy seguro', 'Poco seguro']], [['Muy seguro', 'Poco seguro'], ['Ninguno'], ['Automático'], ['Bajo'], ['Nada que agregar']]]) {
+for (const selections of [[], [['forged']], [['Muy seguro', 'Poco seguro']], [['Muy seguro', 'Poco seguro'], ['Automático'], ['Bajo'], ['Nada que agregar']]]) {
   test(`native question: reject malformed answer envelopes ${JSON.stringify(selections)}`, async t => {
     const f = await fixture(t, {}); await f.start();
     await assert.rejects(f.answer(selections));
@@ -560,14 +632,14 @@ for (const selections of [[], [['forged']], [['Muy seguro', 'Poco seguro']], [['
 // the question simply stays open and can be answered again.
 test('native question: an unlisted label answers nothing and leaves the question open', async t => {
   const f = await fixture(t, {}); await f.start();
-  await f.answer([['Ninguno'], ['Muy seguro'], ['Automático'], ['Bajo'], [CLARIFICATION_LABELS.nothing]]);
+  await f.answer([['Automático'], ['Muy seguro'], ['Bajo'], [CLARIFICATION_LABELS.nothing]]);
   const stalled = f.gate.status(runtime.sessionID);
   assert.equal(stalled.state, 'question-ready');
   assert.ok(stalled.question);
   assert.equal(f.starts(), 0);
   assert.equal(stalled.questionReceipts.at(-1).cancelled, true);
   assert.equal(stalled.questionReceipts.at(-1).answers.length, 0);
-  await f.answer([['Muy seguro'], ['Ninguno'], ['Automático'], ['Bajo'], [CLARIFICATION_LABELS.nothing]]);
+  await f.answer([['Muy seguro'], ['Automático'], ['Bajo'], [CLARIFICATION_LABELS.nothing]]);
   assert.equal(f.starts(), 1);
   assert.equal(f.gate.status(runtime.sessionID).state, 'phase-recorded');
 });
@@ -1232,8 +1304,8 @@ test('written answers: an interrupted preflight answered in the chat starts the 
   assert.equal(f.gate.status(runtime.sessionID).state, 'stopped');
   assert.match(f.gate.status(runtime.sessionID).reason, /mdd_answer/);
   const proofs = written(f);
-  const userText = '1. algo seguro 2. engram 3. automatico 4. medio 5. nada que agregar.';
-  await f.gate.answer({ userText, answers: [{ labels: ['Algo seguro'] }, { labels: ['Engram'] }, { labels: ['Automático'] }, { labels: ['Medio'] }, { labels: [CLARIFICATION_LABELS.nothing] }] }, runtime, 'msg_caller');
+  const userText = '1. algo seguro 2. automatico 3. medio 4. nada que agregar.';
+  await f.gate.answer({ userText, answers: [{ labels: ['Algo seguro'] }, { labels: ['Automático'] }, { labels: ['Medio'] }, { labels: [CLARIFICATION_LABELS.nothing] }] }, runtime, 'msg_caller');
   assert.equal(f.starts(), 1);
   assert.deepEqual(f.workflow().snapshot().answers, { ...f.workflow().snapshot().answers, certainty: 'somewhat-sure', artifactStore: 'engram', mode: 'automatic', summary: 'medium' });
   const status = f.gate.status(runtime.sessionID);
@@ -1249,7 +1321,7 @@ test('written answers: the request that started the run never answers its own pr
   await f.start();
   await dismiss(f.gate, 'closed-preflight');
   written(f, 'msg_start');
-  await assert.rejects(f.gate.answer({ userText: 'Muy seguro, Ninguno, Automático, Bajo', answers: [{ labels: ['Muy seguro'] }, { labels: ['Ninguno'] }, { labels: ['Automático'] }, { labels: ['Bajo'] }, { labels: [] }] }, runtime, 'msg_caller'), /already used/);
+  await assert.rejects(f.gate.answer({ userText: 'Muy seguro, Automático, Bajo', answers: [{ labels: ['Muy seguro'] }, { labels: ['Automático'] }, { labels: ['Bajo'] }, { labels: [] }] }, runtime, 'msg_caller'), /already used/);
   assert.equal(f.starts(), 0);
   assert.equal(f.gate.status(runtime.sessionID).state, 'stopped');
 });
@@ -1372,8 +1444,13 @@ test('written answers: a change confirmation typed into the form stays open and 
   assert.equal(open.state, 'question-ready');
   assert.equal(open.question.questions[0].header, 'Cambio');
   await f.gate.answer({ answers: [{ labels: [CHANGE_LABELS.confirm] }] }, runtime, 'msg_caller');
-  // Confirmed: the single grouped preflight of the new run is what is asked next.
-  assert.deepEqual(f.gate.status(runtime.sessionID).question.questions.map(question => question.header), ['Certeza', 'Artefactos', 'Modo', 'Resumen', 'Notas']);
+  // Fresh typed scope consent replaces the run, not its accepted preference defaults.
+  assert.equal(f.gate.status(runtime.sessionID).question, undefined);
+  assert.equal(f.starts(), 2);
+  assert.equal(f.workflow().snapshot().answers.mode, 'interactive');
+  assert.deepEqual(f.workflow().snapshot().results, []);
+  f.pass();
+  assert.equal(f.workflow().nextAction().kind, 'approve', 'scope consent never approves the next phase');
 });
 
 test('written answers: nothing can be answered when no MDD question waits', async t => {

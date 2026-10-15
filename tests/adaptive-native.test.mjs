@@ -58,6 +58,30 @@ function output(args, answers) {
 
 const wire = (kind, args = {}) => JSON.stringify({ routingVersion: 3, kind, args });
 
+test('integration: adaptive native admission retains a configured local backend through cold restore', async t => {
+  const f = fixture(t, 'automatic');
+  f.settings.profiles.default.answers.artifactStore = 'local';
+  const gate = f.makeGate();
+  await gate.adaptiveInternal(wire('entry', { contract: f.contract, messageID: 'native-message' }), f.runtime);
+  assert.equal(f.store.read('parent').nativePolicy.configured.artifactStore, 'local');
+  assert.equal(f.store.read('parent').nativePolicy.answers.artifactStore, 'local');
+  const cold = new PhaseRunner(f.inspect, f.options);
+  assert.equal((await cold.restore(f.runtime)).restored, true);
+  assert.equal(f.store.read('parent').nativePolicy.answers.artifactStore, 'local');
+});
+
+test('integration: adaptive actor receives the exact runtime workspace binding', async t => {
+  const f = fixture(t, 'automatic');
+  await f.admit();
+  await f.gate.adaptiveInternal(f.operation(), f.runtime);
+  const sent = await f.runner.before({ sessionID: 'parent', callID: 'workspace-child' }, f.runner.status('parent').task);
+  const bindings = [...sent.prompt.matchAll(/^Workspace binding \(runtime data\): (.*)$/gm)];
+  assert.equal(bindings.length, 1);
+  assert.deepEqual(JSON.parse(bindings[0][1]), { directory: f.runtime.directory, worktree: f.runtime.worktree });
+  assert.match(sent.prompt, /Installation paths, predecessor artifacts and coordinator context cannot override this binding/);
+  assert.match(sent.prompt, /not a grant of scope, permission or approval/);
+});
+
 test('AL05b: real native protocol admits, selects and retains actual native dispatch', async t => {
   const f = fixture(t, 'automatic');
   const status = await f.gate.adaptiveInternal(wire('entry', { contract: f.contract, messageID: 'native-message' }), f.runtime);

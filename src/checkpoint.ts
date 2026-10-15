@@ -25,6 +25,8 @@ import { parseRiskVerdict } from './risk.js';
 import type { RiskVerdict } from './risk.js';
 import { identity } from './artifacts.js';
 import type { ArtifactIdentity, ArtifactRef } from './artifacts.js';
+import { TaskStore, TaskWriteError, taskArtifactRef, validateTaskIdentity } from './task-store.js';
+import type { TaskIdentity } from './task-store.js';
 
 export const CHECKPOINT_VERSION = 1;
 export const RESUME_CHECKPOINT_VERSION = 2;
@@ -69,6 +71,8 @@ export type ResumeData = {
   verificationVersion?: VerificationVersion;
   directory: string; worktree: string; userMessageID: string; requirements: string;
   memoryProject?: string;
+  task?: TaskIdentity;
+  taskArtifacts?: { phases: ArtifactRef[]; risks: ArtifactRef[]; contexts: ArtifactRef[] };
   context: { label: string; content: string; source: 'coordinator' }[];
   dependencies: { phase: Phase; content: string; digest: string; batchID?: string }[];
   contexts: { explorationID: string; outcome: 'passed' | 'failed'; summary: string; concerns: ReturnType<typeof concerns>; content: string; digest: string }[];
@@ -221,7 +225,7 @@ function validateRisk(value: unknown, workflow: Workflow, runID: string): { verd
   if (ref.runID !== runID || ref.phase !== 'mdd-risk' || !identifier(ref.recordID) ||
       typeof ref.digest !== 'string' || !/^[a-f0-9]{64}$/.test(ref.digest) ||
       !Number.isSafeInteger(ref.bytes) || (ref.bytes as number) < 0 ||
-      !['engram', 'openspec', 'both', 'none'].includes(ref.store as string)) {
+      !['engram', 'openspec', 'both', 'none', 'local'].includes(ref.store as string)) {
     throw new ValidationError('Invalid checkpoint risk artifact reference.');
   }
   // The domain/explorationID shape is checked with the same rules the artifact store enforces
@@ -243,7 +247,7 @@ function validateRisk(value: unknown, workflow: Workflow, runID: string): { verd
 function validateData(value: unknown, workflow: Workflow, runID: string): ResumeData {
   const data = objectWithKeys(value, 'checkpoint data', ['directory', 'worktree', 'userMessageID', 'requirements', 'memoryProject', 'context',
     'dependencies', 'contexts', 'acceptance', 'decisions', 'planned', 'evidence', 'verification', 'executedChecks',
-    'changedFiles', 'calls', 'usedMessages', 'proposed', 'rework', 'workerPolicy', 'workerState', 'risk', 'verificationVersion']);
+    'changedFiles', 'calls', 'usedMessages', 'proposed', 'rework', 'workerPolicy', 'workerState', 'risk', 'verificationVersion', 'task', 'taskArtifacts']);
   const version = verificationVersion(data.verificationVersion);
   if (![data.directory, data.worktree].every(item => bounded(item, 4096)) || !identifier(data.userMessageID) ||
       !bounded(data.requirements, 12000)) throw new ValidationError('Invalid checkpoint identity or requirements.');
@@ -333,6 +337,30 @@ function validateData(value: unknown, workflow: Workflow, runID: string): Resume
     }
   }
   validateRisk(data.risk, workflow, runID);
+  if (workflow.snapshot().answers.artifactStore === 'local') {
+    const task = validateTaskIdentity(data.task, { runID, directory: data.directory as string, worktree: data.worktree as string,
+      project: data.memoryProject as string | undefined });
+    const refs = objectWithKeys(data.taskArtifacts, 'local task artifacts', ['phases', 'risks', 'contexts']);
+    const phases = list(refs.phases, 256, 'local phase artifacts').map(value => taskArtifactRef(value, task));
+    const contexts = list(refs.contexts, 256, 'local context artifacts').map(value => taskArtifactRef(value, task));
+    const risks = list(refs.risks, 256, 'local risk artifacts').map(value => taskArtifactRef(value, task));
+    if (phases.length !== dependencies.length || contexts.length !== (data.contexts as unknown[]).length ||
+        risks.some(ref => ref.phase !== 'mdd-risk') ||
+        new Set([...phases, ...contexts, ...risks].map(ref => ref.recordID)).size !== phases.length + contexts.length + risks.length)
+      throw new ValidationError('Local task artifact history differs.');
+    phases.forEach((ref, index) => {
+      const dependency = dependencies[index] as ResumeData['dependencies'][number];
+      if (ref.phase !== dependency.phase || ref.batchID !== dependency.batchID || ref.digest !== dependency.digest || ref.bytes !== Buffer.byteLength(dependency.content))
+        throw new ValidationError('Local phase artifact differs from checkpoint bytes.');
+    });
+    contexts.forEach((ref, index) => {
+      const context = (data.contexts as ResumeData['contexts'])[index]!;
+      if (ref.phase !== 'mdd-explore' || ref.explorationID !== context.explorationID || ref.digest !== context.digest || ref.bytes !== Buffer.byteLength(context.content))
+        throw new ValidationError('Local context artifact differs from checkpoint bytes.');
+    });
+    if (data.risk && !isDeepStrictEqual((data.risk as ResumeData['risk'])!.ref, risks.at(-1)))
+      throw new ValidationError('Local selected risk is not the retained assessment.');
+  } else if (data.task !== undefined || data.taskArtifacts !== undefined) throw new ValidationError('Legacy storage cannot acquire a local task location.');
   return structuredClone(value) as ResumeData;
 }
 
@@ -397,6 +425,7 @@ export function validateCheckpoint(value: unknown): { checkpoint: AnyCheckpoint;
 export class CheckpointStore {
   readonly #files: LocalFiles;
   readonly #progress: ProgressGuard;
+  readonly #failedTaskExplorations = new Set<string>();
   constructor(root: string) { this.#files = new LocalFiles(root); this.#progress = new ProgressGuard(root); }
   #explorationName(parent: string): `.mdd/checkpoint-${string}.json` {
     if (!identifier(parent)) throw new ValidationError('Invalid exploration parent.');
@@ -411,6 +440,8 @@ export class CheckpointStore {
   }
   writeExploration(parent: string, value: ExplorationRecord): void {
     const record = validateExplorationRecord(value);
+    const taskAttempt = JSON.stringify([parent, record.ownerRunID]);
+    if (this.#failedTaskExplorations.has(taskAttempt)) throw new TaskWriteError('exploration-publication-unconfirmed');
     if (record.parent !== parent) throw new Error('Exploration parent mismatch.');
     this.#files.update(this.#explorationName(parent), previous => {
       if (previous !== undefined) {
@@ -430,6 +461,14 @@ export class CheckpointStore {
       return JSON.stringify(record);
     }, CHECKPOINT_MAX_BYTES);
     if (!isDeepStrictEqual(this.readExploration(parent), record)) throw new Error('Exploration checkpoint readback differs.');
+    const saved = this.#readRaw(parent)?.checkpoint;
+    if (saved?.version === STABLE_CHECKPOINT_VERSION && saved.data.task && saved.runID === record.ownerRunID) {
+      try {
+        const task = TaskStore.open(saved.data.task, { runID: saved.runID, directory: saved.data.directory,
+          worktree: saved.data.worktree, project: saved.data.memoryProject });
+        task.writeExploration(record);
+      } catch (error) { this.#failedTaskExplorations.add(taskAttempt); throw error; }
+    }
   }
   #name(parent: string): `.mdd/checkpoint-${string}.json` {
     if (!identifier(parent)) throw new ValidationError('Invalid checkpoint parent.');

@@ -11,6 +11,63 @@ import { applyModelOverrides } from '../dist/native-models.js';
 import { PHASE_AGENTS, CHECK_AGENTS, pinPhaseAgents } from '../dist/opencode-plugin.js';
 import { FIELD_SCHEMA } from '../dist/acceptance.js';
 
+test('evidence handoff: shipped prose keeps compact locators, uncertainty and independent verification', () => {
+  for (const path of ['assets/opencode/agents/mdd-orchestrator.md', 'assets/opencode/mdd-instructions.md']) {
+    const text = fs.readFileSync(path, 'utf8').replace(/\s+/g, ' ');
+    for (const pattern of [/finding/, /source locator/, /observed basis/, /freshness conditions and gaps/,
+      /commands\/results only when actually observed and relevant/, /load-bearing locator and uncertainty/,
+      /oldest-first compaction/, /Do not automatically duplicate raw outputs or entire source fragments/,
+      /start planning from relevant evidence/, /close phase-specific gaps/, /Prior evidence is not current proof/,
+      /Apply\/Verify must independently inspect current sources and run applicable checks/]) assert.match(text, pattern, path);
+  }
+});
+
+test('evidence handoff: storage docs distinguish exact readback from declared summary compaction', () => {
+  const artifacts = fs.readFileSync('docs/artifacts-and-actors.md', 'utf8').replace(/\s+/g, ' ');
+  assert.doesNotMatch(artifacts, /\b8,000\b|Do not substitute a digest or summary/);
+  assert.match(artifacts, /96,000 UTF-8 bytes/);
+  assert.match(artifacts, /38,000-byte/);
+  assert.match(artifacts, /oldest-first/);
+  assert.match(artifacts, /recorded summary and ref/);
+  assert.match(artifacts, /readback.*complete artifact/);
+  for (const path of ['docs/artifacts-and-actors.md', 'docs/opencode-adapter.md']) {
+    const text = fs.readFileSync(path, 'utf8').replace(/\s+/g, ' ');
+    assert.match(text, /load-bearing locator and uncertainty/, path);
+    assert.match(text, /Prior evidence is not current proof/, path);
+    assert.match(text, /not measured live actor compliance or token savings/, path);
+  }
+});
+
+test('checkout handoff: shipped guidance scopes negative capability observations without tool bans', () => {
+  const coordinator = fs.readFileSync('assets/opencode/agents/mdd-orchestrator.md', 'utf8').replace(/\s+/g, ' ');
+  const common = fs.readFileSync('assets/opencode/mdd-instructions.md', 'utf8').replace(/\s+/g, ' ');
+  for (const text of [coordinator, common]) {
+    for (const pattern of [/already-observed.*negative capability/, /capability\/provider or index location/,
+      /checkout\/environment identity/, /observed failure/, /fallback/, /invalidation conditions/,
+      /unchanged failed availability probes/, /restart/, /new index/, /contrary current evidence/,
+      /advisory/, /blanket tool bans/, /enforced expiry/]) assert.match(text, pattern);
+  }
+  assert.match(coordinator, /idle boundaries/);
+  assert.match(coordinator, /concise superseding observations/);
+  assert.match(coordinator, /global credentials or create automatic detectors/);
+  assert.match(coordinator, /Standalone investigations gain no observation storage channel/);
+  assert.match(common, /runtime directory.*active checkout/);
+  assert.match(common, /host worktree.*may differ/);
+  assert.match(common, /Installation paths, predecessor artifacts and coordinator context cannot override/);
+});
+
+test('checkout handoff: retained phase and risk briefs compose the same workspace data', () => {
+  const source = fs.readFileSync('src/phase-runner.ts', 'utf8');
+  const risk = source.slice(source.indexOf('#riskPrompts(run: Run)'), source.indexOf('/** Change executor'));
+  const phase = source.slice(source.indexOf('#phasePrompts(run: Run'), source.indexOf('#riskRecoveryReport(run: Run)'));
+  for (const builder of [risk, phase]) {
+    assert.match(builder, /workspaceData\(run\.runtime\)/);
+    assert.match(builder, /const compose = .*closing/s);
+    assert.match(builder, /\.\.\.data/);
+    assert.match(builder, /brief = compose\(/);
+  }
+});
+
 test('SA-1: packaged handoffs ground each planning role without new report fields', () => {
   const expectations = {
     explore: [/searched scope/, /file paths\s+and symbols or line ranges/, /coverage gaps/, /existing artifact prose/],

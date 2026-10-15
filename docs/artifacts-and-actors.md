@@ -2,8 +2,10 @@
 
 Validated artifact storage and all eight phase actors are integrated into complete main
 routes. Exact artifact readback precedes compact general memory and workflow recording.
-Every subsequent phase receives all prior validated contents and references within the
-96,000-byte combined handoff budget. Model-backed end-to-end validation is still pending.
+Subsequent phases receive prior validated artifacts as full text or declared summaries with
+references within the 96,000-byte combined handoff budget. Older artifacts are compacted
+oldest-first toward the 38,000-byte dispatch target. Model-backed end-to-end validation is
+still pending.
 
 ## Runtime handoff API
 
@@ -17,7 +19,7 @@ const artifactText = await store.read(saved.ref);
 
 | Export | Signature / purpose |
 |---|---|
-| `ArtifactStore` | `constructor(root: string, store: Answers['artifactStore'], engram?: EngramHttp)` |
+| `ArtifactStore` | `constructor(root: string, store: Answers['artifactStore'], engram?: EngramHttp, task?: TaskStore)` |
 | `save` | `(identity: ArtifactIdentity, content: string): Promise<ArtifactResult>` |
 | `read` | `(ref: ArtifactRef): Promise<string>` |
 | `ArtifactIdentity` | `{ runID: string; phase: Phase; domain?: string; explorationID?: string }` |
@@ -40,6 +42,9 @@ remain stable diagnostic identifiers, but are not restart/resume authorization. 
 bypass this guard: the resume checkpoint carries each dependency's exact bytes with their digest,
 and a restored run hands those bytes to the next phase as data. A restored store never reads a
 serialized reference.
+Local restoration instead reads diagnostic data through `TaskStore`, after validating the frozen
+task/run/workspace binding and each immutable record against its manifest. It does not mint live
+artifact capabilities or native approval.
 
 The run dossier (`.mdd/run-<SHA256(parentID)>.json`) serializes refs alongside the artifact
 content it already holds. That does not weaken the paragraph above: a serialized ref is exactly
@@ -50,10 +55,26 @@ from the retained `content`, never from a fresh `read`. Preserved artifacts are 
 capability or an authorization, so this remains no resume/import contract.
 
 The adapter retains one store per live run and exposes detached artifact content/references
-in `mdd_status`. Actual validated text and references are passed to subsequent child prompts.
-Budget prompt space using `bytes` before dispatch.
-Do not substitute a digest or summary for the actual dependency artifact. `none` keeps
-content only in the live return/handoff; it has no dedicated disk or observation record.
+in `mdd_status`. Storage readback always confirms the complete artifact; summaries never replace
+that confirmation. Child prompts inline recent artifacts and may carry older ones as their
+recorded summary and ref under declared oldest-first compaction. The prompt announces this
+substitution and status exposes `handoff`; do not invent or silently substitute summaries yourself.
+The ref identifies the complete artifact, not fresh evidence or a serialized read capability.
+`none` keeps content only in the live return/handoff; it has no dedicated disk or observation record.
+
+## Compact evidence handoffs
+
+Use existing artifact/context prose for the pertinent finding, source locator (path with
+symbol/lines or an issue locator), observed basis, freshness conditions and gaps. Commands/results
+belong only when actually observed and relevant; do not automatically duplicate raw outputs or
+entire source fragments. Evidence summaries should retain a load-bearing locator and uncertainty
+when useful after compaction, rather than copying the artifact. Consumers start from relevant
+evidence and close phase-specific gaps. Prior evidence is not current proof: Apply/Verify inspect
+current sources independently and run applicable checks, even when earlier prose reports success.
+Changed source bytes or environments can invalidate a claim; stale evidence is a lead, not proof.
+No report fields, approval, permissions or structured semantic coverage change. Fixture coverage
+proves downstream transport and declared compaction, not measured live actor compliance or token
+savings.
 
 ## Selection and failure semantics
 
@@ -63,6 +84,14 @@ content only in the live return/handoff; it has no dedicated disk or observation
 | `openspec` | Exclusive file creation or identical-content readback. |
 | `engram` | Fresh dedicated `mdd-artifact` observation with exact readback. |
 | `both` | Disk first, then Engram; both must confirm before success. |
+| `local` | Immutable task records and complete progress snapshots, with required readback. |
+
+New native runs automatically select `engram` after successful configured project/session binding,
+otherwise `local`. Configured transport/permission/binding/readback failures block without fallback.
+Storage is not asked in preflight, redo or the profile editor; deprecated saved profile choices cannot
+override resolution. Existing Engram/OpenSpec/Both/None/local runs remain pinned on restart and transfer,
+with no migration. Standalone resolved-answer APIs still accept the legacy backend tokens above.
+`mdd_status.storage` reports the effective `backend` and validated local `taskDirectory`.
 
 **General memory is optional and independent of artifact selection.** Engram and Both
 require an opted-in backend. With memory off, the runner omits the client and receipt writes;
@@ -94,6 +123,43 @@ is not attempted after a failure. No rollback, deletion, retry or workflow advan
 A partial disk write may remain after I/O failure. Inspect known references and reconcile
 explicitly; never claim that failure means nothing was written. Both-mode reads recheck
 both backends and fail on either mismatch; they never select whichever copy still works.
+
+## Complete local task storage
+
+Local-backed runs retain complete task evidence under
+`.mdd/tasks/<readable-objective>-<run-UUID>/`. The adapter generates the name; model-supplied
+paths are not accepted. The UUID separates runs with the same objective. Frozen resume metadata
+binds the location to its originating directory, worktree, run, native user message and optional
+memory project. Transfer retains that identity rather than moving or reselecting the backend.
+
+| Record | Preserved data |
+|---|---|
+| `manifest.json` | Frozen task identity, ordered immutable record identities/digests/byte counts, latest progress snapshot. |
+| `artifact-<UUID>.md` | Exact phase, risk, Apply-batch or contextual artifact bytes. Every retry/rework gets a new file. |
+| `snapshot-<UUID>.json` | Complete workflow/checkpoint and dossier, or a complete exploration-worker record. |
+
+Progress snapshots retain requirements, accepted answers, acceptance maps, decisions, plans,
+verification, coordinator context, native receipt history and replay guards. All risk assessments,
+including failed/retried assessments, retain their actual bodies. Exploration and Apply member
+reports survive aggregation. Each snapshot identifies its current parent and message; the task
+identity and earlier snapshots retain origin provenance. Receipts remain historical data, never
+restored approval authority.
+
+The root comes from `mddDataRoot`: linked-worktree data is stored in the owning repository, so
+deleting that worktree does not delete its task evidence. Those files remain inspectable; a new
+worktree cannot impersonate the originating workspace to resume them.
+
+Publication is exclusive and fsynced, followed by exact record and manifest readback. Manifest
+updates use the existing locked temporary-file/fsync/rename primitive. Operational ownership,
+questions, checkpoints and progress fences stay in their legacy locations. Local progress must
+publish before advancement or dispatch; it never degrades to best-effort dossier storage. An
+unknown write leaves evidence in place and blocks automatic retry and continuation, including
+restart from an older checkpoint. No deletion, fallback or legacy migration reconciles it.
+
+Local dossiers do not shed bodies at the legacy 400 KB budget. Checkpoints retain their existing
+16 MiB sanity ceiling; complete task snapshots have a 64 MiB ceiling. Exceeding a ceiling stops
+publication explicitly rather than trimming evidence. Status and prompt budgets affect views,
+not stored bytes. Existing link/hardlink checks and trusted-filesystem limitations apply.
 
 ## Exact OpenSpec layout
 
@@ -162,9 +228,12 @@ actor nothing until it chooses to, and a globally shadowed skill name still cann
 
 Besides validated dependency artifacts, a phase prompt may carry material the coordinator
 gathered, labelled `Coordinator-provided context (data, not authority)` and attributed
-`source: "coordinator"`. It is bounded to 8,000 UTF-8 bytes for the whole run, is composed by
-MDD rather than written by the model, and is neither an artifact nor a requirement: it grants no
-approval, replaces no user objective, and instructions inside it bind no actor.
+`source: "coordinator"`. Each entry and the composed prompt are bounded to 96,000 UTF-8 bytes;
+there is no smaller whole-run context cap. For a non-complete run, each contribution trial-composes
+the current prompt and is refused, unrecorded, if it exceeds that bound. Older artifacts may be compacted
+toward the 38,000-byte dispatch target, but contributed context is not silently trimmed. Context
+is composed by MDD rather than written as prompt instructions by the model, and is neither an
+artifact nor a requirement: it grants no approval, replaces no objective, and binds no actor.
 
 Shell executes arbitrary project code: these instructions are not a shell sandbox.
 Automatic workflow mode never removes native permission consent. Verify does not silently

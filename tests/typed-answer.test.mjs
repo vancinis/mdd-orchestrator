@@ -4,7 +4,7 @@ import { answerWords, mentions, typedSelections } from '../dist/typed-answer.js'
 import { questionEnvelope } from '../dist/preflight.js';
 import { approvalEnvelope, CLARIFICATION_LABELS } from '../dist/native-intake.js';
 
-// The grouped preflight as MDD issues it: four field questions, then the open note.
+// The grouped preflight as MDD issues it: three user fields, then the open note.
 const note = { header: 'Notas', question: '¿Algo más?', multiple: false, options: [{ label: CLARIFICATION_LABELS.nothing, description: 'Seguir.' }] };
 const preflight = { questions: [...questionEnvelope({}).questions, note] };
 const chat = text => () => ({ text, own: false });
@@ -12,9 +12,9 @@ const read = (...labels) => labels.map(label => ({ labels: label === undefined ?
 
 // The message that could not be recorded on 2026-10-08 and forced a fresh start.
 test('the user\'s own numbered answers to a preflight are read exactly as the form would carry them', () => {
-  const text = '1. algo seguro 2. engram 3. automatico 4. medio 5. nada que agregar.';
-  assert.deepEqual(typedSelections(preflight, 4, read('Algo seguro', 'Engram', 'Automático', 'Medio', 'Nada que agregar'), chat(text)),
-    [['Algo seguro'], ['Engram'], ['Automático'], ['Medio'], ['Nada que agregar']]);
+  const text = '1. algo seguro 2. automatico 3. medio 4. nada que agregar.';
+  assert.deepEqual(typedSelections(preflight, 3, read('Algo seguro', 'Automático', 'Medio', 'Nada que agregar'), chat(text)),
+    [['Algo seguro'], ['Automático'], ['Medio'], ['Nada que agregar']]);
 });
 
 test('case, accents and punctuation are ignored; the words themselves are not', () => {
@@ -23,8 +23,8 @@ test('case, accents and punctuation are ignored; the words themselves are not', 
   assert.ok(mentions('modo automatico', 'Automático'));
   // Whole words only: "medio" is not written inside "intermedio".
   assert.equal(mentions('un nivel intermedio', 'Medio'), false);
-  assert.throws(() => typedSelections(preflight, 4, read('Muy seguro', 'Ninguno', 'Interactivo', 'Medio', undefined),
-    chat('muy seguro, ninguno, interactivo, intermedio')), /did not write "Medio"/);
+  assert.throws(() => typedSelections(preflight, 3, read('Muy seguro', 'Interactivo', 'Medio', undefined),
+    chat('muy seguro, interactivo, intermedio')), /did not write "Medio"/);
 });
 
 test('an option the user did not write is never recorded, whatever the coordinator read', () => {
@@ -33,8 +33,8 @@ test('an option the user did not write is never recorded, whatever the coordinat
 });
 
 test('words that also name another option of the same question are ambiguous, so nothing is recorded', () => {
-  const text = '1. muy seguro 2. no quiero engram, mejor openspec 3. interactivo 4. bajo';
-  assert.throws(() => typedSelections(preflight, 4, read('Muy seguro', 'OpenSpec', 'Interactivo', 'Bajo', undefined), chat(text)), /also name "Engram"/);
+  const text = '1. muy seguro 2. no quiero automatico, mejor interactivo 3. bajo';
+  assert.throws(() => typedSelections(preflight, 3, read('Muy seguro', 'Interactivo', 'Bajo', undefined), chat(text)), /also name "Automático"/);
   assert.throws(() => typedSelections(approvalEnvelope('run-1', 'mdd-plan'), 1, read('Continuar'), chat('pausar no, continuar')), /also name "Pausar"/);
 });
 

@@ -15,7 +15,7 @@
       "additionalProperties": { "$ref": "#/$defs/profile" }
     },
     "engram": {
-      "description": "Optional memory backend. Omission means off. mdd setup offers detection/reuse or explicit-consent installation; the runtime never installs or upgrades.",
+      "description": "Optional memory integration. New native runs use Engram after validated project/session bootstrap; omission means complete local task storage. Configured failures block without fallback. Setup may install only with explicit consent; runtime never installs or upgrades.",
       "oneOf": [{
       "type": "object",
       "additionalProperties": false,
@@ -103,7 +103,7 @@
           "additionalProperties": false,
           "properties": {
             "certainty": { "enum": ["very-sure", "somewhat-sure", "not-sure"] },
-            "artifactStore": { "enum": ["engram", "openspec", "both", "none"] },
+            "artifactStore": { "enum": ["engram", "openspec", "both", "none", "local"], "deprecated": true, "description": "Retained legacy data; ignored for automatic new native-run backend resolution. Restored runs keep their frozen backend." },
             "mode": { "enum": ["interactive", "automatic"] },
             "summary": { "enum": ["detailed", "medium", "low"] },
             "complexity": { "enum": ["very-complex", "somewhat-complex", "not-complex"] }

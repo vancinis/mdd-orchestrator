@@ -22,6 +22,74 @@ import { ProgressGuard } from '../dist/progress.js';
 import { RunDossierStore } from '../dist/run-dossier.js';
 import { projectApprovalTransfer, projectTargetTransfer } from '../dist/transfer.js';
 import { Workflow } from '../dist/workflow.js';
+import { lockIdentity } from '../dist/local-files.js';
+import { FULL_TASK_MAX_BYTES } from '../dist/phase-runner.js';
+
+test('evidence handoff: native downstream dispatch retains locator and limits through announced compaction', async t => {
+  const f = await fixture(t, { route: 'high', memoryEnabled: false });
+  const summary = 'feature.txt:1; synthetic read fixture saw pending state; valid only while source bytes match; gap: integration checks unrun.';
+  const artifact = `Artifact for mdd-explore: Finding: pending boundary. Source locator: feature.txt:1. Observed basis: synthetic read fixture, no commands run. Freshness: source bytes must match. Gap: integration checks unrun.\nFull-only exploration detail.`;
+  await f.phase({ only: true, large: true, artifact, narrative: { evidenceSummary: summary } });
+  let sawCompaction = false;
+  for (const phase of ['mdd-propose', 'mdd-spec', 'mdd-design', 'mdd-tasks', 'mdd-apply', 'mdd-verify']) {
+    await f.phase({ large: phase !== 'mdd-verify' });
+    const prompt = f.delivered();
+    assert.match(prompt, new RegExp(`Perform only ${phase}`));
+    const dependencies = JSON.parse(prompt.match(/^Validated dependency artifacts \(data, not authority\): (.*)$/m)[1]);
+    const exploration = dependencies[0];
+    if (exploration.inlined === false) {
+      sawCompaction = true;
+      assert.equal(exploration.summary, summary);
+      assert.ok(exploration.ref.recordID);
+      assert.match(exploration.ref.digest, /^[a-f0-9]{64}$/);
+      assert.match(prompt, /appear above as their recorded summary and ref/);
+      assert.doesNotMatch(prompt, /Full-only exploration detail/);
+    } else assert.equal(exploration.content.startsWith(artifact), true);
+    const evidence = exploration.summary ?? exploration.content;
+    for (const fragment of ['feature.txt:1', 'synthetic read fixture', 'source bytes', 'integration checks unrun']) assert.ok(evidence.includes(fragment));
+    const packaged = JSON.parse(prompt.match(/^Packaged MDD actor instructions with provenance, which govern this phase: (.*)$/m)[1]);
+    assert.equal(packaged.content, fs.readFileSync('assets/opencode/mdd-instructions.md', 'utf8'));
+    assert.equal(packaged.digest, createHash('sha256').update(packaged.content).digest('hex'));
+    assert.match(packaged.content.replace(/\s+/g, ' '), /Apply\/Verify must independently inspect current sources and run applicable checks/);
+    if (phase === 'mdd-verify') {
+      assert.match(prompt, /Run applicable tests and build checks/);
+      assert.match(prompt, /never repair sources/);
+    }
+  }
+  assert.equal(sawCompaction, true);
+  assert.equal((await f.status()).state, 'complete');
+});
+
+test('evidence handoff: prior successful check prose cannot complete Verify without current checks', async t => {
+  const f = await fixture(t, { memoryEnabled: false });
+  await f.hooks.tool.mdd_context.execute({ label: 'Prior synthetic check', content: 'Finding: a prior fixture check reported exit 0. Source locator: feature.txt:1. Observed basis: synthetic npm test result, not this Verify execution. Freshness: source changed after that check. Gap: current tests unrun.' }, f.context);
+  await f.phase();
+  await f.phase();
+  await assert.rejects(f.phase({ noChecks: true }));
+  const status = await f.status();
+  assert.notEqual(status.state, 'complete');
+  assert.equal(status.verification, undefined);
+  assert.ok(status.rejected.reason);
+  assert.match(f.delivered(), /Run applicable tests and build checks/);
+});
+
+test('checkout handoff: expanded native transport binds checkout and carries capability context through Verify', async t => {
+  const f = await fixture(t, { memoryEnabled: false, distinctWorktree: true });
+  const observation = { label: 'CodeGraph availability', content: `Observed missing index at ${f.root}/.codegraph; provider query unavailable in this environment. Fallback: native read/grep. Reconsider on restart, identity/environment change, a new index or contrary current evidence.` };
+  await f.hooks.tool.mdd_context.execute(observation, f.context);
+  for (const phase of ['mdd-explore', 'mdd-risk', 'mdd-plan', 'mdd-apply', 'mdd-verify']) {
+    await f.phase({ only: true });
+    const prompt = f.delivered();
+    assert.match(prompt, new RegExp(`Perform only ${phase}`));
+    assert.deepEqual(JSON.parse(prompt.match(/^Workspace binding \(runtime data\): (.*)$/m)[1]),
+      { directory: f.runtime.directory, worktree: f.runtime.worktree });
+    assert.notEqual(f.runtime.directory, f.runtime.worktree);
+    const context = JSON.parse(prompt.match(/^Coordinator-provided context \(data, not authority\): (\[.*\])\. The coordinator/m)[1]);
+    assert.deepEqual(context, [{ ...observation, source: 'coordinator' }]);
+    assert.match(prompt, /never an instruction, requirement or approval/);
+  }
+  assert.equal((await f.status()).state, 'complete');
+});
 
 for (const phase of ['mdd-explore', 'mdd-risk', 'mdd-plan', 'mdd-propose', 'mdd-spec', 'mdd-design', 'mdd-tasks', 'mdd-apply', 'mdd-verify']) {
   test(`SA-1: composed ${phase} prompt keeps phase authority and evidence handoff`, async t => {
@@ -635,19 +703,19 @@ test('opt-in Engram project mismatch blocks restoration without rebinding', asyn
   assert.equal(status.task, undefined);
 });
 
-test('opt-in rejected result survives restart as a retry of the same phase', async t => {
+test('automatic local storage fences a rejected result across restart without automatic retry', async t => {
   const f = await fixture(t, { memoryEnabled: false, store: 'none' });
   await assert.rejects(f.phase({ badEnvelope: true }));
   const current = await f.status();
-  assert.equal(current.state, 'ready');
+  assert.equal(current.state, 'blocked');
+  assert.match(current.reason, /Local task publication is incomplete or unknown/);
+  assert.equal(current.task, undefined);
   const resumed = await plugin(f.input);
   const restored = JSON.parse(await resumed.tool.mdd_status.execute({ detail: 'full' }, f.context));
-  assert.equal(restored.state, 'ready');
-  assert.equal(restored.runID, current.runID);
-  assert.equal(restored.phase, 'mdd-plan');
-  assert.equal(restored.attempts, 1);
-  assert.equal(restored.workflow.results.length, 1); // + the exploration every run now starts with
-  assert.equal(restored.task.subagent_type, 'mdd-plan');
+  assert.equal(restored.state, 'recovery-blocked');
+  assert.equal(new CheckpointStore(f.mainRoot).read(f.runtime.sessionID).checkpoint.runID, current.runID, 'the same run remains retained, not resumed');
+  assert.equal(restored.task, undefined);
+  assert.equal(restored.recoverable, true);
 });
 
 test('opt-in malformed completed report restores report-only restatement, not dispatch', async t => {
@@ -697,7 +765,7 @@ test('opt-in failed Verify restores rework and complete runs close before a fres
 });
 
 // Native SDK/hook contract fixtures. No model or real shell execution is performed.
-async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', partial = false, summary = 'low', telemetry = true, memoryEnabled = true, memoryFault, start = true, worktree: worktreeLayout = false, autoReview = true } = {}) {
+async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', partial = false, summary = 'low', telemetry = true, memoryEnabled = true, memoryFault, start = true, worktree: worktreeLayout = false, distinctWorktree = false, autoReview = true } = {}) {
   isolateHome(t);
   // When asked, the session runs inside a linked git worktree laid out as git does on disk — a
   // `.git` file pointing at the administrative directory, which names the shared git directory. It
@@ -716,6 +784,11 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
     await mkdir(root);
     await writeFile(join(root, '.git'), `gitdir: ${administrative.replaceAll('\\', '/')}\n`);
   }
+  const hostWorktree = root;
+  if (distinctWorktree) {
+    root = join(root, 'checkout @active');
+    await mkdir(root);
+  }
   installCleanup(root);
   await writeFile(join(root, 'feature.txt'), 'pending\n');
   const memory = memoryEnabled ? await memoryServer(t, memoryFault) : { binding: {}, writes: [] };
@@ -729,7 +802,7 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
   if (memoryEnabled) settings.engram = { endpoint: memory.endpoint, project: 'mdd-test' };
   settings.telemetry.enabled = telemetry;
   saveGlobalSettings(settings);
-  const runtime = { sessionID: 'ses_parent', agent: 'mdd-orchestrator', directory: root, worktree: root };
+  const runtime = { sessionID: 'ses_parent', agent: 'mdd-orchestrator', directory: root, worktree: hostWorktree };
   const model = { providerID: 'contract-only', modelID: 'model' };
   const requirements = 'Implement a scoped feature and check it.';
   const agents = MODEL_ROLES.map(role => ({ name: role === 'orchestrator' ? 'mdd-orchestrator' : role, mode: role === 'orchestrator' ? 'primary' : 'subagent', permission: [
@@ -738,10 +811,10 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
     ...(['mdd-apply', 'mdd-verify'].includes(role) ? [{ permission: 'bash', pattern: '*', action: 'ask' }] : []),
   ] }));
   const sessions = new Map([[runtime.sessionID, { id: runtime.sessionID, agent: runtime.agent, directory: root, projectID: 'project' }]]);
-  const info = { id: 'msg_parent', sessionID: runtime.sessionID, agent: runtime.agent, role: 'assistant', ...model, path: { cwd: root, root } };
+  const info = { id: 'msg_parent', sessionID: runtime.sessionID, agent: runtime.agent, role: 'assistant', ...model, path: { cwd: root, root: hostWorktree } };
   const parent = [{ info: { id: 'user', sessionID: runtime.sessionID, role: 'user' }, parts: [{ type: 'text', text: requirements, sessionID: runtime.sessionID, messageID: 'user' }] }, { info, parts: [] }];
   const histories = new Map([[runtime.sessionID, parent]]);
-  const input = { directory: root, worktree: root, project: { id: 'project' }, client: {
+  const input = { directory: root, worktree: hostWorktree, project: { id: 'project' }, client: {
     app: { agents: async () => ({ data: agents }) }, session: {
       status: async () => ({ data: {} }),
       get: async ({ path }) => ({ data: sessions.get(path.id) }), messages: async ({ path }) => ({ data: histories.get(path.id) }),
@@ -769,7 +842,7 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
     // 'Ruta' is the one native route question (3a) that replaces the generic approval at the
     // suggested route's first tail phase; the default answer here keeps the suggested route,
     // exactly like the plain 'Continuar' it stands in for.
-    const labels = { 'Aprobación': 'Continuar', Ruta: 'Continuar con la ruta sugerida', Cambio: 'Confirmar el cambio', Certeza: known.certainty === 'not-sure' ? 'Poco seguro' : known.certainty === 'somewhat-sure' ? 'Algo seguro' : 'Muy seguro', Artefactos: { none: 'Ninguno', openspec: 'OpenSpec', engram: 'Engram', both: 'Ambos' }[store], Modo: mode === 'automatic' ? 'Automático' : 'Interactivo', Resumen: { low: 'Bajo', medium: 'Medio', detailed: 'Detallado' }[known.summary], Notas: 'Nada que agregar' };
+    const labels = { 'Aprobación': 'Continuar', Ruta: 'Continuar con la ruta sugerida', Cambio: 'Confirmar el cambio', Certeza: known.certainty === 'not-sure' ? 'Poco seguro' : known.certainty === 'somewhat-sure' ? 'Algo seguro' : 'Muy seguro', Modo: mode === 'automatic' ? 'Automático' : 'Interactivo', Resumen: { low: 'Bajo', medium: 'Medio', detailed: 'Detallado' }[known.summary], Notas: 'Nada que agregar' };
     const selections = Array.isArray(selection) ? selection : args.questions.map(q => [typeof selection === 'string' ? selection : labels[q.header]]);
     const formatted = args.questions.map((q, i) => `"${q.question}"="${selections[i].join(', ')}"`).join(', ');
     await hooks['tool.execute.after']({ ...call, args }, { title: `Asked ${args.questions.length} question${args.questions.length > 1 ? 's' : ''}`, output: `User has answered your questions: ${formatted}. You can now continue with the user's answers in mind.`, metadata: { answers: selections, truncated: false } });
@@ -903,7 +976,7 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
     parent[1].parts[0].state.metadata = { sessionId: childID, parentSessionId: runtime.sessionID, model };
     sessions.set(childID, { id: childID, parentID: runtime.sessionID, directory: root, projectID: 'project', agent: phase, permission: [{ permission: 'task', pattern: '*', action: 'deny' }] });
     await hooks.event({ event: { type: 'session.created', properties: { info: sessions.get(childID) } } });
-    const child = [{ info: { id: `msg-${ordinal}`, sessionID: childID, role: 'assistant', agent: phase, ...model, path: { cwd: root, root }, time: { completed: 10 }, finish: 'stop', ...(options.spent ?? {}) }, parts: [] }];
+    const child = [{ info: { id: `msg-${ordinal}`, sessionID: childID, role: 'assistant', agent: phase, ...model, path: { cwd: root, root: hostWorktree }, time: { completed: 10 }, finish: 'stop', ...(options.spent ?? {}) }, parts: [] }];
     histories.set(childID, child);
     if (options.beforeMismatch) child[0].info.modelID = 'substituted';
     async function tool(name, input, output, execute = async () => {}) {
@@ -1016,6 +1089,54 @@ async function assessedRoute(f, route) {
   return ['mdd-explore', ...tail];
 }
 
+for (const fault of ['', 'permission', 'session', 'readback', 'receipt-readback', 'artifact-permission']) test(`PF-3: configured native Engram activation and publication never fall back (${fault || 'success'})`, async t => {
+  const f = await fixture(t, { start: false, store: 'none', memoryEnabled: true, memoryFault(req, reply) {
+    if (fault === 'permission' && req.url.startsWith('/project/current')) { reply.status = 403; reply.data = { error: 'denied' }; }
+    if (fault === 'session' && req.url.startsWith('/sessions/')) reply.data = { ...reply.data, project: 'foreign-project' };
+    if (fault === 'readback' && req.url.startsWith('/observations/') && reply.data.type === 'mdd-artifact') reply.data = { ...reply.data, content: 'Not the saved artifact.' };
+    if (fault === 'receipt-readback' && req.url.startsWith('/observations/') && reply.data.type === 'workflow' && reply.data.content.includes('agent-evidence')) reply.data = { ...reply.data, content: 'Not the result receipt.' };
+    if (fault === 'artifact-permission' && req.url.startsWith('/observations/') && reply.data.type === 'mdd-artifact') { reply.status = 403; reply.data = { error: 'denied' }; }
+  } });
+  if (['permission', 'session'].includes(fault)) {
+    await assert.rejects(f.hooks.tool.mdd_start.execute({ requirements: f.requirements }, f.context));
+    const status = await f.status();
+    assert.equal(status.state, 'blocked');
+    assert.equal(status.memory, 'enabled');
+    assert.equal(status.storage, undefined);
+    assert.equal(status.question, undefined);
+  } else {
+    await f.hooks.tool.mdd_start.execute({ requirements: f.requirements }, f.context);
+    const started = await f.status();
+    assert.equal(started.storage.backend, 'engram', 'deprecated none profile does not override configured Engram');
+    assert.equal(started.storage.taskDirectory, undefined);
+    if (['readback', 'receipt-readback', 'artifact-permission'].includes(fault)) {
+      await assert.rejects(f.phase({ only: true }));
+      const failed = await f.status();
+      assert.equal(failed.state, 'blocked');
+      assert.equal(failed.memory, 'enabled');
+      assert.equal(failed.storage.backend, 'engram');
+      assert.equal(failed.task, undefined);
+      assert.match(failed.reason, /Configured Engram persistence is unconfirmed/);
+      const resumed = await plugin(f.input);
+      const held = JSON.parse(await resumed.tool.mdd_status.execute({ detail: 'full' }, f.context));
+      assert.ok(['blocked', 'recovery-blocked'].includes(held.state), `configured uncertainty must remain blocked after restart: ${held.state}`);
+      assert.equal(held.task, undefined);
+      assert.equal(held.memory, 'enabled');
+      assert.notEqual(held.storage?.backend, 'local');
+      const retried = JSON.parse(await resumed.tool.mdd_reset.execute({ scope: 'phase' }, f.context));
+      assert.equal(retried.state, 'ready', 'explicit recovery clears the durable storage stop without changing backend');
+      const afterReset = JSON.parse(await resumed.tool.mdd_status.execute({ detail: 'full' }, f.context));
+      assert.equal(afterReset.state, 'ready');
+      assert.equal(afterReset.storage.backend, 'engram');
+    } else {
+      await f.phase({ only: true });
+      assert.ok(f.writes.some(write => write.type === 'mdd-artifact'));
+      assert.equal((await f.status()).artifacts[0].ref.store, 'engram');
+    }
+  }
+  assert.equal(fs.existsSync(join(f.mainRoot, '.mdd/tasks')), false, 'neither a configured failure nor success activates local fallback');
+});
+
 for (const route of ['low', 'high']) for (const store of ['none', 'openspec']) for (const mode of ['automatic', 'interactive']) {
   test(`memory off complete native route: ${route}/${store}/${mode}, no transport or service`, async t => {
     t.mock.method(globalThis, 'fetch', () => { assert.fail('Memory off fetched'); });
@@ -1032,10 +1153,18 @@ for (const route of ['low', 'high']) for (const store of ['none', 'openspec']) f
     assert.equal(status.state, 'complete');
     assert.equal(status.memory, 'off');
     assert.equal(status.coverage, 100);
+    assert.equal(status.workflow.answers.artifactStore, 'local', 'legacy profile choice cannot override automatic local');
+    assert.equal(status.storage.backend, 'local');
+    assert.equal(status.storage.taskDirectory, join(f.mainRoot, '.mdd', 'tasks', new CheckpointStore(f.mainRoot).read(f.runtime.sessionID).checkpoint.data.task.name));
+    const manifest = JSON.parse(await readFile(join(status.storage.taskDirectory, 'manifest.json'), 'utf8'));
+    assert.equal(manifest.task.runID, status.runID);
+    assert.ok(manifest.records.some(record => record.kind === 'snapshot'));
+    assert.ok(manifest.records.some(record => record.kind === 'artifact' && record.ref.phase === 'mdd-risk'));
     assert.equal(f.writes.length, 0);
     for (const artifact of status.artifacts) {
       assert.equal(artifact.ref.observationID, undefined);
-      if (store === 'openspec') assert.ok(artifact.ref.path);
+      assert.equal(artifact.ref.store, 'local');
+      assert.match(artifact.ref.path, /\.mdd\/tasks\/.*\/artifact-/);
     }
     await f.hooks.event({ event: { type: 'server.instance.disposed', properties: { directory: f.root } } });
   });
@@ -1354,8 +1483,13 @@ test('late result memory failure never completes Verify or retains checks credit
     if (req.method === 'POST' && last?.type === 'workflow') { const body = JSON.parse(last.content); if (body.kind === 'agent-evidence' && body.phase === 'mdd-verify') reply.status = 500; }
   } });
   await f.phase(); await f.phase(); await assert.rejects(f.phase());
-  assert.equal((await f.status()).coverage, 65); assert.equal((await f.status()).state, 'ready');
-  assert.equal((await f.status()).evidence.checks, 'unearned');
+  const failed = await f.status();
+  assert.equal(failed.coverage, 40, 'configured persistence uncertainty withdraws affected evidence conservatively');
+  assert.equal(failed.state, 'blocked');
+  assert.equal(failed.memory, 'enabled');
+  assert.equal(failed.storage.backend, 'engram');
+  assert.equal(failed.task, undefined);
+  assert.equal(failed.evidence.checks, 'invalidated');
 });
 
 for (const fault of ['missing', 'invented', 'drift', 'partial']) {
@@ -1534,12 +1668,13 @@ test('SA-3: a new objective still needs latest text and ordinary preflight; arch
   assert.deepEqual((await f.status()).workflow, failed.workflow);
   RunDossierStore.prototype.archiveContinuation = original;
   delete f.settings.profiles.default.answers.mode;
+  delete f.settings.profiles.default.answers.certainty;
   saveGlobalSettings(f.settings);
   const restarted = await plugin(f.input);
   const result = JSON.parse(await restarted.tool.mdd_start.execute({ requirements: f.parent[0].parts[0].text }, f.context));
   assert.equal(result.state, 'question-ready');
   assert.equal(result.task, undefined);
-  assert.equal(result.question.questions[0].header, 'Modo');
+  assert.deepEqual(result.question.questions.map(q => q.header), ['Certeza', 'Notas'], 'new objective certainty is refreshed while applied mode is reused');
   assert.equal(new RunDossierStore(f.root).readContinued(f.runtime.sessionID, failed.runID).results.at(-1).outcome, 'failed');
 });
 
@@ -1761,9 +1896,9 @@ test('confirmed rerun asks every field once despite complete profile and preserv
   const confirmation = await f.change();
   assert.equal(confirmation.question.questions.length, 1);
   await f.answer();
-  const preflight = await f.status(); assert.equal(preflight.question.questions.length, 5);
+  const preflight = await f.status(); assert.equal(preflight.question.questions.length, 4);
   assert.equal(preflight.runID, old.runID);
-  await f.answer([['Muy seguro'], ['Ninguno'], ['Interactivo'], ['Bajo'], ['Nada que agregar']]);
+  await f.answer([['Muy seguro'], ['Interactivo'], ['Bajo'], ['Nada que agregar']]);
   const next = await f.status();
   assert.notEqual(next.runID, old.runID); assert.equal(next.task.subagent_type, 'mdd-explore');
   assert.equal(next.previousRuns[0].runID, old.runID);
@@ -1772,6 +1907,66 @@ test('confirmed rerun asks every field once despite complete profile and preserv
   assert.equal(next.workflow.answers.mode, 'interactive'); assert.equal(next.previousRuns[0].workflow.answers.mode, 'automatic');
   assert.equal(f.questions(), 2);
   await assert.rejects(f.change(), /already used by MDD\. A rerun needs a new user message/);
+});
+
+test('PF-1 P1: fresh-start preference publication failure keeps the new objective blocked and redo bound to it', async t => {
+  const f = await fixture(t, { memoryEnabled: false });
+  await f.phase(); await f.phase(); await f.phase();
+  const previous = await f.status();
+  assert.equal(previous.state, 'complete');
+  const preference = join(f.mainRoot, '.mdd', `preferences-${createHash('sha256').update(f.runtime.sessionID).digest('hex')}.json`);
+  const originalPreferences = await readFile(preference, 'utf8');
+  const lock = `${preference}.lock`;
+  await writeFile(lock, JSON.stringify({ ...lockIdentity(), nonce: 'live-preference-writer' }));
+  const requirements = 'Implement a separate export objective.';
+  f.user(requirements);
+  await assert.rejects(f.hooks.tool.mdd_start.execute({ requirements }, f.context), /reusable defaults are not confirmed durable/);
+  const failed = await f.status();
+  assert.equal(failed.state, 'blocked', 'post-start failure cannot restore predecessor intake over the replacement runner');
+  assert.notEqual(failed.runID, previous.runID);
+  assert.equal(new CheckpointStore(f.mainRoot).read(f.runtime.sessionID).checkpoint.data.requirements, requirements);
+  assert.equal(failed.task, undefined);
+  assert.match(failed.reason, /reusable defaults are not confirmed durable/);
+  assert.doesNotMatch(failed.notice ?? '', /planned run is ready|kept.*plan/i);
+  assert.deepEqual(failed.previousRuns[0].workflow, previous.workflow);
+  assert.deepEqual(failed.previousRuns[0].artifacts, previous.artifacts);
+  assert.equal(new RunOwnershipStore(f.mainRoot).parent(f.runtime.sessionID), failed.runID, 'the replacement owner remains bound');
+  assert.equal(await readFile(preference, 'utf8'), originalPreferences, 'failed publication cannot change reusable defaults');
+  await rm(lock);
+  f.user('Please redo the preflight for the export objective.');
+  const confirmation = await f.change();
+  assert.match(confirmation.question.questions[0].question, /Implement a separate export objective\./);
+  assert.ok(!confirmation.question.questions[0].question.includes(f.requirements), 'redo cannot propose the completed predecessor objective');
+  await f.answer();
+  assert.deepEqual((await f.status()).question.questions.map(q => q.header), ['Certeza', 'Modo', 'Resumen', 'Notas']);
+});
+
+for (const restart of [false, true]) test(`session preferences override profile for new intake without changing old answers (restart=${restart})`, async t => {
+  const f = await fixture(t, { memoryEnabled: false, worktree: restart });
+  f.user('Redo every preflight answer.'); await f.change(); await f.answer();
+  await f.answer([['Poco seguro'], ['Interactivo'], ['Detallado'], ['Nada que agregar']]);
+  const accepted = await f.status();
+  assert.deepEqual(accepted.previousRuns[0].workflow.answers, { ...answers, artifactStore: 'local' });
+  assert.ok((await readdir(join(f.mainRoot, '.mdd'))).some(name => /^preferences-[a-f0-9]{64}\.json$/.test(name)), 'preferences use the shared repository anchor');
+  if (restart) assert.equal(fs.existsSync(join(f.root, '.mdd')), false);
+  await f.hooks.tool.mdd_reset.execute({ scope: 'run' }, f.context);
+  const hooks = restart ? await plugin(f.input) : f.hooks;
+  f.user('A new objective in this same conversation.');
+  const next = JSON.parse(await hooks.tool.mdd_start.execute({ requirements: f.parent[0].parts[0].text }, f.context));
+  assert.equal(next.state, 'ready');
+  assert.equal(next.workflow.answers.mode, 'interactive');
+  assert.equal(next.workflow.answers.summary, 'detailed');
+  assert.equal(next.workflow.answers.certainty, 'very-sure', 'objective certainty comes from the profile, not the previous run');
+  assert.equal(next.provenance.preflight, 'session-preference');
+  const other = { ...f.context, sessionID: 'ses_other_parent', messageID: 'msg_other_parent' };
+  const requirements = 'An independent objective in another parent.';
+  f.sessions.set(other.sessionID, { id: other.sessionID, agent: other.agent, directory: f.root, projectID: 'project' });
+  f.histories.set(other.sessionID, [
+    { info: { id: 'user_other', sessionID: other.sessionID, role: 'user' }, parts: [{ type: 'text', text: requirements, sessionID: other.sessionID, messageID: 'user_other' }] },
+    { info: { ...f.parent[1].info, id: other.messageID, sessionID: other.sessionID }, parts: [] },
+  ]);
+  const separate = JSON.parse(await hooks.tool.mdd_start.execute({ requirements }, other));
+  assert.deepEqual(separate.workflow.answers, { ...answers, artifactStore: 'local' }, 'another parent inherits neither preferences nor receipts');
 });
 test('rejected material change restores exact answers, plan and pending approval', async t => {
   const f = await fixture(t, { mode: 'interactive' }); await f.phase();
@@ -1782,15 +1977,22 @@ test('rejected material change restores exact answers, plan and pending approval
   assert.equal(current.runID, old.runID); assert.deepEqual(current.workflow, old.workflow);
   assert.deepEqual(current.question, old.question); assert.deepEqual(current.acceptance, old.acceptance);
 });
-test('confirmed material change replans from new requirements after one grouped preflight', async t => {
-  const f = await fixture(t); const old = await f.status();
+test('confirmed material change reuses preferences and configured certainty without replaying approvals', async t => {
+  const f = await fixture(t, { mode: 'interactive', memoryEnabled: false }); const old = await f.status();
   f.user('Change the scope to include an integration.');
-  await f.change('material', 'New integration requirements.'); await f.answer(); await f.answer();
+  await f.change('material', 'New integration requirements.');
+  assert.equal((await f.status()).runID, old.runID, 'scope still needs fresh confirmation');
+  await f.answer();
   const next = await f.status();
+  assert.equal(next.question, undefined, 'accepted mode/summary and configured certainty are not repeated');
   assert.notEqual(next.runID, old.runID);
+  assert.deepEqual(next.workflow.answers, old.workflow.answers);
   assert.equal(next.workflow.results.length, 0); assert.equal(next.acceptance, undefined);
-  await f.phase();
+  await f.phase({ only: true });
   assert.match(f.delivered(), /New integration requirements/);
+  await f.phase({ only: true });
+  assert.equal((await f.status()).question.questions[0].header, 'Ruta', 'the new run still needs its own phase consent');
+  assert.equal(f.questions(), 1);
 });
 test('invalid change parameters and wrong user text do not poison a ready plan', async t => {
   const f = await fixture(t); const old = await f.status();
@@ -1824,7 +2026,7 @@ test('new task after completion uses profile without a redundant change confirma
 });
 for (const mode of ['automatic', 'interactive']) {
   test(`contextual exploration preserves ${mode} main workflow and approval`, async t => {
-    const f = await fixture(t, { mode, store: 'both' }); await f.phase();
+    const f = await fixture(t, { mode, store: 'both', memoryEnabled: false }); await f.phase();
     const old = await f.status();
     await f.hooks.tool.mdd_contextual_explore.execute({ purpose: 'Inspect integration uncertainty without changing the plan.' }, f.context);
     const side = await f.status(); assert.equal(side.contextual, true); assert.equal(side.task.subagent_type, 'mdd-explore'); assert.equal(side.question, undefined);
@@ -1832,7 +2034,7 @@ for (const mode of ['automatic', 'interactive']) {
     await f.phase({ concerns: [{ category: 'integrations', evidence: 'An integration assumption needs inspection.', impact: 'May affect a later explicit scope request.' }] });
     const current = await f.status();
     assert.deepEqual(current.workflow, old.workflow); assert.deepEqual(current.evidence, old.evidence); assert.deepEqual(current.acceptance, old.acceptance);
-    assert.equal(current.contexts.length, 1); assert.match(current.contexts[0].artifact.ref.path, /explorations/);
+    assert.equal(current.contexts.length, 1); assert.match(current.contexts[0].artifact.ref.path, /\.mdd\/tasks\/.*\/artifact-/);
     assert.equal(current.contexts[0].artifact.ref.explorationID, current.contexts[0].explorationID);
     assert.deepEqual(current.question, old.question);
     if (current.question) await f.answer();
@@ -1961,17 +2163,15 @@ test('a result that names no session is charged to nobody rather than to a guess
   const f = await fixture(t, { memoryEnabled: false });
   await assert.rejects(f.phase({ badEnvelope: true, spent: { tokens: { input: 900, output: 120, reasoning: 0, cache: { read: 0, write: 0 } }, cost: 0.004 } }));
   const rows = (await readFile(join(f.root, '.mdd/telemetry.jsonl'), 'utf8')).trim().split('\n').map(row => JSON.parse(row));
-  const ended = rows.findLast(row => row.event === 'phase-end');
-  assert.equal(ended.outcome, 'blocked');
-  assert.equal(ended.failure, 'result-rejected');
-  // The envelope that would name the child is exactly what was malformed, so the spending is
-  // real but unattributable. Recording it against this phase anyway would be inventing evidence.
-  assert.equal(ended.usage, undefined);
-  assert.equal(rows.findLast(row => row.event === 'retry').failure, 'result-rejected');
+  // Automatic local storage fences this unconfirmed result before any phase-end/retry event.
+  // Spending without a valid native envelope remains unattributable, never invented evidence.
+  assert.equal(rows.some(row => row.event === 'phase-end' && row.phase === 'mdd-plan'), false);
+  assert.equal(rows.some(row => row.event === 'retry' && row.phase === 'mdd-plan'), false);
+  const status = await f.status();
+  assert.equal(status.state, 'blocked');
+  assert.equal(status.task, undefined);
+  assert.match(status.reason, /Local task publication is incomplete or unknown/);
   const rollup = JSON.parse(await readFile(join(f.root, '.mdd/telemetry-rollup.json'), 'utf8'));
-  assert.equal(rollup.failures['result-rejected'], 1);
-  assert.equal(rollup.phases['mdd-plan'].retries, 1);
-  assert.equal(rollup.phases['mdd-plan'].blocked, 1);
   assert.equal(rollup.phases['mdd-plan'].measured, 0);
 });
 
@@ -2164,6 +2364,36 @@ test('a new conversation finds a run recorded by another one and can take it ove
   assert.ok(!(later.workspaceRuns ?? []).some(run => run.sessionID === f.runtime.sessionID));
 });
 
+test('transfer keeps held run choices but does not inherit source session preference defaults', async t => {
+  const f = await fixture(t, { memoryEnabled: false });
+  f.user('Redo the preflight.'); await f.change(); await f.answer();
+  await f.answer([['Muy seguro'], ['Automático'], ['Detallado'], ['Nada que agregar']]);
+  await f.phase();
+  const live = await f.status();
+  const other = 'ses_transfer_preferences';
+  const context = { ...f.context, sessionID: other, messageID: 'msg_transfer_preferences' };
+  f.sessions.set(other, { id: other, agent: 'mdd-orchestrator', directory: f.root, projectID: 'project' });
+  let ordinal = 0;
+  const say = text => f.histories.set(other, [
+    { info: { id: `transfer-user-${++ordinal}`, sessionID: other, role: 'user' }, parts: [{ type: 'text', text, sessionID: other, messageID: `transfer-user-${ordinal}` }] },
+    { info: { ...f.parent[1].info, id: context.messageID, sessionID: other }, parts: [] },
+  ]);
+  f.input.client.session.message = async ({ path }) => ({ data: f.histories.get(path.id)?.find(item => item.info.id === path.messageID) });
+  const request = `Continue sourceSessionID=${f.runtime.sessionID} runID=${live.runID}`;
+  say(request);
+  const moved = JSON.parse(await f.hooks.tool.mdd_transfer.execute({ sourceSessionID: f.runtime.sessionID, runID: live.runID, userText: request }, context));
+  assert.equal(moved.transfer?.state, 'confirmed');
+  assert.equal(moved.workflow.answers.summary, 'detailed', 'the transferred run remains immutable');
+  say('Discard this transferred run.');
+  await f.hooks.tool.mdd_reset.execute({ scope: 'run', userText: 'Discard this transferred run.' }, context);
+  say('A separate target objective.');
+  const restarted = await plugin(f.input);
+  const next = JSON.parse(await restarted.tool.mdd_start.execute({ requirements: 'A separate target objective.' }, context));
+  assert.equal(next.state, 'ready');
+  assert.equal(next.workflow.answers.summary, 'low', 'new target intake uses its own profile, not source defaults');
+  assert.equal(next.provenance.preflight, 'startup-profile');
+});
+
 test('a preserved run restores no approval and no live consent receipt', async t => {
   const f = await fixture(t, { mode: 'interactive', partial: true, memoryEnabled: false });
   await f.answer();
@@ -2195,7 +2425,9 @@ test('a preserved run restores no approval and no live consent receipt', async t
   // The new run wins its own preflight; the old confirmed requirements flag is not inherited.
   f.user('Empecemos de nuevo con este objetivo.');
   const fresh = JSON.parse(await restarted.tool.mdd_start.execute({ requirements: 'Empecemos de nuevo con este objetivo.' }, f.context));
-  assert.equal(fresh.state, 'question-ready');
+  assert.equal(fresh.state, 'ready', 'applied same-parent preferences survive data-only recovery');
+  assert.equal(fresh.workflow.answers.mode, 'interactive');
+  assert.equal(fresh.provenance.preflight, 'session-preference');
   assert.deepEqual(fresh.questionReceipts, []);
 });
 
@@ -2400,7 +2632,7 @@ test('a large history keeps mdd_status within budget and the task byte-identical
   // A superseded run leaves its own history and contexts behind in previousRuns.
   f.user('Please rerun the preflight for this task.');
   await f.change(); await f.answer();
-  await f.answer([['Poco seguro'], ['Ninguno'], ['Automático'], ['Bajo'], ['Nada que agregar']]);
+  await f.answer([['Poco seguro'], ['Automático'], ['Bajo'], ['Nada que agregar']]);
   f.visited.length = 0;
   await f.hooks.tool.mdd_contextual_explore.execute({ purpose: 'Inspect the current feature boundary.' }, f.context);
   await f.phase({ large: true });
@@ -2936,23 +3168,46 @@ test('a dispatch handle is single-use and never survives the prompt it stood for
   assert.equal((await f.status()).state, 'ready');
 });
 
-// A prompt that arrives as neither the handle nor the real text is the one failure that says the
-// handle did not travel. The run stops saving bytes rather than stop being dispatchable.
-test('a handle that cannot travel falls back to the full prompt instead of blocking the phase', async t => {
+// Lost-handle recovery exposes full text only within the transport gate; larger prompts remint.
+function assertLostHandleRecovery(ready, recovered, delivered, error) {
+  const full = { ...delivered, prompt: delivered.prompt.replace(/\nNative callID=.*$/, '') };
+  const bytes = Buffer.byteLength(JSON.stringify(full));
+  if (bytes <= FULL_TASK_MAX_BYTES) {
+    assert.match(error.message, /full phase prompt instead/);
+    assert.equal(recovered.dispatch, undefined, 'an in-budget fallback stops advertising a handle');
+    assert.deepEqual(recovered.task, full, 'full fallback exposes the exact dispatched prompt');
+    assert.match(recovered.task.prompt, /Perform only mdd-explore/);
+  } else {
+    assert.match(error.message, /fresh compact handle instead/);
+    assert.equal(recovered.dispatch.mode, 'handle');
+    assert.ok(recovered.task.prompt.startsWith('mdd:dispatch:'));
+    assert.notEqual(recovered.task.prompt, ready.task.prompt, 'over-budget recovery remints the handle');
+    assert.ok(Buffer.byteLength(JSON.stringify(recovered.task)) <= FULL_TASK_MAX_BYTES);
+  }
+  return bytes;
+}
+
+test('a lost handle recovers with full text or a fresh handle according to the native size gate', async t => {
   const f = await fixture(t);
   const ready = await f.status();
+  let refusal;
   await assert.rejects(f.hooks['tool.execute.before']({ ...f.runtime, callID: 'lost', tool: 'task' },
-    { args: { ...ready.task, prompt: 'I will write the prompt myself.' } }), /full phase prompt instead/);
+    { args: { ...ready.task, prompt: 'I will write the prompt myself.' } }), error => {
+    refusal = error; return /full phase prompt instead|fresh compact handle instead/.test(error.message);
+  });
   const after = await f.status();
   assert.equal(after.state, 'ready');
-  assert.equal(after.dispatch, undefined, 'the fallback stops advertising a handle');
-  assert.match(after.task.prompt, /Perform only mdd-explore/);
   assert.deepEqual(after.nextAction.args, after.task);
-  // And the phase still dispatches, which is the entire point of degrading rather than refusing.
-  const output = { args: after.task };
+  const output = { args: structuredClone(after.task) };
   await f.hooks['tool.execute.before']({ ...f.runtime, callID: 'recovered', tool: 'task' }, output);
   assert.equal((await f.status()).state, 'await-result');
+  assert.match(output.args.prompt, /Perform only mdd-explore/);
   assert.match(output.args.prompt, /Native callID="recovered"/);
+  const bytes = assertLostHandleRecovery(ready, after, output.args, refusal);
+  t.diagnostic(`Recovered full task: ${bytes} bytes; unchanged gate: ${FULL_TASK_MAX_BYTES} bytes.`);
+  await assert.rejects(f.hooks['tool.execute.before']({ ...f.runtime, callID: 'recovered-again', tool: 'task' },
+    { args: structuredClone(after.task) }));
+  assert.equal((await f.status()).state, 'await-result', 'a consumed dispatch cannot start another actor');
 });
 
 // `nextAction.args` repeats whatever `task` holds, so exposing the full prompt doubles it in one
@@ -2977,12 +3232,17 @@ test('an unrecognised prompt too large to expose in full reminted a fresh compac
   assert.equal((await f.status()).state, 'await-result');
 });
 
-test('phase reset restores a compact fresh handle after full-prompt fallback', async t => {
+test('phase reset restores a compact fresh handle after size-dependent lost-handle recovery', async t => {
   const f = await fixture(t);
   const ready = await f.status();
+  let refusal;
   await assert.rejects(f.hooks['tool.execute.before']({ ...f.runtime, callID: 'lost', tool: 'task' },
-    { args: { ...ready.task, prompt: 'unknown substituted prompt' } }), /full phase prompt instead/);
-  assert.equal((await f.status()).dispatch, undefined);
+    { args: { ...ready.task, prompt: 'unknown substituted prompt' } }), error => {
+    refusal = error; return /full phase prompt instead|fresh compact handle instead/.test(error.message);
+  });
+  const exposed = await f.status();
+  assert.equal(exposed.state, 'ready');
+  assert.deepEqual(exposed.nextAction.args, exposed.task);
 
   const resetRaw = await f.hooks.tool.mdd_reset.execute({ scope: 'phase' }, f.context);
   assert.ok(Buffer.byteLength(resetRaw) <= STATUS_BUDGET_BYTES);
@@ -2990,9 +3250,18 @@ test('phase reset restores a compact fresh handle after full-prompt fallback', a
   assert.equal(reset.state, 'ready');
   assert.equal(reset.dispatch.mode, 'handle');
   assert.notEqual(reset.task.prompt, ready.task.prompt);
+  assert.notEqual(reset.task.prompt, exposed.task.prompt, 'reset revokes the recovered dispatch capability');
   assert.ok(reset.task.prompt.startsWith('mdd:dispatch:'));
-  const output = { args: reset.task };
+  assert.deepEqual(reset.nextAction.args, reset.task);
+  const output = { args: structuredClone(reset.task) };
   await f.hooks['tool.execute.before']({ ...f.runtime, callID: 'reset-recovered', tool: 'task' }, output);
+  assert.equal((await f.status()).state, 'await-result');
+  assert.match(output.args.prompt, /Perform only mdd-explore/);
+  assert.match(output.args.prompt, /Native callID="reset-recovered"/);
+  const bytes = assertLostHandleRecovery(ready, exposed, output.args, refusal);
+  t.diagnostic(`Recovered full reset task: ${bytes} bytes; unchanged gate: ${FULL_TASK_MAX_BYTES} bytes.`);
+  await assert.rejects(f.hooks['tool.execute.before']({ ...f.runtime, callID: 'reset-recovered-again', tool: 'task' },
+    { args: structuredClone(reset.task) }));
   assert.equal((await f.status()).state, 'await-result');
 });
 
@@ -3219,7 +3488,7 @@ test('audit D2: a pending re-preflight question on an existing run survives rest
   await f.change();
   await f.answer();
   const preflight = await f.status();
-  assert.equal(preflight.question.questions.length, 5);
+  assert.equal(preflight.question.questions.length, 4);
   await dispatchQuestion(f, 'preflight-before-restart', structuredClone(preflight.question));
   const resumed = await plugin(f.input);
   assert.equal(JSON.parse(await resumed.tool.mdd_status.execute({}, f.context)).state, 'recovery-blocked');

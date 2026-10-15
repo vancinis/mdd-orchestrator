@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { PhaseRunner, SINGULAR_EXPLORATION } from '../dist/phase-runner.js';
+import { PhaseRunner, SINGULAR_EXPLORATION, FULL_TASK_MAX_BYTES } from '../dist/phase-runner.js';
 import { Workflow } from '../dist/workflow.js';
 import { reportFormatLines } from '../dist/phase-report.js';
 import { memoryServer, request, result, reportDocument, riskReport, runtime, call, answers, installCleanup, structuredTraceFixture as traceFixture, structuredVerificationFixture, traceFixture as legacyTraceFixture, ARTIFACT_TEXT, SUMMARY_TEXT, throughRiskStop } from './adapter-fixture.mjs';
@@ -12,6 +12,183 @@ import { statusPayload, STATUS_BUDGET_BYTES } from '../dist/status-budget.js';
 import { mkdtemp, rm, stat, mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import fs from 'node:fs';
+import { TaskStore, TaskWriteError } from '../dist/task-store.js';
+import { LocalFiles } from '../dist/local-files.js';
+
+test('PF-2: local storage preserves full risk retries, receipts and context through restart', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'mdd-local-run-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const here = { ...runtime, directory: root, worktree: root };
+  const options = { checkpoint: new CheckpointStore(root), progress: new ProgressGuard(root), dossier: new RunDossierStore(root) };
+  const inspect = { parent: async () => {}, result: async (_r, _c, _p, output) => output, stopped: async () => true };
+  let runner = new PhaseRunner(inspect, options);
+  await runner.start({ preflight: { answers: { ...answers, artifactStore: 'local' } }, requirements: 'Preserve risk evidence.',
+    context: { label: 'Initial context', content: 'Exact coordinator snapshot.' } }, here,
+    { requirementsConfirmed: true, userMessageID: 'local-user' });
+  const settle = async (callID, text) => {
+    const issued = { sessionID: here.sessionID, callID };
+    await runner.after(issued, await runner.before(issued, runner.status(here.sessionID).task), text);
+  };
+  await settle('local-explore', reportDocument({ evidenceSummary: 'Explored.', artifact: 'Exploration body.' }));
+  const failedBody = 'Failed assessment: ' + 'é'.repeat(220000);
+  await settle('local-risk-failed', riskReport('low', 'failed', { artifact: failedBody }));
+  assert.equal(runner.status(here.sessionID).state, 'blocked');
+  runner = new PhaseRunner(inspect, options);
+  assert.deepEqual(await runner.restore(here), { restored: true });
+  runner.retryRisk(here.sessionID);
+  const passedBody = 'Passed assessment: ' + '✓'.repeat(150000);
+  await settle('local-risk-passed', riskReport('low', 'passed', { artifact: passedBody }));
+  await runner.explore({ purpose: 'Inspect contextual evidence.' }, here);
+  await settle('local-context', reportDocument({ evidenceSummary: 'Context inspected.', artifact: 'Exact contextual findings.' }));
+  runner.contribute({ label: 'Updated context', content: 'Second coordinator snapshot.' }, here);
+  runner.recordConsent(here.sessionID, { questionReceipts: [{ kind: 'preflight', callID: 'question-local', answers: [['accepted']] }], usedMessages: ['local-user'], proposed: [] });
+  const saved = options.checkpoint.read(here.sessionID).checkpoint;
+  assert.equal(saved.data.taskArtifacts.risks.length, 2);
+  assert.match(saved.data.task.name, /^preserve-risk-evidence-/);
+  const manifest = JSON.parse(fs.readFileSync(join(root, '.mdd/tasks', saved.data.task.name, 'manifest.json'), 'utf8'));
+  const snapshot = JSON.parse(fs.readFileSync(join(root, '.mdd/tasks', saved.data.task.name, `snapshot-${manifest.latest}.json`), 'utf8'));
+  assert.equal(snapshot.dossier.context[0].content, 'Exact coordinator snapshot.');
+  assert.equal(snapshot.dossier.context[1].content, 'Second coordinator snapshot.');
+  assert.equal(snapshot.dossier.contexts[0].artifact.content, 'Exact contextual findings.');
+  assert.equal(snapshot.dossier.questionReceipts[0].callID, 'question-local');
+  const risks = snapshot.dossier.artifacts.filter(item => item.ref.phase === 'mdd-risk');
+  assert.deepEqual(risks.map(item => item.content), [failedBody, passedBody]);
+  runner = new PhaseRunner(inspect, options);
+  assert.deepEqual(await runner.restore(here), { restored: true });
+  assert.equal(runner.status(here.sessionID).risk.ref.store, 'local');
+  runner.recordConsent(here.sessionID, { questionReceipts: [], usedMessages: ['local-user'], proposed: [] });
+  const restoredDossier = options.dossier.read(here.sessionID);
+  assert.equal(restoredDossier.artifacts.find(item => item.ref.recordID === saved.data.risk.ref.recordID).content, passedBody);
+  fs.writeFileSync(join(root, saved.data.risk.ref.path), 'Corrupt risk bytes.');
+  assert.equal((await new PhaseRunner(inspect, options).restore(here)).restored, false);
+});
+
+test('PF-2: local exploration workers retain complete member reports before aggregation and settlement', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'mdd-local-exploration-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  for (const name of ['a.txt', 'b.txt']) fs.writeFileSync(join(root, name), name);
+  const here = { ...runtime, directory: root, worktree: root };
+  const checkpoint = new CheckpointStore(root);
+  const runner = new PhaseRunner({ parent: async () => {}, result: async (_r, _c, _p, output) => output, stopped: async () => true }, {
+    checkpoint, progress: new ProgressGuard(root), ownership: new RunOwnershipStore(root), workers: { enabled: true },
+    workerCapability: { phase: 'mdd-explore', readOnly: true },
+  });
+  const workItems = ['a', 'b'].map((name, index) => ({ id: `E${index + 1}`, purpose: `Inspect ${name} independently`,
+    dependsOn: [], independent: true, complete: true, reads: [{ root, files: [`${name}.txt`] }] }));
+  await runner.start({ preflight: { answers: { ...answers, artifactStore: 'local' } }, requirements: 'Preserve exploration workers.',
+    exploration: { workItems } }, here, { requirementsConfirmed: true, userMessageID: 'workers-user' });
+  const tasks = runner.status(here.sessionID).tasks;
+  const calls = ['worker-a', 'worker-b'].map(callID => ({ sessionID: here.sessionID, callID }));
+  const args = await Promise.all(tasks.map((task, index) => runner.before(calls[index], task)));
+  const reports = ['First exact findings.', 'Second exact findings.'].map(artifact => reportDocument({ evidenceSummary: artifact, artifact }));
+  await runner.after(calls[1], args[1], reports[1]);
+  const identity = checkpoint.read(here.sessionID).checkpoint.data.task;
+  const taskDirectory = join(root, '.mdd/tasks', identity.name);
+  const records = () => {
+    const manifest = JSON.parse(fs.readFileSync(join(taskDirectory, 'manifest.json'), 'utf8'));
+    return manifest.records.filter(record => record.kind === 'exploration').map(record => JSON.parse(fs.readFileSync(join(taskDirectory, `snapshot-${record.id}.json`), 'utf8')).exploration);
+  };
+  assert.ok(records().length > 0, 'complete exploration member evidence must be locally indexed before settlement');
+  assert.equal(records().at(-1).workerState.completed[0].text, reports[1]);
+  await runner.after(calls[0], args[0], reports[0]);
+  assert.deepEqual(records().at(-1).workerState.completed.map(member => member.text), reports);
+  assert.equal(records().at(-1).state, 'settled');
+});
+
+for (const boundary of ['intent', 'result', 'artifact', 'dossier']) test(`PF-2: unknown local ${boundary} publication blocks dispatch and restart without retry`, async t => {
+  const root = await mkdtemp(join(tmpdir(), 'mdd-local-unknown-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const here = { ...runtime, directory: root, worktree: root };
+  const checkpoint = new CheckpointStore(root); const progress = new ProgressGuard(root);
+  const inspect = { parent: async () => {}, result: async (_r, _c, _p, output) => output, stopped: async () => true };
+  const runner = new PhaseRunner(inspect, { checkpoint, progress, dossier: new RunDossierStore(root) });
+  const started = await runner.start({ preflight: { answers: { ...answers, artifactStore: 'local' } }, requirements: 'Fence unclear local publication.' }, here,
+    { requirementsConfirmed: true, userMessageID: 'unknown-user' });
+  const issued = { sessionID: here.sessionID, callID: 'unclear-call' };
+  const args = boundary !== 'intent' ? await runner.before(issued, started.task) : undefined;
+  const write = TaskStore.prototype.writeSnapshot;
+  const update = LocalFiles.prototype.update;
+  const preserve = RunDossierStore.prototype.write;
+  let writes = 0;
+  if (boundary === 'artifact') LocalFiles.prototype.update = function (name, ...values) {
+    if (name.endsWith('/manifest.json')) { writes++; throw new Error('Unknown manifest publication.'); }
+    return update.call(this, name, ...values);
+  };
+  else if (boundary === 'dossier') RunDossierStore.prototype.write = function (...values) {
+    writes++; preserve.apply(this, values); throw new Error('Unknown dossier readback.');
+  };
+  else TaskStore.prototype.writeSnapshot = function (...values) { writes++; write.apply(this, values); throw new TaskWriteError('confirmed-bytes-unknown-readback'); };
+  try {
+    if (boundary === 'intent') await assert.rejects(runner.before(issued, started.task), /unconfirmed/);
+    else await assert.rejects(runner.after(issued, args, reportDocument({ evidenceSummary: 'Explored.', artifact: 'Complete retained exploration.' })), /unconfirmed|incomplete or unknown/);
+  } finally { TaskStore.prototype.writeSnapshot = write; LocalFiles.prototype.update = update; RunDossierStore.prototype.write = preserve; }
+  assert.equal(writes, 1);
+  assert.equal(runner.status(here.sessionID).state, 'blocked');
+  assert.equal(runner.status(here.sessionID).task, undefined);
+  assert.equal(progress.read(here.sessionID).state, 'pending');
+  if (boundary === 'artifact') {
+    const attempts = runner.status(here.sessionID).artifactAttempts;
+    assert.deepEqual(attempts.map(attempt => [attempt.backend, attempt.status]), [['local', 'unknown']]);
+    assert.equal(fs.readFileSync(join(root, attempts[0].ref.path), 'utf8'), 'Complete retained exploration.');
+  }
+  assert.equal((await new PhaseRunner(inspect, { checkpoint, progress }).restore(here)).restored, false);
+});
+
+test('PF-2: local checkpoint metadata rejects backend rebinding and arbitrary artifact locations', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'mdd-local-metadata-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const here = { ...runtime, directory: root, worktree: root };
+  const checkpoint = new CheckpointStore(root); const progress = new ProgressGuard(root);
+  const runner = new PhaseRunner({ parent: async () => {}, result: async (_r, _c, _p, output) => output, stopped: async () => true }, { checkpoint, progress });
+  const started = await runner.start({ preflight: { answers: { ...answers, artifactStore: 'local' } }, requirements: 'Validate exact task identity.' }, here,
+    { requirementsConfirmed: true, userMessageID: 'identity-user' });
+  const issued = { sessionID: here.sessionID, callID: 'identity-explore' };
+  await runner.after(issued, await runner.before(issued, started.task), reportDocument({ evidenceSummary: 'Explored.', artifact: 'Bound exploration.' }));
+  const saved = checkpoint.read(here.sessionID).checkpoint;
+  for (const mutate of [
+    item => { delete item.data.task; },
+    item => { delete item.data.taskArtifacts; },
+    item => { item.data.task.name = '../escape'; },
+    item => { item.data.task.runID = 'different'; },
+    item => { item.data.task.worktree = 'different'; },
+    item => { item.data.memoryProject = 'other-project'; },
+    item => { item.data.taskArtifacts.phases[0].path = '../secret'; },
+    item => { item.data.taskArtifacts.phases[0].domain = ''; },
+    item => { item.data.taskArtifacts.phases[0].store = 'none'; },
+    item => { item.request.answers.artifactStore = 'none'; },
+  ]) {
+    const changed = structuredClone(saved); mutate(changed);
+    changed.dataDigest = sealResumeData(changed.data, changed.runID, changed.parent, changed.events, changed.stable);
+    assert.throws(() => validateCheckpoint(changed));
+  }
+  assert.deepEqual(checkpoint.read(here.sessionID).checkpoint, saved);
+});
+
+test('PF-2: a general receipt failure after local artifact publication cannot reissue work', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'mdd-local-receipt-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  let refused = 0;
+  const memory = await memoryServer(t, (req, reply, writes) => {
+    if (req.method === 'POST' && JSON.parse(writes.at(-1).content).kind === 'agent-evidence') { refused++; reply.status = 500; }
+  });
+  const here = { ...runtime, directory: root, worktree: root };
+  memory.binding.directory = root;
+  const checkpoint = new CheckpointStore(root); const progress = new ProgressGuard(root);
+  const inspect = { parent: async () => {}, result: async (_r, _c, _p, output) => output, stopped: async () => true };
+  const runner = new PhaseRunner(inspect, { checkpoint, progress });
+  const started = await runner.start({ preflight: { answers: { ...answers, artifactStore: 'local' } }, requirements: 'Keep published local evidence.',
+    engramEndpoint: memory.endpoint, project: 'mdd-test' }, here, { requirementsConfirmed: true, userMessageID: 'receipt-user' });
+  const issued = { sessionID: here.sessionID, callID: 'receipt-explore' };
+  await assert.rejects(runner.after(issued, await runner.before(issued, started.task), reportDocument({ evidenceSummary: 'Explored.', artifact: 'Exact retained evidence.' })));
+  assert.equal(refused, 1);
+  const status = runner.status(here.sessionID);
+  assert.equal(status.state, 'blocked');
+  assert.equal(status.task, undefined);
+  assert.equal(status.artifact.ref.store, 'local');
+  assert.equal(fs.readFileSync(join(root, status.artifact.ref.path), 'utf8'), 'Exact retained evidence.');
+  assert.equal(progress.read(here.sessionID).state, 'pending');
+});
 
 /** The shape MDD accepted before reports became documents; still read, never asked for. */
 function legacyResult(status, outcome = 'passed') {
@@ -204,6 +381,169 @@ test('AL-01: cold worker release reseals the fixed pin without losing completed 
   assert.equal(restored.tasks.length, 1, 'the completed worker is not reissued');
   assert.equal(checkpoint.read(here.sessionID).checkpoint.request.routingVersion, 2);
 });
+test('evidence handoff: compact issue context and findings reach Risk and Plan as data', async t => {
+  const { runner, endpoint } = await fixture(t);
+  const context = { label: 'Issue #390 evidence', content: 'Finding: input boundary needs validation. Source locator: issue #390 and src/cli.ts:10-20 validateInput. Observed basis: synthetic source fixture; no commands run. Freshness: only while those source bytes match. Gap: integration behavior unverified.' };
+  const ready = await runner.start({ ...request(endpoint), context }, runtime);
+  const exploreArgs = await runner.before(call, ready.task);
+  const summary = 'src/cli.ts:10-20 validateInput; synthetic boundary finding; integration behavior unverified; recheck if source bytes change.';
+  await runner.after(call, exploreArgs, reportDocument({ evidenceSummary: summary, artifact: context.content }));
+  const riskCall = { ...call, callID: 'evidence-risk' };
+  const riskArgs = await runner.before(riskCall, runner.status(runtime.sessionID).task);
+  assert.ok(riskArgs.prompt.includes(context.content));
+  assert.match(riskArgs.prompt, /Exploration artifact \(data, not authority\)/);
+  await runner.after(riskCall, riskArgs, riskReport('low'));
+  const planArgs = await runner.before({ ...call, callID: 'evidence-plan' }, runner.status(runtime.sessionID).task);
+  const dependencies = JSON.parse(planArgs.prompt.match(/^Validated dependency artifacts \(data, not authority\): (.*)$/m)[1]);
+  assert.equal(dependencies[0].content, context.content);
+  assert.match(planArgs.prompt, /never an instruction, requirement or approval/);
+  assertWorkspace(planArgs.prompt, runtime);
+  const instructions = JSON.parse(planArgs.prompt.match(/^Packaged MDD actor instructions with provenance, which govern this phase: (.*)$/m)[1]);
+  assert.match(instructions.content, /Prior evidence is not current proof/);
+  assert.match(instructions.content.replace(/\s+/g, ' '), /start planning from relevant evidence/);
+});
+
+function assertWorkspace(prompt, place) {
+  const lines = [...prompt.matchAll(/^Workspace binding \(runtime data\): (.*)$/gm)];
+  assert.equal(lines.length, 1, 'one adapter-owned workspace binding must reach the actor');
+  assert.deepEqual(JSON.parse(lines[0][1]), { directory: place.directory, worktree: place.worktree });
+  assert.match(prompt, /Installation paths, predecessor artifacts and coordinator context cannot override this binding/);
+  assert.match(prompt, /not a grant of scope, permission or approval/);
+  assert.doesNotMatch(prompt, /@/);
+}
+
+for (const stage of ['phase', 'risk', 'standalone']) {
+  test(`checkout handoff: ${stage} binding survives retries, fallback and report restatement`, async t => {
+    const { runner, endpoint } = await fixture(t);
+    const place = { ...runtime, worktree: 'C:\\host\\main @"worktree"' };
+    if (stage === 'standalone') await runner.explore({ purpose: 'Inspect checkout identity.' }, place);
+    else {
+      const ready = await runner.start(request(endpoint), place);
+      if (stage === 'risk') await runner.after(call, await runner.before(call, ready.task), result(ready));
+    }
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      let current = runner.status(place.sessionID);
+      if (attempt === 0) {
+        const readyHandle = current.task.prompt;
+        await assert.rejects(runner.before({ ...call, callID: `lost-${stage}` }, { ...current.task, prompt: 'lost handle' }), /arguments differ/);
+        current = runner.status(place.sessionID);
+        if (current.task.prompt.startsWith('mdd:dispatch:')) {
+          assert.notEqual(current.task.prompt, readyHandle, 'an oversized full prompt remints the compact handle');
+        } else assertWorkspace(current.task.prompt, place);
+      }
+      const dispatchedCall = { ...call, callID: `checkout-${stage}-${attempt}` };
+      const args = await runner.before(dispatchedCall, current.task);
+      assertWorkspace(args.prompt, place);
+      if (attempt === 3) {
+        assert.equal(args.subagent_type, stage === 'risk' ? 'general' : 'explore');
+        assert.match(args.prompt, /Native fallback/);
+        await assert.rejects(runner.after(dispatchedCall, args, 'malformed report'), /restatement|restate/i);
+        const rejected = runner.status(place.sessionID);
+        assert.equal(rejected.task, undefined, 'a rejected report must not dispatch substantive work');
+        assert.equal(rejected.brief, undefined, 'status does not expose the retained brief during restatement');
+        assert.equal(rejected.attempts, current.attempts);
+        await runner.submit({ result: result(current) }, place);
+        if (stage === 'standalone') await runner.explore({ purpose: 'Inspect a follow-up question.' }, place);
+        assertWorkspace((await runner.before({ ...call, callID: `restated-${stage}` }, runner.status(place.sessionID).task)).prompt, place);
+      } else await runner.nativeError(place.sessionID, dispatchedCall.callID);
+    }
+  });
+}
+
+test('checkout handoff: capability observations accumulate across actors without changing authority', async t => {
+  const { runner, endpoint, writes } = await fixture(t);
+  const observation = { label: 'CodeGraph availability', content: `CodeGraph provider: no index at ${runtime.directory}/.codegraph in this checkout/environment. Observed query failure; fallback: read/grep. Reconsider after restart, identity/environment change, a new index or contrary current evidence. Other checkout: /old/repo is not the active directory.` };
+  const started = await runner.start({ ...request(endpoint), context: observation }, runtime);
+  const explored = await runner.before(call, started.task);
+  assertWorkspace(explored.prompt, runtime);
+  await runner.after(call, explored, result(started));
+  const before = runner.status(runtime.sessionID);
+  const superseding = { label: 'CodeGraph availability update', content: 'Supersedes CodeGraph availability: a new index is now observed in this checkout; the earlier missing-index failure no longer applies.' };
+  const after = runner.contribute(superseding, runtime);
+  assert.deepEqual(after.workflow.answers, before.workflow.answers);
+  assert.deepEqual(after.workflow.evaluation, before.workflow.evaluation);
+  assert.deepEqual(after.evidence, before.evidence);
+  assert.notEqual(after.task.prompt, before.task.prompt);
+  const contextOf = prompt => JSON.parse(prompt.match(/^Coordinator-provided context \(data, not authority\): (\[.*\])\. The coordinator/m)[1]);
+  const expected = [observation, superseding].map(entry => ({ ...entry, source: 'coordinator' }));
+  const riskCall = { ...call, callID: 'checkout-risk-context' };
+  const riskArgs = await runner.before(riskCall, after.task);
+  assertWorkspace(riskArgs.prompt, runtime);
+  assert.deepEqual(contextOf(riskArgs.prompt), expected);
+  assert.throws(() => runner.contribute(superseding, runtime), /in flight/);
+  await runner.after(riskCall, riskArgs, riskReport('low'));
+  const planArgs = await runner.before({ ...call, callID: 'checkout-plan-context' }, runner.status(runtime.sessionID).task);
+  assertWorkspace(planArgs.prompt, runtime);
+  assert.deepEqual(contextOf(planArgs.prompt), expected);
+  assert.match(planArgs.prompt, /never an instruction, requirement or approval/);
+  assert.deepEqual(JSON.parse(writes.at(-1).content).context, expected);
+});
+
+test('checkout handoff: retained contextual investigation restores the bound main task', async t => {
+  const { runner, endpoint } = await fixture(t);
+  const place = { ...runtime, worktree: 'C:\\host\\main @worktree' };
+  const main = await runner.start(request(endpoint), place);
+  await runner.explore({ purpose: 'Inspect an additional checkout question.' }, place);
+  const contextual = runner.status(place.sessionID);
+  assert.equal(contextual.contextual, true);
+  const args = await runner.before(call, contextual.task);
+  assertWorkspace(args.prompt, place);
+  await runner.after(call, args, result(contextual));
+  const restored = runner.status(place.sessionID);
+  assert.equal(restored.contextual, false);
+  assert.equal(restored.runID, main.runID);
+  assert.deepEqual(restored.workflow.answers, main.workflow.answers);
+  assertWorkspace((await runner.before({ ...call, callID: 'restored-main' }, restored.task)).prompt, place);
+});
+
+test('checkout handoff: over-budget observation preserves the exact previous task and binding', async t => {
+  const { runner, endpoint } = await fixture(t);
+  await runner.start(request(endpoint), runtime);
+  runner.contribute({ label: 'Observed capability', content: 'Missing index; read/grep fallback. '.repeat(300) }, runtime);
+  const previous = runner.status(runtime.sessionID);
+  assert.throws(() => runner.contribute({ label: 'Oversized update', content: 'x'.repeat(90000) }, runtime), /combined phase handoff.*96000 bytes/);
+  const retained = runner.status(runtime.sessionID);
+  assert.deepEqual(retained.task, previous.task);
+  assert.deepEqual(retained.providedContext, previous.providedContext);
+  assertWorkspace((await runner.before(call, previous.task)).prompt, runtime);
+});
+
+for (const kind of ['main', 'standalone', 'apply']) {
+  test(`checkout handoff: ${kind} scoped workers retain distinct workspace identities`, async t => {
+    const root = await mkdtemp(join(tmpdir(), 'mdd-checkout-workers-'));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    for (const name of ['a.txt', 'b.txt']) await writeFile(join(root, name), name);
+    const place = { ...runtime, directory: root, worktree: join(root, 'host @worktree') };
+    const runner = new PhaseRunner({ parent: async () => {}, result: async (_r, _c, _p, output) => output, stopped: async () => true }, {
+      checkpoint: new CheckpointStore(root), ownership: new RunOwnershipStore(root), progress: new ProgressGuard(root),
+      workers: { enabled: true }, workerCapability: { phase: 'mdd-explore', readOnly: true, applyEditing: true },
+    });
+    const items = ['a', 'b'].map(name => ({ id: name, purpose: `Inspect ${name}`, dependsOn: [], independent: true, complete: true, reads: [{ root, files: [`${name}.txt`] }] }));
+    if (kind === 'standalone') await runner.explore({ purpose: 'Inspect both components.', workItems: items }, place);
+    else {
+      await runner.start({ preflight: { answers }, requirements: 'Inspect independent components.', ...(kind === 'main' ? { exploration: { workItems: items } } : {}) }, place,
+        { requirementsConfirmed: true, userMessageID: 'checkout-user' });
+      if (kind === 'apply') {
+        const ready = await throughRiskStop(runner, place.sessionID, 'low', { release: true });
+        const planCall = { ...call, callID: 'checkout-worker-plan' };
+        const planArgs = await runner.before(planCall, ready.task);
+        const trace = traceFixture();
+        trace.deliverables = items.map(item => ({ ...trace.deliverables[0], id: item.id, path: `${item.id}.txt`, dependsOn: [],
+          checks: [{ id: `${item.id}-check`, command: 'npm test', requirement: 'required' }],
+          parallel: { complete: true, reads: [], writes: [`${item.id}.txt`] } }));
+        await runner.after(planCall, planArgs, reportDocument({ evidenceSummary: SUMMARY_TEXT, artifact: ARTIFACT_TEXT, ...trace }));
+        runner.releaseSettled(place.sessionID, planCall.callID);
+      }
+    }
+    const ready = runner.status(place.sessionID);
+    assert.equal(ready.tasks.length, 2);
+    for (const [index, task] of ready.tasks.entries()) {
+      const args = await runner.before({ ...call, callID: `checkout-${kind}-worker-${index}` }, task);
+      assertWorkspace(args.prompt, place);
+      assert.match(args.prompt, kind === 'apply' ? /^Assigned worker task:/m : /^Assigned read-only work item:/m);
+    }
+  });
+}
 
 test('SA-2: new runs freeze the version before planning and refuse legacy report downgrade', async t => {
   const { runner, endpoint } = await fixture(t);
@@ -307,8 +647,8 @@ for (const requirement of ['required', 'optional']) {
   });
 }
 
-for (const legacy of [false, true]) {
-  test(`SA-3: continued ${legacy ? 'legacy' : 'v1'} failure retains exact evidence and PR truth after restart`, async t => {
+for (const backend of ['none', 'local']) for (const legacy of [false, true]) {
+  test(`${backend}: continued ${legacy ? 'legacy' : 'v1'} failure retains exact evidence and PR truth after restart`, async t => {
     const root = await mkdtemp(join(tmpdir(), 'mdd-continued-'));
     t.after(() => rm(root, { recursive: true, force: true }));
     const here = { ...runtime, directory: root, worktree: root };
@@ -316,7 +656,7 @@ for (const legacy of [false, true]) {
       ownership: new RunOwnershipStore(root), dossier: new RunDossierStore(root) };
     const inspect = { parent: async () => {}, result: async (_r, _c, _p, output) => output, stopped: async () => true };
     const first = new PhaseRunner(inspect, options);
-    await first.start({ preflight: { answers }, requirements: 'Preserve the failed verification.' }, here,
+    await first.start({ preflight: { answers: { ...answers, artifactStore: backend } }, requirements: 'Preserve the failed verification.' }, here,
       { requirementsConfirmed: true, userMessageID: 'initial-user' });
     if (legacy) {
       const saved = options.checkpoint.read(here.sessionID).checkpoint;
@@ -362,6 +702,11 @@ for (const legacy of [false, true]) {
     assert.deepEqual(archive.verification, before.data.verification);
     assert.equal(archive.verificationVersion, legacy ? undefined : 1);
     assert.equal(archive.continuation.checkpointDigest, before.dataDigest);
+    if (backend === 'local') {
+      const task = TaskStore.open(before.data.task, { runID: before.runID, directory: root, worktree: root });
+      assert.deepEqual(task.latest().dossier.continuation, archive.continuation);
+      assert.deepEqual(task.latest().dossier.executedChecks, data.checks);
+    }
     const facts = restarted.prFacts(here.sessionID, before.runID);
     assert.equal(facts.verified, false);
     assert.deepEqual(facts.checks, data.checks);
@@ -1103,12 +1448,28 @@ for (const mutate of [
     assert.equal(after.state, 'ready');
     assert.equal(after.task.description, ready.task.description);
     assert.equal(after.task.subagent_type, ready.task.subagent_type);
-    // A prompt that arrives as neither the handle nor the real text is the one mistake that says
-    // the handle itself did not survive, so that run falls back to shipping the whole prompt.
+    assert.equal(writes.length, 0, 'rejected arguments never write dispatch intent');
+    // A lost handle exposes the full prompt only when it fits the unchanged transport gate;
+    // larger merged instruction sets must remint a compact handle instead.
     // Every other mutation is the coordinator composing instead of copying, and the refusal is
     // the whole fix: the handle stays, and so does the payload it saves.
     if (mutate(ready.task).prompt === ready.task.prompt) assert.deepEqual(after.task, ready.task);
-    else assert.ok(after.task.prompt.length > 1000, 'a lost handle falls back to the full prompt');
+    else {
+      const compact = after.task.prompt.startsWith('mdd:dispatch:');
+      const sent = await runner.before({ ...call, callID: 'fallback-proof' }, after.task);
+      const full = { ...sent, prompt: sent.prompt.replace(/\nNative callID=.*$/, '') };
+      const bytes = Buffer.byteLength(JSON.stringify(full));
+      if (compact) {
+        assert.notEqual(after.task.prompt, ready.task.prompt, 'a lost handle is reminted');
+        assert.ok(bytes > FULL_TASK_MAX_BYTES, 'only an over-budget full prompt keeps a compact handle');
+      } else {
+        assert.ok(after.task.prompt.length > 1000, 'a lost handle falls back to the full prompt');
+        assert.ok(bytes <= FULL_TASK_MAX_BYTES, `full-fallback task must fit: ${bytes} > ${FULL_TASK_MAX_BYTES}`);
+      }
+      t.diagnostic(`Full-fallback task: ${bytes} bytes; unchanged gate: ${FULL_TASK_MAX_BYTES} bytes.`);
+      assert.equal(writes.length, 1, 'only the exact reissued task writes dispatch intent');
+      return;
+    }
     assert.equal(writes.length, 0);
   });
 }

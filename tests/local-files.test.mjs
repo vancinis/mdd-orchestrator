@@ -16,6 +16,22 @@ function root(t) {
 }
 const ownerName = `.mdd/owner-${createHash('sha256').update('run-lock').digest('hex')}.json`;
 
+test('PF-2: nested task destinations stay narrowly allowlisted and reject traversal, reserved names and links', t => {
+  const directory = root(t); const files = new LocalFiles(directory);
+  const name = `.mdd/tasks/readable-${randomUUID()}/manifest.json`;
+  files.update(name, () => 'exact manifest', 4096);
+  assert.equal(files.read(name, 4096), 'exact manifest');
+  for (const invalid of ['.mdd/tasks/../escape/manifest.json', '.mdd/tasks/con/manifest.json', '.mdd/tasks/CON/manifest.json',
+    '.mdd/tasks/nul/manifest.json', '.mdd/tasks/a\\b/manifest.json', '.mdd/tasks/a/extra.json', '.mdd/tasks/a/snapshot-unknown.json',
+    '.mdd/tasks/a/nested/manifest.json', '.mdd/tasks/a/artifact-custom.md', `.mdd/tasks/a/snapshot-${randomUUID()}.json`]) {
+    assert.throws(() => files.update(invalid, () => 'unsafe', 4096));
+  }
+  const outside = join(directory, 'outside'); fs.mkdirSync(outside);
+  fs.symlinkSync(outside, join(directory, '.mdd/tasks/linked'), process.platform === 'win32' ? 'junction' : 'dir');
+  assert.throws(() => files.update('.mdd/tasks/linked/manifest.json', () => 'unsafe', 4096));
+  assert.deepEqual(fs.readdirSync(outside), []);
+});
+
 /** A PID that belonged to a real process which has already exited. */
 function deadPid() {
   const child = spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { encoding: 'utf8' });

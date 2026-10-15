@@ -23,7 +23,7 @@ const planned = () => {
 const report = data => reportDocument({ evidenceSummary: 'Scoped batch evidence.', artifact: 'Scoped batch artifact.', ...data });
 const applied = (id, changes = [`src/${id}.ts`]) => ({ completed: [id], changes });
 
-test('SA-1: Apply worker prompts omit cleanup paths without broadening their footprints', async t => {
+for (const store of ['none', 'local']) test(`${store}: Apply worker prompts omit cleanup paths without broadening their footprints`, async t => {
   const root = mkdtempSync(join(tmpdir(), 'mdd-apply-prompt-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const runtime = { sessionID: 'apply-prompt', agent: 'mdd-orchestrator', directory: root, worktree: root };
@@ -31,7 +31,7 @@ test('SA-1: Apply worker prompts omit cleanup paths without broadening their foo
     checkpoint: new CheckpointStore(root), ownership: new RunOwnershipStore(root), progress: new ProgressGuard(root),
     workers: { enabled: true }, workerCapability: { phase: 'mdd-explore', readOnly: true, applyEditing: true },
   });
-  await runner.start({ preflight: { answers }, requirements: 'Implement two independent files.' }, runtime,
+  await runner.start({ preflight: { answers: { ...answers, artifactStore: store } }, requirements: 'Implement two independent files.' }, runtime,
     { requirementsConfirmed: true, userMessageID: 'user' });
   const ready = await throughRiskStop(runner, runtime.sessionID, 'low', { release: true });
   const planCall = { sessionID: runtime.sessionID, callID: 'plan' };
@@ -59,6 +59,14 @@ test('SA-1: Apply worker prompts omit cleanup paths without broadening their foo
   const verify = await runner.before({ sessionID: runtime.sessionID, callID: 'verify' }, runner.status(runtime.sessionID).task);
   assert.match(verify.prompt, /^Optional packaged skills for this phase/m);
   assert.match(verify.prompt, /Verify is read-only for project sources/);
+  if (store === 'local') {
+    const saved = new CheckpointStore(root).read(runtime.sessionID).checkpoint;
+    const directory = join(root, '.mdd/tasks', saved.data.task.name);
+    const manifest = JSON.parse(readFileSync(join(directory, 'manifest.json'), 'utf8'));
+    const snapshot = JSON.parse(readFileSync(join(directory, `snapshot-${manifest.latest}.json`), 'utf8'));
+    assert.equal(snapshot.checkpoint.data.workerState.completed.length, 2);
+    assert.equal(snapshot.dossier.artifacts.filter(item => item.ref.phase === 'mdd-apply').length, 2);
+  }
 });
 
 async function fixture(t, { mode = 'automatic', store = 'none', checkpointFault, progressFault, memoryFault } = {}) {
@@ -147,9 +155,9 @@ test('batch selection validates plan IDs, dependency order and exact progress', 
   assert.deepEqual(progress.completed, [], 'selection/completion never mutates caller state');
 });
 
-for (const mode of ['automatic', 'interactive']) {
-  test(`${mode} batches persist first completion, restart with only the dependent assignment, then advance Verify`, async t => {
-    const f = await fixture(t, { mode, store: 'openspec' });
+for (const store of ['openspec', 'local']) for (const mode of ['automatic', 'interactive']) {
+  test(`${store} ${mode} batches persist first completion, restart with only the dependent assignment, then advance Verify`, async t => {
+    const f = await fixture(t, { mode, store });
     if (mode === 'interactive') {
       assert.equal(f.status().state, 'await-approval');
       f.runner.approveNative(f.runtime.sessionID, 'mdd-apply');
@@ -303,10 +311,10 @@ test('Apply callbacks never inspect unrelated exploration storage before recordi
   assert.deepEqual(f.durable.read(f.runtime.sessionID).workflow.applyProgress().completed, ['first']);
 });
 
-for (const landed of [false, true]) {
-  test(`unknown Apply result checkpoint (landed=${landed}) cannot reissue any writer after restart`, async t => {
+for (const store of ['none', 'local']) for (const landed of [false, true]) {
+  test(`${store}: unknown Apply result checkpoint (landed=${landed}) cannot reissue any writer after restart`, async t => {
     let refused = 0;
-    const f = await fixture(t, { checkpointFault(value, write) {
+    const f = await fixture(t, { store, checkpointFault(value, write) {
       if (value.events.at(-1)?.kind === 'result' && value.events.at(-1).result.phase === 'mdd-apply') {
         refused++;
         if (landed) write();
@@ -375,8 +383,8 @@ test('checkpoint replay rejects uncorrelated artifact batch IDs and tampered com
   assert.throws(() => validateCheckpoint(reseal(completion)), /assigned task first/);
 });
 
-test('explicit rework starts a new epoch without inheriting old completion or losing file evidence', async t => {
-  const f = await fixture(t);
+for (const store of ['none', 'local']) test(`${store}: explicit rework starts a new epoch without inheriting old completion or losing file evidence`, async t => {
+  const f = await fixture(t, { store });
   await f.finish(applied('first'));
   await f.finish(applied('second'));
   const assessment = { status: 'not-verified', checks: [], assessment: 'Implementation needs correction.' };
@@ -394,6 +402,23 @@ test('explicit rework starts a new epoch without inheriting old completion or lo
   assert.equal(f.status().phase, 'mdd-apply');
   assert.deepEqual(f.durable.read(f.runtime.sessionID).workflow.applyProgress().completed, ['first']);
   assert.equal(f.runner.prFacts(f.runtime.sessionID).changedFiles, 3);
+  if (store === 'local') {
+    assert.deepEqual(await f.restart(), { restored: true });
+    await f.finish(applied('second'));
+    await f.finish({ outcome: 'failed', checks: [], verification: {
+      scenarios: ['S1', 'S2'].map((scenarioID, i) => ({ requirementID: 'R1', scenarioID, stepID: i ? 'second' : 'first', ...assessment })),
+      steps: ['first', 'second'].map(stepID => ({ stepID, ...assessment })), decisions: [{ decisionID: 'D1', ...assessment }], changes: 'Second verification findings.', limits: [],
+      checkResults: ['first-check', 'second-check'].map(checkID => ({ checkID, disposition: 'blocked', executions: [], reason: 'Correction still needed.' })), supplementalChecks: [],
+    } });
+    const saved = f.durable.read(f.runtime.sessionID).checkpoint;
+    const directory = join(f.root, '.mdd/tasks', saved.data.task.name);
+    const manifest = JSON.parse(readFileSync(join(directory, 'manifest.json'), 'utf8'));
+    const dossier = JSON.parse(readFileSync(join(directory, `snapshot-${manifest.latest}.json`), 'utf8')).dossier;
+    const verification = dossier.artifacts.filter(item => item.ref.phase === 'mdd-verify');
+    assert.equal(verification.length, 2);
+    assert.notEqual(verification[0].ref.path, verification[1].ref.path);
+    assert.equal(readFileSync(join(f.root, verification[0].ref.path), 'utf8'), verification[0].content);
+  }
 });
 
 test('settled legacy histories stay without a batch plan; explicit rework binds a fresh batch plan', () => {
