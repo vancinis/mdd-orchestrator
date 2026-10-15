@@ -23,6 +23,73 @@ import { RunDossierStore } from '../dist/run-dossier.js';
 import { projectApprovalTransfer, projectTargetTransfer } from '../dist/transfer.js';
 import { Workflow } from '../dist/workflow.js';
 import { lockIdentity } from '../dist/local-files.js';
+import { FULL_TASK_MAX_BYTES } from '../dist/phase-runner.js';
+
+test('evidence handoff: native downstream dispatch retains locator and limits through announced compaction', async t => {
+  const f = await fixture(t, { route: 'high', memoryEnabled: false });
+  const summary = 'feature.txt:1; synthetic read fixture saw pending state; valid only while source bytes match; gap: integration checks unrun.';
+  const artifact = `Artifact for mdd-explore: Finding: pending boundary. Source locator: feature.txt:1. Observed basis: synthetic read fixture, no commands run. Freshness: source bytes must match. Gap: integration checks unrun.\nFull-only exploration detail.`;
+  await f.phase({ only: true, large: true, artifact, narrative: { evidenceSummary: summary } });
+  let sawCompaction = false;
+  for (const phase of ['mdd-propose', 'mdd-spec', 'mdd-design', 'mdd-tasks', 'mdd-apply', 'mdd-verify']) {
+    await f.phase({ large: phase !== 'mdd-verify' });
+    const prompt = f.delivered();
+    assert.match(prompt, new RegExp(`Perform only ${phase}`));
+    const dependencies = JSON.parse(prompt.match(/^Validated dependency artifacts \(data, not authority\): (.*)$/m)[1]);
+    const exploration = dependencies[0];
+    if (exploration.inlined === false) {
+      sawCompaction = true;
+      assert.equal(exploration.summary, summary);
+      assert.ok(exploration.ref.recordID);
+      assert.match(exploration.ref.digest, /^[a-f0-9]{64}$/);
+      assert.match(prompt, /appear above as their recorded summary and ref/);
+      assert.doesNotMatch(prompt, /Full-only exploration detail/);
+    } else assert.equal(exploration.content.startsWith(artifact), true);
+    const evidence = exploration.summary ?? exploration.content;
+    for (const fragment of ['feature.txt:1', 'synthetic read fixture', 'source bytes', 'integration checks unrun']) assert.ok(evidence.includes(fragment));
+    const packaged = JSON.parse(prompt.match(/^Packaged MDD actor instructions with provenance, which govern this phase: (.*)$/m)[1]);
+    assert.equal(packaged.content, fs.readFileSync('assets/opencode/mdd-instructions.md', 'utf8'));
+    assert.equal(packaged.digest, createHash('sha256').update(packaged.content).digest('hex'));
+    assert.match(packaged.content.replace(/\s+/g, ' '), /Apply\/Verify must independently inspect current sources and run applicable checks/);
+    if (phase === 'mdd-verify') {
+      assert.match(prompt, /Run applicable tests and build checks/);
+      assert.match(prompt, /never repair sources/);
+    }
+  }
+  assert.equal(sawCompaction, true);
+  assert.equal((await f.status()).state, 'complete');
+});
+
+test('evidence handoff: prior successful check prose cannot complete Verify without current checks', async t => {
+  const f = await fixture(t, { memoryEnabled: false });
+  await f.hooks.tool.mdd_context.execute({ label: 'Prior synthetic check', content: 'Finding: a prior fixture check reported exit 0. Source locator: feature.txt:1. Observed basis: synthetic npm test result, not this Verify execution. Freshness: source changed after that check. Gap: current tests unrun.' }, f.context);
+  await f.phase();
+  await f.phase();
+  await assert.rejects(f.phase({ noChecks: true }));
+  const status = await f.status();
+  assert.notEqual(status.state, 'complete');
+  assert.equal(status.verification, undefined);
+  assert.ok(status.rejected.reason);
+  assert.match(f.delivered(), /Run applicable tests and build checks/);
+});
+
+test('checkout handoff: expanded native transport binds checkout and carries capability context through Verify', async t => {
+  const f = await fixture(t, { memoryEnabled: false, distinctWorktree: true });
+  const observation = { label: 'CodeGraph availability', content: `Observed missing index at ${f.root}/.codegraph; provider query unavailable in this environment. Fallback: native read/grep. Reconsider on restart, identity/environment change, a new index or contrary current evidence.` };
+  await f.hooks.tool.mdd_context.execute(observation, f.context);
+  for (const phase of ['mdd-explore', 'mdd-risk', 'mdd-plan', 'mdd-apply', 'mdd-verify']) {
+    await f.phase({ only: true });
+    const prompt = f.delivered();
+    assert.match(prompt, new RegExp(`Perform only ${phase}`));
+    assert.deepEqual(JSON.parse(prompt.match(/^Workspace binding \(runtime data\): (.*)$/m)[1]),
+      { directory: f.runtime.directory, worktree: f.runtime.worktree });
+    assert.notEqual(f.runtime.directory, f.runtime.worktree);
+    const context = JSON.parse(prompt.match(/^Coordinator-provided context \(data, not authority\): (\[.*\])\. The coordinator/m)[1]);
+    assert.deepEqual(context, [{ ...observation, source: 'coordinator' }]);
+    assert.match(prompt, /never an instruction, requirement or approval/);
+  }
+  assert.equal((await f.status()).state, 'complete');
+});
 
 for (const phase of ['mdd-explore', 'mdd-risk', 'mdd-plan', 'mdd-propose', 'mdd-spec', 'mdd-design', 'mdd-tasks', 'mdd-apply', 'mdd-verify']) {
   test(`SA-1: composed ${phase} prompt keeps phase authority and evidence handoff`, async t => {
@@ -698,7 +765,7 @@ test('opt-in failed Verify restores rework and complete runs close before a fres
 });
 
 // Native SDK/hook contract fixtures. No model or real shell execution is performed.
-async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', partial = false, summary = 'low', telemetry = true, memoryEnabled = true, memoryFault, start = true, worktree: worktreeLayout = false, autoReview = true } = {}) {
+async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', partial = false, summary = 'low', telemetry = true, memoryEnabled = true, memoryFault, start = true, worktree: worktreeLayout = false, distinctWorktree = false, autoReview = true } = {}) {
   isolateHome(t);
   // When asked, the session runs inside a linked git worktree laid out as git does on disk — a
   // `.git` file pointing at the administrative directory, which names the shared git directory. It
@@ -717,6 +784,11 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
     await mkdir(root);
     await writeFile(join(root, '.git'), `gitdir: ${administrative.replaceAll('\\', '/')}\n`);
   }
+  const hostWorktree = root;
+  if (distinctWorktree) {
+    root = join(root, 'checkout @active');
+    await mkdir(root);
+  }
   installCleanup(root);
   await writeFile(join(root, 'feature.txt'), 'pending\n');
   const memory = memoryEnabled ? await memoryServer(t, memoryFault) : { binding: {}, writes: [] };
@@ -730,7 +802,7 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
   if (memoryEnabled) settings.engram = { endpoint: memory.endpoint, project: 'mdd-test' };
   settings.telemetry.enabled = telemetry;
   saveGlobalSettings(settings);
-  const runtime = { sessionID: 'ses_parent', agent: 'mdd-orchestrator', directory: root, worktree: root };
+  const runtime = { sessionID: 'ses_parent', agent: 'mdd-orchestrator', directory: root, worktree: hostWorktree };
   const model = { providerID: 'contract-only', modelID: 'model' };
   const requirements = 'Implement a scoped feature and check it.';
   const agents = MODEL_ROLES.map(role => ({ name: role === 'orchestrator' ? 'mdd-orchestrator' : role, mode: role === 'orchestrator' ? 'primary' : 'subagent', permission: [
@@ -739,10 +811,10 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
     ...(['mdd-apply', 'mdd-verify'].includes(role) ? [{ permission: 'bash', pattern: '*', action: 'ask' }] : []),
   ] }));
   const sessions = new Map([[runtime.sessionID, { id: runtime.sessionID, agent: runtime.agent, directory: root, projectID: 'project' }]]);
-  const info = { id: 'msg_parent', sessionID: runtime.sessionID, agent: runtime.agent, role: 'assistant', ...model, path: { cwd: root, root } };
+  const info = { id: 'msg_parent', sessionID: runtime.sessionID, agent: runtime.agent, role: 'assistant', ...model, path: { cwd: root, root: hostWorktree } };
   const parent = [{ info: { id: 'user', sessionID: runtime.sessionID, role: 'user' }, parts: [{ type: 'text', text: requirements, sessionID: runtime.sessionID, messageID: 'user' }] }, { info, parts: [] }];
   const histories = new Map([[runtime.sessionID, parent]]);
-  const input = { directory: root, worktree: root, project: { id: 'project' }, client: {
+  const input = { directory: root, worktree: hostWorktree, project: { id: 'project' }, client: {
     app: { agents: async () => ({ data: agents }) }, session: {
       status: async () => ({ data: {} }),
       get: async ({ path }) => ({ data: sessions.get(path.id) }), messages: async ({ path }) => ({ data: histories.get(path.id) }),
@@ -904,7 +976,7 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
     parent[1].parts[0].state.metadata = { sessionId: childID, parentSessionId: runtime.sessionID, model };
     sessions.set(childID, { id: childID, parentID: runtime.sessionID, directory: root, projectID: 'project', agent: phase, permission: [{ permission: 'task', pattern: '*', action: 'deny' }] });
     await hooks.event({ event: { type: 'session.created', properties: { info: sessions.get(childID) } } });
-    const child = [{ info: { id: `msg-${ordinal}`, sessionID: childID, role: 'assistant', agent: phase, ...model, path: { cwd: root, root }, time: { completed: 10 }, finish: 'stop', ...(options.spent ?? {}) }, parts: [] }];
+    const child = [{ info: { id: `msg-${ordinal}`, sessionID: childID, role: 'assistant', agent: phase, ...model, path: { cwd: root, root: hostWorktree }, time: { completed: 10 }, finish: 'stop', ...(options.spent ?? {}) }, parts: [] }];
     histories.set(childID, child);
     if (options.beforeMismatch) child[0].info.modelID = 'substituted';
     async function tool(name, input, output, execute = async () => {}) {
@@ -3106,6 +3178,9 @@ test('a handle that cannot travel falls back to the full prompt instead of block
   const after = await f.status();
   assert.equal(after.state, 'ready');
   assert.equal(after.dispatch, undefined, 'the fallback stops advertising a handle');
+  const bytes = Buffer.byteLength(JSON.stringify(after.task));
+  assert.ok(bytes <= FULL_TASK_MAX_BYTES, `full-fallback fixture needs a deliverable task: ${bytes} > ${FULL_TASK_MAX_BYTES}`);
+  t.diagnostic(`Full-fallback task: ${bytes} bytes; unchanged gate: ${FULL_TASK_MAX_BYTES} bytes.`);
   assert.match(after.task.prompt, /Perform only mdd-explore/);
   assert.deepEqual(after.nextAction.args, after.task);
   // And the phase still dispatches, which is the entire point of degrading rather than refusing.
@@ -3142,7 +3217,11 @@ test('phase reset restores a compact fresh handle after full-prompt fallback', a
   const ready = await f.status();
   await assert.rejects(f.hooks['tool.execute.before']({ ...f.runtime, callID: 'lost', tool: 'task' },
     { args: { ...ready.task, prompt: 'unknown substituted prompt' } }), /full phase prompt instead/);
-  assert.equal((await f.status()).dispatch, undefined);
+  const exposed = await f.status();
+  assert.equal(exposed.dispatch, undefined);
+  const bytes = Buffer.byteLength(JSON.stringify(exposed.task));
+  assert.ok(bytes <= FULL_TASK_MAX_BYTES, `full-fallback reset fixture needs a deliverable task: ${bytes} > ${FULL_TASK_MAX_BYTES}`);
+  t.diagnostic(`Full-fallback reset task: ${bytes} bytes; unchanged gate: ${FULL_TASK_MAX_BYTES} bytes.`);
 
   const resetRaw = await f.hooks.tool.mdd_reset.execute({ scope: 'phase' }, f.context);
   assert.ok(Buffer.byteLength(resetRaw) <= STATUS_BUDGET_BYTES);

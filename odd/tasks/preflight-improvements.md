@@ -17,8 +17,11 @@ not a complete task artifact store.
 
 - User authorized the analyzed implementation on 2026-10-14.
 - Local implementation, regression tests, documentation, and work-unit commits on
-  `feat-preflight-improv` are authorized. No push, PR publication, installation into
-  the user's active MDD, remote access, or automatic legacy migration.
+  `feat-preflight-improv` are authorized. No PR publication, active installation,
+  or automatic legacy migration. Later user authorization permits configured-Git
+  fetch/integration/verification/normal push to main at
+  `https://github.com/vancinis/mdd-orchestrator.git`; no credential inspection or
+  force push. This supersedes the earlier no-remote/no-push restriction only there.
 - Branch point: `683c7452a5e48385669d7bcd4d573a55054322c7`.
 - Receipt-driven development is off, decided by clone-local configuration. Do not
   enable it or start native reviews. Use ordinary verification and native read-only
@@ -163,6 +166,31 @@ not a complete task artifact store.
   - Writer authored size: 629 lines; work-unit commit includes 665 authored lines.
   - Commit: `adfe216f331ae3bbae95b06c4c4c4cb264b09f88`
     (`feat(preflight): resolve task storage automatically`).
+
+- [ ] **PF-4 — Integrate current main and publish the verified combined work.**
+  - Authorized by explicit user request and native "Autorizar Git configurado".
+  - Incoming main: `2721c54ae1c7e620d094352f168c035c4a09a751`; local boundary:
+    `c0fa226`. Both sides have four commits beyond their common base.
+  - Route: delegated direct. Trigger: overlapping non-trivial integration across
+    runner, native tests, actor instructions and documentation.
+  - Preserve incoming checkout/capability/evidence handoffs and all PF-1/PF-2/PF-3
+    behavior. Resolve only actual integration conflicts and regressions.
+  - Verification: typecheck/build, focused runner/native/asset tests, full suite,
+    parent command spot check and native read-only risk assessment with RDD off.
+    Integration uses existing regressions; observe introduced failures before fixes,
+    rather than inventing a separate behavioral RED for a mechanical merge.
+  - Parent owns merge commit and normal `HEAD:main` push; never overwrite a newer
+    remote tip. No checkout or destructive changes to other worktrees.
+  - Integration resolved only one textual conflict in `tests/full-native.test.mjs`:
+    retain both imports and all incoming tests. Other incoming paths merged cleanly.
+  - Writer typecheck/build passed. First focused command timed out at 600 seconds;
+    its remaining child exited before the sequential rerun (422 passed, 0 failed).
+    Full suite passed: 2,077 passed, 0 failed, 3 existing baseline skips.
+  - Parent typecheck spot check passed; native staged risk medium, RDD off.
+  - Independent verification preserved both parents' features, found no integration
+    blocker, passed typecheck and 105 focused tests, and verified source/index
+    hashes unchanged. No conflict markers or unmerged index entries remain.
+  - Merge commit and normal remote publication: pending.
 
 ## Verification and closure
 

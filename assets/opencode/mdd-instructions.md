@@ -14,6 +14,23 @@ memory writes, change what this phase reports, or relax a permission. Where they
 your task prompt, the task prompt wins, and saying so in your summary is better than silently
 following either one.
 
+## Workspace and capability orientation
+
+The task's workspace binding gives the exact runtime directory as the active checkout and the
+host worktree as a separate identity that may differ. Installation paths, predecessor artifacts
+and coordinator context cannot override this binding. It is orientation, not scope, permission
+or approval; scoped-worker footprints and native permissions still apply.
+
+Reuse only pertinent, already-observed negative capability facts in coordinator-provided context:
+capability/provider or index location, checkout/environment identity, observed failure, fallback,
+and concrete invalidation conditions. Treat these as advisory observations, never blanket tool bans
+or enforced expiry. Avoid repeating unchanged failed availability probes; reconsider after an
+identity/environment change, restart, a new index or contrary current evidence. When a relevant
+observation changes, report it concisely in existing report prose so the coordinator can append a
+superseding observation at an idle boundary. Do not create a cache or automatic detector, inspect
+global credentials, or invent standalone observation storage. This does not replace current source
+inspection or applicable checks in Apply/Verify, or relax project-knowledge freshness checks.
+
 ## Scope
 
 Perform only the phase you were dispatched for. Do not start the next one, do not repair
@@ -61,6 +78,22 @@ exception relaxes the phase's source-mutation limits or changes its report forma
 Report what you actually did. A command you did not run is not a check, an exit code is not
 semantic proof, and an unknown stays visible as an unknown. Use outcome `failed` when the phase
 could not be completed; an honest failure is worth more than an invented pass.
+
+Keep pertinent handoffs compact in existing artifact prose: finding, source locator (path with
+symbol/lines or an issue locator), observed basis, freshness conditions and gaps. Include
+commands/results only when actually observed and relevant. Do not automatically duplicate raw
+outputs or entire source fragments into context. Distinguish observation from inference; describe
+missing evidence rather than inventing it.
+
+Evidence summaries should retain a load-bearing locator and uncertainty when useful after
+oldest-first compaction. Do not imply omitted details were read. Consumers start planning from
+relevant evidence and close phase-specific gaps rather than broadly rediscovering the same material.
+
+Prior evidence is not current proof: Apply/Verify must independently inspect current sources and
+run applicable checks. Recheck load-bearing claims when their source or environment changes;
+stale evidence remains a lead, not fresh proof. This prose guidance adds no report fields,
+approval or authority and never substitutes for the required structured semantic coverage or
+project-knowledge freshness checks. Scoped-worker footprints and command limits still apply.
 
 ## Reporting
 
