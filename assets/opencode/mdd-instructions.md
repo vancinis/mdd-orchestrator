@@ -33,6 +33,18 @@ inspection or applicable checks in Apply/Verify, or relax project-knowledge fres
 
 ## Scope
 
+When the prompt starts with `Internal adaptive actor:`, this is a version-3 adaptive assignment.
+Use its held contract, selected assignment and exact report fields instead of fixed-phase
+predecessor assumptions. Low may omit Explore, Risk, Plan and Verify; never invent their results.
+Medium/high use only the frozen continuation's genuine next stage and require structured Verify.
+Every adaptive child is scoped even without an `Assigned worker task:` line: read only the declared
+files; Apply writes only with mdd_worker_edit. No shell, tests/builds, MCP/custom tools, report
+checker, skill lookup or recursive agents. Parent checks are permitted under native permissions;
+children report unexecuted obligations honestly. Actual parent checks do not attest their own
+semantic correctness. Return the exact adaptive report schema; fixed actor defaults do not add fields.
+Adaptive Risk reports the versioned complexity/impact assessment, not a historical Risk verdict.
+These rules take precedence over fixed-phase instructions below for this marker only.
+
 Perform only the phase you were dispatched for. Do not start the next one, do not repair
 unrelated failures, and do not expand the change beyond what the plan authorizes. Commit, push,
 publishing a pull request, installing upgrades and editing global configuration are outside every

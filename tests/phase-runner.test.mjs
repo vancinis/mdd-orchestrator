@@ -1,14 +1,15 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { PhaseRunner, SINGULAR_EXPLORATION, FULL_TASK_MAX_BYTES } from '../dist/phase-runner.js';
+import { Workflow } from '../dist/workflow.js';
 import { reportFormatLines } from '../dist/phase-report.js';
-import { memoryServer, request, result, reportDocument, riskReport, runtime, call, answers, installCleanup, throughRiskStop, structuredTraceFixture as traceFixture, structuredVerificationFixture, traceFixture as legacyTraceFixture, ARTIFACT_TEXT, SUMMARY_TEXT } from './adapter-fixture.mjs';
+import { memoryServer, request, result, reportDocument, riskReport, runtime, call, answers, installCleanup, structuredTraceFixture as traceFixture, structuredVerificationFixture, traceFixture as legacyTraceFixture, ARTIFACT_TEXT, SUMMARY_TEXT, throughRiskStop } from './adapter-fixture.mjs';
 import { validateCheckpoint, CheckpointStore, CheckpointStorageError, sealResumeData } from '../dist/checkpoint.js';
 import { ProgressGuard } from '../dist/progress.js';
 import { RunOwnershipStore } from '../dist/run-ownership.js';
 import { RunDossierStore } from '../dist/run-dossier.js';
 import { statusPayload, STATUS_BUDGET_BYTES } from '../dist/status-budget.js';
-import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, stat, mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import fs from 'node:fs';
@@ -223,6 +224,163 @@ async function fixture(t, fault) {
   return { ...memory, inspect, runner };
 }
 
+test('AL-02 correction P1: historical fixed cold recovery still accepts unknown termination on user attestation', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'mdd-fixed-attestation-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const here = { ...runtime, directory: root, worktree: root };
+  const checkpoint = new CheckpointStore(root), progress = new ProgressGuard(root), ownership = new RunOwnershipStore(root);
+  const inspect = { parent: async () => {}, result: async (_r, _c, _p, output) => output,
+    liveness: async () => ({ verdict: 'unknown', detail: 'No usable native termination trace.' }) };
+  const options = { checkpoint, progress, ownership };
+  const runner = new PhaseRunner(inspect, options);
+  const ready = await runner.start({ preflight: { answers, routingVersion: 2 }, requirements: 'Preserve historical fixed recovery.' }, here,
+    { requirementsConfirmed: true, userMessageID: 'fixed-native-user' });
+  const dispatched = { sessionID: here.sessionID, callID: 'fixed-call' };
+  await runner.before(dispatched, ready.task);
+  const marker = progress.read(here.sessionID), saved = checkpoint.read(here.sessionID).checkpoint;
+  const cold = new PhaseRunner(inspect, options);
+  await cold.withReset(here.sessionID, async resetID => {
+    assert.equal((await cold.confirmStopped(here.sessionID, here, true, resetID)).verdict, 'unknown');
+  });
+  assert.equal(ownership.read(marker.runID).state, 'idle');
+  assert.deepEqual(progress.read(here.sessionID), { ...marker, state: 'settled' });
+  assert.deepEqual(checkpoint.read(here.sessionID).checkpoint, saved);
+  assert.deepEqual(await cold.restore(here), { restored: true });
+  assert.equal(cold.status(here.sessionID).state, 'blocked');
+});
+
+test('AL-01: fixed routing pins survive runner checkpoint writes, restart and pending release', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'mdd-routing-pin-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const checkpoint = new CheckpointStore(root); const progress = new ProgressGuard(root);
+  const inspect = { parent: async () => {}, result: async (_r, _c, _p, output) => output, stopped: async () => true };
+  const input = { preflight: { answers, routingVersion: 2 }, requirements: 'Preserve fixed routing on restart.' };
+  const runner = new PhaseRunner(inspect, { checkpoint, progress });
+  const ready = await runner.start(input, runtime, { requirementsConfirmed: true, userMessageID: 'routing-user' });
+  const assertPin = () => {
+    const saved = checkpoint.read(runtime.sessionID).checkpoint;
+    assert.equal(saved.request.routingVersion, 2);
+    const { routingVersion: _pin, ...unmarked } = saved.request;
+    assert.throws(() => validateCheckpoint({ ...saved, request: unmarked }), /digest mismatch/);
+    return saved;
+  };
+  assertPin();
+  await toPlan(runner, ready);
+  assertPin();
+  const restarted = new PhaseRunner(inspect, { checkpoint, progress });
+  assert.deepEqual(await restarted.restore(runtime), { restored: true });
+  assert.equal(restarted.status(runtime.sessionID).phase, 'mdd-plan');
+  const planCall = { ...call, callID: 'routing-plan' };
+  await restarted.before(planCall, restarted.status(runtime.sessionID).task);
+  assertPin();
+  const interrupted = new PhaseRunner(inspect, { checkpoint, progress });
+  assert.equal((await interrupted.restore(runtime)).restored, false, 'pending work is not replayed');
+  assert.equal((await interrupted.confirmStopped(runtime.sessionID, runtime)).verdict, 'stopped');
+  assert.deepEqual(await interrupted.restore(runtime), { restored: true });
+  assert.equal(interrupted.status(runtime.sessionID).state, 'blocked', 'release alone does not authorize retry');
+  assert.equal(interrupted.status(runtime.sessionID).task, undefined);
+  assertPin();
+  assert.deepEqual(interrupted.reset(runtime.sessionID, 'phase'), { scope: 'phase', phase: 'mdd-plan' });
+  const retry = { ...call, callID: 'routing-plan-retry' };
+  await interrupted.after(retry, await interrupted.before(retry, interrupted.status(runtime.sessionID).task),
+    reportDocument({ evidenceSummary: 'Plan held.', artifact: 'Plan.', ...traceFixture() }));
+  assert.equal(assertPin().stable.phase, 'mdd-apply');
+});
+
+test('AL-01: the runner refuses reserved adaptive routing before creating durable state', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'mdd-routing-inactive-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const checkpoint = new CheckpointStore(root);
+  const runner = new PhaseRunner({ parent: async () => {}, result: async (_r, _c, _p, output) => output }, { checkpoint });
+  await assert.rejects(runner.start({ preflight: { answers, routingVersion: 3 }, requirements: 'Inactive contract.' }, runtime,
+    { requirementsConfirmed: true, userMessageID: 'routing-user' }), /routingVersion.*native-context-required/);
+  assert.equal(checkpoint.read(runtime.sessionID), undefined);
+});
+
+test('AL-01 correction: a non-enumerable own fixed pin reaches the real checkpoint seal and restart', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'mdd-own-routing-pin-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const checkpoint = new CheckpointStore(root); const progress = new ProgressGuard(root);
+  const inspect = { parent: async () => {}, result: async (_r, _c, _p, output) => output };
+  const preflight = Object.defineProperty({ answers }, 'routingVersion', { value: 2 });
+  const runner = new PhaseRunner(inspect, { checkpoint, progress });
+  const ready = await runner.start({ preflight, requirements: 'Retain the own fixed routing pin.' }, runtime,
+    { requirementsConfirmed: true, userMessageID: 'own-routing-user' });
+  const planOnly = [{ kind: 'start', phase: 'mdd-plan' }];
+  assert.throws(() => Workflow.replay(preflight, planOnly), /Only the current ready phase can start/);
+  const assertPin = () => {
+    const saved = checkpoint.read(runtime.sessionID).checkpoint;
+    assert.equal(Object.hasOwn(saved.request, 'routingVersion'), true);
+    assert.equal(saved.request.routingVersion, 2);
+    assert.notEqual(saved.dataDigest, sealResumeData(saved.data, saved.runID, saved.parent, saved.events, saved.stable));
+    assert.throws(() => Workflow.replay(saved.request, planOnly), /Only the current ready phase can start/);
+    const unmarked = structuredClone(saved); delete unmarked.request.routingVersion;
+    assert.throws(() => validateCheckpoint(unmarked), /digest mismatch/);
+  };
+  assertPin();
+  await toPlan(runner, ready);
+  assertPin();
+  const restarted = new PhaseRunner(inspect, { checkpoint, progress });
+  assert.deepEqual(await restarted.restore(runtime), { restored: true });
+  assert.equal(restarted.status(runtime.sessionID).phase, 'mdd-plan');
+  assertPin();
+});
+
+test('AL-01 correction: the runner rejects non-enumerable invalid pins before recording a legacy route', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'mdd-own-routing-inactive-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const checkpoint = new CheckpointStore(root);
+  for (const routingVersion of [3, undefined, null, '2', 4]) {
+    const runner = new PhaseRunner({ parent: async () => {}, result: async (_r, _c, _p, output) => output }, { checkpoint });
+    const preflight = Object.defineProperty({ answers, route: ['mdd-plan', 'mdd-apply', 'mdd-verify'] }, 'routingVersion', { value: routingVersion });
+    await assert.rejects(runner.start({ preflight, requirements: 'Reject the own invalid routing pin.' }, runtime,
+      { requirementsConfirmed: true, userMessageID: 'own-routing-user' }), routingVersion === 3 ? /routingVersion.*native-context-required/ : /routingVersion.*unsupported/);
+    assert.equal(checkpoint.read(runtime.sessionID), undefined);
+  }
+});
+
+test('AL-01: cold worker release reseals the fixed pin without losing completed work', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'mdd-worker-routing-pin-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, 'src'));
+  for (const name of ['a', 'b']) await writeFile(join(root, `src/${name}.ts`), name);
+  const here = { ...runtime, sessionID: 'routing-workers', directory: root, worktree: root };
+  const checkpoint = new CheckpointStore(root); const progress = new ProgressGuard(root);
+  const inspect = { parent: async () => {}, result: async (_r, _c, _p, output) => output, stopped: async () => true };
+  const options = { checkpoint, progress, ownership: new RunOwnershipStore(root), workers: { enabled: true }, workerCapability: { confined: true } };
+  const runner = new PhaseRunner(inspect, options);
+  await runner.start({ preflight: { answers, routingVersion: 2 }, requirements: 'Preserve independent worker progress.' }, here,
+    { requirementsConfirmed: true, userMessageID: 'routing-workers-user' });
+  const ready = await throughRiskStop(runner, here.sessionID, 'low', { release: true });
+  const trace = traceFixture(); const base = trace.deliverables[0];
+  trace.deliverables = ['a', 'b'].map((name, index) => ({ ...base, id: `T${index + 1}`, path: `src/${name}.ts`, dependsOn: [],
+    parallel: { complete: true, reads: [], writes: [`src/${name}.ts`] },
+    checks: [{ id: `T${index + 1}-check`, command: 'npm test', requirement: 'required' }] }));
+  const planCall = { sessionID: here.sessionID, callID: 'routing-workers-plan' };
+  await runner.after(planCall, await runner.before(planCall, ready.task),
+    reportDocument({ evidenceSummary: 'Plan held.', artifact: 'Plan.', ...trace }));
+  runner.releaseSettled(here.sessionID, planCall.callID);
+  const tasks = runner.status(here.sessionID).tasks;
+  const calls = ['routing-worker-one', 'routing-worker-two'].map(callID => ({ sessionID: here.sessionID, callID }));
+  const args = await Promise.all(tasks.map((task, index) => runner.before(calls[index], task)));
+  await runner.after(calls[0], args[0], reportDocument({ evidenceSummary: 'First task completed.', artifact: 'First task evidence.',
+    completed: ['T1'], changes: ['src/a.ts'], checks: [] }));
+  const cold = new PhaseRunner(inspect, options);
+  assert.equal((await cold.restore(here)).restored, false);
+  await cold.withReset(here.sessionID, async resetID => {
+    assert.equal((await cold.confirmStopped(here.sessionID, here, false, resetID)).verdict, 'stopped');
+    const saved = checkpoint.read(here.sessionID).checkpoint;
+    assert.equal(saved.request.routingVersion, 2);
+    const unmarked = structuredClone(saved); delete unmarked.request.routingVersion;
+    assert.throws(() => validateCheckpoint(unmarked), /digest mismatch/);
+    assert.deepEqual(await cold.restore(here), { restored: true });
+    cold.reset(here.sessionID, 'phase');
+  });
+  const restored = cold.status(here.sessionID);
+  assert.deepEqual(restored.workerProgress.completed, ['T1']);
+  assert.equal(restored.tasks.length, 1, 'the completed worker is not reissued');
+  assert.equal(checkpoint.read(here.sessionID).checkpoint.request.routingVersion, 2);
+});
 test('evidence handoff: compact issue context and findings reach Risk and Plan as data', async t => {
   const { runner, endpoint } = await fixture(t);
   const context = { label: 'Issue #390 evidence', content: 'Finding: input boundary needs validation. Source locator: issue #390 and src/cli.ts:10-20 validateInput. Observed basis: synthetic source fixture; no commands run. Freshness: only while those source bytes match. Gap: integration behavior unverified.' };
@@ -266,9 +424,12 @@ for (const stage of ['phase', 'risk', 'standalone']) {
     for (let attempt = 0; attempt < 4; attempt += 1) {
       let current = runner.status(place.sessionID);
       if (attempt === 0) {
+        const readyHandle = current.task.prompt;
         await assert.rejects(runner.before({ ...call, callID: `lost-${stage}` }, { ...current.task, prompt: 'lost handle' }), /arguments differ/);
         current = runner.status(place.sessionID);
-        assertWorkspace(current.task.prompt, place);
+        if (current.task.prompt.startsWith('mdd:dispatch:')) {
+          assert.notEqual(current.task.prompt, readyHandle, 'an oversized full prompt remints the compact handle');
+        } else assertWorkspace(current.task.prompt, place);
       }
       const dispatchedCall = { ...call, callID: `checkout-${stage}-${attempt}` };
       const args = await runner.before(dispatchedCall, current.task);
@@ -1287,16 +1448,27 @@ for (const mutate of [
     assert.equal(after.state, 'ready');
     assert.equal(after.task.description, ready.task.description);
     assert.equal(after.task.subagent_type, ready.task.subagent_type);
-    // A prompt that arrives as neither the handle nor the real text is the one mistake that says
-    // the handle itself did not survive, so that run falls back to shipping the whole prompt.
+    assert.equal(writes.length, 0, 'rejected arguments never write dispatch intent');
+    // A lost handle exposes the full prompt only when it fits the unchanged transport gate;
+    // larger merged instruction sets must remint a compact handle instead.
     // Every other mutation is the coordinator composing instead of copying, and the refusal is
     // the whole fix: the handle stays, and so does the payload it saves.
     if (mutate(ready.task).prompt === ready.task.prompt) assert.deepEqual(after.task, ready.task);
     else {
-      assert.ok(after.task.prompt.length > 1000, 'a lost handle falls back to the full prompt');
-      const bytes = Buffer.byteLength(JSON.stringify(after.task));
-      assert.ok(bytes <= FULL_TASK_MAX_BYTES, `full-fallback fixture needs a deliverable task: ${bytes} > ${FULL_TASK_MAX_BYTES}`);
+      const compact = after.task.prompt.startsWith('mdd:dispatch:');
+      const sent = await runner.before({ ...call, callID: 'fallback-proof' }, after.task);
+      const full = { ...sent, prompt: sent.prompt.replace(/\nNative callID=.*$/, '') };
+      const bytes = Buffer.byteLength(JSON.stringify(full));
+      if (compact) {
+        assert.notEqual(after.task.prompt, ready.task.prompt, 'a lost handle is reminted');
+        assert.ok(bytes > FULL_TASK_MAX_BYTES, 'only an over-budget full prompt keeps a compact handle');
+      } else {
+        assert.ok(after.task.prompt.length > 1000, 'a lost handle falls back to the full prompt');
+        assert.ok(bytes <= FULL_TASK_MAX_BYTES, `full-fallback task must fit: ${bytes} > ${FULL_TASK_MAX_BYTES}`);
+      }
       t.diagnostic(`Full-fallback task: ${bytes} bytes; unchanged gate: ${FULL_TASK_MAX_BYTES} bytes.`);
+      assert.equal(writes.length, 1, 'only the exact reissued task writes dispatch intent');
+      return;
     }
     assert.equal(writes.length, 0);
   });

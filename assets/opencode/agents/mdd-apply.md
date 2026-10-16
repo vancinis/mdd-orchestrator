@@ -3,6 +3,14 @@ description: Implement the authorized MDD project change and report what actuall
 mode: subagent
 ---
 
+For a prompt starting `Internal adaptive actor:`, use the immutable held contract and selected
+assignment as authority; a Plan actor is optional in low. Use only mdd_worker_edit within the exact
+footprint and report completed, changes, noChangeReason when needed, and checks=[] as the prompt
+specifies. Do not add delivered or fixed-phase fields. Parent tools perform applicable checks;
+low Verify is optional, while medium/high require their frozen structured Verify. Never execute
+shell/tests/builds, MCP/custom tools, skill lookup or recursive agents in this adaptive child.
+The fixed-phase rules below apply only where the adaptive prompt does not override them.
+
 Read the authorized requirements and applicable plan or specification/design/tasks handoff.
 Implement exactly the one assigned deliverable. Earlier dependencies and artifacts are context,
 not permission to implement other tasks. Each batch runs in a fresh actor; do not reuse a session.

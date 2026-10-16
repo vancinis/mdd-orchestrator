@@ -7,14 +7,14 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { spawn } from 'node:child_process';
 import { createLegacyPlugin as plugin } from '../dist/opencode-plugin.js';
-import { CheckpointStorageError, CheckpointStore, sealResumeData } from '../dist/checkpoint.js';
+import { CheckpointStorageError, CheckpointStore, sealResumeData, validateCheckpoint } from '../dist/checkpoint.js';
 import { QuestionCheckpointStore } from '../dist/question-checkpoint.js';
 import { ProgressGuard } from '../dist/progress.js';
 import { Workflow } from '../dist/workflow.js';
 import { defaultSettings } from '../dist/settings.js';
 import { saveGlobalSettings } from '../dist/global-settings.js';
 import { isolateHome, memoryServer, reportDocument, traceFixture, structuredTraceFixture, throughRiskStop } from './adapter-fixture.mjs';
-import { projectTargetTransfer } from '../dist/transfer.js';
+import { projectApprovalTransfer, projectTargetTransfer } from '../dist/transfer.js';
 import { RunOwnershipStore } from '../dist/run-ownership.js';
 import { PhaseRunner } from '../dist/phase-runner.js';
 import { EngramHttp } from '../dist/engram-http.js';
@@ -25,6 +25,36 @@ const sourceID = 'ses_source';
 const runID = 'run_explicit';
 const userText = `Continue MDD sourceSessionID=${sourceID} runID=${runID} here.`;
 const answers = { certainty: 'very-sure', artifactStore: 'none', mode: 'automatic', summary: 'low' };
+
+for (const kind of ['approval', 'target']) {
+  test(`AL-01: ${kind} transfer reseals and preserves an explicit fixed routing pin through target restart`, async t => {
+    const root = mkdtempSync(join(tmpdir(), 'mdd-transfer-routing-pin-'));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const source = kind === 'approval' ? approvalCheckpoint(root) : checkpoint(root);
+    source.request.routingVersion = 2;
+    source.dataDigest = sealResumeData(source.data, source.runID, source.parent, source.events, source.stable, source.request);
+    validateCheckpoint(source);
+    const target = { sessionID: 'routing-target', agent: 'mdd-orchestrator', directory: root, worktree: root };
+    const marker = new ProgressGuard(root).read(sourceID);
+    const projected = kind === 'approval' ? projectApprovalTransfer(source, marker, target, 'routing-target-user') :
+      projectTargetTransfer(source, marker, target, { sessionID: target.sessionID, userMessageID: 'routing-target-user', latest: true,
+        authored: true, userText: `Continue sourceSessionID=${source.parent} runID=${source.runID}` });
+    assert.deepEqual(projected.checkpoint.request, source.request);
+    assert.deepEqual(projected.checkpoint.events, source.events);
+    const unmarked = structuredClone(projected.checkpoint);
+    delete unmarked.request.routingVersion;
+    assert.throws(() => validateCheckpoint(unmarked), /digest mismatch/);
+    const store = new CheckpointStore(root); const progress = new ProgressGuard(root);
+    store.write(target.sessionID, projected.checkpoint);
+    progress.write(target.sessionID, projected.progress);
+    const runner = new PhaseRunner({ parent: async () => {}, result: async (_r, _c, _p, output) => output }, { checkpoint: store, progress });
+    assert.deepEqual(await runner.restore(target), { restored: true });
+    assert.equal(store.read(target.sessionID).checkpoint.request.routingVersion, 2);
+    const status = runner.status(target.sessionID);
+    assert.equal(status.workflow.nextAction.phase, kind === 'approval' ? 'mdd-propose' : 'mdd-plan');
+    assert.equal(status.state, kind === 'approval' ? 'await-approval' : 'ready');
+  });
+}
 
 for (const backend of ['none', 'local']) for (const legacy of [false, true]) {
   test(`${backend}: transfer preserves the frozen ${legacy ? 'legacy' : 'structured'} held plan and target prompts`, async t => {

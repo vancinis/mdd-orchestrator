@@ -12,7 +12,25 @@ test('plural foreground tasks preserve exact objects and cannot advance a phase 
 import { nextAction, withNextAction } from '../dist/next-action.js';
 
 const task = { description: 'MDD plan phase', subagent_type: 'mdd-plan', prompt: 'mdd:dispatch:token' };
+
+for (const state of ['completed', 'closed-unverified']) test(`AL-03: internal ${state} offers status only, never public or review authority`, () => {
+  const action = nextAction({ lane: 'adaptive-low-internal', state });
+  assert.equal(action.tool, 'mdd_status'); assert.equal(action.args, undefined);
+  assert.match(action.why, /no Plan, Verify, review authority/);
+  assert.match(action.why, /unverified closure is not verified completion/);
+});
 const question = { questions: [{ header: 'Aprobación', question: '¿Continuar?', multiple: false, options: [] }] };
+
+test('AL05b: inactive native projection never falls into public fixed reset or startup routing', () => {
+  const base = { lane: 'adaptive-native-protocol-internal', routingVersion: 3, registration: 'inactive' };
+  for (const state of ['blocked', 'not-started', 'recovery-blocked', 'await-selection', 'await-result', 'transfer-recovery-required']) {
+    assert.equal(nextAction({ ...base, state, next: { internal: 'status', inputContract: 'operations' } }), undefined);
+  }
+  assert.deepEqual(nextAction({ ...base, state: 'question-ready', question }).args, question);
+  assert.doesNotMatch(nextAction({ ...base, state: 'question-ready', question }).why, /mdd_answer/);
+  assert.deepEqual(nextAction({ ...base, state: 'authorized-actor', task }).args, task);
+  assert.equal(nextAction({ ...base, state: 'question-ready', questionRef: { args: { cursor: 'held:0' } } }), undefined);
+});
 
 test('SA-3: failed Verify offers explicit actions without fabricating the next phase or consent', () => {
   const action = nextAction({ state: 'blocked', reworkable: 'mdd-apply', runID: 'failed' });
@@ -114,4 +132,12 @@ test('next action: attaching it never touches what the tool already decided', ()
   assert.deepEqual({ ...attached, nextAction: undefined }, { ...status, nextAction: undefined });
   assert.equal(attached.nextAction.tool, 'task');
   assert.equal(status.nextAction, undefined, 'the original status is not mutated');
+});
+test('AL-02: an actorless adaptive boundary waits for internal selection, not startup/reset/completion', () => {
+  const action = nextAction({ lane: 'adaptive-low-internal', state: 'await-selection', selection: { handle: 'internal' } });
+  assert.equal(action.tool, 'mdd_status');
+  assert.equal(action.args, undefined);
+  assert.match(action.why, /select|selection/);
+  const pending = nextAction({ lane: 'adaptive-low-internal', state: 'await-result', liveness: { verdict: 'stopped' } });
+  assert.equal(pending.tool, 'mdd_status'); assert.equal(pending.args, undefined);
 });

@@ -3173,26 +3173,46 @@ test('a dispatch handle is single-use and never survives the prompt it stood for
   assert.equal((await f.status()).state, 'ready');
 });
 
-// A prompt that arrives as neither the handle nor the real text is the one failure that says the
-// handle did not travel. The run stops saving bytes rather than stop being dispatchable.
-test('a handle that cannot travel falls back to the full prompt instead of blocking the phase', async t => {
+// Lost-handle recovery exposes full text only within the transport gate; larger prompts remint.
+function assertLostHandleRecovery(ready, recovered, delivered, error) {
+  const full = { ...delivered, prompt: delivered.prompt.replace(/\nNative callID=.*$/, '') };
+  const bytes = Buffer.byteLength(JSON.stringify(full));
+  if (bytes <= FULL_TASK_MAX_BYTES) {
+    assert.match(error.message, /full phase prompt instead/);
+    assert.equal(recovered.dispatch, undefined, 'an in-budget fallback stops advertising a handle');
+    assert.deepEqual(recovered.task, full, 'full fallback exposes the exact dispatched prompt');
+    assert.match(recovered.task.prompt, /Perform only mdd-explore/);
+  } else {
+    assert.match(error.message, /fresh compact handle instead/);
+    assert.equal(recovered.dispatch.mode, 'handle');
+    assert.ok(recovered.task.prompt.startsWith('mdd:dispatch:'));
+    assert.notEqual(recovered.task.prompt, ready.task.prompt, 'over-budget recovery remints the handle');
+    assert.ok(Buffer.byteLength(JSON.stringify(recovered.task)) <= FULL_TASK_MAX_BYTES);
+  }
+  return bytes;
+}
+
+test('a lost handle recovers with full text or a fresh handle according to the native size gate', async t => {
   const f = await fixture(t);
   const ready = await f.status();
+  let refusal;
   await assert.rejects(f.hooks['tool.execute.before']({ ...f.runtime, callID: 'lost', tool: 'task' },
-    { args: { ...ready.task, prompt: 'I will write the prompt myself.' } }), /full phase prompt instead/);
+    { args: { ...ready.task, prompt: 'I will write the prompt myself.' } }), error => {
+    refusal = error; return /full phase prompt instead|fresh compact handle instead/.test(error.message);
+  });
   const after = await f.status();
   assert.equal(after.state, 'ready');
-  assert.equal(after.dispatch, undefined, 'the fallback stops advertising a handle');
-  const bytes = Buffer.byteLength(JSON.stringify(after.task));
-  assert.ok(bytes <= FULL_TASK_MAX_BYTES, `full-fallback fixture needs a deliverable task: ${bytes} > ${FULL_TASK_MAX_BYTES}`);
-  t.diagnostic(`Full-fallback task: ${bytes} bytes; unchanged gate: ${FULL_TASK_MAX_BYTES} bytes.`);
-  assert.match(after.task.prompt, /Perform only mdd-explore/);
   assert.deepEqual(after.nextAction.args, after.task);
-  // And the phase still dispatches, which is the entire point of degrading rather than refusing.
-  const output = { args: after.task };
+  const output = { args: structuredClone(after.task) };
   await f.hooks['tool.execute.before']({ ...f.runtime, callID: 'recovered', tool: 'task' }, output);
   assert.equal((await f.status()).state, 'await-result');
+  assert.match(output.args.prompt, /Perform only mdd-explore/);
   assert.match(output.args.prompt, /Native callID="recovered"/);
+  const bytes = assertLostHandleRecovery(ready, after, output.args, refusal);
+  t.diagnostic(`Recovered full task: ${bytes} bytes; unchanged gate: ${FULL_TASK_MAX_BYTES} bytes.`);
+  await assert.rejects(f.hooks['tool.execute.before']({ ...f.runtime, callID: 'recovered-again', tool: 'task' },
+    { args: structuredClone(after.task) }));
+  assert.equal((await f.status()).state, 'await-result', 'a consumed dispatch cannot start another actor');
 });
 
 // `nextAction.args` repeats whatever `task` holds, so exposing the full prompt doubles it in one
@@ -3217,16 +3237,17 @@ test('an unrecognised prompt too large to expose in full reminted a fresh compac
   assert.equal((await f.status()).state, 'await-result');
 });
 
-test('phase reset restores a compact fresh handle after full-prompt fallback', async t => {
+test('phase reset restores a compact fresh handle after size-dependent lost-handle recovery', async t => {
   const f = await fixture(t);
   const ready = await f.status();
+  let refusal;
   await assert.rejects(f.hooks['tool.execute.before']({ ...f.runtime, callID: 'lost', tool: 'task' },
-    { args: { ...ready.task, prompt: 'unknown substituted prompt' } }), /full phase prompt instead/);
+    { args: { ...ready.task, prompt: 'unknown substituted prompt' } }), error => {
+    refusal = error; return /full phase prompt instead|fresh compact handle instead/.test(error.message);
+  });
   const exposed = await f.status();
-  assert.equal(exposed.dispatch, undefined);
-  const bytes = Buffer.byteLength(JSON.stringify(exposed.task));
-  assert.ok(bytes <= FULL_TASK_MAX_BYTES, `full-fallback reset fixture needs a deliverable task: ${bytes} > ${FULL_TASK_MAX_BYTES}`);
-  t.diagnostic(`Full-fallback reset task: ${bytes} bytes; unchanged gate: ${FULL_TASK_MAX_BYTES} bytes.`);
+  assert.equal(exposed.state, 'ready');
+  assert.deepEqual(exposed.nextAction.args, exposed.task);
 
   const resetRaw = await f.hooks.tool.mdd_reset.execute({ scope: 'phase' }, f.context);
   assert.ok(Buffer.byteLength(resetRaw) <= STATUS_BUDGET_BYTES);
@@ -3234,9 +3255,18 @@ test('phase reset restores a compact fresh handle after full-prompt fallback', a
   assert.equal(reset.state, 'ready');
   assert.equal(reset.dispatch.mode, 'handle');
   assert.notEqual(reset.task.prompt, ready.task.prompt);
+  assert.notEqual(reset.task.prompt, exposed.task.prompt, 'reset revokes the recovered dispatch capability');
   assert.ok(reset.task.prompt.startsWith('mdd:dispatch:'));
-  const output = { args: reset.task };
+  assert.deepEqual(reset.nextAction.args, reset.task);
+  const output = { args: structuredClone(reset.task) };
   await f.hooks['tool.execute.before']({ ...f.runtime, callID: 'reset-recovered', tool: 'task' }, output);
+  assert.equal((await f.status()).state, 'await-result');
+  assert.match(output.args.prompt, /Perform only mdd-explore/);
+  assert.match(output.args.prompt, /Native callID="reset-recovered"/);
+  const bytes = assertLostHandleRecovery(ready, exposed, output.args, refusal);
+  t.diagnostic(`Recovered full reset task: ${bytes} bytes; unchanged gate: ${FULL_TASK_MAX_BYTES} bytes.`);
+  await assert.rejects(f.hooks['tool.execute.before']({ ...f.runtime, callID: 'reset-recovered-again', tool: 'task' },
+    { args: structuredClone(reset.task) }));
   assert.equal((await f.status()).state, 'await-result');
 });
 

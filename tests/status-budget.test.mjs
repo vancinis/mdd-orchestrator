@@ -10,6 +10,17 @@ test('compact status protects plural exact handles and member progress', () => {
 import { statusPayload, STATUS_BUDGET_BYTES, STATUS_COMPACT_KEEP, STATUS_DROP_ORDER, STATUS_PROTECTED_FIELDS } from '../dist/status-budget.js';
 
 const filler = size => 'x'.repeat(size);
+
+test('AL-03: terminal compact status retains coverage, optional failures, limits and assurance', () => {
+  const evidence = { matched: true, assurance: 'Reported consistency, not independent execution attestation.',
+    coverage: { assignments: [{ assignmentID: 'A1', status: 'verified' }] },
+    checkResults: [{ checkID: 'C1', disposition: 'failed', executions: ['X1'], reason: 'Optional failure remains visible.' }],
+    limits: ['No live host execution was independently attested.'] };
+  const value = { lane: 'adaptive-low-internal', state: 'completed', evidence,
+    completion: { outcome: 'verified', limits: evidence.limits }, selection: { completed: ['A1'] } };
+  const payload = JSON.parse(statusPayload(value, 'compact'));
+  assert.deepEqual(payload.evidence, evidence); assert.deepEqual(payload.completion, value.completion);
+});
 const base = () => ({
   state: 'ready', phase: 'mdd-apply', runID: 'run', sessionID: 'ses', mode: 'delegate',
   task: { description: 'MDD apply phase', subagent_type: 'mdd-apply', prompt: filler(15000) },
@@ -206,4 +217,16 @@ test('compact view: the default for statusPayload stays full, so callers opt in'
   const compact = JSON.parse(statusPayload(value, 'compact'));
   assert.equal(compact.acceptance, undefined);
   assert.deepEqual(compact.omitted, ['acceptance', 'brief']);
+});
+test('AL-02: bounded selection metadata and the last actual receipt survive status projection', () => {
+  const payload = { lane: 'adaptive-low-internal', state: 'await-selection', selection: { handle: 'internal', completed: ['A1'] },
+    lastReceipt: { actor: 'mdd-apply', outcome: 'failed', summary: 'Partial changes remain.' }, report: 'x'.repeat(60000) };
+  for (const view of ['full', 'compact']) {
+    const value = JSON.parse(statusPayload(payload, view));
+    assert.deepEqual(value.selection, payload.selection);
+    assert.deepEqual(value.lastReceipt, payload.lastReceipt);
+    assert.equal(value.phase, undefined);
+  }
+  assert.ok(STATUS_PROTECTED_FIELDS.includes('selection'));
+  assert.ok(STATUS_PROTECTED_FIELDS.includes('lastReceipt'));
 });

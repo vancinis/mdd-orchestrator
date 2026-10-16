@@ -37,7 +37,7 @@
  * improvement report, a knowledge record, a security task — are never collapsed by this rule.
  */
 export const STATUS_REPLY_TOOLS: readonly string[] = Object.freeze([
-  'mdd_status', 'mdd_start', 'mdd_prepare_advance', 'mdd_revisit', 'mdd_answer', 'mdd_phase_result',
+  'mdd_adapt', 'mdd_status', 'mdd_start', 'mdd_prepare_advance', 'mdd_revisit', 'mdd_answer', 'mdd_phase_result',
   'mdd_reset', 'mdd_change_request', 'mdd_context', 'mdd_contextual_explore', 'mdd_transfer', 'mdd_transfer_recover',
 ]);
 
@@ -50,14 +50,17 @@ function bytes(text: string): number { return Buffer.byteLength(text); }
 function record(value: unknown): Status | undefined {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Status : undefined;
 }
+const candidate = (tool: string): boolean => STATUS_REPLY_TOOLS.includes(tool) || tool === 'task' || tool === 'subagent';
 
 /** A status reply, or undefined for anything that must neither supersede nor be superseded. */
 function statusOf(tool: string, text: string): Status | undefined {
-  if (!STATUS_REPLY_TOOLS.includes(tool)) return undefined;
+  if (!candidate(tool)) return undefined;
   let value: unknown;
   try { value = JSON.parse(text); } catch { return undefined; }
   const status = record(value);
   if (!status || typeof status.state !== 'string' || Object.hasOwn(status, 'superseded')) return undefined;
+  if ((tool === 'task' || tool === 'subagent') &&
+      (status.lane !== 'adaptive-native' || status.routingVersion !== 3 || status.registration !== 'active')) return undefined;
   return status;
 }
 
@@ -114,7 +117,7 @@ export function collapseSupersededStatus(messages: unknown): number {
     if (!Array.isArray(parts)) continue;
     for (let index = 0; index < parts.length; index += 1) {
       const part = parts[index] as ToolPart | null;
-      if (!part || typeof part !== 'object' || part.type !== 'tool' || typeof part.tool !== 'string' || !STATUS_REPLY_TOOLS.includes(part.tool)) continue;
+      if (!part || typeof part !== 'object' || part.type !== 'tool' || typeof part.tool !== 'string' || !candidate(part.tool)) continue;
       const state = part.state;
       if (!state || typeof state !== 'object' || state.status !== 'completed' || typeof state.output !== 'string') continue;
       found.push({ parts, index, part: part as ToolPart & { state: { output: string } }, tool: part.tool, text: state.output });
@@ -163,7 +166,7 @@ export function collapseSupersededStatusResults<Message>(messages: readonly Mess
     if (!Array.isArray(content)) return;
     content.forEach((value, partIndex) => {
       const part = record(value) as ResultPart | undefined;
-      if (!part || part.type !== 'tool-result' || typeof part.name !== 'string' || !STATUS_REPLY_TOOLS.includes(part.name)) return;
+      if (!part || part.type !== 'tool-result' || typeof part.name !== 'string' || !candidate(part.name)) return;
       const text = resultText(part.result);
       if (text === undefined) return;
       found.push({ message: messageIndex, part: partIndex, result: part.result!, tool: part.name, text });

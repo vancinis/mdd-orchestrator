@@ -25,6 +25,55 @@ function throughRisk(workflow, route) {
   workflow.recordRiskResult({ outcome: 'passed', evidenceSummary: 'Risk evidence.', route });
 }
 
+test('AL-01: unmarked resume seals preserve the exact historical digest', () => {
+  const data = { requirements: 'Historical bytes.' };
+  const events = [];
+  for (const stable of [undefined, { state: 'ready' }]) {
+    const historical = createHash('sha256').update(JSON.stringify({ runID: 'run-1', parent, events, data,
+      ...(stable ? { stable } : {}) })).digest('hex');
+    assert.equal(sealResumeData(data, 'run-1', parent, events, stable), historical);
+    assert.equal(sealResumeData(data, 'run-1', parent, events, stable, request), historical);
+    assert.notEqual(sealResumeData(data, 'run-1', parent, events, stable, { ...request, routingVersion: 2 }), historical);
+  }
+});
+
+test('AL-01: seal callers cannot silently ignore unsafe requests or invalid routing pins', () => {
+  for (const input of [null, [], 'request', new Date(), { ...request, extra: true },
+    ...[undefined, null, '2', 1, 4].map(routingVersion => ({ ...request, routingVersion }))]) {
+    assert.throws(() => sealResumeData({}, 'run-1', parent, [], undefined, input));
+  }
+  assert.throws(() => sealResumeData({}, 'run-1', parent, [], undefined, { ...request, routingVersion: 3 }), /native-context-required/);
+});
+
+for (const version of [2, 3]) {
+  test(`AL-01: checkpoint v${version} binds an explicit routing pin and rejects insertion or removal`, () => {
+    const workflow = new Workflow(request);
+    const data = { directory: 'project', worktree: 'project', userMessageID: 'message-1', requirements: 'Goal',
+      context: [], dependencies: [], contexts: [], decisions: [], planned: [],
+      evidence: { requirements: 'unearned', plan: 'unearned', implementation: 'unearned', checks: 'unearned' },
+      executedChecks: [], changedFiles: 0, calls: [], usedMessages: [], proposed: [] };
+    const stable = version === 3 ? { phase: 'mdd-explore', state: 'ready', mode: 'delegate', attempts: 0, spent: 0,
+      malformed: 0, report: { phase: 'mdd-explore', summary: 'Ready.', how: [], status: 'in-progress', evidence: data.evidence },
+      changedList: [], concerns: [] } : undefined;
+    const pinned = { ...request, routingVersion: 2 };
+    const record = input => ({ ...checkpoint(workflow, 0), version, request: input, data, ...(stable ? { stable } : {}),
+      dataDigest: sealResumeData(data, 'run-1', parent, workflow.history(), stable, input) });
+    const saved = record(pinned);
+    assert.deepEqual(validateCheckpoint(saved).checkpoint, saved);
+    assert.throws(() => validateCheckpoint({ ...saved, request }), /digest mismatch/);
+    assert.throws(() => validateCheckpoint({ ...record(request), request: pinned }), /digest mismatch/);
+    for (const routingVersion of [3, 4, null, '2']) {
+      assert.throws(() => validateCheckpoint({ ...saved, request: { ...pinned, routingVersion } }), /routingVersion/);
+    }
+    assert.deepEqual(validateCheckpoint(record(request)).checkpoint.request, request, 'explicit resealing is required to remove a pin');
+  });
+}
+
+test('AL-01: an unsealed legacy checkpoint cannot carry an explicit routing pin', () => {
+  assert.throws(() => validateCheckpoint({ ...checkpoint(new Workflow(request), 0), request: { ...request, routingVersion: 2 } }),
+    /sealed.*checkpoint/);
+});
+
 test('workflow replay derives approvals, failed verification, rework and the current action', () => {
   const workflow = new Workflow(request);
   throughRisk(workflow, 'low');

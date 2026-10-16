@@ -57,3 +57,12 @@ First reported here as local-store only; that was wrong. It affected every store
 - One intermediate full run had a single `setup-ui` failure ("source first run without dist…") while sources were being edited mid-run; it passed in isolation and in the final run.
 - Final: `npm run typecheck` exit 0; `git diff --check` exit 0; `npm test` 2,089 tests, 2,086 passed, 0 failed, 3 skipped (same environment skips as baseline).
 - Delivery: the routing changes and this restore fix are separate commits; each passed the full suite on its own tree (2,086 and 2,090 passed, 0 failed). Integration with `origin/main` and publication follow.
+
+## Integration with `origin/main`
+
+- The user authorized commit, integration of the latest `main` and a normal direct push to `main`. `origin/main` was at `6a75bc9` (21 commits ahead: adaptive low/medium/high workflows).
+- One textual conflict in `PhaseRunner.reset`: kept upstream's adaptive-lane guards and this change's rework `phase` parameter.
+- Semantic follow-ups found by the merged suite:
+  - Adaptive continuation accepts only passed planning reports, so it now refuses one that names `unmet`, as the fixed route does.
+  - Upstream's larger packaged instructions plus the new Verify guidance pushed a Verify prompt with 12 KB of coordinator context 57 bytes past the 38,000-byte dispatch budget, so the plan artifact was summarized. The probe instruction now travels in the probe-directory line, and the cause rule is shorter: that prompt measures 37,794 bytes with every artifact inlined.
+- Merged tree: `npm run typecheck` exit 0; `git diff --check` exit 0; `npm test` 2,609 tests, 2,606 passed, 0 failed, 3 skipped.

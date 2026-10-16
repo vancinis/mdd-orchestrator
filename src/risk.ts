@@ -1,5 +1,25 @@
 import { objectWithKeys } from './validation.js';
 import { shortText } from './acceptance.js';
+import type { AssessmentLevel } from './policy.js';
+
+export const FUTURE_ASSESSMENT_VERSION = 1;
+export type FutureAssessment = {
+  assessmentVersion: typeof FUTURE_ASSESSMENT_VERSION;
+  complexity: AssessmentLevel;
+  impact: AssessmentLevel;
+};
+
+/** Pure future-contract reader, not a Risk verdict, route selector or execution admission. */
+export function parseFutureAssessment(value: unknown): FutureAssessment {
+  const input = objectWithKeys(value, 'future assessment', ['assessmentVersion', 'complexity', 'impact']);
+  if (input.assessmentVersion !== FUTURE_ASSESSMENT_VERSION) throw new Error('future assessment.assessmentVersion must be integer 1.');
+  for (const field of ['complexity', 'impact'] as const) {
+    if (input[field] !== 'low' && input[field] !== 'medium' && input[field] !== 'high') {
+      throw new Error(`future assessment.${field} must be exactly "low", "medium" or "high".`);
+    }
+  }
+  return { assessmentVersion: FUTURE_ASSESSMENT_VERSION, complexity: input.complexity as AssessmentLevel, impact: input.impact as AssessmentLevel };
+}
 
 /**
  * The risk actor's one authoritative structured field. It is deliberately not shaped into

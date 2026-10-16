@@ -19,8 +19,18 @@ describes the shared runtime settings; model-backed E2E and final review remain 
 
 An approved plan continues without redundant process prompts in automatic mode. Explicit
 interactive mode, native permissions, scope safety and review boundaries remain intact.
-Low uses one compact plan, not extra phases or mandatory design paperwork. The preflight is not
-scored: every run starts with exploration, and the `mdd-risk` assessment selects low or high.
+Fresh native implementation uses `mdd_adapt`, including precise edits. Low holds a compact
+acceptance/scope/evidence contract and selects only the next necessary actor; Plan and Verify
+are optional. Medium uses structured Plan/Apply/Verify; high uses
+Propose/Spec/Design/Tasks/Apply/Verify. Parent checks remain subject to native permissions.
+Configured interactive/automatic mode is preserved; unset mode asks only mode. Historical runs
+and explicit `mdd_start` retain the fixed Explore/Risk low-or-high compatibility workflow.
+
+Read `mdd_status` for exact operations and paged input/detail references. Version 3 is native-only:
+the CLI and fixed `Workflow` cannot fabricate its runtime context. Terminal runs can be replaced
+in the same parent after a genuine fresh user turn: immutable archival readback and exact ownership
+CAS precede replacement. Uncertain publication stays fenced until exact cold reconciliation.
+Structured reported evidence is not independent command attestation or proof of correctness.
 
 ## Set up MDD
 
@@ -149,7 +159,7 @@ To continue a run in a **new conversation**, read `mdd_status` in the old one fo
 | Lifecycle | Private in-memory state, isolated snapshots, exact phase/result/approval boundaries; no dispatch. No state is terminal: a failed attempt returns its phase to ready, one retry stays with the same actor before the coordinator takes over, an unlisted answer leaves its question open, and `mdd_reset` always has an exit, including re-opening a pending approval. |
 | OpenCode adapter | Requirements-only native intake; exact questions/approvals; all eight phases by delegation or carried out inline by the coordinator; bounded dependency handoff; reported change/check evidence; selected artifact storage and general receipts. |
 | Tests | Native Node tests, CLI subprocesses, real loopback HTTP transport, and explicitly mocked SDK contract tests. No paid agent E2E execution. |
-| Changes and context | Native-confirmed re-preflight creates a new planned run without erasing old evidence; idle contextual exploration leaves the main workflow/approval unchanged. Any precise, small edit the user spells out (text, style, a value, a prop, a rename...) skips preflight and phases: the coordinator finds and edits it directly, asking only when it cannot locate it unambiguously. |
+| Changes and context | Fresh implementation and precise edits use the version-3 native contract. Unknown context may use read-only contextual Explore before immutable admission. Existing fixed runs retain native-confirmed re-preflight; contextual exploration never grants implementation authority. |
 | PR body | A coordinator tool uses the exact packaged skill/template and current recorded facts, or, for a quick edit with no run, the files git lists against the PR target branch plus the coordinator's own Spanish reasons, stated as unverified by MDD. Unknowns remain unverified; no branch/commit/push/PR creation authority. |
 | Validation boundary | Contract suites and model-free startup checks do not prove real model output quality or permission UI behavior. User-authorized model-backed E2E/final review remains pending. |
 | Deliberately unsupported | Resuming a run after process loss and exactly-once guarantees (its evidence is preserved and reported as read-only data instead), delivery/publication automation, and non-OpenCode provider adapters. |

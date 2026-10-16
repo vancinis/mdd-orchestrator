@@ -4,6 +4,11 @@
  */
 export const POLICY_VERSION = 'mdd-routing-v2';
 
+/** Request pins are not output policy identifiers; omission is never upgraded or stamped. */
+export const FIXED_ROUTING_VERSION = 2;
+export const FUTURE_ROUTING_VERSION = 3;
+/** Vocabulary for future assessments only; current runtime routes remain low or high. */
+export type AssessmentLevel = 'low' | 'medium' | 'high';
 export type LegacyArtifactStore = 'engram' | 'openspec' | 'both' | 'none';
 export type ArtifactBackend = LegacyArtifactStore | 'local';
 

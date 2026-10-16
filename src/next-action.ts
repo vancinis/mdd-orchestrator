@@ -24,7 +24,7 @@
 const WRITTEN = 'If the user already answered it in their own words, typed inside the form or written in a message after it was shown, record that with mdd_answer instead of asking again.';
 
 export type NextAction = {
-  tool: 'question' | 'task' | 'mdd_start' | 'mdd_status' | 'mdd_prepare_advance' | 'mdd_phase_result' | 'mdd_reset';
+  tool: 'question' | 'task' | 'mdd_adapt' | 'mdd_start' | 'mdd_status' | 'mdd_prepare_advance' | 'mdd_phase_result' | 'mdd_reset';
   args?: Record<string, unknown>;
   calls?: Record<string, unknown>[];
   why: string;
@@ -50,11 +50,19 @@ export function nextAction(status: unknown): NextAction | undefined {
   const value = object(status);
   if (!value) return undefined;
   const state = typeof value.state === 'string' ? value.state : '';
+  const nativeProtocol = value.lane === 'adaptive-native-protocol-internal';
+
+  if (value.lane === 'adaptive-low-internal' && ['completed', 'closed-unverified'].includes(state)) return { tool: 'mdd_status',
+    why: 'Internal closure retains reported coverage, failures and assurance limits. It grants no Plan, Verify, review authority, new work, public activation or durable resume; unverified closure is not verified completion.' };
+
+  if (value.lane === 'adaptive-low-internal' && state === 'await-selection') return { tool: 'mdd_status',
+    why: 'An actorless internal selection boundary is waiting. Select only the next necessary authorized actor or prepare and submit final evidence through the guarded internal caller; no public startup, reset, mandatory Plan or Verify, review authority or automatic completion is implied.' };
 
   const question = object(value.question);
   if (question) {
     return { tool: 'question', args: question,
-      why: `A native question is pending. Ask it once, exactly as it is here, and answer nothing on the user's behalf. While it is pending it is the only question the user should see. ${WRITTEN}` };
+      why: nativeProtocol ? 'Ask this exact native envelope once. Only the actual native before/after question hooks can supply its answer; payload approval flags or raw text cannot authorize an operation.'
+        : `A native question is pending. Ask it once, exactly as it is here, and answer nothing on the user's behalf. While it is pending it is the only question the user should see. ${WRITTEN}` };
   }
 
   if (state === 'review-ready') return { tool: 'mdd_prepare_advance',
@@ -101,6 +109,15 @@ export function nextAction(status: unknown): NextAction | undefined {
     return { tool: 'task', args: task,
       why: 'This phase is ready to delegate. Call the native task tool once, foreground, with exactly this object and no extra arguments. The prompt may be a single-use MDD dispatch handle; pass it through unchanged.' };
   }
+
+  if (value.lane === 'adaptive-native') return { tool: 'mdd_adapt',
+    why: 'Read workspaceRuns for relevant existing work before fresh entry; do not call mdd_start for continuation or fresh native work (explicit fixed compatibility only). Use the published version-3 operation descriptors and exact input/detail references. Compose only required data; never invent identity, preferences, approval, stopped proof or dispatch authority. Closed work stays closed; entry requires a genuine fresh current native request.' };
+
+  // Its explicit internal next/input contract owns continuation. There is no public adapter yet.
+  if (nativeProtocol) return undefined;
+
+  if (value.lane === 'adaptive-low-internal') return { tool: 'mdd_status',
+    why: 'An internal adaptive actor is authorized or in flight. Wait for its exact stopped-child receipt; never enter fixed-phase reset, redispatch, start or complete automatically.' };
 
   const pending = object(value.pendingStart);
   if (pending && typeof pending.requirements === 'string') {

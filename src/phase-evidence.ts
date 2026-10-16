@@ -16,7 +16,7 @@ export type Deliverable = { id: string; description: string; path: string; scena
   ({ check: string; checks?: never } | { checks: PlannedCheck[]; check?: never });
 export type Check = { id?: string; command: string; exit: number | null };
 
-function plannedChecks(value: unknown, seen: Set<string>): PlannedCheck[] {
+export function plannedChecks(value: unknown, seen: Set<string>): PlannedCheck[] {
   if (!Array.isArray(value) || !value.length || value.length > 32) throw new Error('Planned checks requires 1–32 entries per deliverable.');
   return value.map(value => {
     const item = objectWithKeys(value, 'planned check', ['id', 'command', 'requirement', 'appliesWhen']);

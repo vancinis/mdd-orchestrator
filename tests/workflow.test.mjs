@@ -29,6 +29,119 @@ function throughRisk(workflow, route) {
   workflow.recordRiskResult({ outcome: 'passed', evidenceSummary: 'Risk fixture.', route });
 }
 
+test('AL-01: explicit fixed routing is recorded without changing default or profile evaluation', () => {
+  for (const base of [{ answers }, { profile: { answers }, explore: false }]) {
+    const request = { ...base, routingVersion: 2 };
+    const workflow = new Workflow(request);
+    assert.deepEqual(evaluate(request), evaluate(base));
+    assert.equal(workflow.snapshot().evaluation.policyVersion, 'mdd-routing-v2');
+    assert.deepEqual(Workflow.recordedRequest(request, workflow), request);
+    assert.deepEqual(Workflow.recordedRequest(base, new Workflow(base)), base, 'omission is never stamped');
+  }
+});
+
+for (const legacy of [false, true]) {
+  test(`AL-01 correction: non-enumerable fixed pin survives ${legacy ? 'legacy' : 'modern'} request recording`, () => {
+    for (const base of [{ answers }, { profile: { answers } }]) {
+      for (const route of legacy ? [low, ['mdd-explore', ...low], ['mdd-explore', ...high]] : [undefined]) {
+        const request = Object.defineProperty({ ...base, ...(route ? { route } : {}) }, 'routingVersion', { value: 2 });
+        const workflow = new Workflow(request);
+        const saved = Workflow.recordedRequest(request, workflow);
+        assert.equal(Object.hasOwn(saved, 'routingVersion'), true);
+        assert.equal(saved.routingVersion, 2);
+        assert.equal(Object.getOwnPropertyDescriptor(saved, 'routingVersion').enumerable, true, 'the pin survives subsequent JSON and clone boundaries');
+        assert.deepEqual(saved, { ...base, ...(route ? { route } : {}), routingVersion: 2 });
+        assert.deepEqual(Workflow.replay(saved, []).snapshot(), workflow.snapshot());
+        if (!route) {
+          assert.deepEqual(evaluate(request), evaluate(base));
+          const planOnly = [{ kind: 'start', phase: 'mdd-plan' }];
+          assert.throws(() => Workflow.replay(request, planOnly), /Only the current ready phase can start/);
+          assert.throws(() => Workflow.replay(saved, planOnly), /Only the current ready phase can start/);
+        }
+      }
+    }
+  });
+}
+
+test('AL-01 correction: own inactive and unsupported pins cannot disappear through legacy route extraction', () => {
+  for (const routingVersion of [3, undefined, null, '2', 4]) {
+    for (const route of [undefined, low, ['mdd-explore', ...low], ['mdd-explore', ...high]]) {
+      const request = Object.defineProperty({ answers, ...(route ? { route } : {}) }, 'routingVersion', { value: routingVersion });
+      const error = routingVersion === 3 ? /native-context-required/ : /routingVersion.*unsupported/;
+      assert.throws(() => new Workflow(request), error);
+      assert.throws(() => Workflow.replay(request, []), error);
+      assert.throws(() => Workflow.recordedRequest(request, new Workflow({ answers })), error);
+    }
+  }
+});
+
+test('AL05b: version three requires native context at fixed evaluation, construction and replay', () => {
+  const request = { answers, routingVersion: 3 };
+  for (const read of [() => evaluate(request), () => new Workflow(request), () => Workflow.replay(request, [])]) {
+    assert.throws(read, /native-context-required/);
+  }
+});
+
+test('AL-01: malformed and unsupported routing discriminators fail closed', () => {
+  for (const routingVersion of [undefined, null, '2', '3', true, 0, 1, 4, 2.5, NaN, Infinity, {}, []]) {
+    const request = { answers, routingVersion };
+    assert.throws(() => evaluate(request), /routingVersion.*unsupported/);
+    assert.throws(() => Workflow.replay(request, []), /routingVersion.*unsupported/);
+  }
+});
+
+test('AL-01: a pinned request never infers a legacy route from otherwise valid old history', () => {
+  const events = [{ kind: 'start', phase: 'mdd-explore' }, { kind: 'result', result: result('mdd-explore') },
+    { kind: 'start', phase: 'mdd-plan' }];
+  assert.deepEqual(Workflow.replay({ answers }, events).nextAction(), { kind: 'await-result', phase: 'mdd-plan' });
+  assert.throws(() => Workflow.replay({ answers, routingVersion: 2 }, events), /Only the current ready phase can start/);
+});
+
+test('AL-01: explicit recorded legacy routes keep their fixed tails and discriminator', () => {
+  for (const route of [low, ['mdd-explore', ...low], ['mdd-explore', ...high]]) {
+    const request = { answers, routingVersion: 2, route };
+    const workflow = new Workflow(request);
+    for (const phase of route) { workflow.start(phase); workflow.recordResult(result(phase)); }
+    assert.deepEqual(workflow.nextAction(), { kind: 'finished' });
+    assert.deepEqual(Workflow.recordedRequest(request, workflow), request);
+    assert.deepEqual(Workflow.replay(request, workflow.history()).snapshot(), workflow.snapshot());
+  }
+});
+
+for (const selection of ['low', 'high', 'override', 'manual']) {
+  test(`AL-01: fixed replay preserves ${selection} routing and earned Apply progress`, () => {
+    const base = { answers: { ...answers, mode: selection === 'override' ? 'interactive' : 'automatic' } };
+    const request = { ...base, routingVersion: 2 };
+    const workflow = new Workflow(request);
+    workflow.start('mdd-explore'); workflow.recordResult(result('mdd-explore'));
+    workflow.startRisk();
+    workflow.recordRiskResult(selection === 'manual' ? { outcome: 'failed', evidenceSummary: 'Unknown risk.' } :
+      { outcome: 'passed', evidenceSummary: 'Grounded risk.', route: selection === 'high' ? 'high' : 'low' });
+    if (selection === 'override') workflow.overrideRoute();
+    if (selection === 'manual') workflow.chooseManualRoute('low');
+    const tail = workflow.snapshot().evaluation.route === 'high' ? high : low;
+    for (const phase of tail.slice(0, -2)) {
+      if (workflow.nextAction().kind === 'approve') workflow.approve(phase);
+      workflow.start(phase);
+      workflow.recordResult({ ...result(phase), ...(['mdd-plan', 'mdd-tasks'].includes(phase) ? { applyPlan: [
+        { id: 'first', dependsOn: [] }, { id: 'second', dependsOn: ['first'] },
+      ] } : {}) });
+    }
+    if (workflow.nextAction().kind === 'approve') workflow.approve('mdd-apply');
+    workflow.start('mdd-apply');
+    workflow.recordResult({ ...result('mdd-apply'), completed: ['first'], batchID: 'batch-first' });
+    workflow.start('mdd-apply');
+    const replayed = Workflow.replay(request, workflow.history());
+    assert.deepEqual(replayed.snapshot(), workflow.snapshot());
+    assert.deepEqual(replayed.applyProgress().completed, ['first']);
+    assert.deepEqual(Workflow.replay(base, workflow.history()).snapshot(), workflow.snapshot(), 'unmarked modern history stays compatible');
+    replayed.retry();
+    replayed.start('mdd-apply');
+    replayed.recordResult({ ...result('mdd-apply'), completed: ['second'], batchID: 'batch-second' });
+    assert.equal(replayed.nextAction().phase, 'mdd-verify');
+  });
+}
+
 for (const [name, request, tail] of [
   ['low', { answers }, low],
   ['high', { answers: { ...answers, certainty: 'not-sure' } }, high],

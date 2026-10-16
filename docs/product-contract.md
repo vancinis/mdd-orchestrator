@@ -69,6 +69,250 @@ Phase identities use the `mdd-*` form everywhere in output:
 
 A run recorded before the risk stop existed keeps the route it recorded, including the older low route without exploration (`mdd-plan`, `mdd-apply`, `mdd-verify`). `explore` is still accepted on input for those saved requests but no longer changes the first phase.
 
+### Routing-contract pins and native-only version 3
+
+| Request discriminator | Interpretation |
+|---|---|
+| `routingVersion` omitted | Retains historical fixed semantics permanently. Modern histories replay their low/high Risk events; older unmarked histories may infer the single known legacy route that fits. No version is stamped. |
+| `routingVersion: 2` | Explicit fixed contract with the same default evaluation and low/high tails. Recording preserves the pin; replay cannot fall back to legacy route inference. An explicitly recorded known legacy route still retains that route. |
+| `routingVersion: 3` | Active native-only adaptive contract through coordinator-only `mdd_adapt({payload:string})`. Fixed evaluation, construction and replay refuse with `native-context-required`, never a fabricated fixed phase list or score. |
+| Any other supplied value | Rejected, including null, strings and explicit undefined. |
+
+Resume checkpoint versions 2 and 3 integrity-bind an explicitly supplied routing discriminator.
+Removing, inserting or altering it without a valid new seal is rejected. Unmarked checkpoints
+retain the exact historical digest. Checkpoint version 1 has no seal and cannot carry a pin.
+Restart and both transfer projections preserve the pin; none grants new execution authority.
+
+The pure `parseFutureAssessment` reader in `dist/risk.js` accepts only
+`{ assessmentVersion: 1, complexity, impact }`, with each level independently `low`, `medium`
+or `high`. High impact with low complexity is valid in this separate future assessment; it is
+not a current Risk verdict and selects no route. Current `parseRiskVerdict` still requires
+equal low/high `route` and `complexity`. Native version 3 derives actual low/medium/high depth
+without renaming historical routes. Summary level `medium` remains a separate presentation choice.
+
+### Internal adaptive admission, evidence, recovery, transfer and continuation (AL-02/AL-04c)
+
+The native lane supports `await-selection -> authorized-actor ->
+await-result -> await-selection`. The parent selects one necessary Explore, Risk, Plan, Apply
+or Verify actor with a purpose and assignment identity; no fixed Workflow or omitted Plan
+receipt is fabricated. Selection boundaries carry no phase, workflow, phase report format
+or fixed-route visual. Status retains bounded selection metadata and the last actual receipt,
+not the full contract body. Public startup uses version 3; fixed version-3 entry requires native context.
+
+| Boundary | Internal guarantee |
+|---|---|
+| Admission | Intake proves genuine native objective text/message; runner independently rechecks it, exact coordinator/workspace, idle ownership and current local source fingerprints. Public entry binds the actual host assistant caller to its latest native user lineage and requires the payload messageID to match that user. The legacy internal helper remains automatic-only; the native policy bridge supports configured interactive mode. |
+| Compact contract | Version 1, stable globally unique acceptance/decision/assignment/evidence IDs, exclusions, complete exact scopes, dependency-ordered assignments and source or real command obligations are validated and copied before native awaits. Contract-authored links do not claim Plan provenance. |
+| Selection | Unresolved product ambiguity pauses all actors. Technical uncertainty permits a brief scoped Explore only. Apply requires low impact independently of complexity, understood bounded dependencies, current fingerprints, completed prerequisites and real scoped-editor capability. |
+| Native execution | Exact issued handles are consumed once, with one actor/writer and existing native result/liveness inspection. Apply edits only through the existing single-child WorkerFence and `mdd_worker_edit`; generic editors, shell and out-of-scope writes remain denied. Unsafe bootstrap/config footprints and unsupported hosts have no serial fallback. |
+| Settlement | Every confirmed stopped actual actor returns to selection. Failed, malformed or absent receipts earn no progress or automatic retry; another writer requires an explicit repair reference. Reports cannot broaden acceptance/scope or decide product questions. Internal Risk uses the independent future assessment, never a historical Risk verdict. |
+| Persistence | Production injects a separate bounded adaptive record/store under the product data root, using existing LocalFiles protections. It is not a fixed checkpoint, dossier or fabricated phase artifact. Pending native intent is durable before provider arguments; an accepted receipt is durable before the settled marker and ownership release. The existing child marker remains `resumable:false` for fixed-checkpoint recovery. |
+
+#### Native policy bridge (AL-05a, publicly activated in AL-05c)
+
+`mdd_adapt` registers the bounded protocol through `NativeIntake.adaptiveInternal`. It wraps
+admission, selection/repair, evidence, escalation, stopped-child recovery and
+same-workspace transfer/recovery without executing commands or expanding native permissions.
+
+| Boundary | Policy guarantee |
+|---|---|
+| Preferences | Freeze the actual configured profile answers. Preserve absent certainty, artifact storage and summary preferences as absent. If mode is unset, ask only the existing native mode question; a clear request does not require the four-field fixed preflight. Configured automatic mode invents neither human consent nor redundant per-operation approvals. |
+| Interactive operations | The actual before/after native-question hooks inspect the exact running parent/call/envelope and parse its result. Approval binds the run, durable record generation, owner epoch, current handle, actual declared source bytes and complete canonical proposed operation. A private single-use capability connects that inspected result to the guarded runner operation; serialized flags, raw user text and caller IDs cannot replace it. |
+| Question journal | Explicit question-record version 2 carries adaptive bindings, never a fabricated fixed phase or checkpoint. CAS transitions and readback precede authority changes. Actual answers remain historical receipts; interrupted prepared, pending or unapplied answered questions stay blocked and never resume as live consent. Existing fixed-question semantics remain version 1. |
+| Product decisions | Ask genuine product questions before immutable admission, preserving complete offered choices and their display/answer mapping. A rebuilt draft must retain original objective, acceptance, scope, exclusions and decisions; broader business authorization needs an explicit revised native request. Actual pre-admission answers reach the scoped actor as data. Actor-raised questions retain their actual receipt/call identity and durably pause selection. Native answers add linked context, never silently amend the held business contract or earn completion. Free-text approval, pause, decline and unresolved actor questions authorize no operation. |
+| Transfer policy | A target-side policy question also holds a durable source-owner fence. Other intake, actor admission and publication cannot overlap it. Source generation, handle, epoch, declared bytes and both parent boundaries are rechecked through native reply and asynchronous transfer proof. The target occupancy exception accepts only the exact consumed adaptive receipt for that operation and current source binding; pending, unrelated, stale, foreign and fixed questions remain blockers. An actual mode answer selecting automatic is a policy preference, not invented human operation approval; selecting interactive requires its own subsequent operation approval. Receipts are retained, not deleted. |
+| Recovery | Frozen preferences and actual question history survive ordinary restore and transfer without restoring approval. Interrupted transfers require a fresh native decision and existing positive native idle/request proof. An unclaimed failed policy proposal can be explicitly aborted only against its own fresh inspected recovery receipt; no target publication or successful work is invented. Unknown outcomes and failed durability remain fenced rather than being retried blindly. |
+
+These are deterministic local native/runtime guarantees, not live-host/model approval, independent
+command attestation, or authentication against coordinated rewriting of all stored evidence.
+The public registration adds no shell executor, arbitrary actor dispatch or permission expansion.
+
+Transfer and transfer-recovery retain the **current consumed operation proof** across native awaits
+and publication boundaries. Its source-byte/generation binding applies equally to automatic runs
+with no questions and interactive runs; an old question receipt never supplies or replaces it.
+Legacy internal transfers without a policy proof retain their existing selective invalidation.
+
+#### Native JSON protocol (AL-05b, publicly activated in AL-05c)
+
+The internal `NativeIntake.adaptiveInternal(jsonString, hostRuntime)` entry accepts exactly
+`{routingVersion:3,kind,args}` as a JSON **string**, at most 160,000 UTF-8 bytes. Host runtime is
+injected separately and validated against the actual native coordinator parent and exact workspace.
+Agent/session identity, approval booleans, native answers and capability tokens are not request fields.
+The registered tool accepts `{payload:string}`. Public `mdd_status` and settled task replies use
+the same projection for adaptive parents; explicit fixed runs retain their previous status.
+This grants no version-3 execution through the fixed CLI/Workflow. Internal object callers retain compatibility.
+
+| Operation | Required `args` keys | Optional keys |
+|---|---|---|
+| `entry` | `contract`, `messageID` | `questions` |
+| `select` (including explicit repair) | `handle`, `actor`, `assignmentID`, `purpose` | `context`, `repairOf` |
+| `prepare` | `handle` | none |
+| `submit` | `handle`, `evidence` | none |
+| `close` | `handle`, `outcome` | `limits` |
+| `escalate` | `handle`, `depth`, `rationale`, `assessment`, `context` | none |
+| `recover` | none | none |
+| `transfer` | `sourceSessionID`, `runID`, `operationID`, `messageID` | none |
+| `transfer-recovery` | `sourceSessionID`, `runID`, `operationID`, `messageID`, `action` | none |
+| `questions` (actual actor clarification) | `receiptID`, `callID` | none |
+| `status` | none | none |
+| `detail` | `cursor` | none |
+
+Operation-specific known keys, required fields, types and bounded data are checked before policy
+questions or durable mutation. Held-model validators run on an isolated copy rather than duplicating
+business rules. A malformed protocol request cannot revoke a previous match or erase history;
+accepted failed evidence remains visible and blocks verified closure as before. No preference is
+inferred: unset mode still asks only the existing native mode question. Interactive authorization and
+product answers still pass through the actual `beforeQuestion`/`afterQuestion` hooks, never this JSON API.
+The raw compact contract and evidence ceilings are 24,000 and 48,000 bytes respectively, checked
+before normalization. Every evidence field, including an empty `checks` array, must be supplied.
+
+Public projection uses `routingVersion:3`, `registration:"active"`, actual `low`/`medium`/`high` continuation
+depth, frozen mode when known, current handle/generation, permitted-operation descriptors, evidence
+gaps and assurance limits. Every operation has an `inputRef` for complete nested required/optional
+keys, types, held readback, linked IDs and command history. `next` names a public operation/input
+contract or an exact native question/task (V2 `subagent`). Historical
+fixed `route:"low"` remains low; summary level `medium` and historical Risk equality are unchanged.
+
+At a structured Verify boundary with unmatched parent evidence, ordinary Verify remains unavailable.
+A separate `select` descriptor with `variant:"repair"` exposes only completed Apply repairs accepted
+by the existing model's selection guards on isolated copies. Each published assignment/`repairOf`
+pair names its latest actual Apply receipt; healthy unrelated retained writers are not reopened.
+This wire variant additionally requires explicit current `context`. Its guarded `contextRef` carries
+current declared fingerprints and held technical/dependency facts; the coordinator supplies the
+reason for actual reinspection. Missing/forged receipt or missing/stale context is refused before
+authority mutation. Repair still requires refreshed parent snapshot/checks/readback and a new real
+structured Verify before verified closure; neither the descriptor nor an older Verify authorizes it.
+
+Native protocol results stay within the existing 46,000-byte status budget. `details` references
+provide canonical validated journal, effective held contract/continuation, prepared snapshot and
+policy readback. Large questions, tasks or operation descriptors use explicit references rather than
+truncating labels, choices, handlers or selectors. A `detail` result contains JSON-text `text` and,
+when necessary, `nextCursor`: concatenate all pages before `JSON.parse`, then pass the complete exact
+question/task object to its native tool. Pages contain at most 6,000 UTF-16 code units, including when
+a page boundary splits a Unicode surrogate pair; reassembly preserves the original JSON text.
+
+Cursors are held-document IDs with validated page offsets, scoped to the native parent, exact
+workspace, current record/ownership generation, question lifecycle, snapshot and actual declared
+source bytes. These bindings are rechecked after native awaits. Pending transfer readback also
+validates the exact durable source-policy fence; stale, foreign or altered cursors fail without
+consuming consent or mutating the journal. Ordinary readback reports stale proof honestly without
+silently reconciling it. Unloaded sources have declared-byte proof, not reconstructed selection
+capabilities. Exact partially published transfer data can expose only its guarded recovery contract,
+not a task or selection handle; fresh native finish/abort proof remains mandatory.
+If an abort retires the target claim and rotates the source before owner settlement, only the exact
+reserved adaptive abort may propose a fresh native question. The reservation, endpoints, run,
+source generation, owner/fence epochs and consumed actual abort receipt must all agree. A retired
+claim is not empty occupancy; an older transfer/recovery receipt cannot bypass a different current
+reservation. Recognizing this proposal neither consumes approval nor releases the reserved owner.
+
+The proof CLI accepts `--routing-version 2|3` beside either existing input flag. Omission and explicit
+2 produce the same fixed `mdd-routing-v2` output. Explicit 3 exits with the native-context-required
+diagnostic and no result. Neither CLI evaluation nor fixed Workflow can execute adaptive version 3.
+Local deterministic native/runtime tests are not live host/model execution or independent command
+attestation. Public registration, SDK wiring and packaged agent changes remain AL-05c work.
+
+Scoped actors cannot execute commands. Real planned checks retain their requiredness and
+applicability as unexecuted obligations; source-only work uses a separate small source-obligation
+variant, not fake commands. The coordinator executes actual checks through its existing permitted
+tools; the internal evidence operations do not execute commands, expand permissions or attest
+SDK/host execution. Optional Verify is still a fenced, read-only source reviewer, not an executor.
+
+#### Final evidence and honest closure
+
+The guarded internal sequence is **prepare source snapshot → execute permitted checks → submit
+parent readback → close**. Each operation is serialized with actor selection and rechecks exact
+native coordinator/runtime/workspace, the current single-use handle, idle ownership (including its
+epoch), absence of pending intake/child admission, and native parent inspection after any await.
+
+| Evidence boundary | Guarantee and limitation |
+|---|---|
+| Preparation | Locally inspect the complete declared read/write footprint before checks. Exact-file alias checks, credential exclusions, fingerprints, UTF-8 readback, 256 KiB per-file and 1 MiB total byte budgets apply. Completed assignment inputs/outputs must still match. Preparation returns bounded source bodies; ordinary status retains only compact metadata. |
+| Parent readback | Repeat exact held acceptance criteria, scope, exclusions and decisions. Supply final diff inventory with assignment/unrelated dispositions and reasons, one finding per exclusion, every source obligation with its exact paths, and every scenario-assignment, assignment and decision assessment. Apply summaries do not supply this readback. Locally changed declared bytes cannot be omitted; whole-worktree inventory remains a reported observation, not comprehensive diff attestation. |
+| Commands | Reuse structured chronological execution and held-check accounting. Required applicable failed, interrupted or blocked checks prevent verified closure; missing dispositions are rejected. Optional failures remain visible. Unconditional checks cannot be waived, command mismatches require an explicit supported replacement, and retries retain complete attempts and reasons. Supplemental entries cannot hide a held command retry. Re-preparing unchanged source cannot erase execution history; a malformed disposition does not erase an otherwise readable reported attempt. |
+| Source-only proof | Separate obligation readback and linked source assessments can support verified semantic rows without invented command IDs. Command-backed rows cite actual reported successful final execution IDs. All held source and semantic links must be covered exactly; exit codes alone do not prove acceptance. |
+| Freshness and assurance | Submission and verified closure independently recheck the prepared local fingerprints and completed prerequisites. This is structured parent-reported consistency, **not independent execution or applicability attestation**. Any malformed resubmission removes the current match until corrected. |
+| Closure | All effective assignments must have actual accepted Apply completion and all required evidence/semantic links must match. Un-escalated low requires neither Plan nor Verify; structured continuation additionally requires its actual planning sequence and current structured Verify. `completed` records snapshot-bound reported verification; `closed-unverified` requires explicit remaining limits and never earns verified completion. Terminal status grants no new work or review authority. |
+| Explicit repair | A completed writer can be selected again only for failed or stale evidence, referencing its latest actual Apply receipt. Reinspect only its existing footprint, invalidate overlap/dependency-sensitive completion and proof, and retain unrelated completed fingerprints and prior evidence. Old command proof is invalidated conservatively; checks must follow a fresh final snapshot. There are at most four completed-assignment repairs and 64 actor receipts, with no automatic retry or new scope. Overlapping prerequisites must be explicitly repaired first. |
+
+#### Durable same-parent recovery
+
+Adaptive record version 1 carries immutable original admission bytes, current context and
+assessment, actual correlated receipts, completed output and unchanged-input fingerprints,
+source snapshots and evidence matches, historical failed checks, invalidation/repair counts,
+closure, consumed call IDs and a sequence/digest. Ordinary status is not the serialization
+contract. Bounds and relational validation reject unsupported versions, contradictory completion,
+tampered proof and unsafe storage rather than treating them as empty.
+
+| Recovery boundary | Guarantee |
+|---|---|
+| Publication | Parent-locked bootstrap intent precedes parent binding and owner claim. Every journal change uses staged CAS and exact readback before in-memory authority changes. An ambiguous outcome fences authority until reconciliation, never a blind retry. Fixed admission/reset/transfer cannot bypass occupied adaptive data, including unreadable records. |
+| Fresh authority | Restoration proves the native parent, exact workspace and current ownership after asynchronous inspection. Settled or unstarted records restore actorlessly with fresh selection handles; dispatch tokens, provider arguments, native approvals and selected actor capabilities are never deserialized. CAS generation changes fence old-process callbacks and handles. |
+| Pending children | Unknown or running attempts retain quarantine and reservation. Even a stopped child requires explicit recovery with actual native stopped proof; user attestation or abort acknowledgment alone is insufficient. Recovery records a failed interrupted receipt before release, preserves partial source, and never automatically retries Apply. |
+| Dispatch-time prerequisites | Pending Apply retains exact successful receipt links for its complete prerequisite chain. These validated historical admission links survive current proof invalidation, so an interrupted child can roundtrip and settle as failed after native stopped proof. They never restore completion or authorize a new writer; fresh Apply still requires current completed prerequisites and explicit repair. |
+| Retained work | Changed settled output is compared with its settled proof, not its original admission digest. Stale output, unchanged eligibility input, overlap and dependent proof invalidate affected completion without refreshing stale context or redoing unrelated work. Original admission bytes remain the final diff baseline. |
+| Evidence and closure | Failed attempts remain snapshot-bound historical evidence, not current PASS. Stale proof loses its match; verified closure becomes closed-unverified without reopening execution. Repair still requires the latest actual Apply receipt, current source context and the finite repair budget. |
+
+The injected-store path has deterministic native/runtime fault tests, not live-host or model
+attestation. Legacy in-process test hosts without a store remain volatile. An uncorrelated
+reservation or unsafe record remains fenced rather than granting automatic takeover.
+Public version-3 registration exposes these same guarded operations through mdd_adapt.
+Terminal replacement preserves immutable archives and consumed user identities under parent/run locks;
+only exact closed current ownership can retire, and uncertain publication requires exact cold reconciliation.
+
+#### Internal native-proven transfer
+
+The intake/runner transfer exposed through mdd_adapt moves adaptive **data**, not fixed checkpoints or a phase
+history. It requires the same exact workspace/worktree; there is no cross-worktree execution.
+Both native parents are inspected before claims. The latest target-authored
+request must name the exact source/run, bind the immutable admission digest and objective, and
+explicitly preserve acceptance, scope, exclusions and decisions. Raw IDs, approval flags and
+caller-supplied text are not provenance.
+
+| Transfer boundary | Guarantee |
+|---|---|
+| Idle proof | Source is actorless with no pending child, intake, question or writer. Complete native control history and positive child termination are required; truncated/compacted history and unknown/running children fail closed, with no age-based release. Target durable and volatile state is checked, including unreadable/future records and closed legacy claims. Native intake admission is excluded throughout asynchronous transfer inspection. |
+| Projection | `AdaptiveLow.restore` validates real receipts and selectively invalidates stale proof. Original admission, actual completion, failed checks and closure survive; invalidated verified closure stays closed-unverified. No omitted phase, PASS, consent, selection or dispatch capability is manufactured or reused. |
+| Publication | Target parent claim binds exact projected bytes; source owner epoch CAS fences the old parent; target publication/readback precedes a distinct adaptive ownership receipt. Receipt binds operation, source/target generations/digests, admission, native request and epoch. Fixed receipts and historical checkpoint digests retain their original interpretation. |
+| Authority | Adaptive record updates share the owner lock with transfer fencing. Status, selection, evidence, restore fast paths and callbacks also verify durable owner/parent/lineage and record generation. Fresh target runtime handles appear only after ownership commit and native parent/request readback. Cold target restore re-proves native provenance before exposing new handles. |
+| Interruption | There is no cross-file atomicity assumption or blind retry. Explicit exact-operation finish/abort requires fresh latest native recovery proof and rechecks after asynchronous inspection. Abort reserves durable cleanup authority before conditionally retiring only the exact unfinished target record and claim, then rotates the source generation before release. Late finish callbacks lose their CAS; committed target ownership cannot be aborted. |
+
+Divergent bytes, changed projection proof, unknown native state or failed readback stay fenced.
+Operation IDs may repeat across transfers: completed-receipt selection also requires the exact
+source/target endpoints and confirmed claim, epoch and generation/digest lineage. An earlier hop's
+receipt never substitutes for the current hop's native authorization during cold finish.
+An aborted target's retired claim is not treated as an empty transfer destination. Verification
+uses deterministic local native/runtime harnesses, not a live host, model or native approval.
+
+#### Internal executable structured continuation
+
+The coordinator may freeze **medium: Plan → remaining scoped Apply → Verify**, or **high:
+Propose → Spec → Design → Tasks → remaining scoped Apply → Verify**. Each stage still requires
+an explicit parent selection and a fresh native dispatch handle. Nothing dispatches automatically.
+Closed runs cannot reopen, and ordinary low selection retains its five-actor allowlist.
+
+| Boundary | Guarantee |
+|---|---|
+| Freeze | The internal escalation operation serializes with selection/evidence, proves the exact native parent/workspace, checks idle ownership and its epoch after inspection, and validates current source and retained completion. Positive impact or complexity, explicit parent rationale and understood bounded context are required. Unknown context alone is neither high classification nor expanded authorization. |
+| Immutable authority | Depth, actual reports, remaining-work revision, retained source proof and semantic bindings live outside the original admission contract. Its digest and diff baseline never change. Acceptance, exclusions, business decisions, assignment IDs, scenario/decision links, exact footprints and source obligations remain held. Scope or business expansion requires a native user decision, never an approval flag. |
+| Real planning | Actors receive their actual structured phase format and real predecessor reports. Plan/Spec must preserve held acceptance; Plan/Design must preserve held decisions. Plan/Tasks report only unfinished held IDs, preserving source bindings, dependencies and checks while refining technical descriptions or adding dependencies/checks. The combined real retained-plus-remaining plan must cover every scenario and applicable decision. An empty remaining plan is valid only when all work is retained. |
+| Effective execution | Validated remaining deliverables replace the remaining assignment view, rather than merely summarize it. Readiness, scoped editing, transitive dispatch prerequisites, evidence coverage and closure all use that view. Retained valid writers cannot repeat or overlap remaining outputs. Changed proof requires explicit reinspection and bounded repair, never silent PASS or automatic redo. |
+| Verify and closure | Structured Verify is mandatory and checks every effective assignment, scenario and decision using the existing structured verification contract. Its reported executions must exactly match actual parent-reported check history; scoped children still cannot execute commands. Parent final snapshot/readback/check accounting remain separately necessary. A changed snapshot or command history requires another actual Verify. Source-only low closure remains unchanged; structured verified rows require real successful command references, not invented checks. |
+| Recovery and transfer | Reports are bounded journal data, not external fixed-phase artifact identities. Restoration revalidates actual chronological receipt links, stage-specific fields, full held semantics and effective work before exposing fresh handles. Pending Plan/high/Verify actors remain quarantined until exact native stopped proof, then receive an interrupted failure, never a fake Apply. Existing CAS/readback, former-owner fences and exact-hop transfer lineage apply unchanged. |
+
+This internal controller is not a second Workflow, graph scheduler, public tool, command executor,
+permission expansion, Security/Judgment Day entry point or live-model assurance claim. Existing
+receipt, report and source budgets may refuse an oversized prompt without dispatching it.
+
+Each successful structured native receipt separately retains the accepted parsed report payload.
+Verify also freezes its snapshot identity and exact parent command history before native arguments
+are exposed, rechecks that context at acceptance, and retains it in the accepted receipt. Restore
+requires continuation projections to equal those receipt payloads and contexts, with parent snapshot
+and execution-history links preserved. Recomputing a journal checksum cannot make a projection-only
+Plan rewrite or moved Verify snapshot agree with the unchanged native receipt. Historical ordinary
+low receipts remain compatible; structured receipts lacking the accepted payload fail closed.
+These are relational consistency checks, not cryptographic authentication against an attacker who
+rewrites every receipt and evidence source, nor independent command-execution attestation.
+
 ## 3. Kernel API and validation
 
 After `npm run build`, import `evaluate` from `dist/kernel.js`. It accepts an unknown value and validates its entire request before evaluation:
@@ -93,6 +337,7 @@ const saved = evaluate({ profile: { answers } });
 | `answers` | Complete four-field answer object. Mutually exclusive with `profile`. The legacy `complexity` key is accepted and ignored if present. |
 | `profile` | Exactly `{ answers: <complete four-field object> }`. Uses the same answer validator and evaluator. |
 | `explore` | Optional boolean, accepted for saved requests; it no longer changes the first phase. |
+| `routingVersion` | Optional integer `2` pins the fixed contract; omission keeps historical semantics. Native-only `3` is refused with native-context-required here. Output remains `mdd-routing-v2`. |
 
 A request that still carries `config` (the old threshold and weights) is rejected with a `ValidationError` that says scoring was removed, rather than having its weights silently ignored; the CLI's `--config` flag is refused the same way.
 

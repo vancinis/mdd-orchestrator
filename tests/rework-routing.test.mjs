@@ -143,8 +143,7 @@ test('a Verify gap attributed to the design recommends returning to planning, an
   const f = await fixture(t);
   await f.finish(trace());
   const verify = await f.finish({ completed: [STEP], changes: ['src/session.ts'] }).then(() => f.dispatch());
-  assert.match(verify.args.prompt, /^Reproduction probe directory \(gitignored MDD data, not project source\): .*probes/m);
-  assert.match(verify.args.prompt, /Save each reproduction probe you write as a file in the probe directory/);
+  assert.match(verify.args.prompt, /^Save each reproduction probe you write in ".*probes.*" \(gitignored MDD data\) and cite its path and command\.$/m);
   await f.runner.after(verify.call, verify.args, report(failedVerify('design')));
   const blocked = f.status();
   assert.equal(blocked.state, 'blocked');

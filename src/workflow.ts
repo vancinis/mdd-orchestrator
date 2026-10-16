@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from 'node:util';
-import { HIGH_ROUTE, preflight, ROUTES } from './kernel.js';
+import { HIGH_ROUTE, preflight, requestRoutingVersion, ROUTES } from './kernel.js';
 import type { Evaluation } from './kernel.js';
 import type { Answers, Phase } from './policy.js';
 import { objectWithKeys, ValidationError } from './validation.js';
@@ -14,8 +14,12 @@ import type { ApplyProgress, ApplyStep } from './apply-batches.js';
  * only by the replayed mdd-risk verdict, override or manual recovery events.
  */
 function recordedRoute(request: unknown): { base: unknown; route?: Phase[] } {
-  if (!request || typeof request !== 'object' || Array.isArray(request) || !Object.hasOwn(request, 'route')) return { base: request };
+  if (!request || typeof request !== 'object' || Array.isArray(request)) return { base: request };
+  // Validate an own discriminator before object rest can discard a non-enumerable pin.
+  const routingVersion = Object.hasOwn(request, 'routingVersion') ? requestRoutingVersion(request) : undefined;
+  if (!Object.hasOwn(request, 'route')) return { base: request };
   const { route, ...base } = request as Record<string, unknown>;
+  if (routingVersion !== undefined) base.routingVersion = routingVersion;
   if (!ROUTES.some(known => isDeepStrictEqual(route, [...known]))) throw new ValidationError('The recorded route is not a known MDD route.');
   return { base, route: [...route as Phase[]] };
 }
@@ -134,12 +138,17 @@ export class Workflow {
   /**
    * The request to persist for this run. A new run records no route beside it: its tail is derived
    * from the replayed risk verdict, override or manual recovery events. A legacy run keeps the
-   * route it recorded, so it still replays on that route after every restart.
+   * route it recorded, so it still replays on that route after every restart. Any explicit routing
+   * discriminator is retained as supplied; an omitted discriminator is never stamped.
    */
   static recordedRequest(request: unknown, workflow: Workflow): unknown {
     const { base } = recordedRoute(request);
-    if (!workflow.#legacyRoute || !base || typeof base !== 'object' || Array.isArray(base)) return structuredClone(base);
-    return { ...structuredClone(base as Record<string, unknown>), route: [...workflow.#evaluation.phases] };
+    const recorded = structuredClone(base);
+    if (!base || typeof base !== 'object' || Array.isArray(base)) return recorded;
+    // structuredClone preserves values, not non-enumerable properties; materialize only the pin.
+    if (Object.hasOwn(base, 'routingVersion')) (recorded as Record<string, unknown>).routingVersion = requestRoutingVersion(base);
+    if (workflow.#legacyRoute) return { ...recorded as Record<string, unknown>, route: [...workflow.#evaluation.phases] };
+    return recorded;
   }
 
   nextAction(): NextAction {
@@ -163,7 +172,9 @@ export class Workflow {
       // A record written before runs kept their route, and before the risk stop, does not replay
       // as a new run. Its own history then names the route it ran on, and it is accepted only when
       // exactly one known legacy route reproduces that history.
-      if (!request || typeof request !== 'object' || Array.isArray(request) || Object.hasOwn(request, 'route')) throw error;
+      // An explicit pin is authoritative even when its history would fit an older route.
+      if (!request || typeof request !== 'object' || Array.isArray(request) ||
+          Object.hasOwn(request, 'route') || Object.hasOwn(request, 'routingVersion')) throw error;
       const fits = ROUTES.flatMap(route => {
         try { return [Workflow.#replay({ ...request as Record<string, unknown>, route: [...route] }, events)]; }
         catch { return []; }

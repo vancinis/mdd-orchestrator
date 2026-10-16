@@ -25,6 +25,9 @@ import { directPRRequest, prBodyRequest, renderDirectPRBody, renderPRBody } from
 import { directChanges } from './pr-direct.js';
 import { TranslationError } from './pr-translation.js';
 import { mddDataRoot } from './engram-http.js';
+import { AdaptiveStore } from './adaptive-store.js';
+import { adaptiveTransferRequest } from './adaptive-transfer.js';
+import { decodeAdaptiveRequest } from './adaptive-protocol.js';
 import { statusPayload } from './status-budget.js';
 import type { StatusView } from './status-budget.js';
 import { phaseName } from './phase-assets.js';
@@ -76,7 +79,7 @@ const CONCERN_SCHEMA = tool.schema.object({
 });
 
 /** MDD tools belong to the MDD coordinator. Other agents share the registry but not this state. */
-export const MDD_TOOLS = ['mdd_security', 'mdd_start', 'mdd_status', 'mdd_prepare_advance', 'mdd_revisit', 'mdd_answer', 'mdd_phase_result', 'mdd_reset', 'mdd_change_request', 'mdd_contextual_explore', 'mdd_context', 'mdd_pr_body', 'mdd_improve', 'mdd_improvements', 'mdd_knowledge', 'mdd_knowledge_record', 'mdd_transfer', 'mdd_transfer_recover'] as const;
+export const MDD_TOOLS = ['mdd_adapt', 'mdd_security', 'mdd_start', 'mdd_status', 'mdd_prepare_advance', 'mdd_revisit', 'mdd_answer', 'mdd_phase_result', 'mdd_reset', 'mdd_change_request', 'mdd_contextual_explore', 'mdd_context', 'mdd_pr_body', 'mdd_improve', 'mdd_improvements', 'mdd_knowledge', 'mdd_knowledge_record', 'mdd_transfer', 'mdd_transfer_recover'] as const;
 /**
  * The one MDD tool that is not the coordinator's alone. It is kept out of `MDD_TOOLS` because
  * that list is what `restrictTools` switches off everywhere else, and this one has to reach the
@@ -543,6 +546,66 @@ export function createInspector(input: PluginInput, timeout = 5000, now: () => n
           !tokens.some(token => /^rework[.!?]?$/i.test(token)))
         throw new Error('Target rework lacks an explicit native rework request.');
     },
+    async confirmAdaptiveTransfer(runtime, receipt, runID) {
+      await inspector.parent(runtime);
+      const saved = new AdaptiveStore(mddDataRoot(runtime.directory)).read(runtime.sessionID);
+      // Before publication recovery supplies a concrete receipt, but still reads the exact source.
+      const source = new AdaptiveStore(mddDataRoot(runtime.directory)).read(receipt.sourceSessionID);
+      if (!source || source.runID !== runID || source.directory !== runtime.directory || source.worktree !== runtime.worktree ||
+          source.admissionDigest !== receipt.admissionDigest || receipt.targetSessionID !== runtime.sessionID ||
+          saved && (saved.runID !== runID || saved.admissionDigest !== receipt.admissionDigest))
+        throw new Error('Adaptive transfer objective and exact workspace binding cannot be confirmed.');
+      const message = await exactMessage(runtime.sessionID, receipt.nativeUserMessageID, runtime.directory);
+      const info = record(message.info, 'adaptive transfer user');
+      const authored = authoredNativeText(list(message.parts, 'adaptive transfer parts', PARTS_MAX).filter(part => part.type === 'text'), runtime.sessionID, receipt.nativeUserMessageID);
+      const canonical = authored === undefined ? '' : canonicalNativeText(authored);
+      if (info.role !== 'user' || info.sessionID !== runtime.sessionID || canonical !== adaptiveTransferRequest(source) ||
+          createHash('sha256').update(canonical).digest('hex') !== receipt.requestDigest)
+        throw new Error('Adaptive transfer receipt lacks the exact native target-authored unchanged-objective authorization.');
+    },
+    async confirmAdaptiveAdmission(runtime, userMessageID, objective) {
+      await inspector.parent(runtime);
+      const message = await exactMessage(runtime.sessionID, userMessageID, runtime.directory), info = record(message.info);
+      const authored = authoredNativeText(list(message.parts, 'admission user parts', PARTS_MAX).filter(part => part.type === 'text'), runtime.sessionID, userMessageID);
+      if (info.role !== 'user' || authored === undefined || canonicalNativeText(authored) !== canonicalNativeText(objective))
+        throw new Error('Archived fresh admission lacks its exact genuine native user request.');
+    },
+    async adaptiveTransferIdle(runtime, role, settledQuestionCallID) {
+      await inspector.parent(runtime);
+      const history = await messages(runtime.sessionID, runtime.directory);
+      if (history.length >= HISTORY_MAX || history.some(message => record(message.info).summary === true ||
+          list(message.parts, 'adaptive idle parts', PARTS_MAX).some(part => part.type === 'compaction')))
+        throw new Error('Complete native idle history is unavailable; unknown children remain fenced.');
+      const statuses = await readSdk(signal => input.client.session.status({ query: { directory: runtime.directory }, signal, throwOnError: true }), timeout);
+      const states = record(statuses.data, 'adaptive native statuses');
+      if (role === 'source' && states[runtime.sessionID] !== undefined &&
+          record(states[runtime.sessionID], 'adaptive source status').type !== 'idle')
+        throw new Error('The source native parent is running or unknown, not idle.');
+      for (const message of history) for (const part of list(message.parts, 'adaptive native controls', PARTS_MAX)) {
+        if (part.type !== 'tool' || !['task', 'question', 'mdd_adapt', 'mdd_transfer', 'mdd_transfer_recover'].includes(String(part.tool))) continue;
+        const state = record(part.state, 'adaptive control state'), info = record(message.info, 'adaptive control author');
+        if (part.tool === 'mdd_adapt' && role === 'target' && info.id === record(history.at(-1)?.info).id &&
+            info.role === 'assistant' && info.sessionID === runtime.sessionID && part.sessionID === runtime.sessionID && part.messageID === info.id) continue;
+        if (part.tool === 'question' && part.callID === settledQuestionCallID && info.role === 'assistant' &&
+            info.sessionID === runtime.sessionID && part.sessionID === runtime.sessionID && part.messageID === info.id && state.status === 'running') continue;
+        if (info.role !== 'assistant' || info.sessionID !== runtime.sessionID || part.sessionID !== runtime.sessionID ||
+            part.messageID !== info.id || !['completed', 'error'].includes(String(state.status)))
+          throw new Error('Native control is running, unknown or belongs to another parent.');
+        if (part.tool !== 'task') continue;
+        const childID = record(state.metadata ?? {}, 'adaptive child metadata').sessionId;
+        if (typeof childID !== 'string') throw new Error('Native task has an unknown child; transfer cannot infer termination.');
+        const child = await session(childID, runtime.directory), childStatus = states[childID];
+        if (child.parentID !== runtime.sessionID || child.directory !== runtime.directory ||
+            childStatus !== undefined && record(childStatus, 'adaptive child status').type !== 'idle')
+          throw new Error('Native child is running, unknown or belongs to another workspace.');
+        const last = (await messages(childID, runtime.directory)).at(-1), terminal = record(last?.info, 'adaptive child terminal');
+        if (terminal.role !== 'assistant' || !record(terminal.time ?? {}).completed ||
+            !terminal.error && !['stop', 'end-turn'].includes(String(terminal.finish)) ||
+            list(last?.parts, 'adaptive child parts', PARTS_MAX).some(item => item.type === 'tool' &&
+              !['completed', 'error'].includes(String(record(item.state).status))))
+          throw new Error('Native child termination is unknown; no age-based transfer release is allowed.');
+      }
+    },
     /**
      * Recovers the objective of a start that only failed because MDD was not set up yet. That is a
      * narrow, legacy shape: one completed `mdd_start` whose own output says it stopped at setup.
@@ -615,6 +678,25 @@ export function createInspector(input: PluginInput, timeout = 5000, now: () => n
       const caller = history.at(-1);
       if (!caller || record(caller.info, 'caller message').id !== messageID || record(caller.info, 'caller message').role !== 'assistant') throw new Error('Start does not match the actual native caller message.');
       const users = history.slice(0, -1).filter(message => record(message.info, 'message').role === 'user');
+      if (scope === 'native-current') {
+        const info = record(caller.info), path = record(info.path);
+        if (info.sessionID !== runtime.sessionID || info.agent !== COORDINATOR || info.error != null ||
+            path.cwd !== runtime.directory || path.root !== runtime.worktree || info.parentID !== record(users.at(-1)?.info).id)
+          throw new Error('The current native assistant caller does not belong to this coordinator, workspace and user turn.');
+        const question = new QuestionCheckpointStore(mddDataRoot(runtime.directory)).read(runtime.sessionID);
+        for (const message of history) for (const part of list(message.parts, 'current native controls', PARTS_MAX)) {
+          if (part.type !== 'tool' || !['task', 'question', 'mdd_adapt', 'mdd_transfer', 'mdd_transfer_recover'].includes(String(part.tool))) continue;
+          const state = record(part.state), author = record(message.info);
+          if (!['pending', 'running'].includes(String(state.status))) continue;
+          if (part.tool === 'mdd_adapt' && author.id === info.id && author.role === 'assistant' &&
+              part.sessionID === runtime.sessionID && part.messageID === info.id) continue;
+          const consumedQuestion = part.tool === 'question' && state.status === 'running' && question?.version === 2 &&
+            question.state === 'settled' && question.nativeReceipt && question.callID === part.callID &&
+            author.role === 'assistant' && author.sessionID === runtime.sessionID && part.sessionID === runtime.sessionID &&
+            part.messageID === author.id && isDeepStrictEqual(state.input, question.slot.args);
+          if (!consumedQuestion) throw new Error('A current native control remains unsettled; no adaptive admission or transfer is authorized.');
+        }
+      }
       const candidates = scope === 'objective' ? users : users.slice(-1);
       if (!candidates.length) throw new Error('No actual native user requirements found.');
       const canonicalRequirements = canonicalNativeText(requirements);
@@ -800,7 +882,7 @@ const plugin: Plugin = async input => {
     telemetry: (_directory, value, now) => recordTelemetry(dataRoot, value, now),
     progress: new ProgressGuard(dataRoot),
     dossier,
-    checkpoint, ownership,
+    checkpoint, ownership, adaptiveStore: new AdaptiveStore(dataRoot),
     lessons: (_directory, value, now) => recordLessonQuietly(dataRoot, value, now),
     ledger: (_directory, value, now) => recordRunQuietly(dataRoot, value, now),
   });
@@ -846,6 +928,13 @@ const plugin: Plugin = async input => {
    * to inspect the run, and only that call pays for the whole thing.
    */
   const reply = (value: unknown, view: StatusView = 'compact'): string => payload(value, assets, view);
+  const nativeRuntime = (context: Runtime): Runtime => ({ sessionID: context.sessionID, agent: context.agent,
+    directory: context.directory, worktree: context.worktree });
+  const adaptiveReply = async (context: Runtime) => {
+    const status = record(await intake.adaptiveStatus(nativeRuntime(context)));
+    const recorded = status.state === 'not-started' ? workspaceRuns(context, { dossier, checkpoint, progress: new ProgressGuard(dataRoot), ownership }) : [];
+    return reply({ ...status, memory: settings.engram ? 'enabled' : 'off', ...(recorded.length ? { workspaceRuns: recorded } : {}) });
+  };
   /**
    * `restoreFailed`: the target could not re-confirm its native request or bytes this time. A
    * receipt still proves ownership, but that restore failure is reported, not hidden as confirmed.
@@ -922,7 +1011,7 @@ const plugin: Plugin = async input => {
     // Every coordinator tool (including consent preparation and inline results) must reject a
     // source whose durable owner is no longer idle, before it can mutate local state. Reset and
     // transfer recovery establish their own authority: they exist to resolve a held writer.
-    if (!['mdd_status', 'mdd_transfer_recover', 'mdd_reset'].includes(name)) runner.owner(context.sessionID);
+    if (!['mdd_adapt', 'mdd_status', 'mdd_transfer_recover', 'mdd_reset'].includes(name)) runner.owner(context.sessionID);
     if (opened.has(context.sessionID)) return;
     opened.add(context.sessionID);
     // Never throws, and its result is deliberately unused: instrumentation that can fail a run is
@@ -937,6 +1026,19 @@ const plugin: Plugin = async input => {
       pinJudgmentAgents(config as Parameters<typeof pinJudgmentAgents>[0]);
     },
     tool: {
+      mdd_adapt: tool({
+        description: 'Native version-3 implementation entry and guarded adaptive operations. Supply only a bounded JSON payload {routingVersion:3,kind,args}. Read status and its exact operation/input/detail references. Entry and transfer messageID must identify the current native USER request; the host independently binds its assistant caller. No runtime, profile, approval or stopped claims. Low selects actors by need; medium/high require genuine structured stages and Verify. Fixed mdd_start is compatibility-only.',
+        args: { payload: tool.schema.string().min(1).max(160000) },
+        async execute(args, context) {
+          enter(context, 'mdd_adapt');
+          if (context.abort.aborted) throw new Error('Native adaptive operation aborted.');
+          decodeAdaptiveRequest(args.payload);
+          const here = nativeRuntime(context);
+          if (runner.options.adaptiveStore!.occupied(here.sessionID)) await runner.restore(here);
+          return reply({ ...record(await intake.adaptiveInternal(args.payload, here, boundedText(context.messageID, 'actual native assistant caller', 256))),
+            memory: settings.engram ? 'enabled' : 'off' });
+        },
+      }),
       mdd_security: tool({
         description: 'Run a standalone read-only security audit ONLY on an explicit latest native-user audit request. Pass their exact text, not an implementation/configuration/explanation request. Includes committed and all pending implementation layers; returns one single-use foreground task. Never advances workflow or authorizes fixes, review or delivery.',
         args: { userText: tool.schema.string().min(1), baseRef: tool.schema.string().min(1).optional() },
@@ -1289,13 +1391,20 @@ const plugin: Plugin = async input => {
             transfer: { state: 'source-retired', targetSessionID: moved.targetSessionID, runID: moved.runID },
             reason: movedMessage(moved.runID, moved.targetSessionID) }, args.detail ?? 'compact');
           let resumed: Awaited<ReturnType<typeof runner.restore>>;
-          try { resumed = await runner.restore(context, project => intake.boundRunMemory(context, project)); }
+          try { resumed = await runner.restore(nativeRuntime(context), project => intake.boundRunMemory(context, project)); }
           catch { return reply({ state: 'recovery-blocked', sessionID: context.sessionID, task: undefined, ...ambiguousTransfer(context.sessionID, true),
             reason: 'Durable run owner cannot be confirmed for this parent; no task or question was exposed.' }, args.detail ?? 'compact'); }
           try { if (resumed.restored) intake.recover(context); }
           catch { return reply({ state: 'recovery-blocked', sessionID: context.sessionID, task: undefined,
             reason: 'Native question recovery could not be confirmed; do not ask, approve or dispatch. Inspect local question and checkpoint files.' }, args.detail ?? 'compact'); }
           const status = record(intake.status(context.sessionID), 'status');
+          let adaptiveRecord: ReturnType<AdaptiveStore['read']>;
+          try { adaptiveRecord = runner.options.adaptiveStore!.read(context.sessionID); }
+          catch { return reply({ state: 'recovery-blocked', reason: 'Adaptive journal cannot be read safely; no run may start or dispatch.' }); }
+          if (adaptiveRecord && resumed.reason && adaptiveRecord.data.state !== 'await-result' && !adaptiveRecord.transfer)
+            return reply({ lane: 'adaptive-native', routingVersion: 3, registration: 'active', state: 'recovery-blocked', reason: resumed.reason,
+              operations: [], details: {}, assurance: 'Unconfirmed publication grants no execution authority.' });
+          if (adaptiveRecord || status.lane === 'adaptive-low-internal') return adaptiveReply(context);
           let targetCheckpointPresent = true;
           try { targetCheckpointPresent = !!checkpoint?.read(context.sessionID); }
           catch { /* A corrupt checkpoint must keep the restore failure, not look like an empty target. */ }
@@ -1339,8 +1448,14 @@ const plugin: Plugin = async input => {
             const runs = workspaceRuns(context, { dossier, checkpoint, progress: new ProgressGuard(dataRoot), ownership });
             if (runs.length) recorded = { workspaceRuns: runs };
           }
+          let native = {};
+          if (status.state === 'not-started' && !targetCheckpointPresent && !status.pendingStart &&
+              !('pendingStart' in recovery) && !('recovery' in recovery)) {
+            try { native = record(await intake.adaptiveStatus(nativeRuntime(context))); }
+            catch { return reply({ state: 'recovery-blocked', reason: 'Current native parent cannot be confirmed; no entry or dispatch was exposed.' }); }
+          }
           return reply({
-            ...status, ...recovery, ...liveness, ...recorded,
+            ...status, ...native, ...recovery, ...liveness, ...recorded,
             ...(() => { const receipt = runner.owner(context.sessionID)?.receipt;
               return receipt ? { transfer: { state: 'confirmed', sourceSessionID: receipt.sourceSessionID, operationID: receipt.operationID } } : ambiguousTransfer(context.sessionID); })(),
             runtime: { sessionID: context.sessionID, directory: context.directory, worktree: context.worktree, agent: context.agent },
@@ -1619,6 +1734,12 @@ const plugin: Plugin = async input => {
           catch (error) { intake.storageFailed(input.sessionID); throw error; }
           finally { try { intake.phaseRecorded(input.sessionID); } catch { /* best effort re-arm; the original outcome still propagates. */ } }
           const current = runner.status(input.sessionID);
+          if ('lane' in current && current.lane === 'adaptive-low-internal') {
+            const record = runner.options.adaptiveStore!.read(input.sessionID)!;
+            output.output = await adaptiveReply({ sessionID: input.sessionID, agent: COORDINATOR,
+              directory: record.directory, worktree: record.worktree });
+            output.metadata = {};
+          }
           const phase = typeof input.args === 'object' && input.args !== null && 'subagent_type' in input.args &&
             DISPATCHED_AGENTS.includes(String(input.args.subagent_type)) ? input.args.subagent_type as Phase | typeof RISK_AGENT : undefined;
           if (phase) {
@@ -1673,7 +1794,7 @@ const plugin: Plugin = async input => {
   // lessons file) never write a checkpoint, so they never hold the durable writer. Transfer and
   // its recovery manage their own fenced reservations.
   for (const name of MDD_TOOLS) {
-    if (['mdd_security', 'mdd_status', 'mdd_reset', 'mdd_improvements', 'mdd_improve', 'mdd_pr_body', 'mdd_transfer', 'mdd_transfer_recover'].includes(name)) continue;
+    if (['mdd_adapt', 'mdd_security', 'mdd_status', 'mdd_reset', 'mdd_improvements', 'mdd_improve', 'mdd_pr_body', 'mdd_transfer', 'mdd_transfer_recover'].includes(name)) continue;
     const registered = hooks.tool![name]!;
     const execute = registered.execute;
     registered.execute = (async (args: never, context: { sessionID: string }) => {

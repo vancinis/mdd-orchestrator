@@ -76,7 +76,7 @@ export function projectApprovalTransfer(source: StableCheckpoint, marker: Return
   }
   const data = { ...structuredClone(source.data), userMessageID: nativeUserMessageID, usedMessages: [nativeUserMessageID], proposed: [] };
   const checkpoint: StableCheckpoint = { ...structuredClone(source), parent: target.sessionID, sequence: 0, data,
-    dataDigest: sealResumeData(data, source.runID, target.sessionID, source.events, source.stable) };
+    dataDigest: sealResumeData(data, source.runID, target.sessionID, source.events, source.stable, source.request) };
   validateCheckpoint(checkpoint);
   return { checkpoint, ...(marker ? { progress: { ...marker, userMessageID: nativeUserMessageID } } : {}) };
 }
@@ -140,7 +140,7 @@ export function projectTargetTransfer(source: StableCheckpoint, marker: ReturnTy
   const data = { ...structuredClone(source.data), userMessageID: proof.userMessageID, usedMessages: [proof.userMessageID], proposed: [],
     ...(rework ? { rework: { after: 'mdd-verify' as const, summary: last!.evidenceSummary } } : {}) };
   const checkpoint: StableCheckpoint = { ...structuredClone(source), parent: target.sessionID, sequence: 0, events, stable, data,
-    dataDigest: sealResumeData(data, source.runID, target.sessionID, events, stable) };
+    dataDigest: sealResumeData(data, source.runID, target.sessionID, events, stable, source.request) };
   if (rework) delete checkpoint.attempt;
   validateCheckpoint(checkpoint);
   const digest = createHash('sha256').update(text).digest('hex');

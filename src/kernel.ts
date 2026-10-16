@@ -1,4 +1,4 @@
-import { POLICY_VERSION } from './policy.js';
+import { FIXED_ROUTING_VERSION, FUTURE_ROUTING_VERSION, POLICY_VERSION } from './policy.js';
 import type { Answers, Phase } from './policy.js';
 import { objectWithKeys, parseAnswers, ValidationError } from './validation.js';
 
@@ -23,6 +23,19 @@ export const LOW_ROUTE: readonly Phase[] = Object.freeze(['mdd-plan', 'mdd-apply
 export const LOW_EXPLORE_ROUTE: readonly Phase[] = Object.freeze(['mdd-explore', ...LOW_ROUTE]);
 export const ROUTES: readonly (readonly Phase[])[] = Object.freeze([HIGH_ROUTE, LOW_EXPLORE_ROUTE, LOW_ROUTE]);
 
+/** Read a preserved request's explicit pin without inferring a version from history or answers. */
+export function requestRoutingVersion(value: unknown): typeof FIXED_ROUTING_VERSION | undefined {
+  const request = objectWithKeys(value, 'request', ['answers', 'profile', 'explore', 'route', 'routingVersion']);
+  if (!Object.hasOwn(request, 'routingVersion')) return undefined;
+  if (request.routingVersion === FUTURE_ROUTING_VERSION) {
+    throw new ValidationError('request.routingVersion 3: native-context-required. Fixed evaluation and Workflow cannot execute the native adaptive protocol; use mdd_adapt in the native coordinator.');
+  }
+  if (request.routingVersion !== FIXED_ROUTING_VERSION) {
+    throw new ValidationError('request.routingVersion is unsupported; omit it for historical semantics or supply integer 2 for fixed routing.');
+  }
+  return FIXED_ROUTING_VERSION;
+}
+
 export function preflight(value: unknown): { answers: Answers; evaluation: Evaluation } {
   // The preflight used to be scored against a threshold, configurable through `config`. Nothing
   // is scored now, so a request that still tries to tune a score is told so rather than having
@@ -30,7 +43,8 @@ export function preflight(value: unknown): { answers: Answers; evaluation: Evalu
   if (value && typeof value === 'object' && !Array.isArray(value) && Object.hasOwn(value, 'config')) {
     throw new ValidationError('request.config is no longer accepted: preflight answers are not scored, and a validated mdd-risk verdict selects the route.');
   }
-  const request = objectWithKeys(value, 'request', ['answers', 'profile', 'explore']);
+  const request = objectWithKeys(value, 'request', ['answers', 'profile', 'explore', 'routingVersion']);
+  requestRoutingVersion(request);
   const hasAnswers = Object.hasOwn(request, 'answers');
   const hasProfile = Object.hasOwn(request, 'profile');
   if (hasAnswers === hasProfile) {

@@ -9,6 +9,16 @@ import { Workflow } from '../dist/workflow.js';
 import { defaultSettings } from '../dist/settings.js';
 import { answers, memoryServer, runtime } from './adapter-fixture.mjs';
 
+test('AL-02: internal intake refuses supplied approval before inspecting native text', async () => {
+  const settings = defaultSettings(); settings.profiles.default.answers.mode = 'interactive';
+  let inspected = false;
+  const gate = new NativeIntake({ status: () => ({ state: 'not-started' }) }, {
+    intake: async () => { inspected = true; return 'user'; }, question: async () => {},
+  }, settings);
+  await assert.rejects(gate.admitAdaptiveInternal({ approved: true, contract: {} }, runtime, 'message'), /unknown/);
+  assert.equal(inspected, false);
+});
+
 // State-level native hook contracts, not model execution or permission UI proof.
 for (const configured of [false, true]) for (const legacy of ['engram', 'openspec', 'both', 'none', 'local']) {
   test(`PF-3: new native run resolves storage automatically (configured=${configured}, profile=${legacy})`, async t => {

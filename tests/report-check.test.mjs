@@ -5,6 +5,7 @@ import { test } from 'node:test';
 import { checkReportForm, checkRiskReportForm } from '../dist/report-check.js';
 import { reportFormatLines } from '../dist/phase-report.js';
 import { riskReportFormatLines } from '../dist/risk.js';
+import * as riskReaders from '../dist/risk.js';
 import { reportDocument, traceFixture } from './adapter-fixture.mjs';
 import * as checker from '../dist/report-check.js';
 
@@ -199,6 +200,45 @@ const riskVerdict = (overrides = {}) => ({
   evidence: [{ source: 'mdd-explore finding 2', finding: 'auth.ts is imported by all route handlers' }],
   risks: [{ description: 'A regression here locks out every user.', evidence: 'auth.ts has no dedicated tests', mitigation: 'Add a regression test before merging.' }],
   ...overrides,
+});
+
+test('AL-01: future assessment independently accepts high impact with low complexity without routing', () => {
+  assert.equal(typeof riskReaders.parseFutureAssessment, 'function');
+  for (const complexity of ['low', 'medium', 'high']) {
+    for (const impact of ['low', 'medium', 'high']) {
+      const value = { assessmentVersion: 1, complexity, impact };
+      const before = structuredClone(value);
+      const parsed = riskReaders.parseFutureAssessment(value);
+      assert.deepEqual(parsed, before);
+      parsed.impact = 'changed';
+      assert.deepEqual(value, before, 'the reader does not expose input state');
+      assert.equal(Object.hasOwn(parsed, 'route'), false, 'assessment grants no route or execution');
+    }
+  }
+});
+
+test('AL-01: the future assessment reader validates its own version and level vocabulary', () => {
+  assert.equal(typeof riskReaders.parseFutureAssessment, 'function');
+  const value = { assessmentVersion: 1, complexity: 'low', impact: 'high' };
+  for (const assessmentVersion of [undefined, null, '1', 0, 2]) {
+    assert.throws(() => riskReaders.parseFutureAssessment({ ...value, assessmentVersion }), /assessmentVersion/);
+  }
+  for (const field of ['complexity', 'impact']) {
+    for (const level of [undefined, null, 'LOW', 'unknown', 1]) {
+      assert.throws(() => riskReaders.parseFutureAssessment({ ...value, [field]: level }), new RegExp(field));
+    }
+  }
+  for (const input of [null, [], { ...value, route: 'low' }, { ...value, extra: true }]) {
+    assert.throws(() => riskReaders.parseFutureAssessment(input));
+  }
+});
+
+test('AL-01: future assessment values do not widen the current Risk report contract', () => {
+  for (const risk of [riskVerdict({ route: 'high', complexity: 'low' }), riskVerdict({ route: 'medium', complexity: 'medium' }),
+    riskVerdict({ impact: 'high' }), { assessmentVersion: 1, complexity: 'low', impact: 'high' }]) {
+    assert.throws(() => riskReaders.parseRiskVerdict(risk));
+    assert.equal(checkRiskReportForm(riskReport({ risk })).ok, false);
+  }
 });
 
 const riskReport = (overrides = {}) => reportDocument({
