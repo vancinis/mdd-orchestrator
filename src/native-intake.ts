@@ -769,7 +769,7 @@ export class NativeIntake {
       throw new Error('A native question or intake is unresolved; continuation cannot release it.');
   }
 
-  reset(runtime: Runtime, scope: 'phase' | 'run' | 'rework' | 'continue', consent?: Parameters<PhaseRunner['reset']>[2]): unknown {
+  reset(runtime: Runtime, scope: 'phase' | 'run' | 'rework' | 'continue', consent?: Parameters<PhaseRunner['reset']>[2], target?: Parameters<PhaseRunner['reset']>[3]): unknown {
     if (runtime.agent !== 'mdd-orchestrator') throw new Error('Only the coordinator may reset MDD state.');
     if (scope === 'continue') this.assertContinuationIdle(runtime.sessionID);
     const entry = this.#sessions.get(runtime.sessionID);
@@ -784,7 +784,7 @@ export class NativeIntake {
       return { ...this.status(runtime.sessionID), reset: { scope: 'phase' as const } };
     }
     const intakeToken = this.durable.ownership?.intake(runtime.sessionID)?.token;
-    const applied = this.runner.reset?.(runtime.sessionID, scope, consent) ?? { scope: 'run' as const };
+    const applied = this.runner.reset?.(runtime.sessionID, scope, consent, target) ?? { scope: 'run' as const };
     if (applied.scope === 'run' || applied.scope === 'continue') {
       if (intakeToken) {
         const current = this.durable.ownership?.intake(runtime.sessionID);
@@ -796,7 +796,9 @@ export class NativeIntake {
       delete entry.slot; delete entry.reason; delete entry.restore; delete entry.replacing;
       entry.state = 'active';
       entry.notice = applied.scope === 'rework'
-        ? `Verification failed and the user chose to correct it: ${applied.phase ?? 'mdd-apply'} is ready again with the verification findings as its newest input. Verification follows it through the route's ordinary approval. Previous evidence is retained.`
+        ? (applied.phase ?? 'mdd-apply') === 'mdd-apply'
+          ? `Verification failed and the user chose to correct it: mdd-apply is ready again with the verification findings as its newest input, as one correction pass that owns every finding. Verification follows it through the route's ordinary approval. Previous evidence is retained.`
+          : `A phase failed and the user chose to rework the route from ${applied.phase}: it is ready again with the failure as its newest input, and every later phase plans and runs again through the route's ordinary approvals. The plan and verification held before were released; artifacts and changed files are retained.`
         : applied.approval
         ? `The run was released at its approval boundary: ${applied.phase ?? 'the next phase'} is waiting for the same approval question again. Nothing was approved and previous evidence is retained.`
         : `The ${applied.phase ?? 'current'} phase was released and is ready to run again. Previous evidence is retained.`;

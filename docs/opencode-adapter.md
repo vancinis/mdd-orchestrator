@@ -72,10 +72,41 @@ authenticates the exact latest native text without parsing intent or requiring s
 
 | User intent | Action |
 |---|---|
-| Correct the same implementation | `mdd_reset({scope:"rework", userText})` returns to Apply with the findings. |
+| Correct the same implementation | `mdd_reset({scope:"rework", userText})` returns to Apply with the findings, as one correction pass. |
+| Revise the design or the requirements | `mdd_reset({scope:"rework", userText, phase})` with a phase from `status.reworkTargets` (`mdd-design`/`mdd-spec` on high, `mdd-plan` on low) plans again from there. |
 | Retry the checks | `mdd_reset({scope:"phase"})` retries Verify in the same run. |
 | Proceed despite the failed checks | `mdd_reset({scope:"continue", runID, userText})` preserves the failed run and releases its active stop. |
 | Start a clear new objective | `mdd_start({requirements})` authenticates the latest request, preserves the failed predecessor and applies normal new-task preflight. No manual discard is needed. |
+
+### Where a correction goes
+
+A failed Verify used to have one correction target, Apply, even when the gap was in the design. In
+the run that motivated this, the design itself recorded that it could not meet a requirement, Verify
+recommended design rework three times, and each Apply pass moved the same failure one fallback
+deeper. The correction path now has four parts:
+
+- **Unmet requirements stop planning.** Plan, Design and Tasks may report
+  `unmet=[{requirementID,reason}]`. Any entry requires outcome `failed`; a passing report that names
+  one is refused. The run stops before implementation, and `status.reworkable` offers the phase whose
+  decision could not be met (Design → `mdd-spec`, Tasks → `mdd-design`). Revising the
+  specification is also how a gap the user accepts becomes an explicit exclusion.
+- **Verify attributes each gap.** A not-verified or deviation row may carry
+  `cause: implementation | design | requirements`. Status reports `reworkTargets`, the recommended
+  `reworkable` and `reworkReason`: requirements recommend `mdd-spec` (`mdd-plan` on low), design
+  recommends `mdd-design` (`mdd-plan`), and the same requirement failing again after a correction
+  pass recommends redesign instead of another Apply. The user still chooses; without `phase`,
+  rework after Verify returns to Apply as before.
+- **A planning rework releases what it replaces.** Returning to Spec, Design or Plan clears the
+  held plan and verification (and decisions, for Spec), withdraws plan, implementation and check
+  evidence, and binds an empty Apply plan for the next epoch. Results, artifacts and changed files
+  stay. Checkpoints and dossiers check the held plan against the results recorded since that rework.
+- **The Apply correction is one pass that answers for every finding.** It is dispatched once,
+  never as scoped workers, owns every remaining deliverable and completes them together in plan
+  order. Verify saves its reproduction probes under `.mdd/probes/<runID>/` in MDD's gitignored data
+  root; the correction runs or converts each probe and observes it fail before changing code. It
+  reports `closure=[{id,status,evidence}]` for every structured finding of the failed Verify
+  (unverified scenarios, deliverables and decisions, and failing held or required checks). An open
+  finding cannot pass. Histories recorded step by step before this still replay.
 
 Verify is the last phase in both routes. `continued-with-failed-verification` is **not complete or
 PASS**, and bare continuation authorizes no next work. Unclear requested work may need one focused
@@ -191,6 +222,8 @@ within the approved Apply phase need no additional approval. Native edit/shell c
   checkpoints precede exposure of the next writer. Settled legacy histories remain readable;
   a newly authorized legacy Apply binds its held plan before dispatch. Explicit rework starts
   a new completion epoch and keeps prior changes as evidence, never as new completion authority.
+  A rework from failed Verify to Apply is one correction pass that completes every remaining
+  deliverable together, in plan order; partial correction earns nothing.
   A legacy record whose file list was truncated remains readable but cannot dispatch new Apply
   work: inspect the full diff and start a fresh run instead of inventing missing evidence.
 - Each batch attempt stores an immutable `apply/<batchID>/apply-progress.md` artifact under
@@ -297,7 +330,7 @@ legacy format. Missing captured policy keeps old checkpoints serial, even on a c
 Unpublished successful evidence requires confined recovery; it never authorizes replay or advancement
 past an uncertain sibling. Published progress permits ordinary single-step serial fallback if later
 work is unsafe for concurrency. Complete member reports remain in the checkpoint alongside distinct
-Apply artifacts. Explicit Verify rework starts a new implementation pass.
+Apply artifacts. Explicit Verify rework starts a new implementation pass, which is never split into workers.
 Read-only investigations use the same plural status surfaces and member/owner CAS model, with
 separate durable exploration records so contextual work cannot advance or overwrite the main plan.
 
@@ -864,7 +897,7 @@ Structural instruction assertions and immutable-tool regressions verify contract
 | Consent | Complete startup profile or exact correlated native preflight answers; later interactive Proceed/Stop applies only to the currently waiting phase. No repeat preflight or implicit approval. An answer that names nothing on offer selects nothing: the user wrote their own words, or a host reordered the result, and MDD cannot tell those apart. Neither is consent, so the receipt is recorded as cancelled and the same question stays open to be asked again. When those words do name an option, the coordinator records them with `mdd_answer`, checked against the text the user actually typed ([Written answers](#written-answers)). A question MDD did not compose is the coordinator's own and touches no MDD state, except while an MDD question is pending, when it is the only question that may run. |
 | Persistence | HTTP only to a literal IPv4 loopback origin, no credentials/path/query/redirects, no retries. Each HTTP/SDK read has a maximum five-second timeout. HTTP responses are bounded to 128 KiB. |
 | Failure | Infrastructure failures never fabricate phase results. Read-only phases may retry with failure context, then use one tracked native fallback after `DELEGATION_ATTEMPTS` (3). Apply is different: uncertain writes, failed native results or interrupted actors block with pending recovery protection, never automatic redispatch. Unknown child termination remains `await-result`. A malformed completed report permits only bounded report restatement, not substantive work. A reported phase failure blocks until explicit recovery. `mdd_status` never grants approval or dispatches by itself. |
-| Recovery | No MDD state is terminal. `mdd_reset` releases the current attempt (`scope: phase`) or forgets the run for this conversation (`scope: run`), clearing the local progress marker. Scope `phase` also covers work waiting on a person rather than on an actor: a run stopped at an approval returns to `await-approval` with that question re-armed, and an intake stopped before any run re-opens its pending question. Neither prepares a phase nobody authorized. When Verify reports failure, status names `reworkable: "mdd-apply"` and `scope: rework` sends the run back to Apply to correct what it found, instead of re-checking the unchanged implementation or filing a material change. It needs `userText`, the user's exact latest message choosing the correction; the failed verification becomes Apply's newest dependency artifact, earlier changes are kept, and Verify follows through the route's ordinary approval. Recorded artifacts, memory and `previousRuns` are never deleted by a reset, and `scope: run` sets the preserved record aside under a discarded name rather than destroying it. |
+| Recovery | No MDD state is terminal. `mdd_reset` releases the current attempt (`scope: phase`) or forgets the run for this conversation (`scope: run`), clearing the local progress marker. Scope `phase` also covers work waiting on a person rather than on an actor: a run stopped at an approval returns to `await-approval` with that question re-armed, and an intake stopped before any run re-opens its pending question. Neither prepares a phase nobody authorized. When Verify, Design or Tasks reports failure, status names `reworkTargets`, the recommended `reworkable` and its `reworkReason`, and `scope: rework` (with `phase` naming the user's choice) sends the run back there to correct what it found, instead of re-checking the unchanged implementation or filing a material change. It needs `userText`, the user's exact latest message choosing the correction; the failed report becomes the target's newest dependency artifact, earlier changes are kept, and the route follows through its ordinary approvals. Without `phase`, a failed Verify returns to Apply. Recorded artifacts, memory and `previousRuns` are never deleted by a reset, and `scope: run` sets the preserved record aside under a discarded name rather than destroying it. |
 | Handoff budget | Each phase prompt carries the artifacts it depends on. A seven-phase route holding large artifacts outgrows what a dispatched task can be delivered at, and the phases that paid for it were the last ones. Artifacts are therefore inlined newest-first while the prompt stays within 38000 bytes, the size that still fits inside the 46000-byte payload budget with the rest of the status; older ones travel as their own recorded `evidenceSummary` plus the ref that identifies the complete text in the artifact store. Shedding is ordered and announced in the prompt, and `mdd_status` reports it as `handoff`. Contextual findings are not compacted: they accumulate by the user's own choice, and `PHASE_CONTEXT_MAX_BYTES` (96000) remains the absolute bound that fails explicitly rather than cutting anything. |
 | Payload budget | Every MDD tool serializes through `statusPayload`, bounded to 46000 bytes so the host cannot truncate a result and make the exact `task`/`question` uncopyable. Artifact history is reported as refs only (content lives in the artifact store and is already injected into the next phase prompt), and `brief` accompanies only `mode: "inline"`. Over budget, fields are dropped in the fixed order `priorRun, previousRuns, workspaceRuns, contexts, contextualReport, providedContext, artifacts, artifactAttempts, artifact, concerns, expandedReport, report, visual, planned, decisions, acceptance, verification, handoff, workflow, rejected` and listed in `omitted`. `rejected` goes last and never whole: only its text is shed (`rejected.text` in `omitted`), leaving `reason`, `restatementsLeft`, `textOmitted` and `textBytes`, and `mdd_status` with `detail="rejected"` returns that report alone with its reason and `resultFormat`; `task`, `brief`, `question`, `state`, `phase`, `next`, `mode`, `reason`, `runID`, `sessionID`, `runtime`, `questionReceipts`, `recovery`/`pendingStart`, `notice`, `provenance`, `reset`, `evidence`, `coverage` and `recoverable` are never dropped. A task too large to fit is reported in `budget.problem`, never cut. |
 | Next phase | Successful nonfinal Apply batches prepare the next assigned Apply task after durable completion. Final Apply advances to Verify through ordinary automatic/interactive semantics. Only final corroborated Verify returns `complete`. |

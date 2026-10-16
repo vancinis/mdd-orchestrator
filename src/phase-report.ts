@@ -1,4 +1,4 @@
-import { PHASE_RESULT_FIELDS, FIELD_SCHEMA, STRUCTURED_FIELD_SCHEMA } from './acceptance.js';
+import { CORRECTION_FIELDS, PHASE_RESULT_FIELDS, FIELD_SCHEMA, STRUCTURED_FIELD_SCHEMA } from './acceptance.js';
 import { verificationVersion, type VerificationVersion } from './phase-evidence.js';
 import type { Phase } from './policy.js';
 import { parseNarrative } from './reporting.js';
@@ -232,9 +232,10 @@ function jsonDocument(text: string): Record<string, unknown> | undefined {
 }
 
 /** The instructions an actor is given for this phase, in the order the document is written. */
-export function reportFormatLines(phase: Phase, version?: VerificationVersion): string[] {
+export function reportFormatLines(phase: Phase, version?: VerificationVersion, correction = false): string[] {
   verificationVersion(version);
-  const fields = [...PHASE_RESULT_FIELDS[phase], ...(version && PHASE_RESULT_FIELDS[phase].length ? ['verificationVersion'] : [])];
+  const fields = [...PHASE_RESULT_FIELDS[phase], ...(correction && phase === 'mdd-apply' ? CORRECTION_FIELDS : []),
+    ...(version && PHASE_RESULT_FIELDS[phase].length ? ['verificationVersion'] : [])];
   return [
     'Report this phase as a short markdown document, not as a JSON object. Use these exact headings, each once:',
     '"## MDD Outcome" holding exactly passed or failed.',

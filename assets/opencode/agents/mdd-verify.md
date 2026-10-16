@@ -28,6 +28,12 @@ Assess every held requirement/scenario-to-step link, planned step and relevant d
 Supply the dispatch schema's verification map with actual check references and source-based
 assessments. Use not-verified or deviation for gaps; passing commands alone do not prove that
 requirements and plan match. Give a simple outcome/change summary and material remaining limits.
+Give each not-verified or deviation row a cause: implementation when code can close it, design when
+the held decisions cannot satisfy it, requirements when the acceptance itself is contradictory or
+infeasible. MDD recommends where to rework from these causes; a design gap sent to Apply only moves.
+Save each reproduction probe you write as a file in the dispatched probe directory (gitignored MDD
+data, not project source) and cite its path, exact command, observed and expected result, so a
+correction pass can run it unchanged. Writing a probe there is not a source repair.
 Do not repair sources, upgrade dependencies, commit, push or create a PR: report what you
 found instead. Tests may create normal generated outputs; that is expected.
 Automatic mode does not bypass native permission consent. Shell can execute arbitrary

@@ -18,6 +18,8 @@ checks singular Verify must execute. A scoped worker cannot run commands: requir
 for its completion and explicitly defer test/build execution, never imply those checks passed.
 Use held scenario and decision IDs in deliverables. Dependencies must refer to earlier steps.
 Map every accepted scenario and relevant decision to applicable work; add no unrelated checks.
+If the held decisions cannot satisfy a held requirement, report outcome failed with
+unmet=[{requirementID,reason}] instead of planning work around the gap.
 For verificationVersion 1, assign globally unique check IDs across all deliverables, exact
 commands, required/optional requirements and any appliesWhen conditions before execution.
 Singular Verify accounts for the complete held set, including deferred integration checks.

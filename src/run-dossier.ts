@@ -10,6 +10,7 @@ import { objectWithKeys } from './validation.js';
 import type { Answers, Phase } from './policy.js';
 import type { Evidence } from './reporting.js';
 import type { PhaseResult } from './workflow.js';
+import { currentGeneration } from './workflow.js';
 import { TASK_SNAPSHOT_MAX_BYTES, validateTaskIdentity } from './task-store.js';
 import type { TaskIdentity } from './task-store.js';
 
@@ -145,7 +146,9 @@ function parse(value: unknown): RunDossier {
     const steps = planned.length ? deliverables(planned, version) : [];
     executed(checks, version);
     const results = item.results as PhaseResult[];
-    if (results.some(result => result.outcome === 'passed' && ['mdd-plan', 'mdd-tasks'].includes(result.phase)) && !steps.length)
+    // After a rework to a planning phase only the results since then answer to the held plan.
+    const current = currentGeneration(results, item.route as Phase[], item.phase as Phase);
+    if (current.some(result => result.outcome === 'passed' && ['mdd-plan', 'mdd-tasks'].includes(result.phase)) && !steps.length)
       throw new Error('missing held plan');
     if (results.some(result => result.outcome === 'passed' && ['mdd-plan', 'mdd-spec'].includes(result.phase)) && !item.acceptance)
       throw new Error('missing earned acceptance');
@@ -158,11 +161,11 @@ function parse(value: unknown): RunDossier {
       validatePlan(accepted, choices, steps);
       if (checked) {
         const read = retainedVerification(checked, checks, { accepted, choices, planned: steps, verificationVersion: version });
-        if ((item.results as PhaseResult[]).filter(result => result.phase === 'mdd-verify').at(-1)?.outcome === 'passed' && !read.matched)
+        if (current.filter(result => result.phase === 'mdd-verify').at(-1)?.outcome === 'passed' && !read.matched)
           throw new Error('inconsistent verification outcome');
       }
     }
-    if ((item.results as PhaseResult[]).some(result => result.phase === 'mdd-verify') && !checked) throw new Error('missing verification');
+    if (current.some(result => result.phase === 'mdd-verify') && !checked) throw new Error('missing verification');
   }
   return item as unknown as RunDossier;
 }

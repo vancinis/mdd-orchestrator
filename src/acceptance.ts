@@ -4,7 +4,18 @@ import type { Phase } from './policy.js';
 
 export type Acceptance = { goal: string; requirements: { id: string; description: string; scenarios: { id: string; given: string; when: string; then: string }[] }[] };
 export type Decision = { id: string; description: string; requirements: string[] };
-type Assessment = { status: 'verified' | 'not-verified' | 'deviation'; checks: string[]; assessment: string };
+/**
+ * Where a gap Verify found has to be fixed. Without it every failure went back to Apply, including
+ * one the design itself had declared it could not meet: three correction passes each moved the same
+ * failure one fallback deeper. Only a gap carries a cause; a verified row has nothing to fix.
+ */
+export const FINDING_CAUSES = ['implementation', 'design', 'requirements'] as const;
+export type FindingCause = typeof FINDING_CAUSES[number];
+type Assessment = { status: 'verified' | 'not-verified' | 'deviation'; checks: string[]; assessment: string; cause?: FindingCause };
+/** A held requirement a planning phase states it cannot satisfy within its scope. */
+export type Unmet = { requirementID: string; reason: string };
+/** How a correction pass accounts for one finding of the failed Verify it answers. */
+export type Closure = { id: string; status: 'closed' | 'open'; evidence: string };
 export type Verification = {
   scenarios: (Assessment & { requirementID: string; scenarioID: string; stepID: string })[];
   steps: (Assessment & { stepID: string })[];
@@ -24,10 +35,10 @@ export type SupplementalCheck = CheckDisposition & { id: string; requirement: 'r
  */
 export const PHASE_RESULT_FIELDS: Record<Phase, readonly string[]> = Object.freeze({
   'mdd-explore': [], 'mdd-propose': [],
-  'mdd-plan': ['acceptance', 'decisions', 'deliverables'],
+  'mdd-plan': ['acceptance', 'decisions', 'deliverables', 'unmet'],
   'mdd-spec': ['domain', 'acceptance'],
-  'mdd-design': ['decisions'],
-  'mdd-tasks': ['deliverables'],
+  'mdd-design': ['decisions', 'unmet'],
+  'mdd-tasks': ['deliverables', 'unmet'],
   // Apply is told to report the commands it ran, and for a long time reporting them was what got
   // it rejected: the field belonged to Verify alone. Implementation checks are evidence the phase
   // genuinely produced, so it keeps them. They are recorded as its claim; only Verify's checks
@@ -35,9 +46,12 @@ export const PHASE_RESULT_FIELDS: Record<Phase, readonly string[]> = Object.free
   'mdd-apply': ['changes', 'noChangeReason', 'checks', 'delivered', 'completed'],
   'mdd-verify': ['checks', 'verification'],
 });
+const CAUSE_RULE = 'A not-verified or deviation row may add cause: implementation (default) when code can close it, design when the held decisions cannot satisfy it, requirements when the acceptance itself is contradictory or infeasible.';
 const DELIVERABLE_RULES = 'Keep IDs stable. Every scenario and relevant decision must map to an applicable step. Optional parallel metadata requires explicit dependsOn (including [] when independent) and complete exact root-relative file scopes, including shared outputs/tests/docs/lockfiles; include every task/code/data dependency, never guess independence. Use slash-separated portable ASCII paths without traversal, aliases, directories or globs. Apply eligibility needs nonempty writes; missing/incomplete scopes or omitted dependencies remain sequential. This records eligibility only; the runtime selects eligible worker batches under its capability and independence checks.';
 export const FIELD_SCHEMA: Record<string, string> = {
-  completed: 'completed=[assignedStepID] lists exactly the one assigned deliverable actually finished. A failed or partial batch earns no completion; report outcome failed, never guess or claim another step.',
+  completed: 'completed=[assignedStepID] lists exactly the one assigned deliverable actually finished; a correction pass lists every deliverable it owns, in plan order. A failed or partial batch earns no completion; report outcome failed, never guess or claim another step.',
+  unmet: 'unmet=[{requirementID,reason}] names each held requirement no design within this scope can satisfy; omit it when there is none. Any entry requires outcome failed: never pass with a decision that accepts a residual gap against a held requirement. MDD then stops before implementation so the user can revise the requirement or the scope.',
+  closure: 'closure=[{id,status:"closed"|"open",evidence}] only in a correction pass: one entry per finding ID the prompt lists. evidence names the reproduction or regression test with its command and exit, and the change that closed it. Any open entry requires outcome failed.',
   acceptance: 'acceptance={goal,requirements:[{id,description,scenarios:[{id,given,when,then}]}]}. Keep IDs stable.',
   decisions: 'decisions=[{id,description,requirements:[requirementID]}]; empty when the work needs no decision.',
   deliverables: 'deliverables=[{id,description,path,check,scenarios:[scenarioID],decisions:[decisionID],dependsOn:[earlierStepID],parallel?:{complete:true,reads:[filePath],writes:[filePath]}}]. ' + DELIVERABLE_RULES,
@@ -46,22 +60,28 @@ export const FIELD_SCHEMA: Record<string, string> = {
   noChangeReason: 'noChangeReason=text instead of changes when nothing needed changing.',
   delivered: 'delivered={what,implies} summarises the finished change for whoever reviews the pull request: what is now possible or different (what), and what that enables or requires of them (implies). Describe the outcome, never the mechanics — the per-file reasons already say how.',
   checks: 'checks=[{command,exit}] reports only checks this phase actually ran, at most 32. command is the exact command on one line, of any length, with no line breaks, tabs or other control characters; exit is its integer exit code, or null when it did not finish.',
-  verification: 'verification={scenarios:[{requirementID,scenarioID,stepID,status,checks:[command],assessment}],steps:[{stepID,status,checks,assessment}],decisions:[{decisionID,status,checks,assessment}],changes,limits:[]}. Status is verified/not-verified/deviation. Each checks entry repeats a command exactly as reported in checks; a verified row names at least one, and every one it names exited 0. Assessment explains source evidence and limits, not just a pass label. assessment and changes are one line of at most 500 characters; limits holds at most four one-line items of at most 250 characters each. Cover all held links exactly once.',
+  verification: 'verification={scenarios:[{requirementID,scenarioID,stepID,status,checks:[command],assessment,cause?}],steps:[{stepID,status,checks,assessment,cause?}],decisions:[{decisionID,status,checks,assessment,cause?}],changes,limits:[]}. Status is verified/not-verified/deviation. Each checks entry repeats a command exactly as reported in checks; a verified row names at least one, and every one it names exited 0. Assessment explains source evidence and limits, not just a pass label. assessment and changes are one line of at most 500 characters; limits holds at most four one-line items of at most 250 characters each. Cover all held links exactly once. ' + CAUSE_RULE,
 };
 export const STRUCTURED_FIELD_SCHEMA: Record<string, string> = {
   verificationVersion: 'verificationVersion=1 identifies structured actor-reported verification. MDD checks consistency, not independent execution attestation.',
   deliverables: 'deliverables=[{id,description,path,checks:[{id,command,requirement:"required"|"optional",appliesWhen?:text}],scenarios:[scenarioID],decisions:[decisionID],dependsOn:[earlierStepID],parallel?:{complete:true,reads:[filePath],writes:[filePath]}}]. ' + DELIVERABLE_RULES +
     ' Check IDs are globally unique across the held plan (at most 64); declare requiredness and any conditional applicability before execution. Each deliverable has 1–32 checks. No legacy check string is accepted.',
   checks: 'checks=[{id,command,exit}] reports every actual execution in chronological order, at most 32. IDs are unique even for repeated commands; command is exact one-line text and exit is an integer or null for interrupted execution. Never invent IDs for unrun commands or omit failed attempts.',
-  verification: 'verification={scenarios:[{requirementID,scenarioID,stepID,status,checks:[executionID],assessment}],steps:[{stepID,status,checks,assessment}],decisions:[{decisionID,status,checks,assessment}],changes,limits:[],checkResults:[{checkID,disposition,executions:[executionID],reason?,equivalence?}],supplementalChecks:[{id,requirement:"required"|"optional",disposition,executions:[executionID],reason?}]}. Cover every held check exactly once and account for every execution in checkResults or supplementalChecks. Held checks may share an actual integration execution only with the same complete ordered attempt history; supplemental entries cannot overlap any other entry. Disposition: passed/failed/ran (interrupted, null exit)/blocked (no execution)/not-applicable/replaced. Final execution determines the result; keep earlier attempts in order and explain retries. Passed and replaced need final exit 0. Replaced requires reason and equivalence rationale for the actually executed replacement, never a replacement chain. Not-applicable requires a held appliesWhen condition and source-based reason; unconditional checks cannot be waived. Every disposition except passed requires a reason. Supplemental executions must be passed/failed/ran with explicit requiredness and cannot downgrade held checks. Required applicable failed/ran/blocked checks prevent PASS; optional failures remain visible. Semantic acceptance coverage remains independent: cover all scenario-step links, steps and decisions once, status verified/not-verified/deviation, verified rows cite successful final execution IDs. Assessment and changes are one line at most 500 characters; limits has at most four one-line items of 250 characters. Source evidence explains behavior; exit codes alone do not prove it.',
+  verification: 'verification={scenarios:[{requirementID,scenarioID,stepID,status,checks:[executionID],assessment,cause?}],steps:[{stepID,status,checks,assessment,cause?}],decisions:[{decisionID,status,checks,assessment,cause?}],changes,limits:[],checkResults:[{checkID,disposition,executions:[executionID],reason?,equivalence?}],supplementalChecks:[{id,requirement:"required"|"optional",disposition,executions:[executionID],reason?}]}. Cover every held check exactly once and account for every execution in checkResults or supplementalChecks. Held checks may share an actual integration execution only with the same complete ordered attempt history; supplemental entries cannot overlap any other entry. Disposition: passed/failed/ran (interrupted, null exit)/blocked (no execution)/not-applicable/replaced. Final execution determines the result; keep earlier attempts in order and explain retries. Passed and replaced need final exit 0. Replaced requires reason and equivalence rationale for the actually executed replacement, never a replacement chain. Not-applicable requires a held appliesWhen condition and source-based reason; unconditional checks cannot be waived. Every disposition except passed requires a reason. Supplemental executions must be passed/failed/ran with explicit requiredness and cannot downgrade held checks. Required applicable failed/ran/blocked checks prevent PASS; optional failures remain visible. Semantic acceptance coverage remains independent: cover all scenario-step links, steps and decisions once, status verified/not-verified/deviation, verified rows cite successful final execution IDs. Assessment and changes are one line at most 500 characters; limits has at most four one-line items of 250 characters. Source evidence explains behavior; exit codes alone do not prove it. ' + CAUSE_RULE,
 };
 /**
  * Fields a phase reported that belong to no phase. They are dropped rather than fatal: a finished
  * phase must not be discarded over a key it added in good faith, and the actor is told which ones
  * were ignored so the next report is cleaner. Fields that carry meaning are still validated.
  */
+/**
+ * Fields only a correction pass is shown. Apply accepts them always, so a report never fails over
+ * them, but an ordinary Apply prompt does not spend its schema on a field it has no use for.
+ */
+export const CORRECTION_FIELDS: readonly string[] = Object.freeze(['closure']);
 export function phaseFields(phase: Phase, result: Record<string, unknown>): { fields: Record<string, unknown>; ignored: string[] } {
-  const allowed = new Set(['phase', 'runID', 'callID', 'verificationVersion', 'outcome', 'evidenceSummary', 'how', 'purpose', 'openItems', 'learnings', 'confidence', 'artifact', 'concerns', 'questions', ...PHASE_RESULT_FIELDS[phase]]);
+  const allowed = new Set(['phase', 'runID', 'callID', 'verificationVersion', 'outcome', 'evidenceSummary', 'how', 'purpose', 'openItems', 'learnings', 'confidence', 'artifact', 'concerns', 'questions', ...PHASE_RESULT_FIELDS[phase],
+    ...(phase === 'mdd-apply' ? CORRECTION_FIELDS : [])]);
   const fields: Record<string, unknown> = {};
   const ignored: string[] = [];
   for (const [key, value] of Object.entries(result)) {
@@ -144,6 +164,94 @@ export function decisions(value: unknown, accepted: Acceptance): Decision[] {
     if (unknown !== undefined) throw new Error(`Decision ${key} references unknown requirement ${unknown}. Accepted requirements: ${accepted.requirements.map(item => item.id).join(', ')}.`);
     return { id: key, description: shortText(decision.description, `decision ${key} description`), requirements: required };
   });
+}
+/**
+ * The requirements a planning phase says it cannot satisfy. With a held acceptance map every ID must
+ * name one of its requirements; mdd-plan, which writes that map itself, is checked for form only.
+ */
+export function unmet(value: unknown, accepted?: Acceptance): Unmet[] {
+  if (value === undefined) return [];
+  const seen = new Set<string>();
+  return items(value, 'unmet requirements', true).map(value => {
+    const entry = objectWithKeys(value, 'unmet requirement', ['requirementID', 'reason']);
+    const key = id(entry.requirementID, 'unmet requirementID');
+    if (seen.has(key)) throw new Error(`Unmet requirement ${key} is listed more than once.`);
+    seen.add(key);
+    if (accepted && !accepted.requirements.some(item => item.id === key))
+      throw new Error(`Unmet requirement ${key} is not a held requirement. Held requirements: ${accepted.requirements.map(item => item.id).join(', ')}.`);
+    return { requirementID: key, reason: shortText(entry.reason, `reason requirement ${key} is unmet`) };
+  });
+}
+/** A planning phase that names an unmet requirement cannot pass; one wording wherever it is checked. */
+export const UNMET_PASS = 'A planning phase that leaves held requirements unmet cannot pass: report outcome failed with unmet, so implementation does not start on a plan known not to satisfy acceptance and the user can revise the requirement or the scope.';
+/**
+ * How a correction pass accounts for the findings it was given. With `findings` the entries must
+ * cover exactly those IDs; without them (the report checker) only the form is checked.
+ */
+export function closure(value: unknown, findings?: readonly string[]): Closure[] {
+  const seen = new Set<string>();
+  const entries = items(value, 'closure', true).map(value => {
+    const entry = objectWithKeys(value, 'closure entry', ['id', 'status', 'evidence']);
+    const key = id(entry.id, 'closure finding ID');
+    if (seen.has(key)) throw new Error(`Closure accounts for finding ${key} more than once.`);
+    seen.add(key);
+    if (entry.status !== 'closed' && entry.status !== 'open') throw new Error(`Closure of ${key} needs status closed or open.`);
+    return { id: key, status: entry.status as Closure['status'], evidence: shortText(entry.evidence, `closure evidence for ${key}`) };
+  });
+  if (findings) {
+    const unknown = entries.find(entry => !findings.includes(entry.id));
+    if (unknown) throw new Error(`Closure names ${unknown.id}, which is not a finding of the failed Verify. Findings: ${findings.join(', ')}.`);
+    const missing = findings.filter(finding => !seen.has(finding));
+    if (missing.length) throw new Error(`Closure omits Verify finding(s) ${missing.join(', ')}. Account for every finding, closed or open.`);
+  }
+  return entries;
+}
+/** A correction pass with an open finding cannot pass; one wording wherever it is checked. */
+export const OPEN_CLOSURE_PASS = 'A correction pass that leaves a Verify finding open cannot pass: report outcome failed and name what keeps it open. If closing it needs a different design, say so instead of adding another fallback.';
+/**
+ * The findings a failed Verify recorded in structured form, as the IDs a correction pass answers
+ * for: every scenario, deliverable and decision it did not verify, and every held or required
+ * supplemental check that did not pass.
+ */
+export function verificationFindings(checked: Verification | undefined): string[] {
+  if (!checked) return [];
+  const ids = [
+    ...checked.scenarios.filter(row => row.status !== 'verified').map(row => row.scenarioID),
+    ...checked.steps.filter(row => row.status !== 'verified').map(row => row.stepID),
+    ...checked.decisions.filter(row => row.status !== 'verified').map(row => row.decisionID),
+    ...(checked.checkResults ?? []).filter(row => !['passed', 'replaced', 'not-applicable'].includes(row.disposition)).map(row => row.checkID),
+    ...(checked.supplementalChecks ?? []).filter(row => row.requirement === 'required' && row.disposition !== 'passed').map(row => row.id),
+  ];
+  return [...new Set(ids)].slice(0, 64);
+}
+/** The requirements a verification left unverified: what a repeated failure is compared on. */
+export function failingRequirements(checked: unknown): string[] {
+  // Read defensively: an earlier verification is recovered from an artifact, not from held state.
+  const rows = checked && typeof checked === 'object' && Array.isArray((checked as { scenarios?: unknown }).scenarios) ? (checked as { scenarios: unknown[] }).scenarios : [];
+  return [...new Set(rows.flatMap(row => {
+    const item = row && typeof row === 'object' ? row as Record<string, unknown> : {};
+    return item.status !== 'verified' && typeof item.requirementID === 'string' ? [item.requirementID] : [];
+  }))];
+}
+/** The deepest cause Verify gave its gaps: requirements outrank design, design outranks code. */
+export function deepestCause(checked: Verification | undefined): FindingCause {
+  const causes = new Set([...(checked?.scenarios ?? []), ...(checked?.steps ?? []), ...(checked?.decisions ?? [])]
+    .filter(row => row.status !== 'verified').map(row => row.cause ?? 'implementation'));
+  return causes.has('requirements') ? 'requirements' : causes.has('design') ? 'design' : 'implementation';
+}
+/**
+ * The links section MDD appended to an artifact, read back. Earlier verifications are only kept
+ * as artifacts, so this is how a later failure is compared with the one before it.
+ */
+export function tracedLinks(artifact: string): Record<string, unknown> | undefined {
+  const at = artifact.lastIndexOf(TRACE_HEADING);
+  if (at < 0) return undefined;
+  const block = /```json\r?\n([\s\S]*?)\r?\n```/.exec(artifact.slice(at));
+  if (!block) return undefined;
+  try {
+    const value: unknown = JSON.parse(block[1]!);
+    return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+  } catch { return undefined; }
 }
 /**
  * How many problems one rejection carries. Enough that a plan is normally fixed in a single pass;
@@ -326,8 +434,11 @@ export function readVerification(value: unknown, held: HeldPlan | undefined, rep
       else if (failed !== undefined) own.push(`The verified assessment of ${label} rests on check ${preview(failed)}, which did not pass.`);
     }
     const assessment = attempt(own, () => shortText(entry.assessment, `source-based assessment of ${label}`));
+    if (entry.cause !== undefined && !FINDING_CAUSES.includes(entry.cause as FindingCause))
+      own.push(`The assessment of ${label} has unknown cause ${preview(entry.cause)}. Use ${FINDING_CAUSES.join(', ')}.`);
+    else if (entry.cause !== undefined && status === 'verified') own.push(`The verified assessment of ${label} cannot name a cause; only a gap has one.`);
     problems.push(...own);
-    return own.length ? undefined : { status: status!, checks: checks!, assessment: assessment! };
+    return own.length ? undefined : { status: status!, checks: checks!, assessment: assessment!, ...(entry.cause !== undefined ? { cause: entry.cause as FindingCause } : {}) };
   };
   // A row whose assessment is malformed still covers its link: counting it as missing too would
   // report one mistake twice.
@@ -335,7 +446,7 @@ export function readVerification(value: unknown, held: HeldPlan | undefined, rep
   const scenarios: Verification['scenarios'] = [];
   const coveredLinks: { scenarioID: string; stepID: string }[] = [];
   for (const value of attempt(problems, () => items(input.scenarios, 'scenario coverage')) ?? []) {
-    const entry = attempt(problems, () => objectWithKeys(value, 'scenario coverage', ['requirementID', 'scenarioID', 'stepID', 'status', 'checks', 'assessment']));
+    const entry = attempt(problems, () => objectWithKeys(value, 'scenario coverage', ['requirementID', 'scenarioID', 'stepID', 'status', 'checks', 'assessment', 'cause']));
     if (!entry) continue;
     let link: { requirementID: string; scenarioID: string; stepID: string } | undefined;
     if (held) {
@@ -357,7 +468,7 @@ export function readVerification(value: unknown, held: HeldPlan | undefined, rep
   const steps: Verification['steps'] = [];
   const coveredSteps: string[] = [];
   for (const value of attempt(problems, () => items(input.steps, 'step coverage')) ?? []) {
-    const entry = attempt(problems, () => objectWithKeys(value, 'step coverage', ['stepID', 'status', 'checks', 'assessment']));
+    const entry = attempt(problems, () => objectWithKeys(value, 'step coverage', ['stepID', 'status', 'checks', 'assessment', 'cause']));
     if (!entry) continue;
     const stepID = held ? held.planned.find(item => item.id === entry.stepID)?.id : attempt(problems, () => id(entry.stepID, 'step coverage stepID'));
     if (stepID === undefined) {
@@ -371,7 +482,7 @@ export function readVerification(value: unknown, held: HeldPlan | undefined, rep
   const decisions: Verification['decisions'] = [];
   const coveredDecisions: string[] = [];
   for (const value of attempt(problems, () => items(input.decisions, 'decision coverage', true)) ?? []) {
-    const entry = attempt(problems, () => objectWithKeys(value, 'decision coverage', ['decisionID', 'status', 'checks', 'assessment']));
+    const entry = attempt(problems, () => objectWithKeys(value, 'decision coverage', ['decisionID', 'status', 'checks', 'assessment', 'cause']));
     if (!entry) continue;
     const decisionID = held ? held.choices.find(item => item.id === entry.decisionID)?.id : attempt(problems, () => id(entry.decisionID, 'decision coverage ID'));
     if (decisionID === undefined) {
@@ -410,7 +521,12 @@ export function assertNoTraceSection(artifact: string): string {
   }
   return artifact;
 }
-export function traceArtifact(phase: Phase, text: string, accepted: Acceptance | undefined, choices: Decision[], planned: Deliverable[], checked?: Verification): string {
-  const trace = phase === 'mdd-plan' ? { acceptance: accepted, decisions: choices, steps: planned } : phase === 'mdd-spec' ? { acceptance: accepted } : phase === 'mdd-design' ? { decisions: choices } : phase === 'mdd-tasks' ? { steps: planned } : phase === 'mdd-verify' ? { verification: checked } : undefined;
+export function traceArtifact(phase: Phase, text: string, accepted: Acceptance | undefined, choices: Decision[], planned: Deliverable[], checked?: Verification,
+  extra: { unmet?: Unmet[]; closure?: Closure[] } = {}): string {
+  const base = phase === 'mdd-plan' ? { acceptance: accepted, decisions: choices, steps: planned } : phase === 'mdd-spec' ? { acceptance: accepted } : phase === 'mdd-design' ? { decisions: choices } : phase === 'mdd-tasks' ? { steps: planned } : phase === 'mdd-verify' ? { verification: checked } : undefined;
+  // What a planning phase could not satisfy and how a correction pass closed Verify's findings
+  // are links too: the next actor and the reader of the artifact both need them in one place.
+  const links = { ...(extra.unmet?.length ? { unmet: extra.unmet } : {}), ...(extra.closure?.length ? { closure: extra.closure } : {}) };
+  const trace = base || Object.keys(links).length ? { ...base, ...links } : undefined;
   return trace ? `${text}\n\n${TRACE_HEADING}\n\n\`\`\`json\n${JSON.stringify(trace, null, 2)}\n\`\`\`\n` : text;
 }

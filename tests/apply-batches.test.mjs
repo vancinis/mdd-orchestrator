@@ -398,13 +398,30 @@ for (const store of ['none', 'local']) test(`${store}: explicit rework starts a 
   const fresh = f.durable.read(f.runtime.sessionID).workflow.applyProgress();
   assert.equal(fresh.epoch, old.epoch + 1);
   assert.deepEqual(fresh.completed, []);
-  await f.finish(applied('first', ['src/correction.ts']));
-  assert.equal(f.status().phase, 'mdd-apply');
-  assert.deepEqual(f.durable.read(f.runtime.sessionID).workflow.applyProgress().completed, ['first']);
+  // One correction pass owns every finding and every deliverable: it is dispatched once, carries
+  // the findings it must close and the probe directory, and cannot complete only the first step.
+  const findings = ['S1', 'S2', 'first', 'second', 'D1', 'first-check', 'second-check'];
+  const ready = f.status().task;
+  assert.equal(ready.description, 'MDD apply correction');
+  const closure = findings.map(id => ({ id, status: 'closed', evidence: `Probe for ${id} failed before the change and passes after it (exit 0).` }));
+  const { call, args } = await f.dispatch();
+  const corrected = report({ completed: ['first', 'second'], changes: ['src/correction.ts'], closure });
+  if (store === 'none') {
+    await assert.rejects(f.runner.after(call, args, report(applied('first', ['src/correction.ts']))), /must report closure for every Verify finding/);
+    await assert.rejects(f.runner.submit({ result: report({ completed: ['first', 'second'], changes: ['src/correction.ts'],
+      closure: closure.map((entry, index) => index ? entry : { ...entry, status: 'open' }) }) }, f.runtime), /leaves a Verify finding open cannot pass/);
+    await f.runner.submit({ result: corrected }, f.runtime);
+  } else await f.runner.after(call, args, corrected);
+  assert.match(args.prompt, /One actor owns the whole correction/);
+  assert.match(args.prompt, /Report closure for each finding ID S1, S2, first, second, D1, first-check, second-check/);
+  assert.match(args.prompt, /^Reproduction probe directory \(gitignored MDD data, not project source\): .*probes/m);
+  assert.deepEqual(JSON.parse(args.prompt.match(/^Applicable deliverables: (.*)$/m)[1]).map(step => step.id), ['first', 'second']);
+  assert.equal(f.status().phase, 'mdd-verify');
+  assert.equal(f.status().rework, undefined);
+  assert.deepEqual(f.durable.read(f.runtime.sessionID).workflow.applyProgress().completed, ['first', 'second']);
   assert.equal(f.runner.prFacts(f.runtime.sessionID).changedFiles, 3);
   if (store === 'local') {
     assert.deepEqual(await f.restart(), { restored: true });
-    await f.finish(applied('second'));
     await f.finish({ outcome: 'failed', checks: [], verification: {
       scenarios: ['S1', 'S2'].map((scenarioID, i) => ({ requirementID: 'R1', scenarioID, stepID: i ? 'second' : 'first', ...assessment })),
       steps: ['first', 'second'].map(stepID => ({ stepID, ...assessment })), decisions: [{ decisionID: 'D1', ...assessment }], changes: 'Second verification findings.', limits: [],

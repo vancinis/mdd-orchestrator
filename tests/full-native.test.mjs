@@ -945,8 +945,10 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
     // Every phase is shown only its own result schema; a leaked one made plan fill verification.
     // A standalone read-only investigation has its own prompt and no phase result fields at all.
     const standalone = args.prompt.includes('Standalone read-only investigation only');
-    const own = { 'mdd-explore': [], 'mdd-propose': [], 'mdd-plan': ['acceptance', 'decisions', 'deliverables'], 'mdd-spec': ['domain', 'acceptance'],
-      'mdd-design': ['decisions'], 'mdd-tasks': ['deliverables'], 'mdd-apply': ['changes', 'noChangeReason', 'checks', 'delivered', 'completed'], 'mdd-verify': ['checks', 'verification'] }[phase];
+    const own = { 'mdd-explore': [], 'mdd-propose': [], 'mdd-plan': ['acceptance', 'decisions', 'deliverables', 'unmet'], 'mdd-spec': ['domain', 'acceptance'],
+      'mdd-design': ['decisions', 'unmet'], 'mdd-tasks': ['deliverables', 'unmet'], 'mdd-apply': ['changes', 'noChangeReason', 'checks', 'delivered', 'completed'], 'mdd-verify': ['checks', 'verification'] }[phase];
+    // Only the correction pass after a failed Verify is shown how to account for its findings.
+    if (phase === 'mdd-apply' && args.prompt.includes('This is a correction pass')) own.push('closure');
     if (own.length && current.verificationVersion === 1) own.push('verificationVersion');
     if (!standalone) {
       assert.equal(args.prompt.includes(own.length ? `exactly these keys: ${own.join(', ')}.` : 'This phase reports no structured data'), true, `own field list in ${phase}`);
@@ -999,6 +1001,9 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
     if (options.unauthorized) await tool('write', { filePath: join(root, 'feature.txt'), content: 'not permitted' }, { output: 'write', metadata: {} }, () => writeFile(join(root, 'feature.txt'), 'not permitted'));
     if (phase === 'mdd-apply') {
       if (result.outcome === 'passed') result.completed = ['feature'];
+      // A correction pass accounts for every finding of the Verify it corrects, by the IDs it was given.
+      const findings = args.prompt.match(/Report closure for each finding ID (.+?), and completed/)?.[1].split(', ');
+      if (findings && result.outcome === 'passed') result.closure = findings.map(id => ({ id, status: 'closed', evidence: `Reproduced ${id} first; the regression now passes (npm test, exit 0).` }));
       if (options.noChange) {
         await tool('read', { filePath: join(root, 'feature.txt') }, { output: 'Inspected existing implementation.', metadata: { truncated: false } });
         result.noChangeReason = 'Inspected implementation already satisfies the scoped task.';

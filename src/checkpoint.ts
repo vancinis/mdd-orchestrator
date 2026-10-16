@@ -78,7 +78,8 @@ export type ResumeData = {
   acceptance?: Acceptance; decisions: Decision[]; planned: Deliverable[]; evidence: Evidence;
   verification?: Verification; executedChecks: Check[]; changedFiles: number;
   calls: string[]; usedMessages: string[]; proposed: string[];
-  rework?: { after: Phase; summary: string };
+  /** `target` is absent for the original Verify-to-Apply correction, which every older record means. */
+  rework?: { after: Phase; target?: Phase; summary: string };
   workerPolicy?: WorkerPolicy;
   workerState?: WorkerState;
   /**
@@ -277,10 +278,13 @@ function validateData(value: unknown, workflow: Workflow, runID: string): Resume
   if (results.some(result => result.outcome === 'passed' && ['mdd-plan', 'mdd-spec'].includes(result.phase)) && !accepted) {
     throw new ValidationError('Checkpoint omits earned acceptance.');
   }
-  if (results.some(result => result.outcome === 'passed' && ['mdd-plan', 'mdd-tasks'].includes(result.phase)) && !planned.length) {
+  // A rework to a planning phase releases the plan and verification held before it; only the
+  // results recorded since then have to be answered for by what is held now.
+  const current = workflow.generation();
+  if (current.some(result => result.outcome === 'passed' && ['mdd-plan', 'mdd-tasks'].includes(result.phase)) && !planned.length) {
     throw new ValidationError('Checkpoint omits the held plan.');
   }
-  if (results.some(result => result.phase === 'mdd-verify') && data.verification === undefined) {
+  if (current.some(result => result.phase === 'mdd-verify') && data.verification === undefined) {
     throw new ValidationError('Checkpoint omits verification findings.');
   }
   evidenceCoverage(data.evidence as Evidence);
@@ -290,7 +294,7 @@ function validateData(value: unknown, workflow: Workflow, runID: string): Resume
   if (data.verification !== undefined) {
     if (!accepted || !planned.length) throw new ValidationError('Checkpoint verification has no held plan.');
     const checked = retainedVerification(data.verification, data.executedChecks, { accepted, choices, planned, verificationVersion: version });
-    if (version && results.filter(result => result.phase === 'mdd-verify').at(-1)?.outcome === 'passed' && !checked.matched)
+    if (version && current.filter(result => result.phase === 'mdd-verify').at(-1)?.outcome === 'passed' && !checked.matched)
       throw new ValidationError('Checkpoint passed verification contradicts required checks or semantic coverage.');
   }
   if (!Number.isSafeInteger(data.changedFiles) || (data.changedFiles as number) < 0 || (data.changedFiles as number) > 100000) throw new ValidationError('Invalid checkpoint changed-file count.');
@@ -303,8 +307,13 @@ function validateData(value: unknown, workflow: Workflow, runID: string): Resume
   const proposals = list(data.proposed, 1024, 'proposed');
   if (new Set(proposals).size !== proposals.length || proposals.some(item => !bounded(item, 65536))) throw new ValidationError('Invalid checkpoint replay guards.');
   if (data.rework !== undefined) {
-    const item = objectWithKeys(data.rework, 'checkpoint rework', ['after', 'summary']);
-    if (item.after !== 'mdd-verify' || typeof item.summary !== 'string' || !item.summary.length) throw new ValidationError('Invalid checkpoint rework.');
+    const item = objectWithKeys(data.rework, 'checkpoint rework', ['after', 'target', 'summary']);
+    const route = workflow.snapshot().evaluation.phases;
+    const target = item.target ?? 'mdd-apply';
+    if (!['mdd-verify', 'mdd-design', 'mdd-tasks'].includes(String(item.after)) || typeof item.summary !== 'string' || !item.summary.length ||
+        (item.target !== undefined && item.target === 'mdd-apply') ||
+        !route.includes(target as Phase) || route.indexOf(target as Phase) >= route.indexOf(item.after as Phase))
+      throw new ValidationError('Invalid checkpoint rework.');
   }
   if (data.workerPolicy !== undefined) {
     const policy = objectWithKeys(data.workerPolicy, 'captured worker policy', ['enabled']);

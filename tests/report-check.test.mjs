@@ -122,12 +122,31 @@ test('SA-2: form-only applicability is advisory and runner-held requirements rem
     planned: trace.deliverables, verificationVersion: 1 }), /unconditional/);
 });
 
-test('Apply report form requires exactly one stable completed ID without claiming to validate assignment', () => {
+// One assigned step, or every remaining one in a correction pass: which applies is held by the run,
+// so the form check accepts stable distinct IDs and leaves the assignment to it.
+test('Apply report form requires stable distinct completed IDs without claiming to validate assignment', () => {
   const data = { changes: ['src/first.ts'] };
-  for (const completed of [undefined, [], ['first', 'second'], ['first', 'first'], ['bad/id']]) {
+  for (const completed of [undefined, [], ['first', 'first'], ['bad/id']]) {
     assert.equal(checkReportForm('mdd-apply', reportDocument({ evidenceSummary: 'Implemented.', artifact: 'Batch.', ...data, completed })).ok, false);
   }
-  assert.equal(checkReportForm('mdd-apply', reportDocument({ evidenceSummary: 'Implemented.', artifact: 'Batch.', ...data, completed: ['first'] })).ok, true);
+  for (const completed of [['first'], ['first', 'second']])
+    assert.equal(checkReportForm('mdd-apply', reportDocument({ evidenceSummary: 'Implemented.', artifact: 'Batch.', ...data, completed })).ok, true);
+});
+
+test('a planning report cannot pass while naming an unmet requirement, and a correction cannot pass with an open finding', () => {
+  const missing = [{ requirementID: 'R1', reason: 'A late confirmed write can still restore after every cleanup fails.' }];
+  for (const phase of ['mdd-design', 'mdd-tasks']) {
+    const passed = checkReportForm(phase, reportDocument({ evidenceSummary: 'Designed.', artifact: 'Design.', decisions: [], deliverables: [], unmet: missing }));
+    assert.equal(passed.ok, false); assert.ok(passed.problems.some(problem => /leaves held requirements unmet cannot pass/.test(problem)));
+    const failed = checkReportForm(phase, reportDocument({ outcome: 'failed', evidenceSummary: 'Cannot design it.', artifact: 'Design gap.', unmet: missing }));
+    assert.equal(failed.ok, true);
+    assert.equal(checkReportForm(phase, reportDocument({ outcome: 'failed', evidenceSummary: 'Cannot.', artifact: 'Gap.', unmet: [{ requirementID: 'R1' }] })).ok, false);
+  }
+  const apply = { evidenceSummary: 'Corrected.', artifact: 'Correction.', changes: ['src/first.ts'], completed: ['first'] };
+  const open = checkReportForm('mdd-apply', reportDocument({ ...apply, closure: [{ id: 'S1', status: 'open', evidence: 'Probe still restores the session.' }] }));
+  assert.equal(open.ok, false); assert.ok(open.problems.some(problem => /leaves a Verify finding open cannot pass/.test(problem)));
+  assert.equal(checkReportForm('mdd-apply', reportDocument({ ...apply, closure: [{ id: 'S1', status: 'closed', evidence: 'Probe E6 failed before, passes after (exit 0).' }] })).ok, true);
+  assert.equal(checkReportForm('mdd-apply', reportDocument({ ...apply, outcome: 'failed', completed: [], closure: [{ id: 'S1', status: 'open', evidence: 'Needs a design change.' }] })).ok, true);
 });
 
 const verifyReport = (overrides = {}, data = {}) => {

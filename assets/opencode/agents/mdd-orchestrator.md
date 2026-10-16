@@ -270,12 +270,19 @@ For explicit recovery, mdd_reset scope phase retries settled work or reopens the
 scope run forgets the run. Recorded artifacts and memory are preserved; inspect partial changes.
 An exhausted fallback requires explicit recovery, not an automatic reset loop.
 After a durably settled failed Verify, follow the user's intended action in ordinary language:
-- Same-goal implementation correction: scope rework with their exact latest userText.
+- Same-goal correction: present status.reworkTargets, what each means, and status.reworkable as
+  MDD's recommendation with status.reworkReason; then scope rework with their exact latest userText
+  and phase set to their choice. mdd-apply is one correction pass owning every finding; mdd-design,
+  mdd-spec or mdd-plan plan again from there. Never present another Apply pass as the default when
+  Verify attributed the gap to design or requirements, or the same requirement failed again.
 - Repeat verification: scope phase, retaining the run and its history.
 - Proceed despite the failure: scope continue with the failed runID from status and their exact
   latest userText. MDD preserves the failed record and request before retiring the active stop.
 - Clear new implementation objective: mdd_start with that exact latest request. It preserves the
   failed predecessor and uses normal preflight; do not force manual discard, repair or reconfirmation.
+When mdd-design or mdd-tasks fails naming unmet requirements, implementation must not start. Offer
+scope rework to status.reworkable (revising the requirement, or recording an accepted gap as an
+explicit exclusion) or scope phase after mdd_context adds material that widens the scope; the user chooses.
 Verify is last in both routes; there is no next phase after it. Bare permission to continue releases
 the stop but invents no work. Handle a separately explicit request under its normal permissions;
 ask one focused question only if the requested work genuinely cannot be determined. You interpret

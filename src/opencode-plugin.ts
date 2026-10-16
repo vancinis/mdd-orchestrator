@@ -1408,9 +1408,10 @@ const plugin: Plugin = async input => {
         },
       }),
       mdd_reset: tool({
-        description: 'Release stopped MDD work in this conversation. Scope phase retries; scope rework returns a recorded failed Verify to Apply; scope continue preserves a durably settled failed Verify and retires its active stop without PASS, a next phase, or permission for new work; scope run discards the active run. Rework and continue require exact latest userText; continue also requires the failed runID. A clear fresh objective can use mdd_start directly. Continue never attests a child stopped and cannot release pending actors, questions or transfers. For other scopes, interrupted-child recovery requires actual latest user text saying the child stopped; native liveness still applies.',
+        description: 'Release stopped MDD work in this conversation. Scope phase retries; scope rework returns a recorded failed Verify, design or tasks to an earlier phase (status.reworkTargets, recommended status.reworkable); scope continue preserves a durably settled failed Verify and retires its active stop without PASS, a next phase, or permission for new work; scope run discards the active run. Rework and continue require exact latest userText; continue also requires the failed runID. A clear fresh objective can use mdd_start directly. Continue never attests a child stopped and cannot release pending actors, questions or transfers. For other scopes, interrupted-child recovery requires actual latest user text saying the child stopped; native liveness still applies.',
         args: {
-          scope: tool.schema.enum(['phase', 'run', 'rework', 'continue']).describe('phase retries; rework corrects failed Verify in Apply; continue archives settled failed Verify and frees this conversation without PASS or next work; run discards run state.'),
+          scope: tool.schema.enum(['phase', 'run', 'rework', 'continue']).describe('phase retries; rework sends a failed Verify, design or tasks back to an earlier phase; continue archives settled failed Verify and frees this conversation without PASS or next work; run discards run state.'),
+          phase: tool.schema.enum(['mdd-apply', 'mdd-plan', 'mdd-spec', 'mdd-design']).optional().describe('Only for scope rework: the phase the user chose from status.reworkTargets. Omitted, a failed Verify returns to mdd-apply and a failed design or tasks to status.reworkable.'),
           runID: tool.schema.string().min(1).optional().describe('Required for continue: the exact failed runID from status.'),
           userText: tool.schema.string().min(1).optional().describe('Required for rework or continue: the exact latest native request choosing that action. Continuation is not stopped-child attestation. For other scopes, provide only when the user says an interrupted subagent stopped. Never rewrite it.'),
         },
@@ -1445,6 +1446,7 @@ const plugin: Plugin = async input => {
               args.userText === undefined)
             throw new Error('Discarding a transferred target requires the exact latest native user request in userText. The source will not be reactivated.');
           if (args.scope === 'rework' && args.userText === undefined) throw new Error('Rework changes the route, so it needs the user\'s own word: pass userText with their exact latest message asking to fix what verification found. Nothing was changed.');
+          if (args.phase !== undefined && args.scope !== 'rework') throw new Error('phase names a rework target and is accepted only with scope rework. Nothing was changed.');
           let attested = false;
           if (args.userText !== undefined) {
             if (context.abort.aborted) throw new Error('The reset was aborted.');
@@ -1474,7 +1476,7 @@ const plugin: Plugin = async input => {
           if (!discard) await runner.restore(context, project => intake.boundRunMemory(context, project));
           try {
             if (questionReleased) intake.recover(context);
-            const reset = record(intake.reset(context, args.scope), 'reset');
+            const reset = record(intake.reset(context, args.scope, undefined, args.phase as Phase | undefined), 'reset');
             const reviewing = questionReleased && args.scope === 'phase' && record(intake.status(context.sessionID), 'status').state === 'review-ready';
             const ready = reviewing ? record(intake.prepareAdvance({ questions: [] }, context), 'question recovery') : reset;
             return reply({ ...ready, ...(seen ? { liveness: seen } : {}) });

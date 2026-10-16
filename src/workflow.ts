@@ -3,7 +3,7 @@ import { HIGH_ROUTE, preflight, ROUTES } from './kernel.js';
 import type { Evaluation } from './kernel.js';
 import type { Answers, Phase } from './policy.js';
 import { objectWithKeys, ValidationError } from './validation.js';
-import { applyPlan, completeStep, selectedStep, taskIDs } from './apply-batches.js';
+import { applyPlan, completeRemaining, completeStep, selectedStep, taskIDs } from './apply-batches.js';
 import type { ApplyProgress, ApplyStep } from './apply-batches.js';
 
 /**
@@ -74,6 +74,28 @@ export type WorkflowSnapshot = {
 const LOW_TAIL = ['mdd-plan', 'mdd-apply', 'mdd-verify'] as const;
 const HIGH_TAIL = ['mdd-propose', 'mdd-spec', 'mdd-design', 'mdd-tasks', 'mdd-apply', 'mdd-verify'] as const;
 
+/**
+ * The results that still describe the held plan. A rework that sends the route back to a planning
+ * phase (any phase before Apply) replaces acceptance, decisions or the plan, so what Tasks and Verify
+ * recorded before it no longer describes what is held. That boundary is visible in the results
+ * alone: a result on an earlier planning phase than the one before it. Until the reworked phase
+ * records its first result, the boundary is the phase the route now stands at (`current`): a planning
+ * phase earlier than the last result means everything recorded so far belongs to the old plan.
+ * Results are never discarded; this only says which of them the held plan and verification answer for.
+ */
+export function currentGeneration(results: readonly PhaseResult[], route: readonly Phase[], current?: Phase): PhaseResult[] {
+  const apply = route.indexOf('mdd-apply');
+  const planning = (phase: Phase) => { const at = route.indexOf(phase); return at >= 0 && at < apply; };
+  const last = results.at(-1);
+  if (current && last && planning(current) && route.indexOf(current) < route.indexOf(last.phase)) return [];
+  let start = 0;
+  for (let index = 1; index < results.length; index += 1) {
+    const phase = results[index]!.phase;
+    if (planning(phase) && route.indexOf(phase) < route.indexOf(results[index - 1]!.phase)) start = index;
+  }
+  return results.slice(start);
+}
+
 export class Workflow {
   readonly #answers: Answers;
   readonly #evaluation: Evaluation;
@@ -82,6 +104,12 @@ export class Workflow {
   #index = 0;
   #next: NextAction;
   #apply: ApplyProgress | undefined;
+  /**
+   * Set by a rework that returns a failed Verify to Apply, cleared by the next passed Apply. That
+   * pass is one correction owned by one actor: it may complete every remaining deliverable at once,
+   * because the findings it closes cut across them. Replay still accepts the older step-by-step form.
+   */
+  #correcting = false;
   #routeOrigin?: RouteOrigin;
   /** A run started on a recorded score-routed route, before the mdd-risk stop existed. */
   readonly #legacyRoute: boolean;
@@ -184,6 +212,14 @@ export class Workflow {
 
   applyProgress(): ApplyProgress | undefined { return this.#apply ? structuredClone(this.#apply) : undefined; }
 
+  /** Whether the Apply now due is the single correction pass a Verify rework asked for. */
+  correcting(): boolean { return this.#correcting; }
+
+  /** The results the held plan and verification still answer for; see `currentGeneration`. */
+  generation(): PhaseResult[] {
+    return structuredClone(currentGeneration(this.#results, this.#evaluation.phases, 'phase' in this.#next ? this.#next.phase : undefined));
+  }
+
   /** Settled legacy histories remain legacy; only a newly authorized Apply gets a batch plan. */
   bindApplyPlan(value: unknown): void {
     if (this.#apply || (this.#next.kind !== 'execute' && this.#next.kind !== 'approve') ||
@@ -227,14 +263,18 @@ export class Workflow {
    * Sends a route blocked by a failed phase back to an earlier phase of the same route, so the
    * work that failure points at can be corrected without discarding the run. Recorded results
    * stay: they are the history, and the failed one is what the reworked phase is asked to fix.
+   * Returning to a planning phase also releases the held Apply plan: the phases that follow will
+   * plan again, and the old deliverables no longer describe what will be implemented.
    */
   rework(phase: Phase): void {
     if (this.#next.kind !== 'blocked') throw new ValidationError('Only a route stopped by a failed phase can be reworked.');
     const target = this.#evaluation.phases.indexOf(phase);
     const current = this.#evaluation.phases.indexOf(this.#next.phase);
     if (target < 0 || target >= current) throw new ValidationError('Rework must name an earlier phase of this route.');
+    const planning = target < this.#evaluation.phases.indexOf('mdd-apply');
     this.#index = target;
-    if (this.#apply) this.#apply = { ...this.#apply, epoch: this.#apply.epoch + 1, completed: [] };
+    if (this.#apply) this.#apply = { ...this.#apply, epoch: this.#apply.epoch + 1, completed: [], ...(planning ? { planned: [] } : {}) };
+    this.#correcting = phase === 'mdd-apply';
     this.#next = { kind: 'execute', phase };
     this.#events.push({ kind: 'rework', phase });
   }
@@ -266,8 +306,11 @@ export class Workflow {
       }
       recorded.batchID = batchID;
       if (outcome === 'passed') {
-        progress = completeStep(progress, completed);
+        // The correction pass may close the whole plan at once; a history recorded before it
+        // existed completed one step per result, and still replays that way.
+        progress = this.#correcting && taskIDs(completed).length > 1 ? completeRemaining(progress, completed) : completeStep(progress, completed);
         recorded.completed = taskIDs(completed);
+        this.#correcting = false;
       } else if (completed !== undefined && taskIDs(completed).length) throw new ValidationError('A failed Apply cannot earn completion.');
     } else if (completed !== undefined || batchID !== undefined) throw new ValidationError('Completion belongs only to a planned Apply batch.');
     this.#apply = progress;

@@ -155,6 +155,11 @@ test('the form asks for every narrative section and a level, never a percentage'
 test('the form an actor is shown names only its own fields', () => {
   assert.match(reportFormatLines('mdd-verify').join('\n'), /exactly these keys: checks, verification\./);
   assert.match(reportFormatLines('mdd-apply').join('\n'), /exactly these keys: changes, noChangeReason, checks, delivered, completed\./);
+  // Closure belongs to the correction pass after failed Verify; an ordinary Apply is not shown it.
+  assert.doesNotMatch(reportFormatLines('mdd-apply').join('\n'), /closure/);
+  assert.match(reportFormatLines('mdd-apply', 1, true).join('\n'), /exactly these keys: changes, noChangeReason, checks, delivered, completed, closure, verificationVersion\./);
+  for (const phase of ['mdd-plan', 'mdd-design', 'mdd-tasks']) assert.match(reportFormatLines(phase).join('\n'), /unmet=\[\{requirementID,reason\}\].*requires outcome failed/);
+  assert.match(reportFormatLines('mdd-verify', 1).join('\n'), /cause: implementation \(default\)/);
   assert.match(reportFormatLines('mdd-explore').join('\n'), /omit "## MDD Data" entirely/);
   assert.doesNotMatch(reportFormatLines('mdd-plan').join('\n'), /verification=/);
   for (const phase of ['mdd-explore', 'mdd-plan', 'mdd-apply', 'mdd-verify']) {

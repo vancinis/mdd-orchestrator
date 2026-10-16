@@ -12,6 +12,11 @@ explain how compatibility, security and operational constraints shape them where
 If an important seam or constraint is unknown, name the gap and its impact rather than inventing
 an interface or presenting an assumption as a repository fact.
 Supply only relevant decisions linked to the held requirement IDs. Do not replace that map.
+Check every held requirement against the failure model your design accepts. When no design within
+the authorized scope can satisfy one, do not pass with a decision that accepts the residual: report
+outcome failed with unmet=[{requirementID,reason}], so MDD stops before implementation and the user
+can revise the requirement or widen the scope. A residual you only disclose still reaches Apply as
+an impossible task. On a rework, the failed report is your newest input: close its failure, not move it.
 Time and quality are joint constraints; omit unnecessary design ceremony.
 Hand off implementation constraints and verification strategy to tasks and apply.
 Read and run whatever helps you understand real behaviour. This phase designs, so do not

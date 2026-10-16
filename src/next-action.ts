@@ -66,8 +66,13 @@ export function nextAction(status: unknown): NextAction | undefined {
   // re-checking an unchanged implementation reproduces the same failure. It outranks the exhausted
   // fallback notice because the findings are recorded, whatever route produced them.
   if (state === 'blocked' && typeof value.reworkable === 'string') {
+    const targets = Array.isArray(value.reworkTargets) && value.reworkTargets.length ? value.reworkTargets.join(', ') : value.reworkable;
+    const reason = typeof value.reworkReason === 'string' ? ` MDD recommends ${value.reworkable}: ${value.reworkReason}` : '';
+    const offer = `Present every rework target with what it means and the recommendation, and let the user choose. scope rework with exact latest userText and phase set to their choice (${targets}) sends the run back to it; the route then runs again from there.${reason}`;
+    if (value.reworkFrom === 'mdd-design' || value.reworkFrom === 'mdd-tasks') return { tool: 'mdd_reset',
+      why: `${value.reworkFrom} reported failure and named the held requirements it cannot satisfy (its artifact says why). Implementation must not start on that plan. ${offer} Revising the specification is also how a gap the user accepts becomes an explicit exclusion. Alternatively scope phase retries ${value.reworkFrom}, after mdd_context adds material that widens its scope. Never choose or continue automatically.` };
     return { tool: 'mdd_reset',
-      why: `Verification reported failure and its findings are recorded. Follow the user's explicit choice: scope rework with exact latest userText sends the run back to ${value.reworkable}; scope phase retries Verify; scope continue with this runID and exact latest userText preserves the failed result and releases the stop without PASS. Verify has no next phase. For a clear new objective, call mdd_start with the exact latest request; normal preflight still applies, without a discard ritual. Never choose or continue automatically, and never treat continuation as stopped-child attestation.` };
+      why: `Verification reported failure and its findings are recorded. Follow the user's explicit choice. ${offer} Without phase, scope rework returns to mdd-apply. scope phase retries Verify; scope continue with this runID and exact latest userText preserves the failed result and releases the stop without PASS. Verify has no next phase. For a clear new objective, call mdd_start with the exact latest request; normal preflight still applies, without a discard ritual. Never choose or continue automatically, and never treat continuation as stopped-child attestation.` };
   }
 
   if (state === 'continued-with-failed-verification') return { tool: 'mdd_status',

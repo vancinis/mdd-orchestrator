@@ -1,5 +1,5 @@
 import { boundedText, nonemptyText } from './phase-runner.js';
-import { acceptance, assertNoTraceSection, phaseFields, UNMATCHED_PASS } from './acceptance.js';
+import { acceptance, assertNoTraceSection, closure, OPEN_CLOSURE_PASS, phaseFields, UNMATCHED_PASS, unmet, UNMET_PASS } from './acceptance.js';
 import { concerns } from './concerns.js';
 import { openQuestions } from './open-questions.js';
 import { changed, deliverables, executed, verificationVersion, verifyReport } from './phase-evidence.js';
@@ -86,8 +86,15 @@ export function checkReportForm(phase: Phase, text: unknown): ReportCheck {
     ...(passed && (phase === 'mdd-plan' || phase === 'mdd-spec') ? [() => acceptance(fields.acceptance)] : []),
     ...(passed && (phase === 'mdd-plan' || phase === 'mdd-tasks') ? [() => deliverables(fields.deliverables, version)] : []),
     ...(passed && phase === 'mdd-apply' ? [() => changed(fields.changes, fields.noChangeReason), () => {
-      if (taskIDs(fields.completed).length !== 1) throw new Error('Successful Apply must name exactly one completed task.');
+      // One assigned task, or every remaining one in a correction pass: which applies is the run's to judge.
+      if (!taskIDs(fields.completed).length) throw new Error('Successful Apply must name its completed task.');
     }, () => executed(fields.checks, version)] : []),
+    ...(['mdd-plan', 'mdd-design', 'mdd-tasks'].includes(phase) ? [() => {
+      if (unmet(fields.unmet).length && passed) throw new Error(UNMET_PASS);
+    }] : []),
+    ...(phase === 'mdd-apply' && fields.closure !== undefined ? [() => {
+      if (closure(fields.closure).some(entry => entry.status === 'open') && passed) throw new Error(OPEN_CLOSURE_PASS);
+    }] : []),
     // Verify's checks and verification are read on every outcome, exactly as the run reads them. A
     // check that skipped them on a failed Verify once cleared a report the run then refused, so
     // the actor was told it was fine at the one moment it could still have fixed it. Which links

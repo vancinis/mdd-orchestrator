@@ -37,3 +37,21 @@ export function completeStep(progress: ApplyProgress, value: unknown): ApplyProg
   }
   return { ...structuredClone(progress), completed: [...progress.completed, selected.id] };
 }
+
+/** The steps still owed, in plan order: what one correction pass has to close together. */
+export function remainingSteps(progress: ApplyProgress): string[] {
+  return progress.planned.filter(step => !progress.completed.includes(step.id)).map(step => step.id);
+}
+
+/**
+ * A correction pass after failed Verify is one actor owning every finding, so it completes every
+ * remaining step at once, in plan order. Partial correction earns nothing: report it as failed.
+ */
+export function completeRemaining(progress: ApplyProgress, value: unknown): ApplyProgress {
+  const completed = taskIDs(value);
+  const remaining = remainingSteps(progress);
+  if (!remaining.length || completed.length !== remaining.length || completed.some((id, index) => id !== remaining[index])) {
+    throw new ValidationError(`A correction pass must complete every remaining deliverable in plan order (${remaining.join(', ') || 'none'}) or report outcome failed; partial correction earns no progress.`);
+  }
+  return { ...structuredClone(progress), completed: [...progress.completed, ...completed] };
+}

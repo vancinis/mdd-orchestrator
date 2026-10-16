@@ -1076,7 +1076,7 @@ test('runner contract: a phase prompt carries only the schema of its own result 
   // The prompt reaches the actor, not the coordinator, so it is read where it is delivered: what
   // `before` returns is exactly what the dispatched subagent receives.
   const dispatched = await runner.before(call, ready.task);
-  assert.match(dispatched.prompt, /exactly these keys: acceptance, decisions, deliverables, verificationVersion\./);
+  assert.match(dispatched.prompt, /exactly these keys: acceptance, decisions, deliverables, unmet, verificationVersion\./);
   assert.match(dispatched.prompt, /concrete changes, decisions or investigation steps, and the source-grounded reason for each/);
   // The injected mdd-doc guide names verification reports in prose; no verification schema leaks.
   assert.doesNotMatch(dispatched.prompt, /verification=\{|keys: checks, verification/);
