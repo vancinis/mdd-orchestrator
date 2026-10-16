@@ -38,6 +38,16 @@ Results are recorded under Progress.
 - `cause` is optional and defaults to implementation; the repeated-failure rule compares requirement IDs from the previous Verify artifact's links section.
 - Transfer of a reworked run keeps its existing Apply-only target rework.
 
+## Follow-up: restated results that advance the route could not be restored
+
+First reported here as local-store only; that was wrong. It affected every store.
+
+- Symptom: after a refused report was restated with `mdd_phase_result` and the restated result advanced the route with no approval in between (automatic mode, next Apply batch, the route mdd-risk selected), any restart returned `restored: false` ("Checkpoint or progress cannot be validated for this parent").
+- Cause (instrumented restore): `Checkpoint and progress correlation disagree`. The checkpoint settled the inline attempt (`attempt.id` = the restatement's UUID), but the progress marker settled with `callID` of the earlier delegated call and no `attemptID`. `#record`/`#recordRisk` ready the next phase (`#advance` → `#prepare`, which resets `mode` to `delegate`) before the final `#mark`, and `#mark` derived "inline" from the run's current mode.
+- Fix: `#record` and `#recordRisk` capture whether their own attempt is inline before readying the next phase and pass it to `#mark`, whose `inline` parameter now defaults to the old derivation.
+- Evidence: new `tests/inline-restatement-restore.test.mjs` — RED 1 passed / 3 failed (Apply restatement in `none` and `local`, risk restatement; the approval-stop control passed) on the unfixed source; GREEN 4/4. The apply-batches correction test now restarts after an inline restatement in the local store again.
+- Final after the follow-up: `npm run typecheck` exit 0; `git diff --check` exit 0; `npm test` 2,093 tests, 2,090 passed, 0 failed, 3 skipped.
+
 ## Progress
 
 - Dependencies: absent at start; `npm ci --ignore-scripts --no-audit --no-fund` installed 396 locked packages without manifest changes.
@@ -46,4 +56,4 @@ Results are recorded under Progress.
 - New `tests/rework-routing.test.mjs` (9 tests): correction-pass workflow and legacy replay, planning rework and generations, verification causes and findings, design-cause and repeated-failure recommendations, unmet design → spec rework through restart, design failure without unmet, next action.
 - One intermediate full run had a single `setup-ui` failure ("source first run without dist…") while sources were being edited mid-run; it passed in isolation and in the final run.
 - Final: `npm run typecheck` exit 0; `git diff --check` exit 0; `npm test` 2,089 tests, 2,086 passed, 0 failed, 3 skipped (same environment skips as baseline).
-- Delivery: committed as its own work unit; integration with `origin/main` and publication follow.
+- Delivery: the routing changes and this restore fix are separate commits; each passed the full suite on its own tree (2,086 and 2,090 passed, 0 failed). Integration with `origin/main` and publication follow.

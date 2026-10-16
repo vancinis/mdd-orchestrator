@@ -2063,6 +2063,8 @@ export class PhaseRunner {
   /** One contract for both routes: the phase reports the same document however it was carried out. */
   async #record(run: Run, text: string, callID?: string, publication?: { batchID: string }): Promise<void> {
     if (this.#risking(run)) { await this.#recordRisk(run, text, callID); return; }
+    // Captured before the next phase is readied, which resets the mode (see #mark).
+    const inline = run.mode === 'inline' && !run.callID;
     const report = this.#readReport(run, text, callID);
     const { result, ignored, outcome, evidenceSummary, advisory, questions, narrative } = report;
     let artifact = report.artifact;
@@ -2231,7 +2233,7 @@ export class PhaseRunner {
       }
       this.#event(run, 'report', run.state === 'complete' ? 'passed' : run.state === 'blocked' ? 'blocked' : undefined);
       this.#preserve(run);
-      try { this.#mark(run, run.state === 'complete' ? 'complete' : 'settled'); }
+      try { this.#mark(run, run.state === 'complete' ? 'complete' : 'settled', inline); }
       catch {
         if (this.options.checkpoint) {
           run.checkpointFailed = true;
@@ -2266,6 +2268,8 @@ export class PhaseRunner {
    * task is published, so nothing after the commit boundary can contradict what was recorded.
    */
   async #recordRisk(run: Run, text: string, callID?: string): Promise<void> {
+    // Captured before the selected route's first phase is readied, which resets the mode (see #mark).
+    const inline = run.mode === 'inline' && !run.callID;
     const check = checkRiskReportForm(text);
     if (!check.ok) throw new MalformedReport(`The mdd-risk report could not be read: ${check.problems.join(' ')}`);
     let fields: Record<string, unknown>;
@@ -2334,7 +2338,7 @@ export class PhaseRunner {
       else this.#advance(run);
     }
     this.#preserve(run);
-    try { this.#mark(run, 'settled'); }
+    try { this.#mark(run, 'settled', inline); }
     catch {
       if (this.options.checkpoint) {
         run.checkpointFailed = true;
@@ -3302,12 +3306,16 @@ export class PhaseRunner {
     try { this.options.lessons?.(run.runtime.directory, input, this.#now()); } catch { /* A lesson is never worth a route. */ }
   }
 
-  #mark(run: Run, state: 'pending' | 'settled' | 'complete'): void {
+  /**
+   * `inline` describes the attempt being marked. It defaults to the run's current mode, which is
+   * right until a recorded result readies the next phase: readying switches the run back to
+   * delegation, so a result settling after that passes the mode its own attempt had.
+   */
+  #mark(run: Run, state: 'pending' | 'settled' | 'complete', inline = run.mode === 'inline' && !run.callID): void {
     if (!this.options.progress) return;
     // A released attempt still has to record that it ended, so the last dispatched call is kept.
     // A run carried out inline has no call at all, and must still be marked: skipping it is what
     // made an interrupted inline phase indistinguishable from a conversation that never started.
-    const inline = run.mode === 'inline' && !run.callID;
     const callID = run.workerState?.batch?.id ?? (inline ? undefined : run.callID ?? run.lastCallID);
     // A side investigation has its own call ID. Never correlate its pending marker with the last
     // settled main-phase attempt, even though that attempt remains in this run's history.

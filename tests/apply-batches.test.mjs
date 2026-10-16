@@ -405,13 +405,11 @@ for (const store of ['none', 'local']) test(`${store}: explicit rework starts a 
   assert.equal(ready.description, 'MDD apply correction');
   const closure = findings.map(id => ({ id, status: 'closed', evidence: `Probe for ${id} failed before the change and passes after it (exit 0).` }));
   const { call, args } = await f.dispatch();
-  const corrected = report({ completed: ['first', 'second'], changes: ['src/correction.ts'], closure });
-  if (store === 'none') {
-    await assert.rejects(f.runner.after(call, args, report(applied('first', ['src/correction.ts']))), /must report closure for every Verify finding/);
-    await assert.rejects(f.runner.submit({ result: report({ completed: ['first', 'second'], changes: ['src/correction.ts'],
-      closure: closure.map((entry, index) => index ? entry : { ...entry, status: 'open' }) }) }, f.runtime), /leaves a Verify finding open cannot pass/);
-    await f.runner.submit({ result: corrected }, f.runtime);
-  } else await f.runner.after(call, args, corrected);
+  await assert.rejects(f.runner.after(call, args, report(applied('first', ['src/correction.ts']))), /must report closure for every Verify finding/);
+  await assert.rejects(f.runner.submit({ result: report({ completed: ['first', 'second'], changes: ['src/correction.ts'],
+    closure: closure.map((entry, index) => index ? entry : { ...entry, status: 'open' }) }) }, f.runtime), /leaves a Verify finding open cannot pass/);
+  // Restated inline; the local-store restart below proves the restated result stays resumable.
+  await f.runner.submit({ result: report({ completed: ['first', 'second'], changes: ['src/correction.ts'], closure }) }, f.runtime);
   assert.match(args.prompt, /One actor owns the whole correction/);
   assert.match(args.prompt, /Report closure for each finding ID S1, S2, first, second, D1, first-check, second-check/);
   assert.match(args.prompt, /^Reproduction probe directory \(gitignored MDD data, not project source\): .*probes/m);
