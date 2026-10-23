@@ -190,7 +190,7 @@ for (const role of ['explore', 'propose', 'spec', 'design', 'tasks', 'apply', 'v
   });
 }
 
-for (const name of ['mdd-pr-body', 'mdd-cleanup', 'mdd-doc', 'mdd-judgment-day']) {
+for (const name of ['mdd-pr-body', 'mdd-cleanup', 'mdd-doc', 'mdd-judgment-day', 'mdd-grill']) {
   test(`assets: ${name} trigger metadata, structure and explicit registry`, () => {
     const text = fs.readFileSync(`assets/opencode/skills/${name}/SKILL.md`, 'utf8');
     assert.match(text, new RegExp(`name: ${name}\\n`));
@@ -728,6 +728,51 @@ test('assets: cognitive-doc-design stays verbatim upstream, attributed, and is n
     assert.ok(MDD_PACKAGED_ASSETS.includes(name), name);
   }
   assert.match(fs.readFileSync('AGENTS.md', 'utf8'), /skills\/cognitive-doc-design\/SKILL\.md/);
+});
+
+// A large, undecided request used to reach admission with one batch of at most eight product
+// questions, and the contract froze whatever that batch could not settle. The session runs before
+// the contract exists, through the native question tool, because entry binds the latest user text.
+// These assertions check shipped instructions, not model adherence or a native E2E run.
+test('assets: mdd-grill offers a pre-admission question session with optional documentation', () => {
+  const skill = fs.readFileSync('assets/opencode/skills/mdd-grill/SKILL.md', 'utf8');
+  const flat = skill.replace(/\s+/g, ' ');
+  for (const name of ['assets/opencode/skills/mdd-grill/SKILL.md', 'assets/opencode/skills/mdd-grill/NOTICE']) {
+    assert.ok(MDD_ASSETS.includes(name), name);
+  }
+  assert.ok(Buffer.byteLength(skill) < 6000, 'stays a small share of the coordinator context');
+  for (const pattern of [/before the first `mdd_adapt` entry of a fresh implementation request/,
+    /complexity or impact `high` for a new capability/, /more than three `productQuestions` or `context\.technical: "uncertain"`/,
+    /explicit user request to be grilled or questioned first/, /native question tool in this same turn/,
+    /entry binds the latest native user message/, /grants no mode, approval, operation consent or implementation authority/,
+    /writes no file/, /never ask the user for it/, /never ask while a task is in flight/,
+    /Declining or cancelling leaves the ordinary entry and its `productQuestions` unchanged/,
+    /`Sesión de preguntas`, `Sesión con documentación` .* `Seguir sin sesión`/, / \(Recomendada\)/,
+    /design tree/, /frontier is empty/, /`Confirmar y seguir`, `Corregir algo` or `Cancelar`/,
+    /only after confirmation/, /`decisions\[\]`/, /`exclusions\[\]`/, /`acceptance\.requirements\[\]\.scenarios`/,
+    /24000-byte budget/, /hard to reverse, surprising without context and the result of a real trade-off/,
+    /Apply writes, Verify checks/, /When nothing qualifies, create nothing/,
+    /no active MDD run in this conversation; a closed one is fine/, /MDD refuses questions it did not issue while a run is active/,
+    /A session question is refused \| Stop without retrying or rephrasing; continue with the ordinary entry/,
+    /latest 100 native messages/]) assert.match(flat, pattern);
+  // The adapter suffixes recommended clarification options this way; the coordinator matches it.
+  assert.doesNotMatch(skill, /\(Recomendado\)/);
+  const notice = fs.readFileSync('assets/opencode/skills/mdd-grill/NOTICE', 'utf8');
+  assert.match(notice, /MIT License/);
+  assert.match(notice, /Copyright \(c\) 2026 Matt Pocock/);
+  assert.match(notice, /The above copyright notice and this permission notice shall be included/);
+  assert.match(notice, /not a verbatim copy/);
+  const coordinator = fs.readFileSync('assets/opencode/agents/mdd-orchestrator.md', 'utf8').replace(/\s+/g, ' ');
+  assert.match(coordinator, /Grilling offer: before the first mdd_adapt entry of a fresh request/);
+  assert.match(coordinator, /load the installed skills\/mdd-grill\/SKILL\.md by exact path/);
+  assert.match(coordinator, /offers the session once, in either mode; declining keeps the ordinary entry unchanged/);
+  assert.match(coordinator, /native question tool in this same turn, because entry binds the latest native user message/);
+  assert.match(coordinator, /never mode, approval or operation consent/);
+  assert.match(coordinator, /Only while this conversation holds no active MDD run, a closed one being fine; a refused session question ends the session without retry/);
+  assert.ok(coordinator.indexOf('Grilling offer:') > coordinator.indexOf('Fresh implementation, including precise edits'));
+  const guide = fs.readFileSync('docs/opencode-adapter.md', 'utf8').replace(/\s+/g, ' ');
+  assert.match(guide, /### Question session before admission/);
+  assert.match(guide, /not measured model compliance; model-backed E2E is pending/);
 });
 
 // The body is read by a reviewer, so it is Spanish like every other user-facing surface, and the

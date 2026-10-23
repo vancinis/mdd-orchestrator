@@ -605,6 +605,53 @@ and parent/call correlation still apply. Aggregate safety bounds also remain: th
 is at most 160000 bytes, and the combined phase handoff at most 96000 bytes. Oversized payloads
 fail explicitly rather than being shortened or treated as a reason to silently re-ask.
 
+### Question session before admission
+
+A large, undecided request can be settled with the user before its version-3 contract exists,
+instead of in one batch of at most eight product questions. The coordinator offers the session
+once, in either mode, before the first `mdd_adapt` entry when:
+
+| Trigger | Condition |
+|---|---|
+| Assessment | Its own draft assessment has `complexity` or `impact` high, for a new capability. |
+| Open decisions | The draft would still carry more than three `productQuestions`, or `context.technical` is `uncertain`. |
+| Explicit request | The user asks to be questioned first; the offer is skipped and only the documentation choice is asked. |
+
+The offer has three options: `Sesión de preguntas`, `Sesión con documentación` and
+`Seguir sin sesión`. Declining keeps the ordinary entry, product questions included, unchanged.
+A session asks the decisions that are ready to answer in rounds, each question with a
+recommended option, until no decision is left open. Facts the repository can answer are read or
+explored first, never asked. A final summary is confirmed before the contract is drafted:
+
+| Session result | Contract field |
+|---|---|
+| Decision | `decisions[]`, linked to the requirements it shapes |
+| Out of scope | `exclusions[]` |
+| Agreed behaviour | `acceptance.requirements[].scenarios` |
+| Still open | `productQuestions` |
+
+With documentation, terms resolved against the existing glossary and decisions that are hard to
+reverse, surprising and a real trade-off become one more requirement and assignment: Apply writes
+`GLOSSARY.md` or ADR files within `scope.writes`, and Verify checks them. The session itself
+writes nothing.
+
+The rounds use the native `question` tool in the same turn, because entry binds the latest native
+user message. If the user answers in chat instead, the coordinator asks them to resend the request
+in one message, which then becomes the objective.
+
+| Limit | Behaviour |
+|---|---|
+| Conversation holds a closed version-3 run | A session runs normally before the next request's entry. The closed run issues no question of its own, so intake treats any question it did not issue there as the coordinator's; an unresolved durable MDD question still refuses. |
+| Conversation holds an active run | MDD refuses native questions it did not issue, so no session is offered there; a new conversation can host one. A refused session question changes no state, and the ordinary entry stays available. |
+| Readable history | Entry reads the latest 100 native messages. A session long enough to push the request out of that window is refused without creating a run. |
+| Dismissed session question | Settles without holding the parent; the ordinary entry stays available. |
+
+Session answers are clarification only: they
+grant no mode, approval or operation consent, and contract validation is unchanged. The packaged
+`skills/mdd-grill/SKILL.md` is an MIT adaptation of the mattpocock/skills `grilling` and
+`domain-modeling` skills; its `NOTICE` travels with it. These are shipped instructions, not
+measured model compliance; model-backed E2E is pending.
+
 ### Bootstrap the actual parent
 
 Only when memory is enabled, MDD checks health and `GET /project/current?cwd=<native-root>`.

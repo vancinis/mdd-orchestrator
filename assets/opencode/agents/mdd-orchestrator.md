@@ -78,9 +78,20 @@ authored text. Never supply runtime, profile, answers, approval, stopped flags o
 Inspect actual local sources before declaring complete exact read/write footprints, fingerprints,
 acceptance, decisions, assignments and evidence obligations. If context is unknown, use an idle
 read-only mdd_contextual_explore before immutable admission; do not invent paths or start a writer.
-Use genuine product questions only for decisions the repository cannot answer. Preserve actual
-native mode preferences: unset asks only mode; interactive asks exact operation approval;
-automatic does not ask continuation questions. Never answer, copy old approval or switch mode.
+Use genuine product questions only for decisions the repository cannot answer.
+Grilling offer: before the first mdd_adapt entry of a fresh request, when your own draft assessment
+has complexity or impact high for a new capability and would still carry more than three
+productQuestions or context.technical uncertain, or when the user explicitly asks to be grilled or
+questioned first, load the installed skills/mdd-grill/SKILL.md by exact path and follow it. Only
+while this conversation holds no active MDD run, a closed one being fine; a refused session
+question ends the session without retry. It offers the session once, in either mode; declining
+keeps the ordinary entry unchanged.
+Its rounds use the native question tool in this same turn, because entry binds the latest native
+user message, and they shape the contract before admission only: answers are clarification,
+never mode, approval or operation consent. Optional glossary and ADR documentation is written by
+the contract's Apply. Preserve actual native mode preferences: unset asks only mode; interactive
+asks exact operation approval; automatic does not ask continuation questions. Never answer, copy
+old approval or switch mode.
 Low selects only the next necessary actor: Apply-only or Explore then Apply is valid. Parent tools
 may execute applicable checks under native permissions; children remain scoped with no shell,
 MCP/custom tools or recursive agents. Prepare, submit complete current evidence and close honestly.

@@ -1465,6 +1465,20 @@ export class PhaseRunner {
     return this.#ownerOf(sessionID, this.#runs.get(sessionID), callID);
   }
 
+  /**
+   * Whether this parent's loaded version-3 run has closed. A closed run still holds its parent
+   * until a fresh request replaces it, but it issues no further native question of its own, so
+   * intake can tell a coordinator's own question apart from a lost MDD one. Stale or fenced
+   * authority throws, exactly as `owner` does; no state is read beyond the held run.
+   */
+  adaptiveClosed(sessionID: string): boolean {
+    const adaptive = this.#adaptive.get(sessionID);
+    if (!adaptive) return false;
+    this.#adaptiveCurrent(adaptive);
+    return (adaptive.low.state === 'completed' || adaptive.low.state === 'closed-unverified') &&
+      !adaptive.dispatching && !adaptive.low.pendingQuestions();
+  }
+
   /** The durable owner of one specific in-memory run (or, with none, of the parent's checkpoint). */
   #ownerOf(sessionID: string, run: Run | undefined, callID?: string): RunOwner | undefined {
     if (!run && this.#continuedRetirement(sessionID)) return undefined;

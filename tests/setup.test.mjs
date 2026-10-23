@@ -216,6 +216,47 @@ for (const file of ['SKILL.md', 'references/prompts-and-formats.md']) {
     assert.throws(() => initProject(root), /refuses to overwrite/); assert.deepEqual(snapshot(root), before);
   });
 }
+// An installation from before the question session has neither mdd-grill file nor the coordinator
+// rule. Updating must add both without touching a user's own grilling skills, and the runtime
+// staleness check must name only the changed coordinator, never block on the absent skill.
+test('update from a release without mdd-grill adds the skill pair and keeps the user grilling skills', async t => {
+  const { staleAssets } = await import('../dist/project-assets.js');
+  const root = fixture(t);
+  const foreign = ['skills/grilling/SKILL.md', 'skills/grill-me/SKILL.md', 'skills/grill-with-docs/SKILL.md'];
+  for (const name of foreign) { fs.mkdirSync(join(root, name, '..'), { recursive: true }); fs.writeFileSync(join(root, name), `foreign ${name}`); }
+  initProject(root);
+  const grill = ['skills/mdd-grill/SKILL.md', 'skills/mdd-grill/NOTICE'];
+  const ledger = join(root, 'mdd/setup-assets.json'), manifest = JSON.parse(fs.readFileSync(ledger, 'utf8'));
+  for (const name of grill) { fs.rmSync(join(root, name)); delete manifest[name]; }
+  fs.rmdirSync(join(root, 'skills/mdd-grill'));
+  const older = '---\nmode: primary\n---\n\nAn older coordinator without the question session.\n';
+  fs.writeFileSync(join(root, 'agents/mdd-orchestrator.md'), older);
+  manifest['agents/mdd-orchestrator.md'] = assetText(root, 'agents/mdd-orchestrator.md').digest;
+  fs.writeFileSync(ledger, JSON.stringify(manifest));
+  const environment = { home: join(root, '..'), env: { XDG_CONFIG_HOME: join(root, '..') } };
+  assert.deepEqual(staleAssets(environment), ['agents/mdd-orchestrator.md'], 'the absent skill is not reported as stale');
+  const result = initProject(root, true);
+  assert.equal(result.created, grill.length);
+  for (const name of grill) assert.equal(fs.readFileSync(join(root, name), 'utf8'), fs.readFileSync(`assets/opencode/${name}`, 'utf8'), name);
+  assert.match(fs.readFileSync(join(root, 'agents/mdd-orchestrator.md'), 'utf8'), /skills\/mdd-grill\/SKILL\.md/);
+  for (const name of foreign) assert.equal(fs.readFileSync(join(root, name), 'utf8'), `foreign ${name}`, name);
+  assert.deepEqual(staleAssets(environment), []);
+  const recorded = JSON.parse(fs.readFileSync(ledger, 'utf8'));
+  for (const name of grill) assert.equal(recorded[name], assetText(root, name).digest, name);
+  assert.ok(Buffer.byteLength(fs.readFileSync(ledger)) < 16384, 'the ledger stays inside its read bound');
+  assert.equal(initProject(root, true).created, 0);
+});
+
+for (const file of ['SKILL.md', 'NOTICE']) {
+  test(`init preserves a foreign mdd-grill ${file} before any partial installation`, t => {
+    const root = fixture(t); const path = join(root, `skills/mdd-grill/${file}`);
+    fs.mkdirSync(join(path, '..'), { recursive: true }); fs.writeFileSync(path, 'foreign content');
+    const before = snapshot(root);
+    assert.throws(() => initProject(root), /refuses to overwrite different content: skills\/mdd-grill/);
+    assert.deepEqual(snapshot(root), before);
+  });
+}
+
 test('init refuses linked target directories without writing outside the target', t => {
   const root = fixture(t); const outside = fixture(t, false);
   fs.symlinkSync(outside, join(root, 'agents'), process.platform === 'win32' ? 'junction' : 'dir');

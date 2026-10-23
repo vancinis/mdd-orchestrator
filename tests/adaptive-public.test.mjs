@@ -15,6 +15,7 @@ import { LocalFiles } from '../dist/local-files.js';
 import { RunOwnershipStore } from '../dist/run-ownership.js';
 import { adaptiveTransferRequest } from '../dist/adaptive-transfer.js';
 import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
 
 const wire = (kind, args = {}) => JSON.stringify({ routingVersion: 3, kind, args });
 const hash = text => createHash('sha256').update(text).digest('hex');
@@ -96,7 +97,7 @@ async function fixture(t, mode = 'automatic') {
       metadata: { status: 'running', sessionID: childID } } });
     for (const tool of ['shell', 'mcp_external', 'subagent']) await assert.rejects(hooks.get('execute.before')({ sessionID: childID, agent: actor,
       messageID: `child-message-${count}`, id: `denied-${tool}-${count}`, tool, input: {} }), /worker|scope|denied|allow|tool/i);
-    if (edit) await tools.get('mdd_worker_edit').execute({ operations: [{ path: 'own.txt', kind: 'edit', oldString: edit[0], newString: edit[1] }] },
+    if (edit) await tools.get('mdd_worker_edit').execute({ operations: Array.isArray(edit) ? [{ path: 'own.txt', kind: 'edit', oldString: edit[0], newString: edit[1] }] : edit.operations },
       { sessionID: childID, agent: actor, messageID: `child-message-${count}`, id: `edit-${count}`, signal: new AbortController().signal });
     const text = typeof fields === 'string' ? fields : reportDocument({ phase: actor, outcome: 'passed', evidenceSummary: 'Actual scoped actor report.', artifact: 'Read actual held source.', ...fields });
     messages.set(childID, [{ id: `final-${count}`, type: 'assistant', agent: actor, content: [{ type: 'text', text }], time: { created: count, completed: ++count }, finish: 'stop' }]);
@@ -575,4 +576,230 @@ test('AL05c public: native Decline authorizes no actor and never overrides inter
   status = await f.answer(await f.select(status), [['Decline']]);
   assert.equal(status.task, undefined); assert.equal(status.mode, 'interactive');
   assert.equal(f.store.read(f.sessionID).data.receipts.length, 0);
+});
+
+// Question session (mdd-grill) regressions. The session is the coordinator's own native questions
+// asked before the first entry, so these prove that, on the actual V2 hooks, those questions never
+// lock the parent, never become consent and leave every later admission, actor and Verify step to
+// behave exactly as it does without them. They check runtime boundaries, not model compliance.
+let grillCount = 0;
+const grillQuestion = (labels, header = 'Sesión de preguntas') => {
+  const round = ++grillCount;
+  return { questions: labels.map((_, index) => ({ header, question: `Ronda ${round}, pregunta ${index + 1}: ¿qué decidimos?`, multiple: false,
+    options: [{ label: 'Opción A (Recomendada)', description: 'La opción recomendada.' }, { label: 'Opción B', description: 'La alternativa.' }] })) };
+};
+async function ownQuestion(f, labels, input = grillQuestion(labels)) {
+  const call = f.begin('question', input);
+  const part = f.messages.get(f.sessionID).flatMap(message => message.content ?? []).find(item => item.id === call.id);
+  try { await f.hooks.get('execute.before')(call); }
+  catch (error) { part.state = { status: 'error', input: call.input, error: String(error), metadata: {} }; throw error; }
+  const content = `User has answered your questions: ${input.questions.map((q, i) => `"${q.question}"="${labels[i].join(', ')}"`).join(', ')}. You can now continue with the user's answers in mind.`;
+  await f.hooks.get('execute.after')({ ...call, status: 'completed', result: { output: { answers: labels }, content } });
+  part.state = { status: 'completed', input: call.input, content: [{ type: 'text', text: content }], metadata: { answers: labels } };
+  part.time.completed = part.time.created + 1;
+  return call;
+}
+const offer = [['Sesión de preguntas (Recomendada)']];
+const round = [['Opción A (Recomendada)'], ['Opción B']];
+const confirm = [['Confirmar y seguir']];
+function grilledDraft(f, objective = 'Replace only the bounded source.', text = 'before') {
+  const draft = f.contract(objective, text);
+  draft.assessment = { assessmentVersion: 1, complexity: 'high', impact: 'high' };
+  draft.decisions = [{ id: 'D1', description: 'Settled in the question session: replace the bounded source wholesale.', requirements: ['R1'] }];
+  draft.exclusions = ['No change outside the bounded source.'];
+  draft.assignments[0].decisions = ['D1'];
+  return draft;
+}
+
+test('grill: a complete session before entry leaves the high route, Apply and Verify unblocked', async t => {
+  const f = await fixture(t), draft = grilledDraft(f), userID = f.user(draft.objective);
+  await f.call('mdd_status');
+  for (const labels of [offer, round, round, round, confirm]) await ownQuestion(f, labels);
+  let status = await f.send('entry', { contract: draft, messageID: userID });
+  assert.equal(status.state, 'await-selection'); assert.equal(status.route, 'high');
+  assert.equal(status.question, undefined, 'session answers are not an MDD question still waiting');
+  assert.equal(f.store.read(f.sessionID).nativePolicy.questions.length, 0, 'session answers are never recorded as MDD consent');
+  assert.deepEqual(f.store.read(f.sessionID).data.contract.decisions, draft.decisions);
+  assert.deepEqual(f.store.read(f.sessionID).data.contract.exclusions, draft.exclusions);
+  const item = draft.assignments[0], command = 'node -e "process.exit(0)"';
+  const deliverables = [{ id: item.id, description: item.description, path: item.path, scenarios: item.scenarios, decisions: ['D1'], dependsOn: [], parallel: item.scope,
+    checks: [{ id: 'C1', command, requirement: 'required' }] }];
+  for (const [actor, fields] of [['mdd-propose', {}], ['mdd-spec', { domain: 'project', acceptance: draft.acceptance }],
+    ['mdd-design', { decisions: draft.decisions }], ['mdd-tasks', { deliverables }]]) {
+    assert.equal(status.continuation.next, actor);
+    status = (await f.dispatch(await f.select(status, actor), { verificationVersion: 1, ...fields })).status;
+    assert.equal(status.lastReceipt.outcome, 'passed', actor);
+  }
+  status = (await f.dispatch(await f.select(status), { completed: ['A1'], changes: ['own.txt'], checks: [] }, ['before', 'after'])).status;
+  status = await f.send('prepare', { handle: status.handle });
+  const shell = f.begin('shell', { command }); await f.hooks.get('execute.before')(shell);
+  execFileSync(process.execPath, ['-e', 'process.exit(0)'], { cwd: f.root });
+  const evidence = f.evidence(draft, status.evidence.snapshotID);
+  evidence.readback = { acceptance: draft.acceptance, scope: draft.scope, exclusions: draft.exclusions, decisions: draft.decisions };
+  evidence.exclusions = [{ exclusion: draft.exclusions[0], status: 'verified', assessment: 'Only the bounded source changed.' }];
+  evidence.decisions = [{ decisionID: 'D1', status: 'verified', sources: ['E1'], checks: [], assessment: 'The bounded source was replaced wholesale.' }];
+  evidence.checks = [{ id: 'X1', command, exit: 0 }]; evidence.checkResults = [{ checkID: 'C1', disposition: 'passed', executions: ['X1'] }];
+  status = await f.send('submit', { handle: status.handle, evidence });
+  const finding = { status: 'verified', checks: ['X1'], assessment: 'Actual held source and parent check reviewed.' };
+  const verification = { scenarios: [{ requirementID: 'R1', scenarioID: 'S1', stepID: 'A1', ...finding }], steps: [{ stepID: 'A1', ...finding }],
+    decisions: [{ decisionID: 'D1', ...finding }], changes: 'Held replacement is present.', limits: [], checkResults: evidence.checkResults, supplementalChecks: [] };
+  status = (await f.dispatch(await f.select(status, 'mdd-verify'), { verificationVersion: 1, checks: evidence.checks, verification })).status;
+  assert.equal(status.lastReceipt.outcome, 'passed');
+  assert.equal((await f.send('close', { handle: status.handle, outcome: 'verified' })).state, 'completed');
+});
+
+test('grill: declining the offer keeps ordinary product questions and admission unchanged', async t => {
+  const f = await fixture(t), draft = grilledDraft(f), userID = f.user(draft.objective);
+  await ownQuestion(f, [['Seguir sin sesión']]);
+  const open = { ...structuredClone(draft), productQuestions: ['Which replacement format?'] };
+  let status = await f.send('entry', { contract: open, messageID: userID });
+  assert.ok(status.question, 'MDD still issues its own product question');
+  assert.match(status.question.questions[0].question, /Which replacement format\?/);
+  status = await f.answer(status, [['Keep the original format.']]);
+  status = await f.send('entry', { contract: draft, messageID: userID });
+  assert.equal(status.state, 'await-selection'); assert.equal(status.route, 'high');
+  const recorded = f.store.read(f.sessionID).nativePolicy.questions;
+  assert.deepEqual(recorded.map(item => item.adaptive.purpose), ['product'], 'only the MDD-issued question is recorded, never the offer');
+});
+
+test('grill: interactive and unset modes still ask MDD mode and operation approval after a session', async t => {
+  for (const mode of ['interactive', null]) {
+    const f = await fixture(t, mode), draft = grilledDraft(f), userID = f.user(draft.objective);
+    for (const labels of [offer, round, confirm]) await ownQuestion(f, labels);
+    let status = await f.send('entry', { contract: draft, messageID: userID });
+    assert.ok(status.question, 'a session never stands in for MDD consent');
+    if (mode) { assert.match(status.question.questions[0].question, /Authorize only this exact adaptive operation/); status = await f.answer(status); }
+    else {
+      assert.equal(status.question.questions[0].header, 'Modo');
+      status = await f.answer(status, [[status.question.questions[0].options.find(option => /utom.tico/.test(option.label)).label]]);
+    }
+    assert.equal(status.state, 'await-selection'); assert.equal(status.route, 'high');
+  }
+});
+
+test('grill: the documentation option admits new glossary and ADR files and Apply creates them in scope', async t => {
+  const f = await fixture(t), draft = f.contract('Replace only the bounded source and record the agreed language.');
+  const docs = ['GLOSSARY.md', 'docs/adr/0001-replace-bounded-source.md'];
+  draft.scope = { complete: true, reads: ['own.txt'], writes: ['own.txt', ...docs] };
+  draft.context.fingerprints = [{ path: 'own.txt', digest: hash('before') }, ...docs.map(path => ({ path, digest: null }))];
+  draft.acceptance.requirements.push({ id: 'R2', description: 'Agreed language is documented', scenarios: [{ id: 'S2', given: 'A resolved term and decision', when: 'The run applies', then: 'The glossary and ADR record them' }] });
+  draft.assignments.push({ id: 'A2', path: 'GLOSSARY.md', description: 'Write the agreed glossary term and ADR', scenarios: ['S2'], decisions: [], dependsOn: [],
+    scope: { complete: true, reads: [], writes: docs }, obligations: { source: [{ id: 'E2', description: 'Read the written documentation', paths: docs }], checks: [] } });
+  const userID = f.user(draft.objective);
+  for (const labels of [[['Sesión con documentación (Recomendada)']], round, confirm]) await ownQuestion(f, labels);
+  let status = await f.send('entry', { contract: draft, messageID: userID });
+  assert.equal(status.state, 'await-selection'); assert.equal(status.route, 'low');
+  status = await f.select(status, 'mdd-apply', { assignmentID: 'A2' });
+  assert.equal(status.task.agent, 'mdd-apply');
+  const operations = [{ path: 'GLOSSARY.md', kind: 'create', content: '# Project\n\n## Language\n\n**Bounded source**:\nThe single file this change may replace.\n_Avoid_: target file\n' },
+    { path: 'docs/adr/0001-replace-bounded-source.md', kind: 'create', content: '# Replace the bounded source wholesale\n\nAgreed in the question session.\n' }];
+  const settled = await f.dispatch(status, { completed: ['A2'], changes: docs, checks: [] }, { operations });
+  assert.equal(settled.status.lastReceipt.outcome, 'passed');
+  for (const [index, path] of docs.entries()) assert.equal(fs.readFileSync(join(f.root, path), 'utf8'), operations[index].content, path);
+  assert.equal(fs.readFileSync(join(f.root, 'own.txt'), 'utf8'), 'before', 'the documentation assignment touched only its own scope');
+});
+
+test('grill: a chat reply during the session refuses the old objective until the request is resent', async t => {
+  const f = await fixture(t), draft = grilledDraft(f), first = f.user(draft.objective);
+  await ownQuestion(f, offer);
+  f.user('Q1 sí, Q2 la opción B.');
+  await assert.rejects(f.send('entry', { contract: draft, messageID: first }), /latest|current|native/i);
+  assert.equal(f.store.read(f.sessionID), undefined, 'a refused entry leaves no run behind');
+  const resent = f.user(draft.objective);
+  await ownQuestion(f, confirm);
+  const status = await f.send('entry', { contract: draft, messageID: resent });
+  assert.equal(status.state, 'await-selection'); assert.equal(status.route, 'high');
+});
+
+test('grill: a session cannot run over a pending MDD question, and the refusal leaves it answerable', async t => {
+  const f = await fixture(t), draft = grilledDraft(f), userID = f.user(draft.objective);
+  let status = await f.send('entry', { contract: { ...structuredClone(draft), productQuestions: ['Which replacement format?'] }, messageID: userID });
+  assert.ok(status.question);
+  await assert.rejects(ownQuestion(f, round), /question|pending|differs|envelope/i);
+  status = await f.answer(status, [['Keep the original format.']]);
+  status = await f.send('entry', { contract: draft, messageID: userID });
+  assert.equal(status.state, 'await-selection');
+});
+
+test('grill: a long session within the readable native history still admits the current request', async t => {
+  const f = await fixture(t), draft = grilledDraft(f), userID = f.user(draft.objective);
+  const parent = f.messages.get(f.sessionID);
+  for (let step = 0; step < 60; step++) {
+    parent.push({ id: `grill-step-${step}`, type: 'assistant', agent: 'mdd-orchestrator', model: { providerID: 'openai', id: 'test' }, content: [], time: { created: 1000 + step } });
+    f.switchParent(f.sessionID);
+    await ownQuestion(f, [['Opción A (Recomendada)']]);
+  }
+  const status = await f.send('entry', { contract: draft, messageID: userID });
+  assert.equal(status.state, 'await-selection'); assert.equal(status.route, 'high');
+});
+
+test('grill: a dismissed session question settles without holding the parent', async t => {
+  const f = await fixture(t), draft = grilledDraft(f), userID = f.user(draft.objective);
+  const call = f.begin('question', grillQuestion(offer));
+  await f.hooks.get('execute.before')(call);
+  await f.hooks.get('execute.after')({ ...call, status: 'error', error: 'The user dismissed this question' });
+  f.messages.get(f.sessionID).flatMap(message => message.content ?? []).find(item => item.id === call.id).state =
+    { status: 'error', input: call.input, error: 'The user dismissed this question', metadata: {} };
+  const status = await f.send('entry', { contract: draft, messageID: userID });
+  assert.equal(status.state, 'await-selection'); assert.equal(status.route, 'high');
+});
+
+test('grill: a session past the readable native history fails closed without creating a run', async t => {
+  const f = await fixture(t), draft = grilledDraft(f), userID = f.user(draft.objective);
+  for (let step = 0; step < 99; step++) {
+    f.messages.get(f.sessionID).push({ id: `grill-long-${step}`, type: 'assistant', agent: 'mdd-orchestrator', model: { providerID: 'openai', id: 'test' }, content: [], time: { created: 1000 + step } });
+    f.switchParent(f.sessionID);
+    await ownQuestion(f, [['Opción A (Recomendada)']]);
+  }
+  await assert.rejects(f.send('entry', { contract: draft, messageID: userID }));
+  assert.equal(f.store.read(f.sessionID), undefined);
+});
+
+// A closed version-3 run keeps its parent until a fresh request replaces it. MDD used to refuse
+// every question it had not issued there, so a second session in the same conversation was
+// impossible until OpenCode restarted. Both closures, with and without a restore, now host one.
+async function closeRun(f, outcome) {
+  const draft = f.contract();
+  let status = await f.entry(draft);
+  if (outcome === 'unverified') return f.send('close', { handle: status.handle, outcome, limits: ['Not implemented.'] });
+  const settled = await f.dispatch(await f.select(status), { completed: ['A1'], changes: ['own.txt'], checks: [] }, ['before', 'after']);
+  // The host reports the finished child idle, as OpenCode does; terminal replacement checks it.
+  await f.emit({ type: 'session.status', data: { sessionID: settled.result.output.sessionID, status: { type: 'idle' } } });
+  status = await f.send('prepare', { handle: settled.status.handle });
+  status = await f.send('submit', { handle: status.handle, evidence: f.evidence(draft, status.evidence.snapshotID) });
+  return f.send('close', { handle: status.handle, outcome });
+}
+for (const outcome of ['unverified', 'verified']) for (const restart of [false, true]) {
+  test(`grill: after a ${outcome} closed run the same conversation can hold a session (restart=${restart})`, async t => {
+    const f = await fixture(t);
+    let status = await closeRun(f, outcome);
+    assert.equal(status.state, outcome === 'verified' ? 'completed' : 'closed-unverified');
+    const prior = status.runID;
+    if (restart) await f.restart();
+    const draft = grilledDraft(f, 'Add a different new capability.', outcome === 'verified' ? 'after' : 'before'), userID = f.user(draft.objective);
+    await f.call('mdd_status');
+    for (const labels of [offer, round, round, confirm]) await ownQuestion(f, labels);
+    assert.equal(f.store.read(f.sessionID).runID, prior, 'the session leaves the closed run untouched');
+    status = await f.send('entry', { contract: draft, messageID: userID });
+    assert.equal(status.state, 'await-selection'); assert.equal(status.route, 'high');
+    assert.notEqual(status.runID, prior);
+    assert.equal(f.store.read(f.sessionID).nativePolicy.questions.length, 0, 'session answers are never recorded as MDD consent');
+    assert.equal(new AdaptiveRetirement(f.store).read(f.sessionID, prior).previous.data.state, outcome === 'verified' ? 'completed' : 'closed-unverified');
+  });
+}
+
+// The allowance is only for a closed run with nothing of MDD's own outstanding.
+test('grill: active runs, pending MDD questions and interrupted durable questions still refuse other questions', async t => {
+  const active = await fixture(t);
+  await active.entry(active.contract());
+  await assert.rejects(ownQuestion(active, round), /no restored intake/);
+  const f = await fixture(t);
+  await closeRun(f, 'unverified');
+  const draft = grilledDraft(f, 'Add a different new capability.'), userID = f.user(draft.objective);
+  const open = { ...structuredClone(draft), productQuestions: ['Which replacement format?'] };
+  let status = await f.send('entry', { contract: open, messageID: userID });
+  assert.ok(status.question);
+  await assert.rejects(ownQuestion(f, round), /question|pending|differs|envelope/i);
+  await f.restart(); await f.call('mdd_status');
+  await assert.rejects(ownQuestion(f, round), /question|consent|intake|interrupted/i);
 });

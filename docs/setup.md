@@ -135,7 +135,7 @@ it from the source checkout you want to deploy.
 | `mdd/packages` | Content-addressed local tarballs for reproducible local package references |
 | `mdd/mdd.config.json` | Shared profiles, model preferences and explicit memory settings |
 | `mdd/setup-assets.json` | Hashes of installed MDD assets, not runtime authority |
-| `agents/mdd-*.md`, `skills/mdd-cleanup`, `skills/mdd-pr-body` | Only MDD-namespaced global actors and skills |
+| `agents/mdd-*.md`, `skills/mdd-cleanup`, `skills/mdd-pr-body`, `skills/mdd-grill` | Only MDD-namespaced global actors and skills |
 | `plugins/mdd.ts` | Relative loader for `../mdd/node_modules/my-driven-development/dist/opencode-plugin.js` |
 | `mdd/bin`, `mdd/memory` | Optional separately owned binary and data |
 

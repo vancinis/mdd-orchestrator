@@ -41,7 +41,7 @@ export type IntakeInspect = {
   transferLiveness?(runtime: Runtime, sourceSessionID: string, runID: string, requestDigest: string,
     assistantMessageID?: string): Promise<'running' | 'stopped' | 'unknown'>;
 };
-type Runner = Pick<PhaseRunner, 'start' | 'status' | 'approveNative' | 'block'> & Partial<Pick<PhaseRunner, 'admitAdaptiveInternal' | 'transferAdaptiveInternal' | 'recoverAdaptiveTransferInternal' | 'approvalStopped' | 'assertChangeable' | 'assertFreshStart' | 'closeForFreshStart' | 'contribute' | 'explore' | 'movedAway' | 'priorGuards' | 'recordConsent' | 'reset' | 'failedVerification' | 'resumable' | 'submit' | 'owner' | 'reserve' | 'release' | 'handoffRecoveredQuestion' | 'forceRoute' | 'retryRisk' | 'chooseManualRoute' | 'openQuestions' | 'takeOpenQuestions'>>;
+type Runner = Pick<PhaseRunner, 'start' | 'status' | 'approveNative' | 'block'> & Partial<Pick<PhaseRunner, 'admitAdaptiveInternal' | 'transferAdaptiveInternal' | 'recoverAdaptiveTransferInternal' | 'approvalStopped' | 'assertChangeable' | 'assertFreshStart' | 'closeForFreshStart' | 'contribute' | 'explore' | 'movedAway' | 'priorGuards' | 'recordConsent' | 'reset' | 'failedVerification' | 'resumable' | 'submit' | 'owner' | 'reserve' | 'release' | 'handoffRecoveredQuestion' | 'forceRoute' | 'retryRisk' | 'chooseManualRoute' | 'openQuestions' | 'takeOpenQuestions' | 'adaptiveClosed'>>;
 /** The run and settled state a native question reserved the durable writer against. */
 type Reservation = NonNullable<QuestionRecord['reservation']>;
 /** `fields` counts a preflight envelope's leading field questions; the rest are its clarifications. */
@@ -1066,7 +1066,7 @@ export class NativeIntake {
     this.#refuseMovedAway(call, args);
     const owner = this.runner.owner?.(call.sessionID);
     const entry = this.#entry(call, args);
-    if (!entry) { if (owner) throw new Error('Native question has no restored intake; no answer is authorized.'); return; }
+    if (!entry) { if (owner && !this.#closedAdaptive(call.sessionID)) throw new Error('Native question has no restored intake; no answer is authorized.'); return; }
     if (entry.slot?.kind === 'preflight') this.#assertIntake(entry);
     // While MDD has a question pending, that one is the only question that may run: anything else
     // leaves the user answering two things at once, and an altered copy of it is a forgery.
@@ -1137,7 +1137,10 @@ export class NativeIntake {
     this.#refuseMovedAway(call, args);
     const owner = this.runner.owner?.(call.sessionID, call.callID);
     const entry = this.#entry(call, args);
-    if (!entry || !this.#owned(args)) { if (owner) throw new Error('Native question callback has no current issued question; no answer was accepted.'); return; }
+    if (!entry || !this.#owned(args)) {
+      if (owner && !(!entry && this.#closedAdaptive(call.sessionID))) throw new Error('Native question callback has no current issued question; no answer was accepted.');
+      return;
+    }
     if (this.durable.questions?.read(call.sessionID)?.retiredCalls?.includes(call.callID))
       throw new Error('Native question call was retired; its old answer cannot affect the fresh question.');
     const slot = entry.slot;
@@ -1410,6 +1413,20 @@ export class NativeIntake {
     const owner = [...this.#questionOwners].find(([question]) => isDeepStrictEqual(question, args))?.[1];
     if (owner !== undefined && owner !== call.sessionID) throw new Error('MDD question belongs to another parent.');
     return this.#sessions.get(call.sessionID);
+  }
+
+  /**
+   * A closed version-3 run keeps its parent until a fresh request replaces it, and refusing every
+   * question there left the coordinator unable to ask anything before that request: a second
+   * question session in the same conversation was impossible. Such a run issues no question of its
+   * own, and every question MDD did issue was already matched by the adaptive gate, so a question
+   * reaching this point is the coordinator's. An unresolved durable record still refuses: that one
+   * may be MDD's own, interrupted, and it is never re-admitted as somebody else's question.
+   */
+  #closedAdaptive(sessionID: string): boolean {
+    if (!this.runner.adaptiveClosed?.(sessionID)) return false;
+    const held = this.durable.questions?.read(sessionID);
+    return !held || !['prepared', 'pending', 'answered'].includes(held.state);
   }
 
   /** Only an envelope MDD composed drives consent. Anything else is the coordinator's own question. */

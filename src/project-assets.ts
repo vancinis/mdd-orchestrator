@@ -15,6 +15,7 @@ export const MDD_ASSETS = Object.freeze([
   'assets/opencode/skills/mdd-pr-body/assets/template.md',
   'assets/opencode/skills/mdd-judgment-day/SKILL.md',
   'assets/opencode/skills/mdd-judgment-day/references/prompts-and-formats.md',
+  'assets/opencode/skills/mdd-grill/SKILL.md', 'assets/opencode/skills/mdd-grill/NOTICE',
 ]);
 /**
  * Shipped in the package and never installed. MDD's actor instructions are read from the package

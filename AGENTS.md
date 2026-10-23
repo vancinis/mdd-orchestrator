@@ -16,6 +16,7 @@ workflow dispatch.
 | `mdd-cleanup` | Scoped cleanup, redundant abstractions or overengineering | `assets/opencode/skills/mdd-cleanup/SKILL.md` |
 | `mdd-doc` | Writing a guide, report or artifact a reader must scan and verify | `assets/opencode/skills/mdd-doc/SKILL.md` |
 | `mdd-judgment-day` | Explicit request for judgment-day, judgment day or judment-day on a concrete target | `assets/opencode/skills/mdd-judgment-day/SKILL.md` |
+| `mdd-grill` | Coordinator question session before a high-assessment `mdd_adapt` entry, or an explicit request to be questioned first | `assets/opencode/skills/mdd-grill/SKILL.md` |
 | `cognitive-doc-design` | General document-design patterns, alongside `mdd-doc` | `assets/opencode/skills/cognitive-doc-design/SKILL.md` |
 
 Read the file at the path named above rather than resolving the skill by name. A bare name
