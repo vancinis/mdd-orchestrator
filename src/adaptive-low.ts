@@ -112,6 +112,15 @@ function texts(value: unknown, label: string): string[] {
   if (!Array.isArray(value) || value.length > TEXTS_MAX) throw new Error(`${label} requires at most ${TEXTS_MAX} entries.`);
   return Array.from(value, item => reportText(item, label));
 }
+/**
+ * An actor's artifact, kept exactly as the actor wrote it. It has no size limit: a 12000-byte cap
+ * here failed finished receipts while the lane's real bounds — its durable journal and the prompts
+ * that carry earlier reports — are aggregate and are enforced where those are written.
+ */
+function artifactText(value: unknown): string {
+  if (typeof value !== 'string' || !value.trim()) throw new Error('Receipt requires an actual nonempty artifact.');
+  return assertNoTraceSection(value);
+}
 function objective(value: unknown): string {
   if (typeof value !== 'string' || !value.trim() || Buffer.byteLength(value) > 12000 || /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(value))
     throw new Error('Native objective requires exact nonempty text of at most 12000 bytes without terminal controls.');
@@ -310,7 +319,7 @@ export class AdaptiveLow {
       const receipt: Receipt = { id: shortText(item.id, 'receipt ID', 100), actor: item.actor as AdaptiveActor,
         assignmentID: assignment.id, purpose: reportText(item.purpose, 'receipt purpose'), outcome: item.outcome as Receipt['outcome'], summary: summaryText(item.summary, 'receipt summary'),
         callID: shortText(item.callID, 'actual call ID', 256) };
-      if (item.artifact !== undefined) { receipt.artifact = objective(item.artifact); assertNoTraceSection(receipt.artifact); }
+      if (item.artifact !== undefined) receipt.artifact = artifactText(item.artifact);
       if (item.failure !== undefined) receipt.failure = shortText(item.failure, 'receipt failure', 500);
       if (receipt.outcome === 'passed' && (!receipt.artifact || receipt.failure)) throw new Error('Passed receipt contradicts actual failure or lacks an artifact.');
       if (item.changes !== undefined) {
@@ -329,7 +338,7 @@ export class AdaptiveLow {
       if (item.accepted !== undefined) {
         const accepted = objectWithKeys(item.accepted, 'accepted native structured payload', ['fields', 'verifyContext']);
         if (!data.continuation || receipt.actor === 'mdd-apply' || receipt.actor === 'mdd-risk' || receipt.outcome !== 'passed' ||
-            !accepted.fields || typeof accepted.fields !== 'object' || Array.isArray(accepted.fields) || Buffer.byteLength(JSON.stringify(accepted.fields)) > 48000)
+            !accepted.fields || typeof accepted.fields !== 'object' || Array.isArray(accepted.fields))
           throw new Error('Accepted native payload contradicts its actual structured receipt.');
         receipt.accepted = { fields: structuredClone(accepted.fields) as Record<string, unknown>,
           ...(accepted.verifyContext !== undefined ? { verifyContext: verifyContext(accepted.verifyContext) } : {}) };
@@ -881,7 +890,7 @@ export class AdaptiveLow {
       if (questions.length) receipt.questions = questions;
       if (this.#continuation && selected.actor !== 'mdd-apply') {
         receipt.summary = summaryText(fields.evidenceSummary, 'actual phase summary');
-        if (typeof fields.artifact === 'string' && Buffer.byteLength(fields.artifact) <= 12000) { assertNoTraceSection(fields.artifact); receipt.artifact = fields.artifact; }
+        if (typeof fields.artifact === 'string' && fields.artifact.trim()) receipt.artifact = artifactText(fields.artifact);
         this.#assertContinuationCurrent();
         if (fields.phase !== undefined && fields.phase !== selected.actor || fields.runID !== undefined && fields.runID !== runID ||
             fields.callID !== undefined && fields.callID !== callID) throw new Error('Continuation report belongs to another native phase, run or call.');
@@ -907,9 +916,7 @@ export class AdaptiveLow {
       if (input.phase !== undefined && input.phase !== selected.actor || input.runID !== undefined && input.runID !== runID ||
           input.callID !== undefined && input.callID !== callID) throw new Error('Receipt is bound to another actor, run or native call.');
       if (input.outcome !== 'passed' && input.outcome !== 'failed') throw new Error('Receipt outcome must be passed or failed.');
-      const artifact = typeof input.artifact === 'string' && input.artifact.trim() && Buffer.byteLength(input.artifact) <= 12000 ? input.artifact : undefined;
-      if (!artifact) throw new Error('Receipt requires a bounded actual artifact.');
-      assertNoTraceSection(artifact);
+      const artifact = artifactText(input.artifact);
       receipt = { ...receipt, outcome: input.outcome, summary: summaryText(input.evidenceSummary, 'actor summary'), artifact };
       if (selected.actor === 'mdd-risk') {
         receipt.assessment = parseFutureAssessment(input.assessment);

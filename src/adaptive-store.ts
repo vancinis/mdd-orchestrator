@@ -7,7 +7,9 @@ import type { AdaptiveLineage } from './adaptive-transfer.js';
 import { validateNativePolicy } from './adaptive-native.js';
 import type { NativePolicy } from './adaptive-native.js';
 
-const LIMIT = 8 * 1024 * 1024;
+/** The most one lane record may hold. A write above it is refused whole, never cut. */
+export const ADAPTIVE_RECORD_MAX_BYTES = 8 * 1024 * 1024;
+const LIMIT = ADAPTIVE_RECORD_MAX_BYTES;
 export type AdaptiveRecord = {
   version: 1; sequence: number; digest: string; admissionDigest: string;
   runID: string; sessionID: string; directory: string; worktree: string; agent: 'mdd-orchestrator'; userMessageID: string;

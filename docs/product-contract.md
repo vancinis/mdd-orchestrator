@@ -297,11 +297,15 @@ Closed runs cannot reopen, and ordinary low selection retains its five-actor all
 | Real planning | Actors receive their actual structured phase format and real predecessor reports. Plan/Spec must preserve held acceptance; Plan/Design must preserve held decisions. Plan/Tasks report only unfinished held IDs, preserving source bindings, dependencies and checks while refining technical descriptions or adding dependencies/checks. The combined real retained-plus-remaining plan must cover every scenario and applicable decision. An empty remaining plan is valid only when all work is retained. |
 | Effective execution | Validated remaining deliverables replace the remaining assignment view, rather than merely summarize it. Readiness, scoped editing, transitive dispatch prerequisites, evidence coverage and closure all use that view. Retained valid writers cannot repeat or overlap remaining outputs. Changed proof requires explicit reinspection and bounded repair, never silent PASS or automatic redo. |
 | Verify and closure | Structured Verify is mandatory and checks every effective assignment, scenario and decision using the existing structured verification contract. Its reported executions must exactly match actual parent-reported check history; scoped children still cannot execute commands. Parent final snapshot/readback/check accounting remain separately necessary. A changed snapshot or command history requires another actual Verify. Source-only low closure remains unchanged; structured verified rows require real successful command references, not invented checks. |
-| Recovery and transfer | Reports are bounded journal data, not external fixed-phase artifact identities. Restoration revalidates actual chronological receipt links, stage-specific fields, full held semantics and effective work before exposing fresh handles. Pending Plan/high/Verify actors remain quarantined until exact native stopped proof, then receive an interrupted failure, never a fake Apply. Existing CAS/readback, former-owner fences and exact-hop transfer lineage apply unchanged. |
+| Recovery and transfer | Reports are journal data, not external fixed-phase artifact identities. Restoration revalidates actual chronological receipt links, stage-specific fields, full held semantics and effective work before exposing fresh handles. Pending Plan/high/Verify actors remain quarantined until exact native stopped proof, then receive an interrupted failure, never a fake Apply. Existing CAS/readback, former-owner fences and exact-hop transfer lineage apply unchanged. |
 
 This internal controller is not a second Workflow, graph scheduler, public tool, command executor,
-permission expansion, Security/Judgment Day entry point or live-model assurance claim. Existing
-receipt, report and source budgets may refuse an oversized prompt without dispatching it.
+permission expansion, Security/Judgment Day entry point or live-model assurance claim. A receipt's
+artifact and a continuation report have no size limit of their own. When predecessor reports do
+not fit the next actor's dispatch budget, the oldest are carried as their summary plus the byte count
+and SHA-256 of the rest, and the prompt says how many. A prompt that still cannot fit is refused
+without being dispatched. A report that would take the lane's durable record past its 8 MiB bound
+is recorded as a failed receipt, not written partially.
 
 Each successful structured native receipt separately retains the accepted parsed report payload.
 Verify also freezes its snapshot identity and exact parent command history before native arguments

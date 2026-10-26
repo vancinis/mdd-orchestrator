@@ -340,12 +340,16 @@ test('regression: adaptive prose has no length limit and survives receipts, evid
   const args = await f.runner.before(f.call, f.runner.status(f.runtime.sessionID).task);
   writeFileSync(join(f.root, 'own.txt'), 'after');
   const summary = `Assigned work settled.\n\n${long}`;
-  await f.runner.after(f.call, args, f.report({ evidenceSummary: summary }));
+  // An artifact well past the old 12000-byte cap, with a terminal escape the fixed route also keeps.
+  const artifact = `The assigned source was inspected.\n${'Line by line, the replacement keeps the format. \u001b[0m\n'.repeat(400)}`;
+  assert.ok(Buffer.byteLength(artifact) > 12000);
+  await f.runner.after(f.call, args, f.report({ evidenceSummary: summary, artifact }));
   const receipt = f.runner.status(f.runtime.sessionID).lastReceipt;
   assert.equal(receipt.outcome, 'passed', receipt.failure);
   assert.equal(receipt.summary.length, 500, 'a status shows a long summary bounded');
   assert.ok(receipt.summary.endsWith('…'));
   assert.equal(f.options.adaptiveStore.read(f.runtime.sessionID).data.receipts[0].summary, summary, 'the receipt keeps the summary whole, paragraphs included');
+  assert.equal(f.options.adaptiveStore.read(f.runtime.sessionID).data.receipts[0].artifact, artifact, 'the receipt keeps the artifact exactly');
   const handle = () => f.runner.status(f.runtime.sessionID).selection.handle;
   const prepared = await f.runner.prepareAdaptiveEvidenceInternal({ handle: handle() }, f.runtime);
   const limits = Array.from({ length: 9 }, (_, index) => `Limit ${index + 1}: ${long}`);
@@ -365,6 +369,25 @@ test('regression: adaptive prose has no length limit and survives receipts, evid
   assert.equal(closed.completion.limits.length, 9, 'every evidence limit is kept');
   assert.deepEqual(closed.evidence.report.limits, limits, 'the evidence readback keeps every limit whole');
   assert.ok(Buffer.byteLength(JSON.stringify(cold.status(f.runtime.sessionID))) < 46000);
+  assert.equal(f.options.adaptiveStore.read(f.runtime.sessionID).data.receipts[0].artifact, artifact, 'a cold restore keeps the artifact exactly');
+});
+
+test('regression: a report too large for the lane record becomes a failed receipt, never a stuck lane', async t => {
+  const f = fixture(t); f.options.adaptiveStore = new AdaptiveStore(f.root);
+  await f.admit(); await f.select();
+  const args = await f.runner.before(f.call, f.runner.status(f.runtime.sessionID).task);
+  writeFileSync(join(f.root, 'own.txt'), 'after');
+  await f.runner.after(f.call, args, f.report({ artifact: 'x'.repeat(9 * 1024 * 1024) }));
+  const status = f.runner.status(f.runtime.sessionID);
+  assert.equal(status.state, 'await-selection', 'the stopped child is recorded and the lane moves on');
+  assert.equal(status.lastReceipt.outcome, 'failed');
+  assert.match(status.lastReceipt.failure, /past its 8 MiB budget/);
+  const held = f.options.adaptiveStore.read(f.runtime.sessionID);
+  assert.equal(held.data.receipts[0].outcome, 'failed');
+  assert.equal(held.data.receipts[0].artifact, undefined, 'nothing of the oversized report is kept partially');
+  assert.equal(held.attempt.state, 'settled');
+  const cold = new PhaseRunner(f.inspect, f.options);
+  assert.equal((await cold.restore(f.runtime)).restored, true);
 });
 
 test('AL-04a: cold restore retains changed Apply output without duplicating the completed assignment', async t => {

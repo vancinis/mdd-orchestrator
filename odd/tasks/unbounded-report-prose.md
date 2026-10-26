@@ -48,8 +48,39 @@ evidence (48 KB), the security assessment (20 KB), the checkpoint (16 MB) and th
    the removed caps.
 
 Not changed: identifier formats (1–64), paths (400/1000), the user's request text (12000 bytes),
-list counts (64 entries, 32 deliverables/checks, 8 concerns/questions), the adaptive artifact
-(12000 bytes) and every aggregate byte budget.
+list counts (64 entries, 32 deliverables/checks, 8 concerns/questions) and every aggregate byte
+budget. The adaptive artifact cap was removed in the follow-up below.
+
+## Follow-up: the adaptive artifact has no size limit either
+
+The adaptive lane still failed a finished receipt whose artifact was over 12000 bytes ("Receipt
+requires a bounded actual artifact."). In the structured continuation the same cap, and a
+48000-byte budget per report, refused finished planning stages. Those caps were not arbitrary. The
+continuation inlines every predecessor report into the next actor's prompt, and a lane record over
+8 MiB is refused whole. So the caps were removed, and the two aggregate bounds they stood in for
+are handled where they apply:
+
+1. **Artifacts** are kept exactly as written, of any size, at settlement and at restore. Restore
+   used to reuse the objective validator and refused terminal control characters that settlement
+   had accepted, which made such a lane non-resumable. Both now accept what the fixed route
+   accepts.
+2. **The continuation** no longer caps the artifact or the report.
+3. **The next actor's prompt** carries predecessor reports whole while they fit the 38000-byte
+   dispatch budget. Otherwise the oldest give way first to their summary plus the byte count and
+   SHA-256 of the rest, and the prompt says how many did (`continuationHandoff`). The effective
+   held contract in the same prompt keeps every structured link. A prompt that cannot fit with
+   every report compacted is still refused before dispatch.
+4. **The lane record**: a report that would take it past its 8 MiB bound
+   (`ADAPTIVE_RECORD_MAX_BYTES`) is recorded as a failed receipt with that reason. Before, the
+   write was refused and the stopped child was left unrecorded.
+
+- Observed RED on the previous commit's source: all three new regressions failed on the old caps.
+  Two failed with "Receipt/Continuation requires a bounded actual … artifact"; the oversized case
+  failed with the 12000-byte message instead of the record bound.
+- GREEN: every adaptive suite plus phase-assets passed 536/536. `npm run typecheck` exit 0.
+  `git diff --check` exit 0.
+- Full suite after the follow-up: `npm test` 2,639 tests, 2,636 passed, 0 failed, 3 skipped (the same
+  environmental skips as the baseline).
 
 ## Verification
 

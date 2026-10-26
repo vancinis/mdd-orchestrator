@@ -29,8 +29,8 @@ gentleman-programming; this is an independent rewrite for MDD artifacts.
   which appends it with canonical JSON where it applies; an exploration never gets one. Writing
   it yourself fabricates links and the result is rejected. Close the document so an appended
   section reads as a continuation.
-- Stay within the artifact byte limit. `evidenceSummary` is a separate short field, not a
-  place for this document; do not duplicate the artifact into it.
+- `evidenceSummary` is a separate short field, not a place for this document; do not duplicate
+  the artifact into it.
 - Do not propose, quote or imply running commands in a read-only phase.
 
 ## Decision Gates

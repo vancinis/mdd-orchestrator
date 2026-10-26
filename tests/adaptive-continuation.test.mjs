@@ -185,6 +185,36 @@ test('AL-04c: high permits only the frozen real Propose Spec Design Tasks sequen
   assert.throws(() => adaptiveSelection({ handle: 'unused', actor: 'mdd-design', assignmentID: 'A2', purpose: 'Not ordinary low authority.' }, f.contract), /only/);
 });
 
+test('regression: high continuation reports of any size reach the next actor, the oldest compacted first', async t => {
+  const f = fixture(t); await f.admit(); await f.retain(); await f.start('high');
+  const finding = actor => `${actor} finding: ${'Each stage records what it found in the declared sources and why. '.repeat(200)}`;
+  assert.ok(Buffer.byteLength(finding('mdd-propose')) > 12000, 'every artifact is past the old 12000-byte cap');
+  const prompts = [];
+  for (const [actor, data] of [['mdd-propose', {}], ['mdd-spec', { domain: 'project', acceptance: f.contract.acceptance }],
+    ['mdd-design', { decisions: [] }], ['mdd-tasks', { deliverables: f.remaining() }]]) {
+    await f.select(actor);
+    const { args } = await f.dispatch(f.report({ verificationVersion: 1, artifact: finding(actor), ...data }));
+    prompts.push(args.prompt);
+    assert.equal(f.status().lastReceipt.outcome, 'passed', f.status().lastReceipt.failure);
+  }
+  const held = f.options.adaptiveStore.read('parent').data;
+  assert.deepEqual(held.receipts.filter(item => item.actor !== 'mdd-apply').map(item => item.artifact),
+    ['mdd-propose', 'mdd-spec', 'mdd-design', 'mdd-tasks'].map(finding), 'every receipt keeps its artifact whole');
+  for (const prompt of prompts) assert.ok(Buffer.byteLength(prompt) <= 38000, 'every prompt fits the dispatch budget');
+  // Tasks follows three reports that cannot all be inlined: the oldest gives way first, and says so.
+  assert.ok(prompts[1].includes(JSON.stringify(finding('mdd-propose'))), 'a report that fits reaches the next actor whole');
+  assert.equal(prompts[1].includes('"omitted":'), false);
+  const tasks = prompts[3], propose = JSON.stringify(held.continuation.reports[0].fields);
+  assert.match(tasks, /earlier predecessor report\(s\) appear above as their summary plus the byte count and sha256 of the rest/);
+  assert.ok(tasks.includes(createHash('sha256').update(propose).digest('hex')), 'the compacted report is named by the digest of what it left out');
+  assert.equal(tasks.includes(finding('mdd-propose')), false);
+  assert.ok(tasks.includes(JSON.stringify(finding('mdd-design'))), 'the newest report still reaches Tasks whole');
+  await f.select('mdd-apply'); await f.dispatch(f.report({ completed: ['A2'], changes: ['two.txt'], checks: [] }));
+  assert.equal(f.status().continuation.next, 'mdd-verify');
+  const cold = new PhaseRunner(f.inspect, f.options), restored = await cold.restore(f.runtime);
+  assert.equal(restored.restored, true, restored.reason);
+});
+
 for (const mutation of [
   (f, r) => { r.acceptance.goal = 'Expanded business objective'; },
   (f, r) => { r.acceptance.requirements[0].scenarios[0].then = 'Changed meaning under the same stable ID'; },

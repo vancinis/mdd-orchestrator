@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { acceptance, decisions, phaseFields, reportText, shortText, summaryText, validatePlan, readVerification, raise, assertNoTraceSection, unmet, UNMET_PASS } from './acceptance.js';
 import { deliverables, executed } from './phase-evidence.js';
@@ -16,6 +17,21 @@ export type ContinuationData = {
 };
 const STAGES = { medium: ['mdd-plan'], high: ['mdd-propose', 'mdd-spec', 'mdd-design', 'mdd-tasks'] } as const;
 
+/**
+ * The continuation as the next actor's prompt carries it, with its `compacted` oldest reports
+ * reduced to their summary plus the size and digest of the rest. Reports have no size limit, so a
+ * prompt that inlined every one whole could stop fitting the dispatch budget; the receipts keep each
+ * report complete, and the effective contract the prompt also carries holds every structured link.
+ */
+export function continuationHandoff(data: ContinuationData, compacted: number): Omit<ContinuationData, 'reports'> & { reports: unknown[] } {
+  return { ...data, reports: data.reports.map((report, index) => {
+    if (index >= compacted) return report;
+    const rest = JSON.stringify(report.fields);
+    return { receiptID: report.receiptID, actor: report.actor, ...(report.snapshotID ? { snapshotID: report.snapshotID } : {}),
+      summary: report.fields.evidenceSummary, omitted: { bytes: Buffer.byteLength(rest), sha256: createHash('sha256').update(rest).digest('hex') } };
+  }) };
+}
+
 export function continuationRequest(value: unknown, contract: AdaptiveContract): Omit<ContinuationData, 'retained' | 'bindings' | 'reports' | 'revision'> {
   const input = objectWithKeys(value, 'structured continuation', ['depth', 'rationale', 'assessment', 'context']);
   if (input.depth !== 'medium' && input.depth !== 'high') throw new Error('Continuation freezes medium or high depth.');
@@ -33,7 +49,7 @@ export function assignmentDeliverable(item: Assignment): Deliverable {
     dependsOn: item.dependsOn, parallel: item.scope, checks: item.obligations.checks };
 }
 
-/** One frozen sequence. Reports are actual bounded journal data, never fixed-phase artifact paths. */
+/** One frozen sequence. Reports are actual journal data, never fixed-phase artifact paths. */
 export class AdaptiveContinuation {
   readonly #data: ContinuationData;
   #effective: Assignment[];
@@ -127,13 +143,14 @@ export class AdaptiveContinuation {
     if (this.#data.reports.length >= 64) throw new Error('Continuation actual report budget is exhausted.');
     if (actor !== (this.planningNext() ?? 'mdd-verify')) throw new Error('Only the frozen next continuation stage may advance.');
     if (fields.verificationVersion !== 1 || fields.outcome !== 'passed') throw new Error('Continuation requires the actual structured phase contract version 1 and passed outcome.');
-    if (Buffer.byteLength(JSON.stringify(fields)) > 48000) throw new Error('Actual continuation report exceeds the bounded 48000-byte journal budget.');
+    // A report has no size limit of its own. The journal that holds it is bounded as a whole when it
+    // is written, and the next actor's prompt compacts the oldest reports when they do not fit.
     const checked = phaseFields(actor, fields);
     if (checked.ignored.length) throw new Error('Continuation report contains fields outside its actual phase contract.');
     // Continuation accepts only passed reports, so a planning stage naming an unmet requirement is refused, as on the fixed route.
     if ((actor === 'mdd-plan' || actor === 'mdd-design' || actor === 'mdd-tasks') && unmet(fields.unmet, this.contract.acceptance).length) throw new Error(UNMET_PASS);
-    if (typeof fields.artifact !== 'string' || !fields.artifact.trim() || Buffer.byteLength(fields.artifact) > 12000)
-      throw new Error('Continuation requires a bounded actual report artifact.');
+    if (typeof fields.artifact !== 'string' || !fields.artifact.trim())
+      throw new Error('Continuation requires an actual report artifact.');
     assertNoTraceSection(fields.artifact); summaryText(fields.evidenceSummary, 'actual phase summary');
     let effective: Assignment[] | undefined;
     if (actor === 'mdd-plan' || actor === 'mdd-spec') {
