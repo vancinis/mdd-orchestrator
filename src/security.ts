@@ -1,5 +1,5 @@
 import { objectWithKeys } from './validation.js';
-import { shortText } from './acceptance.js';
+import { reportText, shortText } from './acceptance.js';
 
 /** Snapshot builders assign location IDs; this module validates claims, not snapshot provenance. */
 export const SECURITY_LAYERS = Object.freeze(['committed', 'index', 'worktree', 'untracked'] as const);
@@ -40,7 +40,7 @@ function unique(values: readonly string[], label: string): void {
   if (new Set(values).size !== values.length) throw new Error(`${label} must not repeat identifiers.`);
 }
 function limitations(value: unknown, label: string): string[] {
-  return list(value, label, 16).map(item => shortText(item, label, 1000));
+  return list(value, label, 16).map(item => reportText(item, label));
 }
 function lineNumber(value: unknown): number {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) throw new Error('security location lines must be positive safe integers.');
@@ -82,11 +82,12 @@ function finding(value: unknown): SecurityFinding {
   return {
     id: identifier(input.id, 'security finding.id'),
     severity: choice(input.severity, 'security finding.severity', ['critical', 'high', 'medium', 'low'] as const),
-    title: shortText(input.title, 'security finding.title', 300), location: location(input.location),
-    evidence: shortText(input.evidence, 'security finding.evidence', 2000),
-    attackConditions: shortText(input.attackConditions, 'security finding.attackConditions', 2000),
-    impact: shortText(input.impact, 'security finding.impact', 2000),
-    recommendation: shortText(input.recommendation, 'security finding.recommendation', 2000),
+    title: reportText(input.title, 'security finding.title'), location: location(input.location),
+    // A quote of one source line, matched against it as written, so it is never folded.
+    evidence: shortText(input.evidence, 'security finding.evidence', Infinity),
+    attackConditions: reportText(input.attackConditions, 'security finding.attackConditions'),
+    impact: reportText(input.impact, 'security finding.impact'),
+    recommendation: reportText(input.recommendation, 'security finding.recommendation'),
   };
 }
 
@@ -117,9 +118,9 @@ export function parseSecurityAssessment(value: unknown): SecurityAssessment {
 export const SECURITY_FIELD_SCHEMA = [
   'security={snapshotID,status,coverage:[{layer,status,inspected:[locationID],limitations:[text]}],limitations:[text],findings:[{id,severity,title,location:{locationID,layer,side,path,startLine,endLine},evidence,attackConditions,impact,recommendation}]}. No extra keys.',
   'snapshotID, locationID and finding id: 1–128 letters/digits/underscores/hyphens. Copy snapshot and location IDs from runtime input; never invent them. Coverage has exactly one entry for each committed/index/worktree/untracked layer; status complete/partial/unavailable; at most 256 globally unique inspected locationIDs per layer, no inspected IDs when unavailable.',
-  'Copy runtime coverage and omissions, then disclose any additional inspection gaps. Each partial/unavailable layer needs a limitation. Layer and overall limitations: at most 16 nonempty single-line entries each, at most 1000 characters each.',
+  'Copy runtime coverage and omissions, then disclose any additional inspection gaps. Each partial/unavailable layer needs a limitation. Layer and overall limitations: at most 16 nonempty entries each.',
   'Assessment status: findings (complete with 1–32 findings), no-findings (complete with no findings), inconclusive (any partial coverage or limitation, with 0–32 known findings preserved). Inconclusive requires an explicit limitation; never hide findings because coverage is incomplete.',
-  'Finding severity critical/high/medium/low; title at most 300 characters; evidence, attackConditions, impact and recommendation each nonempty single-line text of at most 2000 characters. IDs unique. Ground evidence in supplied source without exposing secrets.',
+  'Finding severity critical/high/medium/low; title, attackConditions, impact and recommendation are nonempty text; evidence is a nonempty single-line source quote. IDs unique. Ground evidence in supplied source without exposing secrets.',
   'Location side before/after (untracked only after); path repository-relative using forward slashes, at most 1000 characters, no traversal. Copy paths exactly, including leading/trailing spaces; never trim or normalize them. Lines inclusive positive safe integers with endLine >= startLine. locationID must appear under inspected in the same layer. Distinct revisions/sides use distinct runtime locationIDs; final binding validates path, side, lines and evidence.',
 ].join(' ');
 

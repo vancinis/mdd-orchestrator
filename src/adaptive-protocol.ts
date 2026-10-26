@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import { AdaptiveLow, adaptiveContract, ADAPTIVE_EVIDENCE_FIELDS } from './adaptive-low.js';
+import { AdaptiveLow, adaptiveContract, ADAPTIVE_EVIDENCE_FIELDS, statusText } from './adaptive-low.js';
 import { nativeOperation } from './adaptive-native.js';
 import type { AdaptiveNative, NativeOperation } from './adaptive-native.js';
 import type { PhaseRunner, Runtime } from './phase-runner.js';
@@ -31,6 +31,8 @@ type Kind = keyof typeof specs;
 type Request = { kind: Kind; args: Record<string, unknown> };
 const objectFields = new Set(['contract', 'context', 'assessment', 'evidence']);
 const arrayFields = new Set(['questions', 'limits']);
+/** Prose arguments: no length limit of their own, only the request's. Every other string is an identity. */
+const PROSE_FIELDS = new Set(['purpose', 'rationale']);
 
 /** Wire identity and consent are deliberately absent. Native host runtime is a separate argument. */
 export function decodeAdaptiveRequest(value: unknown): Request {
@@ -48,7 +50,10 @@ export function decodeAdaptiveRequest(value: unknown): Request {
       if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${key} must be an object.`);
     } else if (arrayFields.has(key)) {
       if (!Array.isArray(value) || value.length > 64) throw new Error(`${key} must be a bounded array.`);
-    } else if (typeof value !== 'string' || !value.trim() || value.length > (key === 'purpose' || key === 'rationale' ? 2000 : 256) || /[\x00-\x1f\x7f]/.test(value)) {
+    } else if (PROSE_FIELDS.has(key)) {
+      // Read in full by its own validator, which folds line breaks and tabs and names any other control.
+      if (typeof value !== 'string' || !value.trim()) throw new Error(`${key} must be nonempty text.`);
+    } else if (typeof value !== 'string' || !value.trim() || value.length > 256 || /[\x00-\x1f\x7f]/.test(value)) {
       throw new Error(`${key} must be bounded nonempty text without controls.`);
     }
   }
@@ -73,7 +78,9 @@ export function decodeAdaptiveRequest(value: unknown): Request {
 // These are input documentation, not another validator. The held model remains the semantic
 // authority; references disclose complete nested keys without protecting an unlimited status blob.
 function inputContracts(contract?: AdaptiveContract, data?: AdaptiveData) {
-  const text = { type: 'string', minLength: 1, maxLength: 500, controls: false };
+  // Prose has no length limit; line breaks and tabs fold into spaces, other controls are refused.
+  const text = { type: 'string', minLength: 1, controls: 'line breaks and tabs fold into spaces' };
+  const identity = { type: 'string', minLength: 1, controls: false };
   const ref = (name: string) => ({ definition: name });
   const list = (items: unknown, maxItems = 64, minItems = 0) => ({ type: 'array', items, minItems, maxItems });
   const object = (required: Record<string, unknown>, optional: Record<string, unknown> = {}) => ({ type: 'object',
@@ -85,7 +92,7 @@ function inputContracts(contract?: AdaptiveContract, data?: AdaptiveData) {
   const definitions = {
     id: { type: 'string', pattern: '^[a-zA-Z0-9_-]{1,64}$' },
     path: { type: 'string', minLength: 1, maxLength: 400, format: 'canonical exact root-relative ASCII file path; existing alias/credential exclusions apply' },
-    handle: { ...text, maxLength: 200 }, nativeID: { ...text, maxLength: 256 }, receiptID: { ...text, maxLength: 100 },
+    handle: { ...identity, maxLength: 200 }, nativeID: { ...identity, maxLength: 256 }, receiptID: { ...identity, maxLength: 100 },
     scope: object({ complete: { const: true }, reads: list(ref('path')), writes: list(ref('path')) }),
     fingerprint: object({ path: ref('path'), digest: { type: ['string', 'null'], pattern: '^[a-f0-9]{64}$' } }),
     context: object({ technical: choice('understood', 'uncertain'), dependencies: choice('bounded', 'unknown'), reason: text,
@@ -93,9 +100,9 @@ function inputContracts(contract?: AdaptiveContract, data?: AdaptiveData) {
     assessment: object({ assessmentVersion: { const: 1 }, complexity: choice('low', 'medium', 'high'), impact: choice('low', 'medium', 'high') }),
     scenario: object({ id: ref('id'), given: text, when: text, then: text }),
     requirement: object({ id: ref('id'), description: text, scenarios: list(ref('scenario'), 64, 1) }),
-    acceptance: object({ goal: { ...text, maxLength: 300 }, requirements: list(ref('requirement'), 64, 1) }),
+    acceptance: object({ goal: text, requirements: list(ref('requirement'), 64, 1) }),
     decision: object({ id: ref('id'), description: text, requirements: { ...ids, minItems: 1 } }),
-    plannedCheck: object({ id: ref('id'), command: { ...text, maxLength: 'request byte budget' }, requirement: choice('required', 'optional') }, { appliesWhen: text }),
+    plannedCheck: object({ id: ref('id'), command: { ...identity, maxLength: 'request byte budget' }, requirement: choice('required', 'optional') }, { appliesWhen: text }),
     sourceObligation: object({ id: ref('id'), description: text, paths: list(ref('path'), 64, 1) }),
     obligations: object({ source: list(ref('sourceObligation'), 32), checks: list(ref('plannedCheck'), 32) }),
     assignment: object({ id: ref('id'), description: text, path: ref('path'), scenarios: { ...ids, minItems: 1 }, decisions: ids,
@@ -114,20 +121,20 @@ function inputContracts(contract?: AdaptiveContract, data?: AdaptiveData) {
     assignmentEvidence: object({ assignmentID: ref('id'), ...semantic }),
     scenarioEvidence: object({ requirementID: ref('id'), scenarioID: ref('id'), assignmentID: ref('id'), ...semantic }),
     decisionEvidence: object({ decisionID: ref('id'), ...semantic }),
-    execution: object({ id: ref('id'), command: { ...text, maxLength: 'request byte budget' }, exit: { type: ['integer', 'null'] } }),
+    execution: object({ id: ref('id'), command: { ...identity, maxLength: 'request byte budget' }, exit: { type: ['integer', 'null'] } }),
     checkResult: object({ checkID: ref('id'), ...dispositions }, { reason: text, equivalence: text }),
     supplementalCheck: object({ id: ref('id'), requirement: choice('required', 'optional'), ...dispositions,
       disposition: choice('passed', 'failed', 'ran') }, { reason: text, equivalence: text }),
     evidence: { ...object({ snapshotID: ref('receiptID'), readback: ref('readback'), inventory: list(ref('inventory')), exclusions: list(ref('exclusionEvidence')),
       sources: list(ref('sourceEvidence')), assignments: list(ref('assignmentEvidence')), scenarios: list(ref('scenarioEvidence')), decisions: list(ref('decisionEvidence')),
-      checks: list(ref('execution'), 32), checkResults: list(ref('checkResult')), supplementalChecks: list(ref('supplementalCheck')), limits: list(text, 4) }), maxBytes: 48000 },
+      checks: list(ref('execution'), 32), checkResults: list(ref('checkResult')), supplementalChecks: list(ref('supplementalCheck')), limits: list(text, 16) }), maxBytes: 48000 },
   };
   const fields: Record<string, unknown> = { contract: ref('contract'), messageID: ref('nativeID'), questions: list(ref('productQuestion'), 8),
     handle: ref('handle'), actor: choice('mdd-explore', 'mdd-risk', 'mdd-plan', 'mdd-apply', 'mdd-verify', 'mdd-propose', 'mdd-spec', 'mdd-design', 'mdd-tasks'),
     assignmentID: ref('id'), purpose: text, context: ref('context'), repairOf: ref('receiptID'), evidence: ref('evidence'),
     outcome: choice('verified', 'unverified'), limits: list(text, 16), depth: choice('medium', 'high'), rationale: text, assessment: ref('assessment'),
     sourceSessionID: ref('nativeID'), runID: ref('nativeID'), operationID: ref('nativeID'), action: choice('finish', 'abort'),
-    receiptID: ref('receiptID'), callID: ref('nativeID'), cursor: { ...text, maxLength: 256, format: 'issued document ID plus validated page offset' } };
+    receiptID: ref('receiptID'), callID: ref('nativeID'), cursor: { ...identity, maxLength: 256, format: 'issued document ID plus validated page offset' } };
   const operations = Object.fromEntries(Object.entries(specs).map(([kind, spec]) => [kind,
     object(Object.fromEntries(spec.required.map(key => [key, fields[key]])), Object.fromEntries(spec.optional.map(key => [key, fields[key]])))]));
   return { routingVersion: 3, maxRequestBytes: REQUEST_BYTES, envelope: object({ routingVersion: { const: 3 }, kind: { enum: Object.keys(specs) }, args: { operation: 'kind' } }),
@@ -298,7 +305,7 @@ export class AdaptiveProtocol {
       projection.lastReceipt = { id: receipt.id, callID: receipt.callID, actor: receipt.actor, assignmentID: receipt.assignmentID, outcome: receipt.outcome };
     }
     if (continuation) projection.continuation = { depth: continuation.depth, next: continuation.next, revision: continuation.revision };
-    if (data?.completion) projection.completion = structuredClone(data.completion);
+    if (data?.completion) projection.completion = { outcome: data.completion.outcome, limits: data.completion.limits.map(statusText) };
     if (data) projection.evidence = { matched, recordedMatch: data.matched, snapshotID: data.snapshot?.id, snapshotCurrent,
       gaps: { missingReport: !data.report, staleAssignments, invalidatedAssignments: data.invalidatedAssignments,
         unfinishedAssignments: ids.filter(id => !data.completed.some(item => item.assignmentID === id)),

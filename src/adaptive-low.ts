@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { lstatSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
-import { acceptance, decisions, evidenceID, references, shortText, assertNoTraceSection, checkAccounting } from './acceptance.js';
+import { acceptance, decisions, evidenceID, references, reportText, shortText, summaryText, assertNoTraceSection, checkAccounting } from './acceptance.js';
 import type { Acceptance, Decision } from './acceptance.js';
 import { applyPlan, taskIDs } from './apply-batches.js';
 import { changed, plannedChecks, executed } from './phase-evidence.js';
@@ -97,9 +97,20 @@ function exactCoverage(actual: string[], expected: string[], label: string): voi
     throw new Error(`${label} must cover exactly the held links, without omissions or invented IDs.`);
 }
 
+/** How many entries a list of prose holds: exclusions, product questions, evidence or closure limits. */
+const TEXTS_MAX = 16;
+/** The most of one prose field a status shows: the old per-field cap, so nothing it accepted is cut. */
+const STATUS_TEXT_MAX = 500;
+/**
+ * Prose as a status payload shows it. The fields it lands in are protected from the status budget,
+ * so a status carries them bounded; the evidence readback and the stored data keep them whole.
+ */
+export function statusText(text: string): string {
+  return text.length > STATUS_TEXT_MAX ? `${text.slice(0, STATUS_TEXT_MAX - 1)}…` : text;
+}
 function texts(value: unknown, label: string): string[] {
-  if (!Array.isArray(value) || value.length > 16) throw new Error(`${label} requires at most 16 entries.`);
-  return Array.from(value, item => shortText(item, label));
+  if (!Array.isArray(value) || value.length > TEXTS_MAX) throw new Error(`${label} requires at most ${TEXTS_MAX} entries.`);
+  return Array.from(value, item => reportText(item, label));
 }
 function objective(value: unknown): string {
   if (typeof value !== 'string' || !value.trim() || Buffer.byteLength(value) > 12000 || /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(value))
@@ -132,7 +143,7 @@ function context(value: unknown, footprint: Scope): Context {
   });
   if (new Set(fingerprints.map(item => item.path)).size !== expected.length) throw new Error('Source fingerprints repeat a path.');
   return { technical: input.technical, dependencies: input.dependencies,
-    reason: shortText(input.reason, 'source context rationale'), fingerprints };
+    reason: reportText(input.reason, 'source context rationale'), fingerprints };
 }
 
 /** Reconstruct validated data, including own non-enumerable fields, before any native await. */
@@ -173,10 +184,10 @@ export function adaptiveContract(value: unknown): AdaptiveContract {
       if (obligations.has(id)) throw new Error('Evidence obligation ID is used more than once.');
       obligations.add(id);
       if (obligations.size > 64 || targets.some(path => ![...own.reads, ...own.writes].includes(path))) throw new Error('Source obligation exceeds its assignment scope or evidence budget.');
-      return { id, description: shortText(entry.description, 'source obligation'), paths: targets };
+      return { id, description: reportText(entry.description, 'source obligation'), paths: targets };
     });
     if (!source.length && !checks.length) throw new Error('Each assignment requires source or real command evidence obligations.');
-    return { id, description: shortText(item.description, 'assignment description'), path, scenarios, decisions: linked,
+    return { id, description: reportText(item.description, 'assignment description'), path, scenarios, decisions: linked,
       dependsOn: taskIDs(item.dependsOn), scope: own, obligations: { source, checks } };
   });
   applyPlan(assignments.map(({ id, dependsOn }) => ({ id, dependsOn })));
@@ -198,7 +209,7 @@ export function adaptiveSelection(value: unknown, contract: AdaptiveContract): A
   const input = objectWithKeys(value, 'adaptive selection', ['handle', 'actor', 'assignmentID', 'purpose', 'context', 'repairOf']);
   if (!ACTORS.includes(input.actor as AdaptiveActor)) throw new Error('Select only Explore, Risk, Plan, Apply or Verify.');
   return { handle: shortText(input.handle, 'selection handle', 200), actor: input.actor as AdaptiveActor,
-    assignmentID: evidenceID(input.assignmentID, 'assignment ID'), purpose: shortText(input.purpose, 'actor purpose'),
+    assignmentID: evidenceID(input.assignmentID, 'assignment ID'), purpose: reportText(input.purpose, 'actor purpose'),
     ...(input.context !== undefined ? { context: context(input.context, contract.scope) } : {}),
     ...(input.repairOf !== undefined ? { repairOf: shortText(input.repairOf, 'repair receipt', 100) } : {}) };
 }
@@ -297,7 +308,7 @@ export class AdaptiveLow {
       const assignment = contract.assignments.find(assignment => assignment.id === item.assignmentID);
       if (!assignment || ![...ACTORS, ...(data.continuation ? ['mdd-propose', 'mdd-spec', 'mdd-design', 'mdd-tasks'] : [])].includes(item.actor as AdaptiveActor) || !['passed', 'failed'].includes(String(item.outcome))) throw new Error('Invalid actual actor receipt.');
       const receipt: Receipt = { id: shortText(item.id, 'receipt ID', 100), actor: item.actor as AdaptiveActor,
-        assignmentID: assignment.id, purpose: shortText(item.purpose, 'receipt purpose'), outcome: item.outcome as Receipt['outcome'], summary: shortText(item.summary, 'receipt summary'),
+        assignmentID: assignment.id, purpose: reportText(item.purpose, 'receipt purpose'), outcome: item.outcome as Receipt['outcome'], summary: summaryText(item.summary, 'receipt summary'),
         callID: shortText(item.callID, 'actual call ID', 256) };
       if (item.artifact !== undefined) { receipt.artifact = objective(item.artifact); assertNoTraceSection(receipt.artifact); }
       if (item.failure !== undefined) receipt.failure = shortText(item.failure, 'receipt failure', 500);
@@ -459,8 +470,9 @@ export class AdaptiveLow {
     } else if (data.pending !== undefined) throw new Error('Unstarted or settled state cannot retain a pending actor.');
     if (data.completion !== undefined) {
       const completion = objectWithKeys(data.completion, 'adaptive closure', ['outcome', 'limits']);
-      const limits = entries(completion.limits, 'closure limits').map(item => shortText(item, 'closure limit'));
-      if (limits.length > 20) throw new Error('Closure exceeds its bounded limits.');
+      const limits = entries(completion.limits, 'closure limits').map(item => reportText(item, 'closure limit'));
+      // Evidence limits followed by the manual ones close added, each list bounded on its own.
+      if (limits.length > 2 * TEXTS_MAX) throw new Error('Closure exceeds its bounded limits.');
       if (completion.outcome === 'verified' ? low.#state !== 'completed' || !low.#matched || completed.length !== low.#assignments().length || !low.#snapshot || !isDeepStrictEqual(limits, low.#report?.limits) || !!low.#continuation?.next(completed.map(item => item.assignmentID), low.#snapshot?.id, low.#checkHistory)
         : completion.outcome !== 'unverified' || low.#state !== 'closed-unverified' || !limits.length || low.#matched)
         throw new Error('Adaptive closure contradicts completion or evidence.');
@@ -682,7 +694,7 @@ export class AdaptiveLow {
       if (item.disposition !== 'assignment' && item.disposition !== 'unrelated') throw new Error('Final diff needs assignment/unrelated disposition.');
       if (item.disposition === 'assignment' && !this.#contract.scope.writes.includes(path) ||
           item.disposition === 'unrelated' && this.#contract.scope.writes.includes(path)) throw new Error('Final diff scope claim contradicts held writes.');
-      return { path, disposition: item.disposition as 'assignment' | 'unrelated', reason: shortText(item.reason, 'final diff rationale') };
+      return { path, disposition: item.disposition as 'assignment' | 'unrelated', reason: reportText(item.reason, 'final diff rationale') };
     });
     if (new Set(inventory.map(item => item.path)).size !== inventory.length) throw new Error('Final diff repeats a path.');
     // This is parent readback, never independent discovery of the whole worktree diff.
@@ -693,7 +705,7 @@ export class AdaptiveLow {
       throw new Error('Final diff inventory omits locally changed declared assignment paths.');
     const exclusions = entries(input.exclusions, 'exclusion findings').map(value => {
       const item = objectWithKeys(value, 'exclusion finding', ['exclusion', 'status', 'assessment']);
-      return { exclusion: shortText(item.exclusion, 'held exclusion'), status: status(item.status), assessment: shortText(item.assessment, 'exclusion assessment') };
+      return { exclusion: reportText(item.exclusion, 'held exclusion'), status: status(item.status), assessment: reportText(item.assessment, 'exclusion assessment') };
     });
     exactCoverage(exclusions.map(item => item.exclusion), this.#contract.exclusions, 'Exclusion findings');
     const obligations = this.#assignments().flatMap(item => item.obligations.source);
@@ -701,12 +713,12 @@ export class AdaptiveLow {
       const item = objectWithKeys(value, 'source readback', ['id', 'paths', 'status', 'assessment']);
       const id = evidenceID(item.id), obligation = obligations.find(item => item.id === id), targets = paths(item.paths);
       if (!obligation || !isDeepStrictEqual(targets, obligation.paths)) throw new Error('Source readback paths contradict held obligation links.');
-      return { id, paths: targets, status: status(item.status), assessment: shortText(item.assessment, 'source readback assessment') };
+      return { id, paths: targets, status: status(item.status), assessment: reportText(item.assessment, 'source readback assessment') };
     });
     exactCoverage(sources.map(item => item.id), obligations.map(item => item.id), 'Source readback');
     const assess = (item: Record<string, unknown>, assignments: Assignment[]): SemanticAssessment => {
       const result = { status: status(item.status), sources: references(item.sources, 'source evidence references', true),
-        checks: references(item.checks, 'execution references', true), assessment: shortText(item.assessment, 'semantic source assessment') };
+        checks: references(item.checks, 'execution references', true), assessment: reportText(item.assessment, 'semantic source assessment') };
       const allowedSource = assignments.flatMap(item => item.obligations.source.map(item => item.id));
       const allowedExecutions = assignments.flatMap(item => item.obligations.checks.flatMap(check => accounting.checkResults.find(result => result.checkID === check.id)!.executions));
       if (result.sources.some(id => !allowedSource.includes(id)) || result.checks.some(id => !allowedExecutions.includes(id)))
@@ -739,7 +751,6 @@ export class AdaptiveLow {
     });
     exactCoverage(choices.map(item => item.decisionID), this.#contract.decisions.map(item => item.id), 'Decision coverage');
     const limits = texts(input.limits, 'evidence limits');
-    if (limits.length > 4) throw new Error('Evidence limits require at most four entries.');
     const report: EvidenceReport = { snapshotID: this.#snapshot!.id, readback: structuredClone(expected), inventory, exclusions, sources,
       assignments, scenarios, decisions: choices, checks, checkResults: accounting.checkResults, supplementalChecks: accounting.supplementalChecks, limits };
     if (Buffer.byteLength(JSON.stringify(report)) > 48000) throw new Error('Adaptive evidence exceeds its 48000-byte budget.');
@@ -869,7 +880,7 @@ export class AdaptiveLow {
       const questions = openQuestions(fields.questions);
       if (questions.length) receipt.questions = questions;
       if (this.#continuation && selected.actor !== 'mdd-apply') {
-        receipt.summary = shortText(fields.evidenceSummary, 'actual phase summary');
+        receipt.summary = summaryText(fields.evidenceSummary, 'actual phase summary');
         if (typeof fields.artifact === 'string' && Buffer.byteLength(fields.artifact) <= 12000) { assertNoTraceSection(fields.artifact); receipt.artifact = fields.artifact; }
         this.#assertContinuationCurrent();
         if (fields.phase !== undefined && fields.phase !== selected.actor || fields.runID !== undefined && fields.runID !== runID ||
@@ -884,7 +895,7 @@ export class AdaptiveLow {
         continuation.accept(selected.actor as ContinuationActor, fields, receipt.id, selected.actor === 'mdd-verify' ? this.#snapshot?.id : undefined);
         adaptiveContract({ ...this.#contract, assignments: continuation.assignments() });
         this.#continuation = continuation;
-        receipt = { ...receipt, outcome: 'passed', summary: shortText(fields.evidenceSummary, 'actual phase summary'), artifact: fields.artifact as string,
+        receipt = { ...receipt, outcome: 'passed', summary: summaryText(fields.evidenceSummary, 'actual phase summary'), artifact: fields.artifact as string,
           accepted: { fields: structuredClone(fields), ...(this.#verifyContext ? { verifyContext: structuredClone(this.#verifyContext) } : {}) } };
         this.#verifyContext = undefined;
         this.#receipts.push(receipt); this.#selection = undefined; this.#handle = randomUUID(); this.#state = 'await-selection';
@@ -899,7 +910,7 @@ export class AdaptiveLow {
       const artifact = typeof input.artifact === 'string' && input.artifact.trim() && Buffer.byteLength(input.artifact) <= 12000 ? input.artifact : undefined;
       if (!artifact) throw new Error('Receipt requires a bounded actual artifact.');
       assertNoTraceSection(artifact);
-      receipt = { ...receipt, outcome: input.outcome, summary: shortText(input.evidenceSummary, 'actor summary'), artifact };
+      receipt = { ...receipt, outcome: input.outcome, summary: summaryText(input.evidenceSummary, 'actor summary'), artifact };
       if (selected.actor === 'mdd-risk') {
         receipt.assessment = parseFutureAssessment(input.assessment);
         if (input.outcome === 'passed') this.#assessment = receipt.assessment;
@@ -939,7 +950,7 @@ export class AdaptiveLow {
       ...(this.pendingQuestions() ? { productQuestions: this.pendingQuestions() } : {}),
       ...(this.#selection ? { actor: this.#selection.actor, assignmentID: this.#selection.assignmentID } : {}),
       ...(last ? { lastReceipt: { id: last.id, actor: last.actor, assignmentID: last.assignmentID, outcome: last.outcome,
-        summary: last.summary, ...(last.failure ? { failure: last.failure } : {}) } } : {}),
+        summary: statusText(last.summary), ...(last.failure ? { failure: last.failure } : {}) } } : {}),
       evidence: { matched: this.#matched, assurance: ASSURANCE, invalidatedAssignments: [...this.#invalidatedAssignments],
         retainedAssignments: this.#retainedProof.map(item => item.assignmentID),
         executionHistory: this.#checkHistory.map(({ id, exit }) => ({ id, exit })),
@@ -951,11 +962,11 @@ export class AdaptiveLow {
           exclusions: this.#report.exclusions.map(({ exclusion, status }) => ({ exclusion: exclusion.slice(0, 150), status })),
           checkResults: this.#report.checkResults.map(({ checkID, disposition, executions, reason }) => ({ checkID, disposition, executions, ...(reason ? { reason: reason.slice(0, 150) } : {}) })),
           supplementalChecks: this.#report.supplementalChecks.map(({ id, requirement, disposition }) => ({ id, requirement, disposition })),
-          limits: [...this.#report.limits] } : {}),
+          limits: this.#report.limits.map(statusText) } : {}),
         ...(this.#priorEvidence ? { priorEvidence: { snapshotID: this.#priorEvidence.report.snapshotID,
           invalidatedAssignments: [...this.#priorEvidence.invalidatedAssignments], commandEvidenceInvalidated: this.#priorEvidence.invalidatedAssignments.length > 0,
           checkResults: this.#priorEvidence.report.checkResults.map(({ checkID, disposition }) => ({ checkID, disposition })) } } : {}) },
-      ...(this.#completion ? { completion: structuredClone(this.#completion) } : {}),
+      ...(this.#completion ? { completion: { outcome: this.#completion.outcome, limits: this.#completion.limits.map(statusText) } } : {}),
       ...(this.#continuation ? { continuation: this.#continuation.status([...this.#completed.keys()], this.#snapshot?.id, this.#checkHistory) } : {}),
       reason: this.#completion ? 'Internal closure grants no further actor, review authority, public activation or durable resume.'
         : 'Select the next necessary actor or prepare final evidence internally. No automatic phase, verification, completion, reset or escalation is implied.' };

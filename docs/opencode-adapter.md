@@ -1161,9 +1161,13 @@ back under `rejected`, the phase becomes the coordinator's to restate through
 `result-rejected`. After `MALFORMED_RESTATEMENTS` (3) consecutive unreadable reports the attempt
 is spent normally, because a report nobody can state correctly is no longer only transcription.
 A rejection names every independent problem at once, each by its position and the rule it broke
-(`checks[9].command "node -e …" is 1019 characters…`), so one restatement can fix them all; a
-payload too small to carry the text alongside the run sheds only `rejected.text`, and
-`mdd_status` with `detail="rejected"` returns it alone.
+(`checks[9].command "node -e …" contains the control character U+000A (a line break)…`), so one
+restatement can fix them all. Report prose — descriptions, given/when/then, reasons, assessments,
+limits, concerns, risk and security text — has no length limit: line breaks and tabs in it fold into
+single spaces, and only the control characters a terminal would act on are refused. Commands,
+identifiers and paths keep their exact one-line form. A payload too small to carry the text
+alongside the run sheds only `rejected.text`, and `mdd_status` with `detail="rejected"` returns
+it alone.
 
 `## MDD Data` permits these phase-specific fields:
 - Plan: `acceptance`, `decisions`, and nonempty `deliverables`. The same single plan artifact
@@ -1193,7 +1197,7 @@ Verify also requires `verification: { scenarios, steps, decisions, changes, limi
   concise source-based `assessment`. The report must agree with itself: a row may only cite a
   command the same phase reported running, and a `verified` row may not rest on a check that
   did not pass. That consistency is the honesty MDD can offer without re-running anything.
-- `changes` is a plain-language interpretation; `limits` contains up to four material notes.
+- `changes` is a plain-language interpretation; `limits` lists every material limit as its own entry.
   `mdd_check_report` reads `checks` and `verification` on every Verify outcome, as the run does;
   only which links exist is left to the run, which holds the plan.
   A passed outcome with missing coverage or any not-verified/deviation row blocks; an explicit

@@ -1,5 +1,5 @@
 import { objectWithKeys } from './validation.js';
-import { evidenceID, raise, readVerification, references, shortText } from './acceptance.js';
+import { evidenceID, raise, readVerification, references, reportText, shortText } from './acceptance.js';
 import type { HeldPlan, Verification } from './acceptance.js';
 import { parseParallelScope } from './worker-batch.js';
 import type { ParallelScope } from './worker-batch.js';
@@ -26,7 +26,7 @@ export function plannedChecks(value: unknown, seen: Set<string>): PlannedCheck[]
     if (seen.size > 64) throw new Error('Plan exceeds 64 checks.');
     if (item.requirement !== 'required' && item.requirement !== 'optional') throw new Error(`Check ${id} needs requirement required or optional.`);
     return { id, command: shortText(item.command, `command of ${id}`, Infinity), requirement: item.requirement,
-      ...(item.appliesWhen !== undefined ? { appliesWhen: shortText(item.appliesWhen, `applicability of ${id}`) } : {}) };
+      ...(item.appliesWhen !== undefined ? { appliesWhen: reportText(item.appliesWhen, `applicability of ${id}`) } : {}) };
   });
 }
 
@@ -41,7 +41,7 @@ export function deliverables(value: unknown, version?: VerificationVersion): Del
     if (ids.has(entry.id)) throw new Error(`Deliverable id ${entry.id} is used more than once.`);
     ids.add(entry.id);
     const parallel = Object.hasOwn(entry, 'parallel') ? parseParallelScope(entry.parallel) : undefined;
-    return { id: entry.id, description: shortText(entry.description, `description of deliverable ${entry.id}`),
+    return { id: entry.id, description: reportText(entry.description, `description of deliverable ${entry.id}`),
       path: shortText(entry.path, `implementation target of deliverable ${entry.id}`, 400),
       ...(version ? { checks: plannedChecks(entry.checks, checkIDs) } : { check: shortText(entry.check, `planned check command of deliverable ${entry.id}`, Infinity) }),
       scenarios: references(entry.scenarios, `scenarios of deliverable ${entry.id}`), decisions: references(Object.hasOwn(entry, 'decisions') ? entry.decisions : [], `decisions of deliverable ${entry.id}`, true), dependsOn: references(Object.hasOwn(entry, 'dependsOn') ? entry.dependsOn : [], `dependencies of deliverable ${entry.id}`, true),
@@ -151,8 +151,8 @@ export function delivered(value: unknown): Delivered | undefined {
   if (value === undefined) return undefined;
   try {
     const entry = objectWithKeys(value, 'delivered summary', ['what', 'implies']);
-    const summary: Delivered = { what: shortText(entry.what, 'what the change delivers', 400) };
-    if (entry.implies !== undefined) summary.implies = shortText(entry.implies, 'what the change implies', 300);
+    const summary: Delivered = { what: reportText(entry.what, 'what the change delivers') };
+    if (entry.implies !== undefined) summary.implies = reportText(entry.implies, 'what the change implies');
     return summary;
   } catch { return undefined; }
 }
@@ -171,10 +171,10 @@ export function changed(value: unknown, noChangeReason: unknown): { paths: strin
     if (typeof item === 'string') return { path: shortText(item, 'changed path', 400) };
     const entry = objectWithKeys(item, 'changed file', ['path', 'reason']);
     const file: ChangedFile = { path: shortText(entry.path, 'changed path', 400) };
-    if (entry.reason !== undefined) file.reason = shortText(entry.reason, 'reason a file changed', 500);
+    if (entry.reason !== undefined) file.reason = reportText(entry.reason, 'reason a file changed');
     return file;
   }) : [];
   if (files.length > 64) throw new Error('Report at most 64 changed paths.');
   if (files.length) return { paths: files.map(file => file.path), files };
-  return { paths: [], files: [], reason: shortText(noChangeReason, 'no-change reason', 2000) };
+  return { paths: [], files: [], reason: reportText(noChangeReason, 'no-change reason') };
 }

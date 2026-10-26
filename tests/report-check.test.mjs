@@ -171,17 +171,29 @@ test('a readable Verify report checks clean, whatever the length of its commands
   assert.equal(checked.ok, true);
 });
 
+test('a Verify report with long, many and multi-line limits and assessments checks clean', () => {
+  const long = 'The probe covered the boundary but not the retry path, which needs a live service. '.repeat(10).trim();
+  const assessment = { status: 'verified', checks: ['npm test'], assessment: `${long}\nSecond paragraph of the same assessment.` };
+  const checked = checkReportForm('mdd-verify', verifyReport({}, {
+    scenarios: ['S1', 'S2'].map(scenarioID => ({ requirementID: 'R1', scenarioID, stepID: 'cli-validation', ...assessment })),
+    steps: [{ stepID: 'cli-validation', ...assessment }], decisions: [{ decisionID: 'D1', ...assessment }],
+    changes: `${long}\n\t${long}`, limits: Array.from({ length: 9 }, (_, index) => `Limit ${index + 1}:\n${long}`) }));
+  assert.deepEqual(checked.problems, []);
+  assert.equal(checked.ok, true);
+});
+
 test('a failed Verify report is checked exactly as the run will read it', () => {
   // The observed miss: this check skipped `checks` on a failed Verify and cleared a report that
   // the run then refused, at the one moment the actor could still have fixed it.
   const checked = checkReportForm('mdd-verify', verifyReport(
     { outcome: 'failed', checks: [{ command: 'npm test', exit: 0 }, { command: 'npm run\nlint', exit: 1 }] },
-    { limits: ['one', 'two', 'three', 'four', 'five'] }));
+    { limits: ['one', 'two', 'three', 'four', 'five'], changes: 'Input validation \u001b[1mfollows the plan.' }));
   assert.equal(checked.ok, false);
   assert.equal(checked.problems.length, 1, 'one rejection carrying every problem');
   assert.match(checked.problems[0], /2 problem\(s\)/);
   assert.match(checked.problems[0], /checks\[1\]\.command .* control character U\+000A/);
-  assert.match(checked.problems[0], /this report lists 5/);
+  assert.match(checked.problems[0], /what changed .* control character U\+001B/);
+  assert.equal(checked.problems[0].includes('limit'), false, 'five limits are five limits, not a problem');
 
   const missing = checkReportForm('mdd-verify', reportDocument({ outcome: 'failed', evidenceSummary: 'Could not verify.', artifact: 'Blocked.' }));
   assert.equal(missing.ok, false, 'the run requires verification on every outcome, so the check does too');
@@ -231,6 +243,19 @@ test('AL-01: the future assessment reader validates its own version and level vo
   for (const input of [null, [], { ...value, route: 'low' }, { ...value, extra: true }]) {
     assert.throws(() => riskReaders.parseFutureAssessment(input));
   }
+});
+
+test('risk and concern prose has no length limit and folds line breaks', () => {
+  const long = 'The middleware is shared by every route, so one mistake reaches every user at once. '.repeat(30).trim();
+  assert.ok(long.length > 2000);
+  const parsed = riskReaders.parseRiskVerdict(riskVerdict({ reason: `${long}\n${long}`,
+    evidence: [{ source: `mdd-explore finding 2: ${long}`, finding: long }],
+    risks: [{ description: long, evidence: long, mitigation: `Add a regression test.\n\tThen merge.` }] }));
+  assert.equal(parsed.reason, `${long} ${long}`);
+  assert.equal(parsed.risks[0].mitigation, 'Add a regression test. Then merge.');
+  assert.equal(riskReaders.parseRiskVerdict(riskVerdict({ risks: [], risksJustification: long })).risksJustification, long);
+  const concerned = checkReportForm('mdd-plan', planReport({ concerns: [{ category: 'integrations', evidence: long, impact: `${long}\n${long}` }] }));
+  assert.deepEqual(concerned.problems, []);
 });
 
 test('AL-01: future assessment values do not widen the current Risk report contract', () => {

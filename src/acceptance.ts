@@ -60,14 +60,14 @@ export const FIELD_SCHEMA: Record<string, string> = {
   noChangeReason: 'noChangeReason=text instead of changes when nothing needed changing.',
   delivered: 'delivered={what,implies} summarises the finished change for whoever reviews the pull request: what is now possible or different (what), and what that enables or requires of them (implies). Describe the outcome, never the mechanics — the per-file reasons already say how.',
   checks: 'checks=[{command,exit}] reports only checks this phase actually ran, at most 32. command is the exact command on one line, of any length, with no line breaks, tabs or other control characters; exit is its integer exit code, or null when it did not finish.',
-  verification: 'verification={scenarios:[{requirementID,scenarioID,stepID,status,checks:[command],assessment}],steps:[{stepID,status,checks,assessment}],decisions:[{decisionID,status,checks,assessment}],changes,limits:[]}. Status is verified/not-verified/deviation. Each checks entry repeats a command exactly as reported in checks; a verified row names at least one, and every one it names exited 0. Assessment explains source evidence and limits, not just a pass label. assessment and changes are one line of at most 500 characters; limits holds at most four one-line items of at most 250 characters each. Cover all held links exactly once. ' + CAUSE_RULE,
+  verification: 'verification={scenarios:[{requirementID,scenarioID,stepID,status,checks:[command],assessment}],steps:[{stepID,status,checks,assessment}],decisions:[{decisionID,status,checks,assessment}],changes,limits:[]}. Status is verified/not-verified/deviation. Each checks entry repeats a command exactly as reported in checks; a verified row names at least one, and every one it names exited 0. Assessment explains source evidence and limits, not just a pass label. limits lists each material limit as its own entry. Cover all held links exactly once. ' + CAUSE_RULE,
 };
 export const STRUCTURED_FIELD_SCHEMA: Record<string, string> = {
   verificationVersion: 'verificationVersion=1 identifies structured actor-reported verification. MDD checks consistency, not independent execution attestation.',
   deliverables: 'deliverables=[{id,description,path,checks:[{id,command,requirement:"required"|"optional",appliesWhen?:text}],scenarios:[scenarioID],decisions:[decisionID],dependsOn:[earlierStepID],parallel?:{complete:true,reads:[filePath],writes:[filePath]}}]. ' + DELIVERABLE_RULES +
     ' Check IDs are globally unique across the held plan (at most 64); declare requiredness and any conditional applicability before execution. Each deliverable has 1–32 checks. No legacy check string is accepted.',
   checks: 'checks=[{id,command,exit}] reports every actual execution in chronological order, at most 32. IDs are unique even for repeated commands; command is exact one-line text and exit is an integer or null for interrupted execution. Never invent IDs for unrun commands or omit failed attempts.',
-  verification: 'verification={scenarios:[{requirementID,scenarioID,stepID,status,checks:[executionID],assessment}],steps:[{stepID,status,checks,assessment}],decisions:[{decisionID,status,checks,assessment}],changes,limits:[],checkResults:[{checkID,disposition,executions:[executionID],reason?,equivalence?}],supplementalChecks:[{id,requirement:"required"|"optional",disposition,executions:[executionID],reason?}]}. Cover every held check exactly once and account for every execution in checkResults or supplementalChecks. Held checks may share an actual integration execution only with the same complete ordered attempt history; supplemental entries cannot overlap any other entry. Disposition: passed/failed/ran (interrupted, null exit)/blocked (no execution)/not-applicable/replaced. Final execution determines the result; keep earlier attempts in order and explain retries. Passed and replaced need final exit 0. Replaced requires reason and equivalence rationale for the actually executed replacement, never a replacement chain. Not-applicable requires a held appliesWhen condition and source-based reason; unconditional checks cannot be waived. Every disposition except passed requires a reason. Supplemental executions must be passed/failed/ran with explicit requiredness and cannot downgrade held checks. Required applicable failed/ran/blocked checks prevent PASS; optional failures remain visible. Semantic acceptance coverage remains independent: cover all scenario-step links, steps and decisions once, status verified/not-verified/deviation, verified rows cite successful final execution IDs. Assessment and changes are one line at most 500 characters; limits has at most four one-line items of 250 characters. Source evidence explains behavior; exit codes alone do not prove it. ' + CAUSE_RULE,
+  verification: 'verification={scenarios:[{requirementID,scenarioID,stepID,status,checks:[executionID],assessment}],steps:[{stepID,status,checks,assessment}],decisions:[{decisionID,status,checks,assessment}],changes,limits:[],checkResults:[{checkID,disposition,executions:[executionID],reason?,equivalence?}],supplementalChecks:[{id,requirement:"required"|"optional",disposition,executions:[executionID],reason?}]}. Cover every held check exactly once and account for every execution in checkResults or supplementalChecks. Held checks may share an actual integration execution only with the same complete ordered attempt history; supplemental entries cannot overlap any other entry. Disposition: passed/failed/ran (interrupted, null exit)/blocked (no execution)/not-applicable/replaced. Final execution determines the result; keep earlier attempts in order and explain retries. Passed and replaced need final exit 0. Replaced requires reason and equivalence rationale for the actually executed replacement, never a replacement chain. Not-applicable requires a held appliesWhen condition and source-based reason; unconditional checks cannot be waived. Every disposition except passed requires a reason. Supplemental executions must be passed/failed/ran with explicit requiredness and cannot downgrade held checks. Required applicable failed/ran/blocked checks prevent PASS; optional failures remain visible. Semantic acceptance coverage remains independent: cover all scenario-step links, steps and decisions once, status verified/not-verified/deviation, verified rows cite successful final execution IDs. limits lists each material limit as its own entry. Source evidence explains behavior; exit codes alone do not prove it. ' + CAUSE_RULE,
 };
 /**
  * Fields a phase reported that belong to no phase. They are dropped rather than fatal: a finished
@@ -92,16 +92,19 @@ export function phaseFields(phase: Phase, result: Record<string, unknown>): { fi
 /** A control character named so it can be found: its code point, and what it usually is. */
 function controlName(character: string): string {
   const code = character.codePointAt(0)!;
-  const usual: Record<number, string> = { 9: 'a tab', 10: 'a line break', 13: 'a carriage return' };
+  const usual: Record<number, string> = { 9: 'a tab', 10: 'a line break', 13: 'a carriage return', 27: 'an escape' };
   return `U+${code.toString(16).toUpperCase().padStart(4, '0')}${usual[code] ? ` (${usual[code]})` : ''}`;
 }
 /**
- * One-line report text. The rejection says which rule failed, where, and on what value: a message
- * that listed every rule at once once sent a coordinator looking for a control character in a
- * command whose only problem was its length, with no way to tell which of twelve commands it was.
- * `max` may be `Infinity` where a length limit protects nothing, as for an executed command.
+ * Exact one-line text: a command cited back verbatim, an identity MDD handed out, a quoted line.
+ * Nothing is folded, because the value is compared as written. The rejection says which rule
+ * failed, where, and on what value: a message that listed every rule at once once sent a
+ * coordinator looking for a control character in a command whose only problem was its length,
+ * with no way to tell which of twelve commands it was. `max` is the bound the value itself needs,
+ * `Infinity` where a length protects nothing, as for an executed command. Report prose is not
+ * read here: see `reportText`.
  */
-export function shortText(value: unknown, label: string, max = 500): string {
+export function shortText(value: unknown, label: string, max: number): string {
   if (value === undefined) throw new Error(`${label} is missing.`);
   if (typeof value !== 'string') throw new Error(`${label} must be text; it read ${preview(value)}.`);
   if (!value.trim()) throw new Error(`${label} is empty; give nonempty text.`);
@@ -115,6 +118,35 @@ export function shortText(value: unknown, label: string, max = 500): string {
     throw new Error(`${label} ${preview(value)} ${problems.join(' and ')}. To fix it, ${fixes.join(' and ')}.`);
   }
   return value.trim();
+}
+/** Line breaks and tabs, with the spaces around them: prose folds each run into one space. */
+const FOLDED = /\s*[\t\n\v\f\r]+\s*/g;
+/** What prose still refuses: the control characters a terminal acts on instead of printing. */
+const TERMINAL_CONTROL = /[\x00-\x08\x0e-\x1f\x7f]/;
+function prose(value: unknown, label: string, fold: boolean): string {
+  if (value === undefined) throw new Error(`${label} is missing.`);
+  if (typeof value !== 'string') throw new Error(`${label} must be text; it read ${preview(value)}.`);
+  const text = (fold ? value.replace(FOLDED, ' ') : value).trim();
+  if (!text) throw new Error(`${label} is empty; give nonempty text.`);
+  const control = TERMINAL_CONTROL.exec(value);
+  if (control) throw new Error(`${label} ${preview(value)} contains the control character ${controlName(control[0])} at character ${control.index + 1}. To fix it, remove it.`);
+  return text;
+}
+/**
+ * Report prose: a description, an assessment, a reason, a limit. It has no length limit. Each of
+ * these fields used to carry one, and all a cap ever did was send finished work back to be
+ * shortened: a design was refused for one 653-character decision. The bounds that protect
+ * something are aggregate ones — the composed phase prompt, the adaptive contract and evidence
+ * budgets, the checkpoint — and they still apply. Line breaks and tabs fold into one space instead
+ * of being refused, because each field is rendered and cited as a single line; only the control
+ * characters a terminal would act on are still refused, by code point and position.
+ */
+export function reportText(value: unknown, label: string): string {
+  return prose(value, label, true);
+}
+/** A summary as written: prose a person reads first, so its line breaks stay. No length limit either. */
+export function summaryText(value: unknown, label: string): string {
+  return prose(value, label, false);
 }
 /** Rejected values are echoed back bounded: an actor can only remap an ID it can see named. */
 function preview(value: unknown): string {
@@ -143,14 +175,14 @@ export function acceptance(value: unknown): Acceptance {
   const requirements = items(map.requirements, 'requirements').map(value => {
     const requirement = objectWithKeys(value, 'requirement', ['id', 'description', 'scenarios']);
     const requirementID = unique(requirement.id, 'requirement ID');
-    return { id: requirementID, description: shortText(requirement.description, `requirement ${requirementID} description`), scenarios: items(requirement.scenarios, `scenarios of requirement ${requirementID}`).map(value => {
+    return { id: requirementID, description: reportText(requirement.description, `requirement ${requirementID} description`), scenarios: items(requirement.scenarios, `scenarios of requirement ${requirementID}`).map(value => {
       const scenario = objectWithKeys(value, 'scenario', ['id', 'given', 'when', 'then']);
       const scenarioID = unique(scenario.id, `scenario ID of requirement ${requirementID}`);
-      return { id: scenarioID, given: shortText(scenario.given, `given of scenario ${scenarioID}`), when: shortText(scenario.when, `when of scenario ${scenarioID}`), then: shortText(scenario.then, `then of scenario ${scenarioID}`) };
+      return { id: scenarioID, given: reportText(scenario.given, `given of scenario ${scenarioID}`), when: reportText(scenario.when, `when of scenario ${scenarioID}`), then: reportText(scenario.then, `then of scenario ${scenarioID}`) };
     }) };
   });
   if (requirements.flatMap(item => item.scenarios).length > 64) throw new Error('Acceptance map exceeds 64 scenarios.');
-  return { goal: shortText(map.goal, 'requested outcome', 300), requirements };
+  return { goal: reportText(map.goal, 'requested outcome'), requirements };
 }
 export function decisions(value: unknown, accepted: Acceptance): Decision[] {
   const seen = new Set<string>();
@@ -162,7 +194,7 @@ export function decisions(value: unknown, accepted: Acceptance): Decision[] {
     const required = references(decision.requirements, `requirements of decision ${key}`);
     const unknown = required.find(key => !accepted.requirements.some(item => item.id === key));
     if (unknown !== undefined) throw new Error(`Decision ${key} references unknown requirement ${unknown}. Accepted requirements: ${accepted.requirements.map(item => item.id).join(', ')}.`);
-    return { id: key, description: shortText(decision.description, `decision ${key} description`), requirements: required };
+    return { id: key, description: reportText(decision.description, `decision ${key} description`), requirements: required };
   });
 }
 /**
@@ -179,7 +211,7 @@ export function unmet(value: unknown, accepted?: Acceptance): Unmet[] {
     seen.add(key);
     if (accepted && !accepted.requirements.some(item => item.id === key))
       throw new Error(`Unmet requirement ${key} is not a held requirement. Held requirements: ${accepted.requirements.map(item => item.id).join(', ')}.`);
-    return { requirementID: key, reason: shortText(entry.reason, `reason requirement ${key} is unmet`) };
+    return { requirementID: key, reason: reportText(entry.reason, `reason requirement ${key} is unmet`) };
   });
 }
 /** A planning phase that names an unmet requirement cannot pass; one wording wherever it is checked. */
@@ -196,7 +228,7 @@ export function closure(value: unknown, findings?: readonly string[]): Closure[]
     if (seen.has(key)) throw new Error(`Closure accounts for finding ${key} more than once.`);
     seen.add(key);
     if (entry.status !== 'closed' && entry.status !== 'open') throw new Error(`Closure of ${key} needs status closed or open.`);
-    return { id: key, status: entry.status as Closure['status'], evidence: shortText(entry.evidence, `closure evidence for ${key}`) };
+    return { id: key, status: entry.status as Closure['status'], evidence: reportText(entry.evidence, `closure evidence for ${key}`) };
   });
   if (findings) {
     const unknown = entries.find(entry => !findings.includes(entry.id));
@@ -339,8 +371,8 @@ export function checkAccounting(input: Record<string, unknown>, held: { planned:
     if (!['passed', 'failed', 'ran', 'blocked', 'not-applicable', 'replaced'].includes(disposition)) throw new Error(`Check ${key} needs an explicit disposition.`);
     if (supplemental && !['passed', 'failed', 'ran'].includes(disposition)) throw new Error(`Supplemental check ${key} must describe actual executions.`);
     const executions = references(entry.executions, `executions of ${key}`, true);
-    const reason = entry.reason === undefined ? undefined : shortText(entry.reason, `reason for ${key}`);
-    const equivalence = entry.equivalence === undefined ? undefined : shortText(entry.equivalence, `equivalence for ${key}`);
+    const reason = entry.reason === undefined ? undefined : reportText(entry.reason, `reason for ${key}`);
+    const equivalence = entry.equivalence === undefined ? undefined : reportText(entry.equivalence, `equivalence for ${key}`);
     if ((disposition !== 'passed' || executions.length > 1) && !reason) throw new Error(`Check ${key} requires a reason, including retry history or applicability evidence.`);
     if (disposition === 'replaced' && !equivalence) throw new Error(`Replacement of ${key} requires equivalence evidence.`);
     if (disposition !== 'replaced' && equivalence) throw new Error(`Only a replaced check may report equivalence evidence.`);
@@ -433,7 +465,7 @@ export function readVerification(value: unknown, held: HeldPlan | undefined, rep
       if (unreported !== undefined) own.push(`The assessment of ${label} cites check ${preview(unreported)}, which this phase did not report running. Reported checks: ${reported!.length ? reported!.map(preview).join(', ') : 'none'}.`);
       else if (failed !== undefined) own.push(`The verified assessment of ${label} rests on check ${preview(failed)}, which did not pass.`);
     }
-    const assessment = attempt(own, () => shortText(entry.assessment, `source-based assessment of ${label}`));
+    const assessment = attempt(own, () => reportText(entry.assessment, `source-based assessment of ${label}`));
     if (entry.cause !== undefined && !FINDING_CAUSES.includes(entry.cause as FindingCause))
       own.push(`The assessment of ${label} has unknown cause ${preview(entry.cause)}. Use ${FINDING_CAUSES.join(', ')}.`);
     else if (entry.cause !== undefined && status === 'verified') own.push(`The verified assessment of ${label} cannot name a cause; only a gap has one.`);
@@ -500,9 +532,10 @@ export function readVerification(value: unknown, held: HeldPlan | undefined, rep
   const repeatedDecision = coveredDecisions.find((item, index) => coveredDecisions.indexOf(item) !== index);
   if (repeatedDecision !== undefined) problems.push(`Verification covers plan decision ${repeatedDecision} more than once.`);
   const listed = attempt(problems, () => items(input.limits, 'remaining limits', true)) ?? [];
-  const limits = listed.map((value, index) => attempt(problems, () => shortText(value, `remaining limit ${index + 1}`, 250)));
-  if (listed.length > 4) problems.push(`Summarize material limits in at most four concise items; this report lists ${listed.length}. Merge or drop the least material ones.`);
-  const changes = attempt(problems, () => shortText(input.changes, 'what changed'));
+  // Every material limit is its own entry. Asking for four at most only made Verify merge them or
+  // drop the least material ones, which is the opposite of what a reader of the limits needs.
+  const limits = listed.map((value, index) => attempt(problems, () => reportText(value, `remaining limit ${index + 1}`)));
+  const changes = attempt(problems, () => reportText(input.changes, 'what changed'));
   if (problems.length) return { problems };
   return { problems, verification: { scenarios, steps, decisions, changes: changes!, limits: limits as string[],
     ...(accounting ? { checkResults: accounting.checkResults, supplementalChecks: accounting.supplementalChecks } : {}),

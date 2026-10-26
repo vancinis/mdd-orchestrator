@@ -1212,6 +1212,47 @@ for (const [name, question, option, freeText] of [
   });
 }
 
+test('regression: a design with a decision over 500 characters is recorded, carried to later phases and resumed', async t => {
+  // The observed refusal: mdd-design came back unread because decision D16 was 653 characters.
+  const f = await fixture(t, { route: 'high', memoryEnabled: false });
+  const long = 'Extends D13 with matrix items N01-N20, each named by scenario ID and the seam it is tested at. '.repeat(8).trim();
+  assert.ok(long.length > 653);
+  const trace = traceFixture(join(f.root, 'feature.txt'), 'feature');
+  const acceptance = structuredClone(trace.acceptance);
+  acceptance.goal = `${trace.acceptance.goal} ${long}`;
+  acceptance.requirements[0].description = `${trace.acceptance.requirements[0].description}\n${long}`;
+  const limits = Array.from({ length: 6 }, (_, index) => `Limit ${index + 1}: ${long}`);
+  const assessment = { status: 'verified', checks: ['E1'], assessment: long };
+  const overrides = {
+    'mdd-spec': { acceptance },
+    'mdd-design': { decisions: [{ id: 'D1', description: `${long}\n\n\tIt keeps D1's boundary.`, requirements: ['R1'] }] },
+    'mdd-verify': { verification: { scenarios: ['S1', 'S2'].map(scenarioID => ({ requirementID: 'R1', scenarioID, stepID: 'feature', ...assessment })),
+      steps: [{ stepID: 'feature', ...assessment }], decisions: [{ decisionID: 'D1', ...assessment }], changes: long, limits,
+      checkResults: [{ checkID: 'feature-check', disposition: 'passed', executions: ['E1'], reason: 'Observed fixture execution.' }], supplementalChecks: [] } },
+  };
+  const phases = await assessedRoute(f, 'high');
+  for (const phase of phases.slice(1)) {
+    const ready = await f.status();
+    assert.equal(ready.task?.subagent_type, phase, `${phase} is dispatched, not a restatement of a refused report (${ready.reason ?? ready.state})`);
+    await f.phase({ only: true, ...(overrides[phase] ? { narrative: overrides[phase] } : {}) });
+    const after = await f.status();
+    assert.equal(after.rejected, undefined, `${phase} report was refused: ${after.rejected?.reason}`);
+    if (phase === 'mdd-tasks') assert.ok(f.delivered().includes(JSON.stringify(`${long} It keeps D1's boundary.`)), 'the held decision reaches the next phase whole');
+    if (after.question) await f.answer();
+  }
+  const status = await f.status();
+  assert.equal(status.state, 'complete');
+  assert.equal(status.decisions[0].description, `${long} It keeps D1's boundary.`, 'line breaks and tabs folded, nothing cut');
+  assert.equal(status.acceptance.goal, acceptance.goal);
+  assert.equal(status.acceptance.requirements[0].description, `${trace.acceptance.requirements[0].description} ${long}`);
+  assert.deepEqual(status.verification.limits, limits, 'every material limit is its own entry');
+  const resumed = await plugin(f.input);
+  const held = JSON.parse(await resumed.tool.mdd_status.execute({ detail: 'full' }, f.context));
+  assert.equal(held.state, 'complete');
+  assert.equal(held.decisions[0].description, status.decisions[0].description);
+  assert.deepEqual(held.verification.limits, limits);
+});
+
 test('regression: clarification preparation tool requires Spanish user-visible fields', async t => {
   const f = await fixture(t, { memoryEnabled: false });
   assert.match(f.hooks.tool.mdd_prepare_advance.description, /question text, option labels and descriptions in Spanish/);

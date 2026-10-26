@@ -324,6 +324,49 @@ test('AL-03: malformed disposition cannot erase a newly reported failed command 
 });
 
 const digest = text => createHash('sha256').update(text).digest('hex');
+test('regression: adaptive prose has no length limit and survives receipts, evidence and a cold restore', async t => {
+  const long = 'The replacement keeps the surrounding format exactly as the reviewer expects it. '.repeat(12).trim();
+  assert.ok(long.length > 900);
+  const f = fixture(t); f.options.adaptiveStore = new AdaptiveStore(f.root);
+  Object.assign(f.contract.acceptance, { goal: `Replace the text. ${long}` });
+  f.contract.assignments[0].description = `Replace the text.\n${long}`;
+  f.contract.exclusions = [`Do not change other files. ${long}`];
+  f.contract.context.reason = long;
+  await f.admit();
+  const held = f.options.adaptiveStore.read(f.runtime.sessionID).data.contract;
+  assert.equal(held.assignments[0].description, `Replace the text. ${long}`, 'a line break folds into one space');
+  assert.equal(held.acceptance.goal, `Replace the text. ${long}`);
+  await f.select('mdd-apply', { purpose: `Perform only the next necessary bounded work. ${long} ${long}` });
+  const args = await f.runner.before(f.call, f.runner.status(f.runtime.sessionID).task);
+  writeFileSync(join(f.root, 'own.txt'), 'after');
+  const summary = `Assigned work settled.\n\n${long}`;
+  await f.runner.after(f.call, args, f.report({ evidenceSummary: summary }));
+  const receipt = f.runner.status(f.runtime.sessionID).lastReceipt;
+  assert.equal(receipt.outcome, 'passed', receipt.failure);
+  assert.equal(receipt.summary.length, 500, 'a status shows a long summary bounded');
+  assert.ok(receipt.summary.endsWith('…'));
+  assert.equal(f.options.adaptiveStore.read(f.runtime.sessionID).data.receipts[0].summary, summary, 'the receipt keeps the summary whole, paragraphs included');
+  const handle = () => f.runner.status(f.runtime.sessionID).selection.handle;
+  const prepared = await f.runner.prepareAdaptiveEvidenceInternal({ handle: handle() }, f.runtime);
+  const limits = Array.from({ length: 9 }, (_, index) => `Limit ${index + 1}: ${long}`);
+  await f.runner.submitAdaptiveEvidenceInternal({ handle: handle(), evidence: { snapshotID: prepared.evidence.snapshot.id,
+    readback: { acceptance: held.acceptance, scope: held.scope, exclusions: held.exclusions, decisions: held.decisions },
+    inventory: [{ path: 'own.txt', disposition: 'assignment', reason: long }],
+    exclusions: [{ exclusion: held.exclusions[0], status: 'verified', assessment: long }],
+    sources: [{ id: 'E1', paths: ['own.txt'], status: 'verified', assessment: long }],
+    assignments: [{ assignmentID: 'A1', status: 'verified', sources: ['E1'], checks: [], assessment: long }],
+    scenarios: [{ requirementID: 'R1', scenarioID: 'S1', assignmentID: 'A1', status: 'verified', sources: ['E1'], checks: [], assessment: long }],
+    decisions: [], checks: [], checkResults: [], supplementalChecks: [], limits } }, f.runtime);
+  const cold = new PhaseRunner(f.inspect, f.options);
+  assert.equal((await cold.restore(f.runtime)).restored, true);
+  assert.equal(cold.status(f.runtime.sessionID).lastReceipt.outcome, 'passed');
+  const closed = await cold.closeAdaptiveInternal({ handle: cold.status(f.runtime.sessionID).selection.handle, outcome: 'verified' }, f.runtime);
+  assert.equal(closed.completion.outcome, 'verified');
+  assert.equal(closed.completion.limits.length, 9, 'every evidence limit is kept');
+  assert.deepEqual(closed.evidence.report.limits, limits, 'the evidence readback keeps every limit whole');
+  assert.ok(Buffer.byteLength(JSON.stringify(cold.status(f.runtime.sessionID))) < 46000);
+});
+
 test('AL-04a: cold restore retains changed Apply output without duplicating the completed assignment', async t => {
   const f = await applied(t, [], true), oldHandle = f.handle();
   const cold = new PhaseRunner(f.inspect, f.options);

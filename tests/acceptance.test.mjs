@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { acceptance, decisions, shortText, validatePlan, verification, MAX_REPORTED_PROBLEMS } from '../dist/acceptance.js';
+import { acceptance, decisions, reportText, shortText, summaryText, validatePlan, verification, MAX_REPORTED_PROBLEMS } from '../dist/acceptance.js';
 import { deliverables, executed, verifyReport } from '../dist/phase-evidence.js';
 import { traceFixture } from './adapter-fixture.mjs';
 
@@ -269,9 +269,9 @@ test('explicit plan drift and not-verified acceptance remain visible instead of 
 });
 
 test('one-line text names the rule it broke, where, and on what value', () => {
-  assert.throws(() => shortText(undefined, 'what changed'), { message: 'what changed is missing.' });
-  assert.throws(() => shortText(42, 'what changed'), { message: 'what changed must be text; it read "42".' });
-  assert.throws(() => shortText('   ', 'what changed'), { message: 'what changed is empty; give nonempty text.' });
+  assert.throws(() => shortText(undefined, 'what changed', Infinity), { message: 'what changed is missing.' });
+  assert.throws(() => shortText(42, 'what changed', Infinity), { message: 'what changed must be text; it read "42".' });
+  assert.throws(() => shortText('   ', 'what changed', Infinity), { message: 'what changed is empty; give nonempty text.' });
   assert.throws(() => shortText('npm test\nnpm run lint', 'checks[3].command', Infinity), error => {
     assert.match(error.message, /^checks\[3\]\.command "npm test\\nnpm run lint" contains the control character U\+000A \(a line break\) at character 9\./);
     assert.match(error.message, /keep it on one line/);
@@ -284,6 +284,58 @@ test('one-line text names the rule it broke, where, and on what value', () => {
     return true;
   });
   assert.equal(shortText('  npm test  ', 'command', Infinity), 'npm test');
+});
+
+test('regression: a design decision longer than 500 characters is held whole, not refused', () => {
+  // The observed refusal: decision D16 "Extends D13 with matrix items N01-N20, each named by
+  // scenario ID…" was 653 characters, and the whole mdd-design report was sent back to be shortened.
+  const data = traceFixture();
+  const description = `Extends D13 with matrix items N01-N20, each named by scenario ID. ${'Every item names its scenario, the seam it is tested at and the evidence it needs. '.repeat(8)}`.trim();
+  assert.ok(description.length > 600);
+  data.decisions[0].description = description;
+  const accepted = acceptance(data.acceptance);
+  const choices = decisions(data.decisions, accepted);
+  assert.equal(choices[0].description, description);
+  validatePlan(accepted, choices, deliverables(data.deliverables));
+});
+
+test('report prose has no length limit anywhere a phase writes it', () => {
+  const f = fixture();
+  const long = 'A source-grounded sentence that a reviewer needs to read in full. '.repeat(40).trim();
+  assert.ok(long.length > 2000);
+  const data = traceFixture();
+  data.acceptance.goal = long;
+  data.acceptance.requirements[0].description = long;
+  Object.assign(data.acceptance.requirements[0].scenarios[0], { given: long, when: long, then: long });
+  data.deliverables[0].description = long;
+  const accepted = acceptance(data.acceptance);
+  assert.equal(accepted.goal, long);
+  assert.equal(accepted.requirements[0].scenarios[0].then, long);
+  assert.equal(deliverables(data.deliverables)[0].description, long);
+  for (const row of [...f.result.scenarios, ...f.result.steps, ...f.result.decisions]) row.assessment = long;
+  f.result.changes = long;
+  f.result.limits = Array.from({ length: 12 }, (_, index) => `Limit ${index + 1}: ${long}`);
+  const checked = verification(f.result, f.accepted, f.choices, f.steps, f.reported);
+  assert.equal(checked.matched, true);
+  assert.equal(checked.changes, long);
+  assert.equal(checked.limits.length, 12, 'every material limit is kept as its own entry');
+  assert.equal(checked.decisions[0].assessment, long);
+});
+
+test('report prose folds line breaks and tabs into one space and refuses terminal controls', () => {
+  assert.equal(reportText('  First line.\r\n\r\n\tSecond   line.\nThird.  ', 'decision D1 description'), 'First line. Second   line. Third.');
+  const data = traceFixture();
+  data.decisions[0].description = 'Validate input\nat the feature boundary.';
+  const accepted = acceptance(data.acceptance);
+  assert.equal(decisions(data.decisions, accepted)[0].description, 'Validate input at the feature boundary.');
+  assert.throws(() => reportText('\n\t \r\n', 'decision D1 description'), { message: 'decision D1 description is empty; give nonempty text.' });
+  assert.throws(() => reportText('Shown \u001b[2Jcleared', 'decision D1 description'), {
+    message: 'decision D1 description "Shown \\u001b[2Jcleared" contains the control character U+001B (an escape) at character 7. To fix it, remove it.' });
+  assert.throws(() => reportText('nul\u0000byte', 'decision D1 description'), /U\+0000 at character 4/);
+  for (const value of [undefined, 42]) assert.throws(() => reportText(value, 'decision D1 description'), /decision D1 description (is missing|must be text)/);
+  // A summary keeps its paragraphs; only terminal controls are refused there too.
+  assert.equal(summaryText('  One.\n\nTwo.  ', 'receipt summary'), 'One.\n\nTwo.');
+  assert.throws(() => summaryText('One.\u0007', 'receipt summary'), /U\+0007 at character 5/);
 });
 
 test('an executed command has no length limit and can still be cited exactly', () => {
@@ -312,16 +364,18 @@ test('executed checks name every malformed entry by its position', () => {
 
 test('a Verify report is refused once, for its checks and its verification together', () => {
   // The observed failure: a rejected command was fixed and re-sent, only to be refused again for a
-  // fifth limit that had been in the same report the whole time.
+  // fifth limit that had been in the same report the whole time. A fifth limit is no longer a
+  // problem at all, so the independent third one here is a terminal escape in the limits.
   const f = fixture();
-  f.result.limits = ['one', 'two', 'three', 'four', 'five'];
+  f.result.limits = ['one', 'two', 'three', 'four', 'five \u001b[31mred'];
   f.result.scenarios[0].assessment = '';
   assert.throws(() => verifyReport([{ command: 'npm test', exit: 0 }, { command: 'npm run\nlint', exit: 0 }], f.result,
     { accepted: f.accepted, choices: f.choices, planned: f.steps }), error => {
     assert.match(error.message, /The verification report has 3 problem\(s\)/);
     assert.match(error.message, /\(1\) checks\[1\]\.command "npm run\\nlint" contains the control character U\+000A/);
     assert.match(error.message, /source-based assessment of scenario S1 on deliverable cli-validation is empty/);
-    assert.match(error.message, /at most four concise items; this report lists 5/);
+    assert.match(error.message, /remaining limit 5 .* contains the control character U\+001B \(an escape\) at character 6\. To fix it, remove it\./);
+    assert.equal(error.message.includes('at most four'), false, 'the number of limits is not a problem');
     // A malformed assessment still covers its link, so the same mistake is not also an omission.
     assert.equal(error.message.includes('omits'), false);
     return true;

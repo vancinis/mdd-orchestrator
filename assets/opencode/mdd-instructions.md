@@ -129,7 +129,7 @@ For any scoped worker, return the report directly: `mdd_check_report` and all cu
 except Apply's scoped editor are denied. The adapter checks the report at the exact parent callback.
 Otherwise, outside native fallback, before you return it, call `mdd_check_report` once with your
 phase and the exact report you intend to send. It is the only MDD tool you may call. It answers
-about form — the required sections, the types of the fields, the size limits — and it records
+about form — the required sections, the types of the fields, the identifiers — and it records
 nothing: no attempt is spent and nothing about the run changes. If it names problems, fix all
 of them and check again; if it comes back clean, report as normal.
 

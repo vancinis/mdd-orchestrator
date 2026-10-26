@@ -101,7 +101,8 @@ for (const [label, mutate] of [
   ['zero line', value => { value.findings[0].location.startLine = 0; }],
   ['reversed line range', value => { value.findings[0].location.endLine = 11; }],
   ['fractional line', value => { value.findings[0].location.startLine = 12.5; }],
-  ['overlong evidence', value => { value.findings[0].evidence = 'x'.repeat(2001); }],
+  ['multi-line evidence, which is an exact one-line quote', value => { value.findings[0].evidence = 'const query =\n  input;'; }],
+  ['terminal escape in impact', value => { value.findings[0].impact = 'Data \u001b[2Jexposed.'; }],
   ['control characters in evidence', value => { value.findings[0].evidence = 'source\u0000text'; }],
   ['oversized finding list', value => { value.findings = Array.from({ length: 33 }, (_, i) => ({ ...finding(), id: `F${i}` })); }],
 ]) {
@@ -113,6 +114,22 @@ for (const [label, mutate] of [
     assert.equal(result.security, undefined, 'invalid data is never returned as an assessment');
   });
 }
+
+test('security prose has no length limit and folds line breaks; evidence stays an exact quote', async () => {
+  const { parseSecurityAssessment } = await import('../dist/security.js');
+  const long = 'An attacker who controls the query parameter reaches the database driver unescaped. '.repeat(40).trim();
+  const quote = `const sql = "SELECT * FROM t WHERE id = " + ${'input + '.repeat(300)}"";`;
+  const value = assessment();
+  Object.assign(value.findings[0], { title: long, evidence: quote, attackConditions: `${long}\n${long}`, impact: long, recommendation: `Use a bound parameter.\n\tNever concatenate.` });
+  value.status = 'inconclusive';
+  value.limitations = [`Context outside the diff was not read:\n${long}`];
+  const parsed = parseSecurityAssessment(value);
+  assert.equal(parsed.findings[0].title, long);
+  assert.equal(parsed.findings[0].evidence, quote, 'a quote is kept exactly as written');
+  assert.equal(parsed.findings[0].attackConditions, `${long} ${long}`);
+  assert.equal(parsed.findings[0].recommendation, 'Use a bound parameter. Never concatenate.');
+  assert.equal(parsed.limitations[0], `Context outside the diff was not read: ${long}`);
+});
 
 test('security parser bounds and detaches its nested contract', async () => {
   const { parseSecurityAssessment } = await import('../dist/security.js');

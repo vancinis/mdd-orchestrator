@@ -388,11 +388,12 @@ evidence, attack conditions, impact or recommendation is rejected, not silently 
 Summary, how, the artifact and the total report have no size limit.
 Snapshot/location/finding IDs allow 1–128 ASCII letters, digits, underscores or hyphens. Each layer
 allows at most 256 inspected IDs, globally unique across layers; unavailable layers cannot claim
-inspection. Layer/overall limitations allow 16 entries of 1–1,000 characters each. Findings allow
-300-character titles and 2,000 characters for each detailed text field, all nonempty single-line
-text. Paths are repository-relative forward-slash paths of at most 1,000 characters; line ranges
-are inclusive positive safe integers. Untracked locations have only an after side. Unknown keys,
-duplicate finding IDs and citations outside the reported inspected layer are rejected.
+inspection. Layer/overall limitations allow 16 nonempty entries each. Finding titles, attack
+conditions, impact and recommendation are nonempty text of any length, with line breaks folded into
+spaces; evidence is an exact single-line source quote of any length. The whole assessment keeps its
+20,000-byte bound. Paths are repository-relative forward-slash paths of at most 1,000 characters;
+line ranges are inclusive positive safe integers. Untracked locations have only an after side.
+Unknown keys, duplicate finding IDs and citations outside the reported inspected layer are rejected.
 
 Snapshot IDs and coverage are still **claims** in this foundation. A clean form check neither
 authenticates the snapshot nor verifies that a cited path, side, line or evidence matches its bytes.

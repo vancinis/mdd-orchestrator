@@ -165,7 +165,9 @@ function validateStable(value: unknown, workflow: Workflow, data: ResumeData): S
   renderReport(workflow.snapshot().answers.summary, item.report as PhaseReport);
   const files = list(item.changedList, CHANGED_LIST_MAX, 'changed files').map(value => {
     const file = objectWithKeys(value, 'changed file', ['path', 'reason']);
-    if (!bounded(file.path, 400) || (file.reason !== undefined && !bounded(file.reason, 500))) throw new ValidationError('Invalid changed file.');
+    // A reason has no length limit when it is reported, so none here either: a held list the
+    // checkpoint refused would leave a valid run silently non-resumable.
+    if (!bounded(file.path, 400) || (file.reason !== undefined && !bounded(file.reason, Infinity))) throw new ValidationError('Invalid changed file.');
     return file;
   });
   // Batch-aware records keep the entire union, not only the last batch's files.

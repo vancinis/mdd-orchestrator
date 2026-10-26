@@ -1,5 +1,5 @@
 import { objectWithKeys } from './validation.js';
-import { shortText } from './acceptance.js';
+import { reportText } from './acceptance.js';
 import type { AssessmentLevel } from './policy.js';
 
 export const FUTURE_ASSESSMENT_VERSION = 1;
@@ -51,17 +51,17 @@ export const RISK_REPORT_KEYS: readonly string[] = Object.freeze(
 function evidenceItem(value: unknown, index: number): RiskEvidence {
   const input = objectWithKeys(value, `risk evidence[${index}]`, ['source', 'finding']);
   return {
-    source: shortText(input.source, `risk evidence[${index}] source`, 300),
-    finding: shortText(input.finding, `risk evidence[${index}] finding`, 500),
+    source: reportText(input.source, `risk evidence[${index}] source`),
+    finding: reportText(input.finding, `risk evidence[${index}] finding`),
   };
 }
 
 function riskItem(value: unknown, index: number): RiskItem {
   const input = objectWithKeys(value, `risk[${index}]`, ['description', 'evidence', 'mitigation']);
   return {
-    description: shortText(input.description, `risk[${index}] description`, 500),
-    evidence: shortText(input.evidence, `risk[${index}] evidence`, 500),
-    mitigation: shortText(input.mitigation, `risk[${index}] mitigation`, 500),
+    description: reportText(input.description, `risk[${index}] description`),
+    evidence: reportText(input.evidence, `risk[${index}] evidence`),
+    mitigation: reportText(input.mitigation, `risk[${index}] mitigation`),
   };
 }
 
@@ -80,13 +80,13 @@ export function parseRiskVerdict(value: unknown): RiskVerdict {
   if (input.route !== 'low' && input.route !== 'high') throw new Error('risk.route must be exactly "low" or "high".');
   if (input.complexity !== 'low' && input.complexity !== 'high') throw new Error('risk.complexity must be exactly "low" or "high".');
   if (input.route !== input.complexity) throw new Error(`risk.route (${input.route}) and risk.complexity (${input.complexity}) must agree; they describe the same assessment.`);
-  const reason = shortText(input.reason, 'risk.reason', 2000);
+  const reason = reportText(input.reason, 'risk.reason');
   if (!Array.isArray(input.evidence) || !input.evidence.length || input.evidence.length > 32) throw new Error('risk.evidence requires 1–32 attributable {source,finding} entries.');
   const evidence = input.evidence.map((item, index) => evidenceItem(item, index));
   if (!Array.isArray(input.risks) || input.risks.length > 32) throw new Error('risk.risks must be an array of at most 32 entries; an empty list is accepted only when risksJustification explicitly states why no concrete risk was evidenced.');
   const risks = input.risks.map((item, index) => riskItem(item, index));
   if (risks.length === 0) {
-    const risksJustification = shortText(input.risksJustification, 'risk.risksJustification', 1000);
+    const risksJustification = reportText(input.risksJustification, 'risk.risksJustification');
     return { route: input.route, complexity: input.complexity, reason, evidence, risks, risksJustification };
   }
   if (input.risksJustification !== undefined) throw new Error('risk.risksJustification is only accepted when risks is empty; a reported risk already carries its own evidence.');

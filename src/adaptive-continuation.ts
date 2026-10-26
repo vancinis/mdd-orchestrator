@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from 'node:util';
-import { acceptance, decisions, phaseFields, shortText, validatePlan, readVerification, raise, assertNoTraceSection, unmet, UNMET_PASS } from './acceptance.js';
+import { acceptance, decisions, phaseFields, reportText, shortText, summaryText, validatePlan, readVerification, raise, assertNoTraceSection, unmet, UNMET_PASS } from './acceptance.js';
 import { deliverables, executed } from './phase-evidence.js';
 import type { Deliverable } from './phase-evidence.js';
 import { parseFutureAssessment } from './risk.js';
@@ -24,7 +24,7 @@ export function continuationRequest(value: unknown, contract: AdaptiveContract):
   if (!levels.includes(assessment.impact) && !levels.includes(assessment.complexity))
     throw new Error('Structured depth requires positive impact or complexity assessment; unknown context is not high authority.');
   if (contract.productQuestions.length) throw new Error('Unresolved business scope requires a native user decision, not escalation.');
-  return { depth: input.depth, rationale: shortText(input.rationale, 'parent continuation rationale'), assessment,
+  return { depth: input.depth, rationale: reportText(input.rationale, 'parent continuation rationale'), assessment,
     context: structuredClone(input.context) as AdaptiveContract['context'] };
 }
 
@@ -134,7 +134,7 @@ export class AdaptiveContinuation {
     if ((actor === 'mdd-plan' || actor === 'mdd-design' || actor === 'mdd-tasks') && unmet(fields.unmet, this.contract.acceptance).length) throw new Error(UNMET_PASS);
     if (typeof fields.artifact !== 'string' || !fields.artifact.trim() || Buffer.byteLength(fields.artifact) > 12000)
       throw new Error('Continuation requires a bounded actual report artifact.');
-    assertNoTraceSection(fields.artifact); shortText(fields.evidenceSummary, 'actual phase summary');
+    assertNoTraceSection(fields.artifact); summaryText(fields.evidenceSummary, 'actual phase summary');
     let effective: Assignment[] | undefined;
     if (actor === 'mdd-plan' || actor === 'mdd-spec') {
       if (!isDeepStrictEqual(acceptance(fields.acceptance), this.contract.acceptance))
