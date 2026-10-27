@@ -65,6 +65,13 @@ async function fixture(t, mode = 'automatic') {
     messages.get(sessionID).push(current);
     return userID;
   };
+  // OpenCode 2 runs each model step as its own assistant message in the same user turn, so a
+  // question MDD returned is shown by a later message than the tool call that returned it.
+  const step = () => {
+    current = { id: `assistant-${++count}`, type: 'assistant', agent: 'mdd-orchestrator',
+      model: { providerID: 'openai', id: 'test' }, content: [], time: { created: count } };
+    messages.get(sessionID).push(current);
+  };
   const call = async (name, args = {}, agent = 'mdd-orchestrator') => {
     assert.ok(tools.has(name), `${name} must be registered on the actual V2 host`);
     const result = await tools.get(name).execute(args, { sessionID, agent, messageID: current.id,
@@ -143,7 +150,7 @@ async function fixture(t, mode = 'automatic') {
     current = messages.get(id).findLast(message => message.type === 'assistant');
     userID = messages.get(id).findLast(message => message.type === 'user')?.id;
   };
-  const f = { root, tools, hooks, sessionHooks, messages, sessions, host: ctx, get sessionID() { return sessionID; }, contract, user, call, send, entry, answer, dispatch, detail, select, evidence, begin, emit, switchParent,
+  const f = { root, tools, hooks, sessionHooks, messages, sessions, host: ctx, get sessionID() { return sessionID; }, contract, user, step, call, send, entry, answer, dispatch, detail, select, evidence, begin, emit, switchParent,
     store: new AdaptiveStore(mddDataRoot(root)), restart: async () => { await cleanup(); cleanup = await plugin.setup(ctx); } };
   return f;
 }
@@ -309,6 +316,32 @@ for (const mode of ['interactive', undefined]) test(`AL05c public: native-only $
     assert.equal(f.store.read(f.sessionID).data.receipts.length, 0);
   }
   assert.equal(f.store.read(f.sessionID).nativePolicy.answers.mode, mode ?? 'automatic');
+});
+
+// The incident: every approved interactive entry on OpenCode 2 failed with "Start does not match
+// the actual native caller message", because admission was checked against the message that
+// proposed the operation, not the later one that ran the approval question.
+test('regression: an entry approved in a later model step of the same turn is admitted', async t => {
+  const f = await fixture(t, 'interactive'), draft = f.contract();
+  let status = await f.entry(draft);
+  assert.match(status.question.questions[0].question, /Authorize only this exact adaptive operation/);
+  f.step();
+  status = await f.answer(status);
+  assert.equal(status.state, 'await-selection', status.reason);
+  assert.equal(f.store.read(f.sessionID).data.contract.objective, draft.objective);
+  // An operation after admission is approved in yet another step, and runs.
+  f.step();
+  const selected = await f.select(status);
+  f.step();
+  status = await f.answer(selected);
+  assert.equal(status.task.agent, 'mdd-apply', status.reason);
+  // Unset mode: the mode question is answered in its own step too.
+  const g = await fixture(t, null), other = g.contract();
+  status = await g.entry(other);
+  g.step();
+  status = await g.answer(status, [[status.question.questions[0].options.find(option => /utom.tico/.test(option.label)).label]]);
+  assert.equal(status.mode, 'automatic', status.reason);
+  assert.equal(g.store.read(g.sessionID).data.contract.objective, other.objective);
 });
 
 test('AL05c public: current user identity is distinct from the assistant tool message', async t => {

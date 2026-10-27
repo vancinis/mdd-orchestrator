@@ -414,7 +414,8 @@ export type Inspect = {
   liveness?(runtime: Runtime, call: TaskCall): Promise<Liveness>;
   /** Asks the host to stop a child session. Never evidence by itself: liveness is read again after it. */
   abort?(runtime: Runtime, child: string): Promise<void>;
-  parent(runtime: Runtime, callID?: string, tool?: 'task' | 'question', args?: unknown): Promise<void>;
+  /** For a native question, resolves to the assistant message running that exact call. */
+  parent(runtime: Runtime, callID?: string, tool?: 'task' | 'question', args?: unknown): Promise<void | string>;
   result(runtime: Runtime, call: TaskCall, phase: string, output: unknown): Promise<string>;
   /** Native caller and running parent-task proof, never actor-supplied parent/run identities. */
   artifactCaller?(runtime: ArtifactCaller, input: unknown): Promise<{ parent: string; callID: string; args: TaskArgs }>;

@@ -43,7 +43,8 @@ export type IntakeInspect = {
    * message that carries the objective: an earlier request needs fresh native confirmation.
    */
   currentUser?(runtime: Runtime, callerMessageID: string): Promise<string>;
-  question(runtime: Runtime, call: TaskCall, args: QuestionEnvelope): Promise<void>;
+  /** Resolves to the assistant message running the exact question call, when the host can say. */
+  question(runtime: Runtime, call: TaskCall, args: QuestionEnvelope): Promise<void | string>;
   /** Read-only identity check for an ordinary question; never supplies consent. */
   questionInput?(call: TaskCall): Promise<unknown>;
   /**

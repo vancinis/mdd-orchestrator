@@ -704,6 +704,7 @@ export function createInspector(input: PluginInput, timeout = 5000, now: () => n
           state.status !== 'running' || !isDeepStrictEqual(state.input, args)) {
         throw new Error('The native question history differs from the exact running call.');
       }
+      return boundedText(info.id, 'native question caller message ID', 256);
     },
     /**
      * Proves the text MDD was handed is text the user actually wrote here, and returns the message
@@ -833,7 +834,7 @@ export function createInspector(input: PluginInput, timeout = 5000, now: () => n
     },
     async question(runtime, call, args) {
       if (call.sessionID !== runtime.sessionID) throw new Error('Native question parent mismatch.');
-      await inspector.parent(runtime, call.callID, 'question', args);
+      return inspector.parent(runtime, call.callID, 'question', args);
     },
     /**
      * Returns what the delegated phase actually answered. The result is the actor's report, not

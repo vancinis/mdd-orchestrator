@@ -286,7 +286,13 @@ export class AdaptiveNative {
     const entry = this.#find(call, args); if (!entry) return false;
     if (entry.state !== 'await-answer' || entry.record!.callID !== call.callID) throw new Error('Native answer call does not match the current question.');
     this.#current(entry);
-    await this.inspect.question(entry.runtime, call, entry.record!.slot.args); this.#current(entry);
+    const answeredIn = await this.inspect.question(entry.runtime, call, entry.record!.slot.args); this.#current(entry);
+    // The answer is consumed inside the native message that ran the question. On OpenCode 2 each
+    // model step is its own message, so that is a later one than the message that proposed the
+    // operation; checking admission against the proposing message refused every approved
+    // interactive entry with "Start does not match the actual native caller message". The message
+    // running this exact, verified question call is now the actual caller, in the same user turn.
+    if (entry.callerMessageID && typeof answeredIn === 'string') entry.callerMessageID = answeredIn;
     let answer: string[][];
     try { answer = nativeQuestionAnswers(entry.record!.slot.args, output, entry.record!.adaptive!.purpose === 'product' ? 0 : undefined); }
     catch (error) {
