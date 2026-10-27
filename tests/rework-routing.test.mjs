@@ -464,9 +464,14 @@ test('automatic correction: a failed Verify is corrected without stopping and re
   const correction = await f.dispatch();
   assert.equal(correction.args.description, 'MDD apply correction');
   assert.match(correction.args.prompt, /Report closure for each finding ID S2\b/);
+  // mdd_check_report reads the same held facts the run will check the report against.
+  assert.deepEqual(f.runner.reportContext(f.runtime.sessionID, 'mdd-apply').findings, ['S2']);
+  assert.equal(f.runner.reportContext(f.runtime.sessionID, 'mdd-verify'), undefined, 'only the phase the run is at');
   await f.runner.after(correction.call, correction.args, report({ completed: [STEP], changes: ['src/session.ts'], closure: closure(['S2']) }));
   const verify = await f.dispatch();
   assert.match(verify.args.prompt, /This Verify is a scoped recheck after a correction pass\. Recheck ONLY these findings of the failed Verify against the current code: S2\./);
+  const held = f.runner.reportContext(f.runtime.sessionID, 'mdd-verify');
+  assert.deepEqual([held.recheck.findings, held.planned.map(step => step.id), held.verificationVersion], [['S2'], [STEP], 1]);
   // Rows for the finding alone, and an extra row that found a new problem outside it.
   const scoped = recheckOf(['S2']);
   scoped.verification.decisions = [{ decisionID: 'D1', status: 'not-verified', checks: [], assessment: 'Boundary validation also misses a trimmed empty name.' }];

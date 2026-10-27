@@ -1,5 +1,8 @@
 import { boundedText, nonemptyText } from './phase-runner.js';
-import { acceptance, assertNoTraceSection, closure, OPEN_CLOSURE_PASS, phaseFields, UNMATCHED_PASS, unmet, UNMET_PASS } from './acceptance.js';
+import { acceptance, assertNoTraceSection, closure, decisions, linkDecisions, mergeRecheck, OPEN_CLOSURE_PASS, phaseFields, UNMATCHED_PASS, unmet, UNMET_PASS,
+  validatePlan, verificationFindings } from './acceptance.js';
+import type { Acceptance, Decision, Verification } from './acceptance.js';
+import type { Deliverable, VerificationVersion } from './phase-evidence.js';
 import { concerns } from './concerns.js';
 import { openQuestions } from './open-questions.js';
 import { changed, deliverables, executed, verificationVersion, verifyReport } from './phase-evidence.js';
@@ -50,13 +53,64 @@ function collect(checks: readonly (() => unknown)[]): string[] {
 
 export type ReportCheck = { ok: boolean; problems: string[]; resultFormat: string[]; note: string; risk?: RiskVerdict };
 
-const CLEAN = 'No problem of form was found. This is not an acceptance: it says the document can be read, not that the work is right, and the links between a plan and the requirements it answers are checked against state only the run holds. Report it as you normally would.';
-const FOUND = 'These are problems of form in the document, not in the work it describes. Fix them all and re-check before reporting; nothing has been recorded and no attempt has been spent.';
+/**
+ * What the run holds for the phase a report answers, when the check is asked from a session MDD
+ * dispatched for that phase (or by the coordinator carrying it out). With it the links are checked
+ * too, with the run's own validators: a Verify that invented a link or omitted a held scenario used
+ * to be cleared here and refused on arrival, and those refusals were the largest share of
+ * malformed reports on record. Without it, the check stays about form alone.
+ */
+export type HeldReportContext = {
+  accepted?: Acceptance; choices: Decision[]; planned: Deliverable[]; verificationVersion?: VerificationVersion;
+  /** A Verify after a correction pass: the findings it rechecks and the verification it completes. */
+  recheck?: { findings: string[]; previous: Verification };
+  /** An Apply correction pass: the Verify findings it has to close. */
+  findings?: string[];
+};
 
-export function checkReportForm(phase: Phase, text: unknown): ReportCheck {
+const CLEAN = 'No problem of form was found. This is not an acceptance: it says the document can be read, not that the work is right, and the links between a plan and the requirements it answers are checked against state only the run holds. Report it as you normally would.';
+const CLEAN_HELD = 'No problem was found, including the links against the requirements, decisions and plan this run holds. This is not an acceptance: it says the document can be read and its links exist, not that the work is right. Report it as you normally would.';
+const FOUND = 'These are problems of form in the document, not in the work it describes. Fix them all and re-check before reporting; nothing has been recorded and no attempt has been spent.';
+const FOUND_HELD = 'These are problems in the document or in its links to what this run holds, not in the work it describes. Fix them all and re-check before reporting; nothing has been recorded and no attempt has been spent.';
+
+/** The run's own link checks for one phase, in the run's own words. */
+function heldChecks(phase: Phase, fields: Record<string, unknown>, held: HeldReportContext): (() => unknown)[] {
+  const passed = fields.outcome === 'passed', version = held.verificationVersion;
+  const requireAccepted = (label: string) => { if (!held.accepted) throw new Error(`${label} has no held requirement map.`); return held.accepted; };
+  return [
+    () => { if (fields.verificationVersion !== undefined && verificationVersion(fields.verificationVersion) !== version)
+      throw new Error('Report verification version contradicts the frozen run contract.'); },
+    ...(phase === 'mdd-spec' ? [() => { if (fields.domain !== 'project') throw new Error('Specification domain must match the dispatched project storage namespace.'); }] : []),
+    ...(passed && phase === 'mdd-plan' ? [() => {
+      const accepted = acceptance(fields.acceptance), choices = decisions(fields.decisions, accepted);
+      validatePlan(accepted, choices, linkDecisions(accepted, choices, deliverables(fields.deliverables, version)).steps);
+    }] : []),
+    ...(passed && phase === 'mdd-design' ? [() => decisions(fields.decisions, requireAccepted('Design'))] : []),
+    ...(passed && phase === 'mdd-tasks' ? [() => {
+      const accepted = requireAccepted('Planning');
+      validatePlan(accepted, held.choices, linkDecisions(accepted, held.choices, deliverables(fields.deliverables, version)).steps);
+    }] : []),
+    ...(['mdd-design', 'mdd-tasks'].includes(phase) && held.accepted ? [() => unmet(fields.unmet, held.accepted)] : []),
+    ...(phase === 'mdd-verify' ? [() => {
+      const accepted = requireAccepted('Verification');
+      const read = verifyReport(fields.checks, fields.verification, { accepted, choices: held.choices, planned: held.planned, verificationVersion: version,
+        ...(held.recheck ? { recheck: { findings: held.recheck.findings } } : {}) });
+      const checked = held.recheck ? mergeRecheck(held.recheck.previous, read.verification!, read.ran, !!version, held.recheck.findings) : read.verification!;
+      if (passed && !checked.matched) throw new Error(held.recheck && read.verification!.matched
+        ? `An earlier verified row relied on a check that did not pass in this recheck: ${verificationFindings(checked).join(', ')}. Report outcome failed, or run that check again.`
+        : UNMATCHED_PASS);
+    }] : []),
+    ...(phase === 'mdd-apply' && held.findings?.length && (passed || fields.closure !== undefined) ? [() => {
+      if (passed && fields.closure === undefined) throw new Error(`A correction pass must report closure for every Verify finding: ${held.findings!.join(', ')}.`);
+      if (closure(fields.closure, held.findings).some(entry => entry.status === 'open') && passed) throw new Error(OPEN_CLOSURE_PASS);
+    }] : []),
+  ];
+}
+
+export function checkReportForm(phase: Phase, text: unknown, held?: HeldReportContext): ReportCheck {
   let resultFormat = reportFormatLines(phase);
   const done = (problems: string[]): ReportCheck =>
-    ({ ok: !problems.length, problems, resultFormat, note: problems.length ? FOUND : CLEAN });
+    ({ ok: !problems.length, problems, resultFormat, note: problems.length ? held ? FOUND_HELD : FOUND : held ? CLEAN_HELD : CLEAN });
 
   // The envelope first, and alone: nothing below can be read out of a document that has none, so
   // reporting those failures too would only bury the one that has to be fixed first.
@@ -68,8 +122,13 @@ export function checkReportForm(phase: Phase, text: unknown): ReportCheck {
   catch (error) { return done([error instanceof Error ? error.message : 'The phase report could not be parsed.']); }
 
   let version;
-  try { version = verificationVersion(fields.verificationVersion); resultFormat = reportFormatLines(phase, version); }
+  try {
+    version = verificationVersion(fields.verificationVersion);
+    // A held run reads the report under its own frozen contract, so the form it shows is that one.
+    resultFormat = reportFormatLines(phase, held ? held.verificationVersion : version, phase === 'mdd-apply' && !!held?.findings?.length);
+  }
   catch (error) { return done([String(error)]); }
+  if (held) version = held.verificationVersion;
 
   const outcome = fields.outcome;
   const passed = outcome === 'passed';
@@ -99,10 +158,11 @@ export function checkReportForm(phase: Phase, text: unknown): ReportCheck {
     // check that skipped them on a failed Verify once cleared a report the run then refused, so
     // the actor was told it was fine at the one moment it could still have fixed it. Which links
     // exist is the run's to judge; everything the document says about itself is checked here.
-    ...(phase === 'mdd-verify' ? [() => {
+    ...(phase === 'mdd-verify' && !held ? [() => {
       const { verification } = verifyReport(fields.checks, fields.verification, undefined, version);
       if (passed && verification && !verification.matched) throw new Error(UNMATCHED_PASS);
     }] : []),
+    ...(held ? heldChecks(phase, fields, held) : []),
   ]));
 }
 

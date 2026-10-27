@@ -1128,6 +1128,8 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
     }
     if (options.mismatch) child[0].info.modelID = 'substituted';
     const text = options.reportText ?? (risk ? riskReport(options.riskRoute ?? riskRoute, options.outcome ?? 'passed') : reportDocument(result));
+    // The actor checks its own report from its own session before returning it, as it is told to.
+    if (options.check) await options.check(JSON.parse(await hooks.tool.mdd_check_report.execute({ phase, result: text }, { ...context, sessionID: childID, agent: phase })));
     child[0].parts.push({ type: 'text', sessionID: childID, messageID: child[0].info.id, text });
     const output = { title: 'Native task', metadata: { sessionId: childID, parentSessionId: runtime.sessionID, model }, output: `<task id="${childID}" state="completed">\n<task_result>\n${text}\n</task_result>\n</task>` };
     if (options.badEnvelope) output.output = 'the delegated task did not finish';
@@ -1631,6 +1633,22 @@ for (const fault of ['missing', 'invented', 'drift', 'partial']) {
   });
 }
 
+test('a dispatched actor checks its report links against what its run holds before it returns it', async t => {
+  const f = await fixture(t, { memoryEnabled: false });
+  let plan, apply;
+  await f.phase({ check: checked => { plan = checked; } });
+  assert.equal(plan.ok, true); assert.match(plan.note, /including the links against the requirements, decisions and plan this run holds/);
+  await f.phase({ check: checked => { apply = checked; } });
+  assert.equal(apply.ok, true, apply.problems.join(' | '));
+  let refused;
+  await assert.rejects(f.phase({ coverageFault: 'invented', check: checked => { refused = checked; } }));
+  assert.equal(refused.ok, false);
+  assert.match(refused.problems.join(' | '), /invents the link "invented"\/"S1"\/"feature"/);
+  assert.match(refused.note, /in its links to what this run holds/);
+  // A report for a phase the run is not at is checked for form alone.
+  const other = JSON.parse(await f.hooks.tool.mdd_check_report.execute({ phase: 'mdd-tasks', result: 'not a report' }, f.context));
+  assert.equal(other.ok, false); assert.doesNotMatch(other.note, /this run holds/);
+});
 // A failed verification used to leave one exit that kept the run: re-checking the same unchanged
 // implementation. Correcting it meant a material change, new requirements and a fresh preflight.
 test('a failed verification can send the run back to Apply with its findings, on the user\'s word', async t => {

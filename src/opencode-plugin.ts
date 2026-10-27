@@ -38,6 +38,7 @@ import { withNextAction } from './next-action.js';
 import { collapseDispatchPrompts } from './dispatch-transcript.js';
 import { collapseSupersededStatus } from './status-transcript.js';
 import { checkReportForm, checkRiskReportForm, checkSecurityReportForm } from './report-check.js';
+import type { HeldReportContext } from './report-check.js';
 import { SecurityAudit, SECURITY_AGENT, SECURITY_HANDLE_PREFIX, SECURITY_RUNTIME_GUARD } from './security-audit.js';
 import type { SecurityInspect, SecurityBinding } from './security-audit.js';
 import { CHANGE_CATEGORIES, decodeConcerns } from './concerns.js';
@@ -1429,7 +1430,7 @@ const plugin: Plugin = async input => {
         },
       }),
       mdd_check_report: tool({
-        description: 'Check that the phase report you are about to return can be read, before you return it. Answers about form only — required sections, field types and size limits — and records nothing: no attempt is spent, no run changes, and a clean answer is not an acceptance. Use it once your report is written; if it names problems, fix them all and check again. This is the only MDD tool a phase actor may call.',
+        description: 'Check that the phase report you are about to return can be read, before you return it. Answers about form — required sections and field types — and, while your run is at this phase, about the links to the requirements, decisions, plan and findings it holds, with the same rules the run applies on arrival. It records nothing: no attempt is spent, no run changes, and a clean answer is not an acceptance. Use it once your report is written; if it names problems, fix them all and check again. This is the only MDD tool a phase actor may call.',
         args: {
           phase: tool.schema.enum(CHECK_AGENTS as unknown as [string, ...string[]]).describe('The phase this report answers, exactly as it appears in your prompt.'),
           result: tool.schema.string().min(1).describe('The full report markdown you intend to return, exactly as you would return it.'),
@@ -1447,7 +1448,15 @@ const plugin: Plugin = async input => {
             throw new Error(`${CHECK_TOOL} belongs to MDD phase actors and the ${COORDINATOR} agent. This session is not carrying out an MDD phase; continue with your own tools.`);
           }
           if (args.phase === RISK_AGENT) return statusPayload(checkRiskReportForm(args.result));
-          return statusPayload(checkReportForm(args.phase as Phase, args.result));
+          // A dispatched actor answers to the run in its parent conversation; the coordinator carrying
+          // a phase answers to its own. When that run is at this phase, the links are checked too,
+          // with the run's own validators. Any lookup failure leaves the check about form alone.
+          let held: HeldReportContext | undefined;
+          try {
+            const owner = context.agent === COORDINATOR ? context.sessionID : (await inspector.nativeActor(context.sessionID, context.agent)).session.parentID;
+            if (typeof owner === 'string') held = runner.reportContext(owner, args.phase as Phase);
+          } catch { held = undefined; }
+          return statusPayload(checkReportForm(args.phase as Phase, args.result, held));
         },
       }),
       mdd_status: tool({

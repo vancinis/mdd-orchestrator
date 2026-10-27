@@ -93,6 +93,44 @@ test('cross-link problems are left to the run, which is the only place that hold
   assert.match(checked.note, /state only the run holds/);
 });
 
+test('regression: with what the run holds, links are checked with the run\'s own validators before the report is sent', () => {
+  const trace = structuredTraceFixture();
+  const held = { accepted: trace.acceptance, choices: trace.decisions, planned: trace.deliverables, verificationVersion: 1 };
+  const document = value => reportDocument({ evidenceSummary: 'Verified.', artifact: 'Evidence.', ...value });
+  const good = structuredVerificationFixture(trace);
+  const clean = checkReportForm('mdd-verify', document(good), held);
+  assert.deepEqual(clean.problems, []);
+  assert.match(clean.note, /including the links against the requirements, decisions and plan this run holds/);
+  // The most frequent refusal on arrival: an invented or missing link. Form alone cannot see it.
+  const invented = structuredClone(good); invented.verification.scenarios[1].scenarioID = 'S9';
+  assert.equal(checkReportForm('mdd-verify', document(invented)).ok, true);
+  const refused = checkReportForm('mdd-verify', document(invented), held);
+  assert.equal(refused.ok, false);
+  assert.match(refused.problems.join(' | '), /invents the link "R1"\/"S9"\/"cli-validation"/);
+  assert.match(refused.problems.join(' | '), /omits scenario coverage for S2 on cli-validation/);
+  assert.match(refused.note, /in its links to what this run holds/);
+  // A recheck after a correction pass covers its findings; the earlier rows are the run's.
+  const previous = readVerify(good.checks, good.verification, held).verification;
+  previous.scenarios[1] = { ...previous.scenarios[1], status: 'not-verified', checks: [], assessment: 'S2 failed.' };
+  previous.matched = false;
+  const scoped = structuredClone(good);
+  scoped.verification.scenarios = scoped.verification.scenarios.filter(row => row.scenarioID === 'S2');
+  scoped.verification.steps = []; scoped.verification.decisions = [];
+  assert.deepEqual(checkReportForm('mdd-verify', document(scoped), { ...held, recheck: { findings: ['S2'], previous } }).problems, []);
+  assert.equal(checkReportForm('mdd-verify', document(scoped), held).ok, false, 'a full Verify still covers every link');
+  // Tasks against the held acceptance: an uncovered scenario is named; a wrong decision link is derived.
+  const tasks = deliverables => reportDocument({ evidenceSummary: 'Steps.', artifact: 'Steps.', verificationVersion: 1, deliverables });
+  assert.deepEqual(checkReportForm('mdd-tasks', tasks(trace.deliverables.map(step => ({ ...step, decisions: ['D9'] }))), held).problems, []);
+  const uncovered = checkReportForm('mdd-tasks', tasks(trace.deliverables.map(step => ({ ...step, scenarios: ['S1'] }))), held);
+  assert.match(uncovered.problems.join(' | '), /omits accepted scenario S2/);
+  // A correction pass names its findings.
+  const apply = reportDocument({ evidenceSummary: 'Corrected.', artifact: 'Correction.', verificationVersion: 1, changes: ['src/cli.ts'], completed: ['cli-validation'], checks: [] });
+  assert.match(checkReportForm('mdd-apply', apply, { ...held, findings: ['S2'] }).problems.join(' | '), /must report closure for every Verify finding: S2/);
+  // A report under another contract version than the run's is named, as the run would.
+  assert.match(checkReportForm('mdd-verify', document(good), { ...held, verificationVersion: undefined }).problems.join(' | '),
+    /contradicts the frozen run contract/);
+});
+
 test('checking is pure: the same document checks the same way every time', () => {
   const text = planReport({ evidenceSummary: 'x'.repeat(2500) });
   const first = checkReportForm('mdd-plan', text);

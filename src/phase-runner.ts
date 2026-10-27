@@ -24,6 +24,7 @@ import { checkRiskReportForm } from './report-check.js';
 import { riskReportFormatLines } from './risk.js';
 import type { RiskVerdict } from './risk.js';
 import type { Acceptance, Decision, Verification } from './acceptance.js';
+import type { HeldReportContext } from './report-check.js';
 import { concerns } from './concerns.js';
 import type { Concern } from './concerns.js';
 import { openQuestions } from './open-questions.js';
@@ -3872,6 +3873,22 @@ export class PhaseRunner {
     for (const key of Object.keys(run) as (keyof Run)[]) if (!(key in staged)) delete run[key];
     Object.assign(run, staged);
     return true;
+  }
+
+  /**
+   * What `mdd_check_report` checks a report's links against: what this run holds for the phase it
+   * has dispatched or is carrying out now. A copy, never authority; nothing is recorded or spent.
+   * Undefined when the run is elsewhere, so a report for another phase is checked for form alone.
+   */
+  reportContext(sessionID: string, phase: Phase): HeldReportContext | undefined {
+    const run = this.#runs.get(sessionID);
+    if (!run || run.side || this.#risking(run) || run.phase !== phase || !['ready', 'await-result'].includes(run.state)) return undefined;
+    const recheck = phase === 'mdd-verify' ? this.#recheckScope(run) : undefined;
+    const findings = phase === 'mdd-apply' && run.workflow.correcting() ? verificationFindings(run.verification) : [];
+    return structuredClone({ ...(run.acceptance ? { accepted: run.acceptance } : {}), choices: run.decisions, planned: run.planned,
+      ...(run.verificationVersion ? { verificationVersion: run.verificationVersion } : {}),
+      ...(recheck && run.verification ? { recheck: { findings: recheck, previous: run.verification } } : {}),
+      ...(findings.length ? { findings } : {}) });
   }
 
   approvalStopped(sessionID: string): void { const run = this.#runs.get(sessionID); if (run) this.#event(run, 'approval', 'cancelled'); }
