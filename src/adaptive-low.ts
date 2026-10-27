@@ -536,11 +536,15 @@ export class AdaptiveLow {
   contract(): AdaptiveContract { return structuredClone({ ...this.#contract, assignments: this.#assignments(), context: this.#context, assessment: this.#assessment }); }
   selection(): AdaptiveSelection | undefined { return structuredClone(this.#selection); }
   assignment(): Assignment | undefined { return structuredClone(this.#assignments().find(item => item.id === this.#selection?.assignmentID)); }
-  /** Read-only candidates, not authorization: the same selection guards run on isolated copies. */
-  continuationRepairs() {
-    if (!this.#continuation || this.#state !== 'await-selection') return undefined;
+  /**
+   * Read-only candidates, not authorization: the same selection guards run on isolated copies.
+   * `used` counts the passed Apply receipts after the first one for that assignment (the repairs it
+   * already had), so a coordinator keeps the automatic-correction bound without counting receipts.
+   */
+  repairCandidates() {
+    if (this.#state !== 'await-selection') return undefined;
     const current = { technical: this.#context.technical, dependencies: this.#context.dependencies, fingerprints: this.policySources() };
-    const repairs: { assignmentID: string; repairOf: string }[] = [];
+    const repairs: { assignmentID: string; repairOf: string; used: number }[] = [];
     for (const assignment of this.#assignments().filter(item => this.#completed.has(item.id))) {
       const receipt = this.#receipts.findLast(item => item.actor === 'mdd-apply' && item.assignmentID === assignment.id);
       if (!receipt) continue;
@@ -549,7 +553,8 @@ export class AdaptiveLow {
         candidate.select(candidate.selectionInput({ handle: candidate.#handle, actor: 'mdd-apply', assignmentID: assignment.id,
           purpose: 'Inspect bounded repair eligibility without authorizing work.', repairOf: receipt.id,
           context: { ...current, reason: this.#context.reason } }));
-        repairs.push({ assignmentID: assignment.id, repairOf: receipt.id });
+        repairs.push({ assignmentID: assignment.id, repairOf: receipt.id,
+          used: Math.max(0, this.#receipts.filter(item => item.actor === 'mdd-apply' && item.assignmentID === assignment.id && item.outcome === 'passed').length - 1) });
       } catch { /* Failed/stale proof, prerequisites, repair budget and frozen-stage guards remain authoritative. */ }
     }
     return { repairs, current };
@@ -833,8 +838,8 @@ export class AdaptiveLow {
         const stale = this.#completed.get(assignment.id)!.some(item => fingerprint(this.root, item.path) !== item.digest);
         const failed = this.#report && (this.#report.assignments.find(item => item.assignmentID === assignment.id)!.status !== 'verified' ||
           assignment.obligations.source.some(item => this.#report!.sources.find(source => source.id === item.id)!.status !== 'verified') ||
-          assignment.obligations.checks.some(item => !['passed', 'replaced', 'not-applicable'].includes(this.#report!.checkResults.find(check => check.checkID === item.id)!.disposition)) ||
-          this.#report.scenarios.some(item => item.assignmentID === assignment.id && item.status !== 'verified') ||
+          assignment.obligations.checks.some(item => !['passed', 'replaced', 'not-applicable', 'environmental'].includes(this.#report!.checkResults.find(check => check.checkID === item.id)!.disposition)) ||
+          this.#report.scenarios.some(item => item.assignmentID === assignment.id && item.status !== 'verified' && item.status !== 'external') ||
           this.#report.decisions.some(item => assignment.decisions.includes(item.decisionID) && item.status !== 'verified'));
         if (!stale && !failed) throw new Error('Completed Apply cannot repeat without failed or stale evidence requiring explicit repair.');
         if (this.#repairs >= 4) throw new Error('Explicit completed-assignment repair budget is exhausted.');

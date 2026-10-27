@@ -14,6 +14,7 @@ import { mddDataRoot } from '../dist/engram-http.js';
 import { LocalFiles } from '../dist/local-files.js';
 import { RunOwnershipStore } from '../dist/run-ownership.js';
 import { adaptiveTransferRequest } from '../dist/adaptive-transfer.js';
+import { adaptiveCorrection } from '../dist/adaptive-protocol.js';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 
@@ -355,6 +356,38 @@ test('regression: entry needs only the contract; the host binds the current user
   assert.deepEqual(saved.data.contract.context.fingerprints, full.context.fingerprints, 'the host recorded the same bytes the coordinator would have');
   assert.deepEqual([saved.data.contract.exclusions, saved.data.contract.decisions, saved.data.contract.productQuestions], [[], [], []]);
   assert.deepEqual(saved.data.contract.assignments[0].obligations.checks, []);
+});
+
+test('regression: failed evidence of completed work publishes the bounded automatic correction, then the user decides', async t => {
+  const f = await fixture(t), draft = f.contract();
+  let status = await f.entry(draft);
+  let settled = await f.dispatch(await f.select(status), { completed: ['A1'], changes: ['own.txt'], checks: [] }, ['before', 'after']);
+  const fail = async handle => {
+    const prepared = await f.send('prepare', { handle });
+    const evidence = f.evidence(draft, prepared.evidence.snapshotID);
+    evidence.scenarios[0] = { ...evidence.scenarios[0], status: 'not-verified', assessment: 'The replacement keeps the old trailing text.' };
+    return f.send('submit', { handle: prepared.handle, evidence });
+  };
+  const repairOf = () => f.store.read(f.sessionID).data.receipts.findLast(item => item.actor === 'mdd-apply').id;
+  for (const [used, from, to] of [[0, 'after', 'fixed'], [1, 'fixed', 'fixed again']]) {
+    status = await fail(settled.status.handle);
+    assert.equal(status.evidence.matched, false);
+    assert.equal(status.correction.automatic, true);
+    assert.deepEqual(status.correction.repairs, [{ assignmentID: 'A1', used }]);
+    assert.match(status.correction.instruction, /select the repair of A1 without asking \(at most 2 repair\(s\) per assignment/);
+    assert.match(status.nextAction.why, /^Evidence failed for completed work\. Automatic mode/);
+    settled = await f.dispatch(await f.select(status, 'mdd-apply', { repairOf: repairOf() }), { completed: ['A1'], changes: ['own.txt'], checks: [] }, [from, to]);
+    assert.equal(settled.status.lastReceipt.outcome, 'passed');
+  }
+  // Two repairs spent: one decision for the user, never a third repair unasked.
+  status = await fail(settled.status.handle);
+  assert.equal(status.correction.automatic, false);
+  assert.deepEqual(status.correction.repairs, [{ assignmentID: 'A1', used: 2 }]);
+  assert.match(status.correction.instruction, /let the user choose: repair a listed assignment, or close unverified .* bound of 2 repair\(s\) per assignment is spent/);
+  // Interactive mode, or a bound of 0, always asks.
+  assert.equal(adaptiveCorrection('interactive', [{ assignmentID: 'A1', used: 0 }], 2).automatic, false);
+  assert.equal(adaptiveCorrection('automatic', [{ assignmentID: 'A1', used: 0 }], 0).automatic, false);
+  assert.doesNotMatch(adaptiveCorrection('interactive', [{ assignmentID: 'A1', used: 0 }], 2).instruction, /spent/);
 });
 
 test('regression: a declared external scenario closes verified as pending, never as a gap, and survives restart', async t => {

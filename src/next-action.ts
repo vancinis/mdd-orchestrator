@@ -129,6 +129,10 @@ export function nextAction(status: unknown): NextAction | undefined {
       why: `This phase is ready to delegate. Call the native task tool once, foreground, with exactly this object and no extra arguments. The prompt may be a single-use MDD dispatch handle; pass it through unchanged.${correction}` };
   }
 
+  // Failed evidence of completed work carries its own bounded correction rule; it comes first.
+  const correction = object(value.correction);
+  if (value.lane === 'adaptive-native' && typeof correction?.instruction === 'string') return { tool: 'mdd_adapt',
+    why: `Evidence failed for completed work. ${correction.instruction} Use the published select repair descriptor exactly; when the user chooses to stop, close unverified with every remaining gap as an explicit limit.` };
   if (value.lane === 'adaptive-native') return { tool: 'mdd_adapt',
     why: 'Read workspaceRuns for relevant existing work before fresh entry; do not call mdd_start for continuation or fresh native work (explicit fixed compatibility only). Use the published version-3 operation descriptors, entryGuide and exact input/detail references. Compose only required data; never invent identity, preferences, approval, stopped proof or dispatch authority. When an operation is refused, correct exactly what the refusal names and retry; a refusal is never a reason to switch to mdd_start. Closed work stays closed; entry requires a genuine native user request in this conversation, answered from the current turn.' };
 

@@ -85,6 +85,22 @@ export function completeAdaptiveEntry(value: unknown, root: string): unknown {
 }
 
 /**
+ * What to do with evidence that failed for completed work, published next to the repair selectors.
+ * The fixed route corrects such a failure by itself in automatic mode; version 3 leaves every
+ * selection to the coordinator, so the same bound travels here as data: repair each failing
+ * assignment unasked at most `bound` times, re-assess the earlier gaps first, then stop with one
+ * decision for the user. Interactive mode, or a bound of 0, always asks.
+ */
+export function adaptiveCorrection(mode: string | undefined, repairs: readonly { assignmentID: string; used: number }[], bound: number) {
+  const within = repairs.filter(item => item.used < bound).map(item => item.assignmentID);
+  const automatic = mode === 'automatic' && bound > 0 && within.length > 0;
+  return { automatic, bound, repairs: repairs.map(({ assignmentID, used }) => ({ assignmentID, used })),
+    instruction: automatic
+      ? `Automatic mode: tell the user in a few lines what the evidence found, then select the repair of ${within.join(', ')} without asking (at most ${bound} repair(s) per assignment, and a further one only when the previous repair closed gaps and opened none). After it, prepare and submit evidence that re-assesses the earlier gap rows first; rows of untouched assignments may be restated from the earlier evidence. A gap that needs a different design or requirement is not repaired: stop and ask.`
+      : `Present the evidence gaps and let the user choose: repair a listed assignment, or close unverified with every remaining gap as an explicit limit.${mode === 'automatic' && bound > 0 ? ` The automatic bound of ${bound} repair(s) per assignment is spent.` : ''}` };
+}
+
+/**
  * The shortest correct way into version 3, carried in the projection that offers entry so a
  * coordinator does not have to page through every definition first. Documentation only: the
  * validators named in `inputRef` remain the authority, and a refusal names what to correct.
@@ -342,14 +358,21 @@ export class AdaptiveProtocol {
         if (actor.length && !(continuation?.next === 'mdd-verify' && !matched)) operation('select', { ids: { handle, actor, assignmentID: ids,
           repairOf: repairs.map(item => item.receiptID) }, repairs,
           condition: 'Assignment readiness, scope, current proof and frozen-stage validators still apply; repairs require failed or stale evidence.' });
-        if (continuation?.next === 'mdd-verify' && !matched && model) {
-          const eligible = AdaptiveLow.restore(model.data, runtime.directory, false).continuationRepairs();
-          if (eligible?.repairs.length) operation('select', { variant: 'repair', required: [...specs.select.required, 'repairOf', 'context'], optional: [],
-            ids: { handle, actor: ['mdd-apply'], assignmentID: eligible.repairs.map(item => item.assignmentID), repairOf: eligible.repairs.map(item => item.repairOf) },
-            repairs: eligible.repairs, contextRef: this.#reference(held, 'repairContext', { required: ['technical', 'dependencies', 'reason', 'fingerprints'],
-              current: eligible.current, reason: 'Supply the coordinator explanation of actual current declared-source inspection; fingerprints must match these held current bytes.' }),
-            condition: 'Only a listed assignment/repairOf pair may be repaired with explicit current context. Unrelated completed writers remain closed; refreshed parent evidence and a new structured Verify are required.' });
+        // Evidence that failed for a completed assignment: what can be repaired, and how many repairs
+        // each assignment already had, so automatic mode can correct within its bound unasked.
+        const failedEvidence = !!model && !matched && (continuation ? continuation.next === 'mdd-verify' : !!data?.report);
+        let eligible: ReturnType<AdaptiveLow['repairCandidates']>;
+        if (failedEvidence) {
+          if (continuation) eligible = AdaptiveLow.restore(model!.data, runtime.directory, false).repairCandidates();
+          else try { eligible = AdaptiveLow.restore(model!.data, runtime.directory, false).repairCandidates(); } catch { eligible = undefined; }
         }
+        if (continuation && eligible?.repairs.length) operation('select', { variant: 'repair', required: [...specs.select.required, 'repairOf', 'context'], optional: [],
+          ids: { handle, actor: ['mdd-apply'], assignmentID: eligible.repairs.map(item => item.assignmentID), repairOf: eligible.repairs.map(item => item.repairOf) },
+          repairs: eligible.repairs.map(({ assignmentID, repairOf }) => ({ assignmentID, repairOf })), contextRef: this.#reference(held, 'repairContext', { required: ['technical', 'dependencies', 'reason', 'fingerprints'],
+            current: eligible.current, reason: 'Supply the coordinator explanation of actual current declared-source inspection; fingerprints must match these held current bytes.' }),
+          condition: 'Only a listed assignment/repairOf pair may be repaired with explicit current context. Unrelated completed writers remain closed; refreshed parent evidence and a new structured Verify are required.' });
+        if (eligible?.repairs.length) projection.correction = adaptiveCorrection(mode, eligible.repairs,
+          Math.min(2, Math.max(0, Math.trunc(this.runner.options.automaticCorrections ?? 0))));
         const planning = continuation && ['mdd-plan', 'mdd-propose', 'mdd-spec', 'mdd-design', 'mdd-tasks'].includes(String(continuation.next));
         if (!planning) operation('prepare', { ids: { handle } });
         if (!planning && data?.snapshot && snapshotCurrent) operation('submit', { ids: { handle, snapshotID: data.snapshot.id }, input: 'evidence: exact held readback and complete linked coverage; read inputRef and details.held.' });
@@ -397,7 +420,7 @@ export class AdaptiveProtocol {
         scenarios: data.report?.scenarios.filter(item => item.status !== 'verified' && item.status !== 'external').map(({ requirementID, scenarioID, assignmentID }) => ({ requirementID, scenarioID, assignmentID })) ?? [],
         externalPending: data.report?.scenarios.filter(item => item.status === 'external').map(({ scenarioID, assignmentID, assessment }) => ({ scenarioID, assignmentID, check: statusText(assessment) })) ?? [],
         decisions: data.report?.decisions.filter(item => item.status !== 'verified').map(item => item.decisionID) ?? [],
-        checks: data.report?.checkResults.filter(item => !['passed', 'replaced', 'not-applicable'].includes(item.disposition))
+        checks: data.report?.checkResults.filter(item => !['passed', 'replaced', 'not-applicable', 'environmental'].includes(item.disposition))
           .map(({ checkID, disposition }) => ({ checkID, disposition })) ?? [] },
       completeCoverage: details.held };
     if (state === 'await-contract') {

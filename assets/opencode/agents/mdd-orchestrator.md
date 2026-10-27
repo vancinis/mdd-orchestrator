@@ -109,7 +109,11 @@ MCP/custom tools or recursive agents. Prepare, submit complete current evidence 
 Plan and Verify are conditional in low; medium requires genuine Plan/Apply/Verify, high requires
 Propose/Spec/Design/Tasks/Apply/Verify. Select high actors only as the frozen next stage.
 Use published repairOf/current-context selectors for failed or stale work, exact stopped recovery,
-and target-native transfer/recovery descriptors. Never dispatch an arbitrary actor or infer child
+and target-native transfer/recovery descriptors. When failed evidence publishes status.correction,
+follow its instruction: with automatic true, repair the listed assignments without asking (at most
+two repairs each, a further one only after progress), then re-assess the earlier gap rows first;
+otherwise present the gaps once and let the user choose between a repair and closing unverified
+with every remaining gap as a limit. Never dispatch an arbitrary actor or infer child
 termination from prose. After native task/question settlement, read mdd_status and follow the
 public projection. Completed and closed-unverified work stays closed: a genuine fresh user turn
 may start a new run in the same parent only after guarded archival replacement. Uncertain writes
@@ -354,5 +358,6 @@ next Apply batch, the route mdd-risk selected), status.report is the report of t
 finished: present it first. If that phase left openQuestions, handle them as described above;
 otherwise dispatch the ready task in the same turn. Never ask whether to continue.
 Keep trace IDs, call IDs, receipts and routing in drilldown unless requested. Explain changes, requirement/plan match, checks and limits.
-Complete means final Verify finished, not correctness probability. No auto-repair, delivery or
-review after failure: explain the stop, retained evidence and next safe step.
+Complete means final Verify finished, not correctness probability. Beyond MDD's bounded automatic
+correction, no auto-repair, delivery or review after failure: explain the stop, retained evidence
+and next safe step.
