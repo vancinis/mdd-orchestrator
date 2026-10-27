@@ -62,6 +62,24 @@ function contentCheck(content: string): void {
       Buffer.from(content).toString('utf8') !== content) throw new Error('Artifact must be nonempty valid UTF-8.');
 }
 function digest(content: string): string { return createHash('sha256').update(content).digest('hex'); }
+
+/** Pure paging of provider-owned retained bytes. This does not mint an ArtifactStore capability. */
+export function retainedArtifactChunk(content: string, expectedDigest: unknown, offset: unknown, limit: unknown) {
+  contentCheck(content);
+  const hash = digest(content);
+  if (expectedDigest !== hash) throw new Error('Retained artifact digest mismatch.');
+  const bytes = Buffer.from(content, 'utf8');
+  if (typeof offset !== 'number' || !Number.isSafeInteger(offset) || offset < 0 || offset > bytes.length)
+    throw new Error('Retained artifact byte range is invalid.');
+  if (typeof limit !== 'number' || !Number.isSafeInteger(limit) || limit < 4 || limit > 8192)
+    throw new Error('Retained artifact read limit must be 4–8192 bytes.');
+  const continuation = (at: number) => at < bytes.length && (bytes[at]! & 0xc0) === 0x80;
+  if (continuation(offset)) throw new Error('Retained artifact offset splits a UTF-8 character.');
+  let end = Math.min(offset + limit, bytes.length);
+  while (continuation(end)) end--;
+  return { content: bytes.subarray(offset, end).toString('utf8'), digest: hash, offset, nextOffset: end,
+    bytes: bytes.length, eof: end === bytes.length };
+}
 function artifactPath(value: ArtifactIdentity): string {
   const name = value.batchID ? `apply/${value.batchID}/apply-progress.md`
     : value.explorationID ? `explorations/${value.explorationID}/exploration.md`

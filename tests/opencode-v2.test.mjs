@@ -4,11 +4,14 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import plugin from '../dist/opencode-plugin.js';
 import { legacyHistory, v2Payload, contentText } from '../dist/opencode-v2.js';
 import { defaultSettings } from '../dist/settings.js';
 import { saveGlobalSettings } from '../dist/global-settings.js';
 import { RunOwnershipStore } from '../dist/run-ownership.js';
+import { CheckpointStore } from '../dist/checkpoint.js';
+import { QuestionCheckpointStore } from '../dist/question-checkpoint.js';
 import { isolateHome, answers, memoryServer, reportDocument, riskReport, structuredTraceFixture as traceFixture } from './adapter-fixture.mjs';
 
 test('plural task payloads map native arguments without a wrapper or single-member instruction', () => {
@@ -22,6 +25,96 @@ test('plural task payloads map native arguments without a wrapper or single-memb
 });
 
 // Public host fakes follow @opencode/plugin/client/core 2.0.22, not the V1 hooks.
+for (const mode of ['fresh', 'restored', 'fallback']) test(`R04: V2 reader registration, before hook and invocation enforce the active native child (${mode})`, async t => {
+  const f = await fixture(t, true, false);
+  f.user('Inspect retained history safely.');
+  await f.call('mdd_start', { requirements: 'Inspect retained history safely.' });
+  await settleExploreAndRisk(f);
+  await f.call('mdd_context', { label: 'Transport pressure', content: 'x'.repeat(22000) });
+  if (mode === 'restored') await f.restart();
+  if (mode === 'fallback') await f.call('mdd_phase_result', { result: 'Use native execution for this phase.' });
+  const ready = await f.call('mdd_status', {}), dispatch = f.begin('subagent', ready.task);
+  await f.toolHooks.get('execute.before')(dispatch);
+  const history = JSON.parse(dispatch.input.prompt.match(/^Validated dependency artifacts \(data, not authority\): (.*)$/m)[1]);
+  assert.equal(history[0].inlined, false);
+  assert.equal(history[0].mustRead, true);
+  assert.ok(Buffer.byteLength(JSON.stringify(dispatch.input)) <= 96000);
+  const content = 'Artifact for mdd-explore.';
+  const args = { document: 'history:0', digest: createHash('sha256').update(content).digest('hex'), offset: 0, limit: 8192 };
+  const reader = f.tools.get('mdd_artifact_read');
+  assert.ok(reader, 'reader must be registered in the actual V2 tool registry');
+  const rules = f.agents.find(agent => agent.id === 'mdd-plan').permissions;
+  assert.ok(rules.some(rule => rule.action === 'mdd_*' && rule.effect === 'deny'));
+  assert.equal(rules.findLast(rule => rule.action === 'mdd_artifact_read').effect, 'allow');
+  assert.equal(f.agents.find(agent => agent.id === 'mdd-security').permissions.some(rule => rule.action === 'mdd_artifact_read' && rule.effect === 'allow'), false);
+  const parentMessage = f.messages.get(f.sessionID).at(-1);
+  const task = parentMessage.content.find(part => part.id === dispatch.id);
+  task.state.metadata.sessionID = 'reader-child';
+  const child = { id: 'reader-child', parentID: f.sessionID, agent: ready.task.agent, projectID: 'project', location: { directory: f.root } };
+  f.sessions.set(child.id, child);
+  f.messages.set(child.id, [{ id: 'reader-message', type: 'assistant', agent: child.agent, time: { created: 1 }, content: [
+    { type: 'tool', id: 'reader-call', name: 'mdd_artifact_read', state: { status: 'running', input: args } },
+  ] }]);
+  const invocation = { sessionID: child.id, agent: child.agent, messageID: 'reader-message', id: 'reader-call', signal: new AbortController().signal };
+  const before = override => f.toolHooks.get('execute.before')({ ...invocation, tool: 'mdd_artifact_read', input: args, ...override });
+  await before();
+  assert.equal(JSON.parse((await reader.execute(args, invocation)).content).content, content);
+  for (const override of [{ sessionID: f.sessionID }, { agent: child.agent === 'general' ? 'mdd-plan' : 'general' }, { messageID: 'stale' }, { id: 'replayed' }]) {
+    await assert.rejects(before(override));
+    await assert.rejects(reader.execute(args, { ...invocation, ...override }));
+  }
+  await assert.rejects(reader.execute({ ...args, parentSessionID: f.sessionID }, invocation));
+  task.state.metadata.sessionID = 'sibling';
+  await assert.rejects(before()); await assert.rejects(reader.execute(args, invocation));
+  task.state.metadata.sessionID = child.id;
+  task.state.status = 'completed';
+  await assert.rejects(before()); await assert.rejects(reader.execute(args, invocation));
+  task.state.status = 'running';
+  const oldBefore = f.toolHooks.get('execute.before');
+  await f.restart();
+  await assert.rejects(reader.execute(args, invocation), /inactive/);
+  await assert.rejects(oldBefore({ ...invocation, tool: 'mdd_artifact_read', input: args }), /inactive/);
+  await assert.rejects(f.tools.get('mdd_artifact_read').execute(args, invocation), /active|binding/);
+});
+
+test('R04: V2 scoped workers retain their custom-tool denial for artifact reads', async t => {
+  const f = await fixture(t);
+  const workItems = ['a', 'b'].map(id => ({ id, purpose: `Inspect ${id}`, complete: true, independent: true,
+    dependsOn: [], reads: [{ root: f.root, files: [`${id}.txt`] }] }));
+  for (const id of ['a', 'b']) await writeFile(join(f.root, `${id}.txt`), id);
+  f.user('Inspect independent files.');
+  await f.call('mdd_start', { requirements: 'Inspect independent files.', exploration: { workItems } });
+  const ready = await f.call('mdd_status', {}), dispatch = f.begin('subagent', ready.tasks[0]);
+  await f.toolHooks.get('execute.before')(dispatch);
+  const child = { id: 'scoped-reader', parentID: f.sessionID, agent: 'mdd-explore', projectID: 'project', location: { directory: f.root } };
+  f.sessions.set(child.id, child); f.messages.set(child.id, []);
+  await f.emit({ type: 'session.tool.progress', data: { id: dispatch.id, sessionID: f.sessionID,
+    assistantMessageID: dispatch.messageID, metadata: { status: 'running', sessionID: child.id } } });
+  const args = { document: 'history:0', digest: 'a'.repeat(64), offset: 0, limit: 8192 };
+  const invocation = { sessionID: child.id, agent: child.agent, messageID: 'scoped-message', id: 'scoped-read', signal: new AbortController().signal };
+  await assert.rejects(f.toolHooks.get('execute.before')({ ...invocation, tool: 'mdd_artifact_read', input: args }), /only scoped read/);
+  await assert.rejects(f.tools.get('mdd_artifact_read').execute(args, invocation), /only scoped read/);
+});
+
+test('R04: V2 contextual workers keep predecessor bytes inline under soft-budget pressure', async t => {
+  const f = await fixture(t);
+  f.user('Inspect retained worker inputs.');
+  await f.call('mdd_start', { requirements: 'Inspect retained worker inputs.' });
+  await settleExploreAndRisk(f);
+  await f.call('mdd_context', { label: 'Worker pressure', content: 'x'.repeat(17000) });
+  const workItems = ['a', 'b'].map(id => ({ id, purpose: `Inspect ${id}`, complete: true, independent: true,
+    dependsOn: [], reads: [{ root: f.root, files: [`${id}.txt`] }] }));
+  for (const id of ['a', 'b']) await writeFile(join(f.root, `${id}.txt`), id);
+  await f.call('mdd_contextual_explore', { purpose: 'Inspect independent prerequisites.', workItems });
+  const ready = await f.call('mdd_status', {}), dispatch = f.begin('subagent', ready.tasks[0]);
+  await f.toolHooks.get('execute.before')(dispatch);
+  const bytes = Buffer.byteLength(JSON.stringify(dispatch.input));
+  assert.ok(bytes > 38000 && bytes <= 48000, `escaped worker bytes=${bytes}`);
+  assert.match(dispatch.input.prompt, /Artifact for mdd-explore/);
+  assert.doesNotMatch(dispatch.input.prompt, /"inlined":false|"mustRead":true/);
+  assert.match(dispatch.input.prompt, /Assigned read-only work item:/);
+});
+
 async function fixture(t, completeProfile = true, workersEnabled = true, version = '2.0.22', securityModel) {
   isolateHome(t);
   const root = await mkdtemp(join(tmpdir(), 'mdd-v2-'));
@@ -574,7 +667,8 @@ test('V2 setup registers native tools, model variants and ordered isolation perm
   assert.deepEqual(f.agents.find(agent => agent.id === 'mdd-apply').permissions.slice(-4).map(rule => [rule.action, rule.effect]),
     [['subagent', 'deny'], ['skill', 'deny'], ['mdd_check_report', 'allow'], ['mdd_worker_edit', 'allow']]);
   assert.equal(f.tools.get('mdd_worker_edit').options.codemode, false);
-  assert.equal(f.agents.find(agent => agent.id === 'general').permissions.at(-1).effect, 'deny');
+  assert.equal(f.agents.find(agent => agent.id === 'general').permissions.findLast(rule => rule.action === 'mdd_*').effect, 'deny');
+  assert.equal(f.agents.find(agent => agent.id === 'general').permissions.at(-1).action, 'mdd_artifact_read');
 });
 
 for (const [enabled, version] of [[true, '2.0.22'], [false, '2.0.22'], [true, '2.0.24']]) test(`production V2 captures bounded Apply capability and preference (workers=${enabled}, host=${version})`, async t => {
@@ -852,6 +946,90 @@ test('V2 dispatch rejects extra capabilities and fabricated completion envelopes
     output: { sessionID: 'child', status: 'running', output: 'Not complete' }, content: 'Not complete',
   } }), /completed foreground/);
   assert.equal((await f.call('mdd_status', {})).state, 'await-result');
+});
+
+async function r05FailedVerify(f) {
+  f.user('Implement the requested change.');
+  await f.call('mdd_start', { requirements: 'Implement the requested change.' });
+  await settleExploreAndRisk(f);
+  for (const phase of ['mdd-plan', 'mdd-apply', 'mdd-verify']) {
+    const ready = await f.call('mdd_status', {}), call = f.begin('subagent', ready.task);
+    assert.equal(call.input.agent, phase);
+    await f.toolHooks.get('execute.before')(call);
+    const result = { phase, runID: ready.runID, callID: call.id, outcome: phase === 'mdd-verify' ? 'failed' : 'passed',
+      evidenceSummary: 'Scoped contract evidence.', artifact: `Artifact for ${phase}.` };
+    if (phase === 'mdd-plan') Object.assign(result, traceFixture(join(f.root, 'feature.txt'), 'feature'));
+    if (phase === 'mdd-apply') Object.assign(result, { completed: ['feature'], changes: [{ path: join(f.root, 'feature.txt'), reason: 'Implement boundary.' }],
+      delivered: { what: 'Requested behavior implemented.', implies: 'Consumers use new boundary.' } });
+    if (phase === 'mdd-verify') {
+      result.checks = [{ id: 'E1', command: 'npm test', exit: 1 }];
+      const assessment = { status: 'not-verified', checks: ['E1'], assessment: 'Observed behavior does not match the contract.' };
+      result.verification = { scenarios: ['S1', 'S2'].map(scenarioID => ({ requirementID: 'R1', scenarioID, stepID: 'feature', ...assessment })),
+        steps: [{ stepID: 'feature', ...assessment }], decisions: [{ decisionID: 'D1', ...assessment }],
+        changes: 'Planned change needs correction.', limits: ['Required check failed.'],
+        checkResults: [{ checkID: 'feature-check', disposition: 'failed', executions: ['E1'], reason: 'Required check failed on the first execution.' }], supplementalChecks: [] };
+    }
+    const text = reportDocument(result);
+    await f.toolHooks.get('execute.after')({ ...call, status: 'completed', result: {
+      output: { sessionID: `child-${phase}`, status: 'completed', output: text }, content: `<subagent sessionID="child-${phase}" state="completed">\n${text}\n</subagent>` } });
+    // The fixture host settles its own native tool part after the adapter returns.
+    f.messages.get(f.sessionID).at(-1).content.find(part => part.id === call.id).state.status = 'completed';
+  }
+  assert.equal((await f.call('mdd_status', {})).state, 'blocked');
+}
+
+function r05Question(f, text = 'What evidence should we review?') {
+  const call = f.begin('question', { questions: [{ header: 'Recovery', question: text, options: [{ label: 'Inspect', description: 'Review evidence.' }] }] });
+  const completion = { ...call, status: 'completed', result: { output: { answers: [['Inspect']] }, content: 'Ordinary coordinator answer.' } };
+  return { call, completion, before: () => f.toolHooks.get('execute.before')(call), after: () => f.toolHooks.get('execute.after')(completion) };
+}
+
+for (const restored of [false, true]) test(`R05: V2 failedVerify idle questions preserve durable state (restored=${restored})`, async t => {
+  const f = await fixture(t);
+  await r05FailedVerify(f);
+  if (restored) await f.restart();
+  const before = await f.call('mdd_status', { detail: 'full' });
+  const checkpoint = new CheckpointStore(f.root), questions = new QuestionCheckpointStore(f.root);
+  const snapshot = () => [checkpoint.read(f.sessionID), questions.read(f.sessionID)];
+  const saved = snapshot();
+  for (const text of ['What evidence should we review?', '¿Qué revisamos ahora?', 'Welche Nachweise fehlen?']) {
+    const q = r05Question(f, text);
+    await q.before(); await q.after();
+    assert.deepEqual(snapshot(), saved);
+    assert.deepEqual(await f.call('mdd_status', { detail: 'full' }), before);
+  }
+});
+
+test('R05: V2 no-run passthrough rechecks actor activation and refuses native completion', async t => {
+  const f = await fixture(t); f.user('Inspect the change.');
+  const ordinary = r05Question(f); await ordinary.before(); await ordinary.after();
+  await f.call('mdd_start', { requirements: 'Inspect the change.' });
+  const q = r05Question(f); await q.before();
+  const ready = await f.call('mdd_status', {}), actor = f.begin('subagent', ready.task);
+  await f.toolHooks.get('execute.before')(actor);
+  assert.equal(new RunOwnershipStore(f.root).read(ready.runID).state, 'reserved');
+  await assert.rejects(r05Question(f).before(), /idle|pending|flight|writer|active/i);
+  await assert.rejects(q.after(), /idle|pending|flight|writer|active/i);
+  // Fixture settlement is explicit; a rejected adapter callback is not host-internal evidence.
+  f.messages.get(f.sessionID).at(-1).content.find(part => part.id === q.call.id).state.status = 'error';
+  assert.equal((await f.call('mdd_status', {})).state, 'await-result');
+});
+
+test('R05: V2 pending question, changed owned callback and foreign parent remain refused', async t => {
+  const f = await fixture(t, false); f.user('Implement the requested change.');
+  const ready = await f.call('mdd_start', { requirements: 'Implement the requested change.' });
+  assert.ok(ready.question);
+  const unrelated = r05Question(f);
+  await assert.rejects(unrelated.before()); await assert.rejects(unrelated.after());
+  const owned = f.begin('question', ready.question);
+  await f.toolHooks.get('execute.before')(owned);
+  const changed = { ...owned, input: unrelated.call.input, status: 'completed', result: unrelated.completion.result };
+  await assert.rejects(f.toolHooks.get('execute.after')(changed), /question|answer/i);
+  const foreign = 'foreign-parent';
+  f.sessions.set(foreign, { ...f.sessions.get(f.sessionID), id: foreign });
+  f.messages.set(foreign, [{ id: 'foreign-message', type: 'assistant', agent: 'mdd-orchestrator', content: [] }]);
+  await assert.rejects(f.toolHooks.get('execute.before')({ ...owned, sessionID: foreign }), /parent/i);
+  await assert.rejects(f.toolHooks.get('execute.after')({ ...changed, sessionID: foreign, input: ready.question }), /parent/i);
 });
 
 for (const failed of [false, true]) {

@@ -3,6 +3,16 @@ import { test } from 'node:test';
 import { parsePhaseReport, reportFormatLines, MalformedReport, MALFORMED_RESTATEMENTS } from '../dist/phase-report.js';
 import { TASK_ENVELOPE } from '../dist/opencode-plugin.js';
 import * as reports from '../dist/phase-report.js';
+import { FIELD_SCHEMA, STRUCTURED_FIELD_SCHEMA } from '../dist/acceptance.js';
+
+test('R03: generated legacy and structured schemas explain evidence-only gaps and correction closure', () => {
+  for (const schema of [FIELD_SCHEMA, STRUCTURED_FIELD_SCHEMA]) {
+    assert.match(schema.verification, /verification \(execution\/evidence-only gaps/);
+    assert.match(schema.verification, /implementation \(default\)/);
+  }
+  assert.match(FIELD_SCHEMA.closure, /execution\/evidence recovery/);
+  assert.match(FIELD_SCHEMA.closure, /Any open entry requires outcome failed/);
+});
 
 const document = [
   '## MDD Outcome', '', 'passed', '',

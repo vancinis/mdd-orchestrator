@@ -8,7 +8,62 @@ import { PhaseRunner } from '../dist/phase-runner.js';
 import { CheckpointStore } from '../dist/checkpoint.js';
 import { RunOwnershipStore } from '../dist/run-ownership.js';
 import { ProgressGuard } from '../dist/progress.js';
-import { answers, reportDocument } from './adapter-fixture.mjs';
+import { answers, reportDocument, throughRiskStop, structuredTraceFixture } from './adapter-fixture.mjs';
+
+test('R04: Apply assignment suffix overflow blocks before publishing worker dispatch', async t => {
+  const prepare = async padding => {
+    const f = fixture(t);
+    f.options.workerCapability.applyEditing = true;
+    await f.runner.start({ requirements: 'Implement both exact parser files @ é😀.', preflight: { answers } }, f.runtime,
+      { requirementsConfirmed: true, userMessageID: 'boundary-user' });
+    await throughRiskStop(f.runner, f.runtime.sessionID, 'low', { release: true });
+    if (padding) f.runner.contribute({ label: 'Mandatory padding', content: 'x'.repeat(padding) }, f.runtime);
+    const trace = structuredTraceFixture('a.txt'), base = trace.deliverables[0];
+    trace.deliverables = ['a', 'b'].map((name, index) => ({ ...base, id: `T${index + 1}`,
+      description: `Implement ${name} @ é😀 "quoted" \\ exactly.`, path: `${name}.txt`,
+      checks: base.checks.map(check => ({ ...check, id: `${name}-check` })),
+      parallel: { complete: true, reads: [], writes: [`${name}.txt`] } }));
+    const call = { sessionID: f.runtime.sessionID, callID: 'boundary-plan' };
+    const args = await f.runner.before(call, f.runner.status(call.sessionID).task);
+    await f.runner.after(call, args, reportDocument({ evidenceSummary: 'Both files planned.', artifact: 'Exact multi-file obligations @ é😀.', ...trace }));
+    f.runner.releaseSettled(call.sessionID, call.callID);
+    return { ...f, trace };
+  };
+  const control = await prepare(0);
+  const call = { sessionID: control.runtime.sessionID, callID: '"'.repeat(256) };
+  const ready = control.runner.status(call.sessionID);
+  assert.equal(ready.tasks.length, 2);
+  const sent = await control.runner.before(call, ready.tasks[0]);
+  const suffix = sent.prompt.indexOf('\nAssigned worker task:');
+  assert.ok(suffix > 0);
+  assert.ok(Buffer.byteLength(JSON.stringify(sent)) <= 96000);
+  assert.match(sent.prompt, /a\.txt/);
+  assert.match(sent.prompt, /b\.txt/);
+  assert.match(sent.prompt, /é😀/);
+  assert.match(sent.prompt, /\\u0040/);
+  const withoutCall = sent.prompt.slice(0, sent.prompt.lastIndexOf('\nNative callID='));
+  const reserved = prompt => Buffer.byteLength(JSON.stringify({ ...sent,
+    prompt: `${prompt}\nNative callID=${JSON.stringify('\u0001'.repeat(256))}` }));
+  const assignmentBytes = reserved(withoutCall) - reserved(withoutCall.slice(0, suffix));
+  assert.ok(assignmentBytes > 1000);
+  const padding = 96000 - reserved(withoutCall) + Math.floor(assignmentBytes / 2) - 500;
+  const blocked = await prepare(padding);
+  const status = blocked.runner.status(blocked.runtime.sessionID);
+  assert.equal(status.state, 'blocked');
+  assert.match(status.reason, /combined Apply worker handoff.*escaped transport bytes=\d+, excess=\d+/);
+  assert.equal(status.uncertain, false);
+  assert.equal(status.tasks, undefined);
+  assert.equal(status.task, undefined);
+  assert.deepEqual(status.planned, blocked.trace.deliverables);
+  const checkpoint = blocked.checkpoint.read(blocked.runtime.sessionID).checkpoint;
+  const owner = blocked.ownership.read(status.runID);
+  assert.equal(owner.state, 'idle');
+  assert.equal(checkpoint.attempt.state, 'settled');
+  assert.equal(checkpoint.data.planned.length, 2);
+  await assert.rejects(blocked.runner.before({ sessionID: blocked.runtime.sessionID, callID: 'forged-worker' }, ready.tasks[0]));
+  assert.deepEqual(blocked.checkpoint.read(blocked.runtime.sessionID).checkpoint, checkpoint);
+  assert.deepEqual(blocked.ownership.read(status.runID), owner);
+});
 
 function fixture(t, enabled = true) {
   const root = mkdtempSync(join(tmpdir(), 'mdd-exploration-workers-'));

@@ -33,6 +33,8 @@ export type IntakeInspect = {
   setupPending?(runtime: Runtime, requirements?: string, messageID?: string): Promise<{ requirements: string; userMessageID: string } | undefined>;
   intake(runtime: Runtime, requirements: string, messageID: string, scope?: 'latest' | 'objective' | 'native-current'): Promise<void | string>;
   question(runtime: Runtime, call: TaskCall, args: QuestionEnvelope): Promise<void>;
+  /** Read-only identity check for an ordinary question; never supplies consent. */
+  questionInput?(call: TaskCall): Promise<unknown>;
   /**
    * Proves `text` is exactly the user's latest message and, when `after` names question calls,
    * that it was written after one of them was shown. Returns that message's ID.
@@ -41,7 +43,7 @@ export type IntakeInspect = {
   transferLiveness?(runtime: Runtime, sourceSessionID: string, runID: string, requestDigest: string,
     assistantMessageID?: string): Promise<'running' | 'stopped' | 'unknown'>;
 };
-type Runner = Pick<PhaseRunner, 'start' | 'status' | 'approveNative' | 'block'> & Partial<Pick<PhaseRunner, 'admitAdaptiveInternal' | 'transferAdaptiveInternal' | 'recoverAdaptiveTransferInternal' | 'approvalStopped' | 'assertChangeable' | 'assertFreshStart' | 'closeForFreshStart' | 'contribute' | 'explore' | 'movedAway' | 'priorGuards' | 'recordConsent' | 'reset' | 'failedVerification' | 'resumable' | 'submit' | 'owner' | 'reserve' | 'release' | 'handoffRecoveredQuestion' | 'forceRoute' | 'retryRisk' | 'chooseManualRoute' | 'openQuestions' | 'takeOpenQuestions' | 'adaptiveClosed'>>;
+type Runner = Pick<PhaseRunner, 'start' | 'status' | 'approveNative' | 'block'> & Partial<Pick<PhaseRunner, 'admitAdaptiveInternal' | 'transferAdaptiveInternal' | 'recoverAdaptiveTransferInternal' | 'approvalStopped' | 'assertChangeable' | 'assertFreshStart' | 'closeForFreshStart' | 'contribute' | 'explore' | 'movedAway' | 'priorGuards' | 'recordConsent' | 'reset' | 'failedVerification' | 'resumable' | 'submit' | 'owner' | 'reserve' | 'release' | 'handoffRecoveredQuestion' | 'forceRoute' | 'retryRisk' | 'chooseManualRoute' | 'openQuestions' | 'takeOpenQuestions' | 'adaptiveClosed' | 'assertCoordinatorQuestionIdle'>>;
 /** The run and settled state a native question reserved the durable writer against. */
 type Reservation = NonNullable<QuestionRecord['reservation']>;
 /** `fields` counts a preflight envelope's leading field questions; the rest are its clarifications. */
@@ -855,12 +857,17 @@ export class NativeIntake {
     }
     const intakeToken = this.durable.ownership?.intake(runtime.sessionID)?.token;
     const applied = this.runner.reset?.(runtime.sessionID, scope, consent, target) ?? { scope: 'run' as const };
+    let nativeEntry: ReturnType<AdaptiveNative['releaseFence']>;
     if (applied.scope === 'run' || applied.scope === 'continue') {
       if (intakeToken) {
         const current = this.durable.ownership?.intake(runtime.sessionID);
         if (current?.state !== 'retired') this.durable.ownership?.retireIntake(runtime.sessionID, intakeToken);
       }
-      this.durable.questions?.clear(runtime.sessionID); this.#forget(runtime.sessionID);
+      const fence = applied.scope === 'run' ? this.#adaptiveNative?.resetFence(runtime) : undefined;
+      // An unresolved (or unreadable) checkpoint held by a live bridge entry is kept with its fence.
+      if (!this.#adaptiveNative?.holdsQuestion(runtime.sessionID)) this.durable.questions?.clear(runtime.sessionID);
+      this.#forget(runtime.sessionID);
+      if (applied.scope === 'run') nativeEntry = this.#adaptiveNative?.releaseFence(runtime, fence);
     }
     else if (entry) {
       delete entry.slot; delete entry.reason; delete entry.restore; delete entry.replacing;
@@ -876,7 +883,7 @@ export class NativeIntake {
       // re-armed here instead of leaving the conversation with nothing to answer.
       this.phaseRecorded(runtime.sessionID);
     }
-    return { ...this.status(runtime.sessionID), reset: applied };
+    return { ...this.status(runtime.sessionID), reset: nativeEntry ? { ...applied, nativeEntry } : applied };
   }
 
   /**
@@ -1064,9 +1071,10 @@ export class NativeIntake {
   async beforeQuestion(call: TaskCall, args: unknown): Promise<void> {
     if (await this.#adaptiveNative?.before(call, args)) return;
     this.#refuseMovedAway(call, args);
-    const owner = this.runner.owner?.(call.sessionID);
+    this.runner.owner?.(call.sessionID);
+    if (await this.#coordinatorQuestion(call, args)) return;
     const entry = this.#entry(call, args);
-    if (!entry) { if (owner && !this.#closedAdaptive(call.sessionID)) throw new Error('Native question has no restored intake; no answer is authorized.'); return; }
+    if (!entry) throw new Error('Native question has no restored intake; no answer is authorized.');
     if (entry.slot?.kind === 'preflight') this.#assertIntake(entry);
     // While MDD has a question pending, that one is the only question that may run: anything else
     // leaves the user answering two things at once, and an altered copy of it is a forgery.
@@ -1075,9 +1083,6 @@ export class NativeIntake {
     // between phases into a blocked run.
     if (entry.state === 'question-ready') {
       if (!isDeepStrictEqual(args, entry.slot!.args)) throw new Error('Question arguments differ from the pending question; no answer was accepted.');
-    } else if (!this.#owned(args)) {
-      if (entry.state === 'accepting' || entry.state === 'await-answer') throw new Error('A native MDD question is already pending; no unrelated question may run.');
-      return;
     }
     const status = this.runner.status(call.sessionID);
     if ('contextual' in status && status.contextual) throw new Error('Wait for the contextual exploration before answering the main approval.');
@@ -1135,11 +1140,11 @@ export class NativeIntake {
   async afterQuestion(call: TaskCall, args: unknown, output: unknown): Promise<void> {
     if (await this.#adaptiveNative?.after(call, args, output)) return;
     this.#refuseMovedAway(call, args);
-    const owner = this.runner.owner?.(call.sessionID, call.callID);
+    this.runner.owner?.(call.sessionID, call.callID);
+    if (await this.#coordinatorQuestion(call, args)) return;
     const entry = this.#entry(call, args);
     if (!entry || !this.#owned(args)) {
-      if (owner && !(!entry && this.#closedAdaptive(call.sessionID))) throw new Error('Native question callback has no current issued question; no answer was accepted.');
-      return;
+      throw new Error('Native question callback has no current issued question; no answer was accepted.');
     }
     if (this.durable.questions?.read(call.sessionID)?.retiredCalls?.includes(call.callID))
       throw new Error('Native question call was retired; its old answer cannot affect the fresh question.');
@@ -1413,6 +1418,35 @@ export class NativeIntake {
     const owner = [...this.#questionOwners].find(([question]) => isDeepStrictEqual(question, args))?.[1];
     if (owner !== undefined && owner !== call.sessionID) throw new Error('MDD question belongs to another parent.');
     return this.#sessions.get(call.sessionID);
+  }
+
+  /** Both hooks recheck the same facts. Ordinary answers create no MDD authority or state. */
+  async #coordinatorQuestion(call: TaskCall, args: unknown): Promise<boolean> {
+    const claimed = (value: unknown): boolean => {
+      const entry = this.#entry(call, value), held = this.durable.questions?.read(call.sessionID);
+      return this.#owned(value) || !!held && (isDeepStrictEqual(value, held.slot.args) || held.callID === call.callID ||
+        !!held.retiredCalls?.includes(call.callID)) || !!entry && (entry.slot?.callID === call.callID ||
+        !!entry.shown?.calls.includes(call.callID) || entry.receipts.some(receipt => receipt.callID === call.callID));
+    };
+    if (claimed(args)) return false;
+    if (this.inspect.questionInput) {
+      const actual = await this.inspect.questionInput(call);
+      if (claimed(actual) || !isDeepStrictEqual(actual, args))
+        throw new Error('Native question identity differs; an issued call cannot become a coordinator question.');
+    }
+    // Native inspection yields: eligibility must be checked again after it, not cached per call.
+    if (claimed(args)) throw new Error('Native question ownership changed during inspection.');
+    this.#refuseMovedAway(call, args);
+    const owner = this.runner.owner?.(call.sessionID), entry = this.#sessions.get(call.sessionID);
+    const adaptive = this.#adaptiveNative?.status(call.sessionID);
+    if (entry?.state === 'question-ready') throw new Error('Question arguments differ from the pending question; a native MDD question is already pending.');
+    if (adaptive && ['starting', 'question-ready', 'await-answer', 'await-contract'].includes(String(adaptive.state)) || this.#adaptiveTransfers.has(call.sessionID) ||
+        this.durable.ownership?.intake(call.sessionID)?.state === 'pending' || this.#unresolved(call.sessionID) ||
+        entry && (entry.restore || ['starting', 'accepting', 'await-answer', 'question-ready'].includes(entry.state)))
+      throw new Error('A native MDD question or intake is already pending; no unrelated question may run.');
+    if (this.runner.assertCoordinatorQuestionIdle) this.runner.assertCoordinatorQuestionIdle(call.sessionID);
+    else if (owner && !this.#closedAdaptive(call.sessionID)) throw new Error('Coordinator question requires proven idle ownership.');
+    return true;
   }
 
   /**

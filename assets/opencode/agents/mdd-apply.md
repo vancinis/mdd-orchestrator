@@ -43,9 +43,11 @@ skipped checks with reasons, requirement evidence, risks and remaining work to v
 Describe preserved filesystem progress and dependency assumptions so a fresh actor can continue
 without this conversation. Final Verify checks the entire plan, not just this batch.
 A correction pass after failed Verify is one actor that owns every finding and every listed
-deliverable. For each finding, first run Verify's saved probe or turn it into a regression test and
-observe it fail; then change the code; then rerun it with the affected suite. Report closure for each
-finding ID the prompt lists, closed or open, with command, exit and change, and completed with every
+deliverable. For semantic defects, first run Verify's saved probe or turn it into a regression test and
+observe it fail; then change the code; then rerun it with the affected suite. For execution/evidence-only gaps,
+perform actual execution/evidence recovery and cite commands, exits and recovered coverage. Do not require
+source changes when none are needed; use noChangeReason. Missing or failed required checks still block acceptance.
+Report closure for each finding ID the prompt lists, closed or open, with command, exit and fix or recovery, and completed with every
 listed deliverable only when all are closed. A green suite or a disclosed residual is not closure.
 If a fix only moves a failure to another fallback within the held design, stop and report outcome
 failed saying the design must change.

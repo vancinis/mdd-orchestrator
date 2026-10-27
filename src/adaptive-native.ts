@@ -66,10 +66,12 @@ export function consumeNativeOperation(token: object, runtime: Runtime): Proof {
   if (!proof || !isDeepStrictEqual(proof.runtime, runtime)) throw new Error('Actual single-use native operation proof is required.');
   proofs.delete(token); return structuredClone(proof);
 }
-type Entry = {
+export type Entry = {
   runtime: Runtime; operation: NativeOperation; policy: NativePolicy; draft?: AdaptiveContract;
   state: 'starting' | 'question-ready' | 'await-answer' | 'await-contract' | 'active' | 'blocked';
   record?: QuestionRecord; reason?: string;
+  /** Single-use token of the last execution attempt; identity for rejection proof only, never authority. */
+  attempt?: object;
   userMessageID?: string;
   callerMessageID?: string;
 };
@@ -86,7 +88,9 @@ export class AdaptiveNative {
   }
 
   status(parent: string): Record<string, unknown> | undefined {
-    const entry = this.#entries.get(parent), record = this.questions.read(parent);
+    const entry = this.#entries.get(parent);
+    // A live entry projects its own state; an unreadable checkpoint must not make that projection (or reset's report) throw.
+    const record = entry ? undefined : this.questions.read(parent);
     if (!entry) return record?.version === 2 && ['prepared', 'pending', 'answered'].includes(record.state)
       ? { ...this.runner.status(parent), state: 'blocked', reason: 'Interrupted native question is not consent. Its unresolved outcome remains fenced.' } : undefined;
     return { ...this.runner.status(parent), ...(entry.state !== 'active' ? { state: entry.state } : {}),
@@ -309,8 +313,55 @@ export class AdaptiveNative {
     proofs.set(token, { runtime: entry.runtime, operation: entry.operation, policy, ...(binding ? { binding } : {}),
       ...(entry.callerMessageID ? { callerMessageID: entry.callerMessageID } : {}),
       ...(entry.record ? { question: structuredClone(entry.record) } : {}) });
-    entry.state = 'starting';
-    try { await this.runner.executeAdaptiveNativeInternal(token, entry.runtime); entry.state = 'active'; return this.status(entry.runtime.sessionID); }
-    catch (error) { entry.state = 'blocked'; entry.reason = error instanceof Error ? error.message : String(error); throw error; }
+    entry.state = 'starting'; entry.attempt = token;
+    try { await this.runner.executeAdaptiveNativeInternal(token, entry.runtime); entry.state = 'active'; delete entry.attempt; return this.status(entry.runtime.sessionID); }
+    catch (error) { proofs.delete(token); entry.state = 'blocked'; entry.reason = error instanceof Error ? error.message : String(error); throw error; }
+  }
+
+  /**
+   * True while a non-active bridge entry's durable question is unresolved (prepared, pending, answered) or
+   * cannot be read. Synchronous, non-throwing and read-only: reset must then keep both checkpoint and fence.
+   */
+  holdsQuestion(parent: string): boolean {
+    const entry = this.#entries.get(parent);
+    if (!entry || entry.state === 'active') return false;
+    try {
+      const durable = this.questions.read(parent);
+      return !!durable && ['prepared', 'pending', 'answered'].includes(durable.state);
+    } catch { return true; }
+  }
+
+  /** Side-effect-free classification of a blocked entry for fixed reset; a string is the reason the fence stays. */
+  resetFence(runtime: Runtime): { entry: Entry; attempt: object } | string | undefined {
+    const parent = runtime.sessionID, entry = this.#entries.get(parent);
+    if (!entry || entry.state === 'active') return undefined;
+    if (this.holdsQuestion(parent)) return 'A native question is unresolved; its checkpoint and fence were retained.';
+    try {
+      if (entry.operation.kind !== 'entry' || entry.state !== 'blocked') return 'Only a blocked entry rejected before bootstrap can be released.';
+      if (!entry.attempt) return 'No attempt-bound proof that bootstrap was never reached.';
+      if (!isDeepStrictEqual(entry.runtime, runtime)) return 'Native coordinator or workspace differs from the rejected attempt.';
+      const durable = this.questions.read(parent);
+      if (entry.record) {
+        if (entry.record.state !== 'settled') return 'The native question is not settled.';
+        // An earlier reset may already have cleared the settled checkpoint before a refused release; that retry stays eligible.
+        if (durable !== undefined && !isDeepStrictEqual(durable, entry.record)) return 'The durable native question differs from the rejected attempt.';
+      } else if (durable && !['settled', 'cancelled'].includes(durable.state)) return 'A native question is unresolved.';
+      return { entry, attempt: entry.attempt };
+    } catch { return 'Native question state could not be read reliably.'; }
+  }
+
+  /** Final reset step: revalidates the exact entry, consumes the runner proof, and only then drops the volatile fence. */
+  releaseFence(runtime: Runtime, fence: ReturnType<AdaptiveNative['resetFence']>): { released: true } | { released: false; reason: string } | undefined {
+    if (fence === undefined) return undefined;
+    if (typeof fence === 'string') return { released: false, reason: fence };
+    const { entry, attempt } = fence;
+    if (this.#entries.get(runtime.sessionID) !== entry || entry.state !== 'blocked' || entry.attempt !== attempt)
+      return { released: false, reason: 'The native entry changed before release.' };
+    let reason: string | undefined;
+    try { reason = this.runner.consumeAdaptiveEntryRejectionInternal(attempt, runtime); }
+    catch { reason = 'Release could not be confirmed.'; }
+    if (reason) return { released: false, reason };
+    this.#entries.delete(runtime.sessionID);
+    return { released: true };
   }
 }

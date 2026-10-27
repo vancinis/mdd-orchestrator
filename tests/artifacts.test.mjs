@@ -4,6 +4,37 @@ import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { ArtifactStore, ArtifactWriteError, PHASE_PATHS } from '../dist/artifacts.js';
+import * as artifacts from '../dist/artifacts.js';
+import { createHash } from 'node:crypto';
+
+test('R04: bounded retained bytes reconstruct exact UTF-8 without issuing store capabilities', async () => {
+  const content = 'aé中😀\\"@\n'.repeat(2000);
+  const digest = createHash('sha256').update(content).digest('hex');
+  let offset = 0, reconstructed = '';
+  while (offset < Buffer.byteLength(content)) {
+    const chunk = artifacts.retainedArtifactChunk(content, digest, offset, 11);
+    assert.equal(chunk.offset, offset);
+    assert.ok(Buffer.byteLength(chunk.content) <= 11);
+    assert.ok(chunk.nextOffset > offset);
+    assert.equal(chunk.digest, digest);
+    reconstructed += chunk.content;
+    offset = chunk.nextOffset;
+  }
+  assert.equal(reconstructed, content);
+  assert.equal(artifacts.retainedArtifactChunk(content, digest, offset, 11).eof, true);
+  const store = new ArtifactStore('.', 'none');
+  const saved = await store.save({ runID: 'read-test', phase: 'mdd-plan' }, content);
+  await assert.rejects(store.read(JSON.parse(JSON.stringify(saved.ref))), /Unissued/);
+});
+
+test('R04: retained byte reads reject digest, boundary and range violations', () => {
+  const content = 'é😀end', digest = createHash('sha256').update(content).digest('hex');
+  for (const [hash, offset, limit] of [[digest, 1, 8], [digest, 3, 8], [digest, -1, 8],
+    [digest, 100, 8], [digest, 0.5, 8], [digest, 0, 8193], [digest, 0, 3], [digest, 0, Infinity],
+    ['0'.repeat(64), 0, 8]]) {
+    assert.throws(() => artifacts.retainedArtifactChunk(content, hash, offset, limit), /digest|UTF-8|range|limit/);
+  }
+});
 /** Well past the former 16,000-byte artifact limit, which no longer exists. */
 const LARGE_BYTES = 200000;
 import { EngramHttp } from '../dist/engram-http.js';

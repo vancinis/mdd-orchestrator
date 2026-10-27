@@ -28,10 +28,25 @@ const noCatalog = { models: () => ({ status: 'unavailable', reason: 'catálogo n
 const catalog = (models, variants = {}) => ({ models: () => ({ status: 'ok', models }), variants: provider => ({ status: 'ok', variants }) });
 const sample = ['openai/gpt-a', 'openai/gpt-b', 'zai/glm-1'];
 
+function assertSpawn(result, started) {
+  const token = value => typeof value === 'string' && /^[A-Z_0-9]{1,40}$/.test(value) ? value : null;
+  const diagnostic = `config UI elapsedMs=${Math.round(performance.now() - started)} code=${token(result.error?.code)} status=${Number.isInteger(result.status) ? result.status : null} signal=${token(result.signal)}`;
+  assert.ok(!result.error && result.signal === null, diagnostic);
+}
+
+test('R06: config UI failures report bounded subprocess metadata', () => {
+  const result = { status: null, signal: 'SIGTERM', error: Object.assign(new Error('PRIVATE'), { code: 'ETIMEDOUT' }) };
+  assert.throws(() => assertSpawn(result, performance.now()), error => {
+    assert.match(error.message, /elapsedMs=\d+ code=ETIMEDOUT status=null signal=SIGTERM/);
+    assert.doesNotMatch(error.message, /PRIVATE/);
+    return true;
+  });
+});
+
 function invoke(root, ...args) {
+  const started = performance.now();
   const result = spawnSync(process.execPath, [cli, ...args], { cwd: root, encoding: 'utf8', timeout: 5000 });
-  assert.ifError(result.error);
-  assert.equal(result.signal, null);
+  assertSpawn(result, started);
   return result;
 }
 

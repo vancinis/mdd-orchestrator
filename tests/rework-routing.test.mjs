@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Workflow, currentGeneration } from '../dist/workflow.js';
 import { PhaseRunner } from '../dist/phase-runner.js';
-import { CheckpointStore, validateCheckpoint } from '../dist/checkpoint.js';
+import { CheckpointStore, sealResumeData, validateCheckpoint } from '../dist/checkpoint.js';
 import { ProgressGuard } from '../dist/progress.js';
 import { completeRemaining, remainingSteps } from '../dist/apply-batches.js';
 import { verifyReport } from '../dist/phase-evidence.js';
@@ -35,10 +35,10 @@ function failedVerify(cause, requirementID = 'R1') {
 }
 const closure = (ids = FINDINGS) => ids.map(id => ({ id, status: 'closed', evidence: `Probe for ${id} failed first and passes after the change (exit 0).` }));
 
-async function fixture(t, route = 'low') {
+async function fixture(t, route = 'low', sessionID = 'ses_rework') {
   const root = mkdtempSync(join(tmpdir(), 'mdd-rework-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const runtime = { sessionID: 'ses_rework', agent: 'mdd-orchestrator', directory: root, worktree: root };
+  const runtime = { sessionID, agent: 'mdd-orchestrator', directory: root, worktree: root };
   const durable = new CheckpointStore(root);
   const progress = new ProgressGuard(root);
   const inspect = { parent: async () => {}, result: async (_runtime, _call, _phase, output) => output, stopped: async () => true };
@@ -139,6 +139,76 @@ test('verification rows carry a cause only on a gap, and findings are derived fr
   assert.equal(failingRequirements({ scenarios: 'not rows' }).length, 0);
 });
 
+test('R03: mixed causes retain semantic precedence and same-requirement semantic rows', () => {
+  const checked = failedVerify('verification').verification;
+  assert.equal(deepestCause(checked), 'verification');
+  assert.deepEqual(failingRequirements(checked), []);
+  assert.deepEqual(verificationFindings(checked), FINDINGS);
+  for (const cause of ['implementation', 'design', 'requirements']) {
+    checked.scenarios[1].cause = cause;
+    assert.equal(deepestCause(checked), cause);
+    assert.deepEqual(failingRequirements(checked), ['R1']);
+  }
+  checked.steps[0].cause = 'design';
+  checked.decisions[0].cause = 'implementation';
+  assert.equal(deepestCause(checked), 'requirements');
+});
+
+for (const restored of [false, true]) {
+  for (const [before, after] of [['verification', 'verification'], [undefined, 'verification'], ['verification', undefined]]) {
+    test(`R03: ${before ?? 'legacy'} to ${after ?? 'legacy'} after passed Apply is not semantic repetition (${restored ? 'restored' : 'fresh'})`, async t => {
+      const f = await fixture(t);
+      await f.finish(trace());
+      await f.finish({ completed: [STEP], changes: ['src/session.ts'] });
+      await f.finish(failedVerify(before));
+      if (restored) assert.deepEqual(await f.restart(), { restored: true });
+      f.runner.reset(f.runtime.sessionID, 'rework');
+      const correction = await f.dispatch();
+      assert.match(correction.args.prompt, /For semantic defects, first run its saved probe/);
+      assert.match(correction.args.prompt, /execution\/evidence-only gaps/);
+      assert.match(correction.args.prompt, /noChangeReason/);
+      const recovered = { completed: [STEP], noChangeReason: 'Recovered execution evidence without source changes.',
+        checks: [{ id: 'recovery', command: 'npm test', exit: 0 }], closure: closure().map(row => ({ ...row, evidence: 'Reran npm test, exit 0; recovered missing execution evidence.' })) };
+      await assert.rejects(f.runner.after(correction.call, correction.args, report({ ...recovered,
+        closure: recovered.closure.map((row, index) => index ? row : { ...row, status: 'open' }) })), /open|closed/);
+      await f.runner.submit({ result: report(recovered) }, f.runtime);
+      await f.finish(failedVerify(after));
+      const check = () => {
+        assert.equal(f.status().state, 'blocked');
+        assert.equal(f.status().reworkable, 'mdd-apply');
+        assert.doesNotMatch(f.status().reworkReason, /after a correction pass/);
+        if (after === 'verification') assert.doesNotMatch(f.status().reworkReason, /gaps to the implementation/);
+        assert.match(nextAction(f.status()).why, /scope phase/);
+      };
+      check();
+      validateCheckpoint(f.saved().checkpoint);
+      assert.deepEqual(await f.restart(), { restored: true });
+      check();
+      const checkpoint = f.saved().checkpoint;
+      checkpoint.data.verification.scenarios[0].cause = 'unknown';
+      checkpoint.dataDigest = sealResumeData(checkpoint.data, checkpoint.runID, checkpoint.parent, checkpoint.events, checkpoint.stable, checkpoint.request);
+      assert.throws(() => validateCheckpoint(checkpoint), /unknown cause/);
+    });
+  }
+}
+
+test('R03: required check-only failure does not assert an implementation defect', async t => {
+  const f = await fixture(t);
+  await f.finish(trace());
+  await f.finish({ completed: [STEP], changes: ['src/session.ts'] });
+  const failed = structuredVerificationFixture(trace());
+  failed.outcome = 'failed';
+  failed.verification.checkResults[0] = { checkID: `${STEP}-check`, disposition: 'blocked', executions: [], reason: 'Required environment unavailable.' };
+  failed.verification.supplementalChecks = [{ id: 'semantic', requirement: 'optional', disposition: 'passed', executions: [failed.checks[0].id] }];
+  await f.finish(failed);
+  assert.equal(f.status().state, 'blocked');
+  assert.equal(f.status().reworkable, 'mdd-apply');
+  assert.doesNotMatch(f.status().reworkReason, /gaps to the implementation/);
+  assert.match(f.status().reworkReason, /execution|evidence/);
+  assert.deepEqual(await f.restart(), { restored: true });
+  assert.doesNotMatch(f.status().reworkReason, /gaps to the implementation/);
+});
+
 test('a Verify gap attributed to the design recommends returning to planning, and that rework plans again', async t => {
   const f = await fixture(t);
   await f.finish(trace());
@@ -209,6 +279,83 @@ test('the same requirement failing again after a correction pass recommends rede
   assert.equal(requirements.status().reworkable, 'mdd-plan');
   assert.match(requirements.status().reworkReason, /requirements themselves/);
 });
+
+for (const restored of [false, true]) {
+  test(`Verify retries without corrective Apply retain implementation routing (${restored ? 'restored' : 'fresh'})`, async t => {
+    const f = await fixture(t, 'low', restored ? 'ses_retry_restored' : 'ses_retry_fresh');
+    await f.finish(trace());
+    await f.finish({ completed: [STEP], changes: ['src/session.ts'] });
+    await f.finish(failedVerify());
+    if (restored) assert.deepEqual(await f.restart(), { restored: true });
+    // Retry the failed phase, not a user-authorized corrective Apply.
+    f.runner.reset(f.runtime.sessionID, 'phase');
+    const retry = failedVerify();
+    retry.verification.scenarios.forEach(row => { row.assessment = 'The new process still accepts a previously rejected session.'; });
+    await f.finish({ ...retry, evidenceSummary: 'Independent verification still finds R1 unmet.' });
+    const assertRetry = () => {
+      const status = f.status();
+      assert.equal(status.state, 'blocked');
+      assert.equal(status.reworkable, 'mdd-apply');
+      assert.deepEqual(status.reworkTargets, ['mdd-apply', 'mdd-plan']);
+      assert.doesNotMatch(status.reworkReason, /after a correction pass/);
+      assert.deepEqual(status.workflow.results.slice(-2).map(result => `${result.phase}:${result.outcome}`),
+        ['mdd-verify:failed', 'mdd-verify:failed']);
+    };
+    assertRetry();
+    validateCheckpoint(f.saved().checkpoint);
+    assert.deepEqual(await f.restart(), { restored: true });
+    assertRetry();
+  });
+}
+
+test('a historical successful correction does not count between later consecutive Verify retries', async t => {
+  const f = await fixture(t, 'low', 'ses_correction_then_retry');
+  await f.finish(trace());
+  await f.finish({ completed: [STEP], changes: ['src/session.ts'] });
+  await f.finish(failedVerify());
+  f.runner.reset(f.runtime.sessionID, 'rework');
+  await f.finish({ completed: [STEP], changes: ['src/session.ts'], closure: closure() });
+  assert.deepEqual(await f.restart(), { restored: true });
+  await f.finish(failedVerify());
+  assert.equal(f.status().reworkable, 'mdd-plan');
+  f.runner.reset(f.runtime.sessionID, 'phase');
+  await f.finish(failedVerify());
+  assert.equal(f.status().reworkable, 'mdd-apply');
+  assert.doesNotMatch(f.status().reworkReason, /after a correction pass/);
+  assert.deepEqual(await f.restart(), { restored: true });
+  assert.equal(f.status().reworkable, 'mdd-apply');
+});
+
+test('planning rework resets repeated requirement lineage even after a successful new Apply', async t => {
+  const f = await fixture(t, 'low', 'ses_replanned_lineage');
+  await f.finish(trace());
+  await f.finish({ completed: [STEP], changes: ['src/session.ts'] });
+  await f.finish(failedVerify());
+  f.runner.reset(f.runtime.sessionID, 'rework', undefined, 'mdd-plan');
+  await f.finish(trace());
+  await f.finish({ completed: [STEP], changes: ['src/session.ts'] });
+  assert.deepEqual(await f.restart(), { restored: true });
+  await f.finish(failedVerify());
+  assert.equal(f.status().reworkable, 'mdd-apply');
+  assert.doesNotMatch(f.status().reworkReason, /after a correction pass/);
+  assert.deepEqual(await f.restart(), { restored: true });
+  assert.equal(f.status().reworkable, 'mdd-apply');
+});
+
+for (const [cause, target] of [['requirements', 'mdd-spec'], ['design', 'mdd-design']]) {
+  test(`explicit ${cause} cause retains high-route escalation without correction`, async t => {
+    const f = await fixture(t, 'high', `ses_explicit_${cause}`);
+    await f.finish({});
+    await f.finish({ domain: 'project', acceptance: trace().acceptance });
+    await f.finish({ decisions: trace().decisions });
+    await f.finish({ deliverables: trace().deliverables });
+    await f.finish({ completed: [STEP], changes: ['src/session.ts'] });
+    await f.finish(failedVerify(cause));
+    assert.equal(f.status().reworkable, target);
+    assert.deepEqual(await f.restart(), { restored: true });
+    assert.equal(f.status().reworkable, target);
+  });
+}
 
 test('a design that cannot meet a held requirement fails before implementation and can send the route back to spec', async t => {
   const f = await fixture(t, 'high');

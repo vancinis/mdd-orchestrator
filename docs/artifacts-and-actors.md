@@ -62,6 +62,50 @@ substitution and status exposes `handoff`; do not invent or silently substitute 
 The ref identifies the complete artifact, not fresh evidence or a serialized read capability.
 `none` keeps content only in the live return/handoff; it has no dedicated disk or observation record.
 
+## Execution-bound retained reads
+
+`mdd_artifact_read({document,digest,offset,limit})` serves provider-owned phase-history or
+contextual artifact bytes to the exact active singular child. Use `history:N` or `context:N`
+(zero-based), the corresponding artifact digest, byte offset 0, and a limit of 4–8192 bytes.
+Continue from the returned `nextOffset` until `eof`. Pages preserve exact UTF-8 boundaries;
+the provider checks the complete retained content against its digest before returning a page.
+
+Every invocation rechecks native child/message/tool identity, the uniquely matching running
+parent task, exact task arguments, workspace and the runner's active attempt/ownership. Caller
+identity is never supplied in tool arguments. Parent, unrelated/sibling, settled and stale
+attempts are refused. Scoped workers cannot use this tool. V2 disposal invalidates captured
+reader callbacks; restoration requires a newly admitted native dispatch.
+
+This reads immutable bytes already retained by the runner, including bytes restored through
+ordinary checkpoint validation. It does not call `ArtifactStore.read` with a serialized ref,
+mint a store capability, grant workflow control, or attest that an actor consulted every page.
+Summaries are not equivalent to omitted originals. Consult omitted material before relying on
+it; report unavailable access as an evidence gap. A diagnostic ref never guarantees retrieval
+from an external store.
+
+Singular native phase, Risk and fallback handoffs can reduce retained narrative oldest-first
+from complete text to a complete navigational summary, then to a manifest. Each omitted document
+has its stable run-local locator, digest, byte count and `mustRead: true`. Read it to `eof` before
+dependent work, including load-bearing planning prose, prerequisites and correction evidence.
+Huge summaries can be omitted too; no summary is treated as equivalent to the original.
+
+Requirements, coordinator context, held acceptance/decisions, the complete operational plan,
+assignment/dependency order, and current structured execution/correction evidence stay inline.
+Scoped workers and integrations without the native reader retain full artifact bytes; excess
+size fails visibly rather than silently omitting their inputs. Report-restatement callbacks gain
+no reader or execution authority.
+
+The unchanged 96,000-byte ceiling covers the JSON-escaped native task envelope. Preparation
+checks both prompt and brief with reserved maximum call-ID space; worker assignments are checked
+after their suffixes. Dispatch checks the actual envelope and bounds optional knowledge by its
+remaining escaped headroom. Irreducible overflow reports measured bytes and excess, preserving
+accepted progress. The separate exploration-worker ceiling remains 48,000 bytes.
+
+Contextual results commit their complete bytes and held main workflow before main-task
+recomposition. A preparation failure retains that evidence once, with the original cause, and
+does not authorize replay. Fresh and restored runs can prepare again after the cause is corrected;
+unknown checkpoint or progress publication still fences dispatch.
+
 ## Compact evidence handoffs
 
 Use existing artifact/context prose for the pertinent finding, source locator (path with

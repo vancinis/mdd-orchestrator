@@ -202,6 +202,13 @@ copy args or calls exactly; compose only when neither is supplied. Follow this s
   only the user can make is missing, call mdd_prepare_advance with those questions instead; MDD asks
   them and returns the same task, updated with the answers. A failed phase's openQuestions are asked with
   your own native question and handed over with mdd_context before recovery.
+  An idle fixed run, including a settled failed Verify after restart, permits ordinary coordinator
+  questions only without pending intake, an issued question, active actors, uncertain progress or a
+  writer reservation. Both native hooks recheck these conditions. An ordinary answer
+  never records consent, changes the plan, or starts work; contributing it requires the separate
+  explicit context operation. Issued envelopes and consumed or retired calls cannot be reused with
+  changed wording. On refusal, inspect status rather than retrying or treating the answer as approval.
+  Active adaptive runs retain their question-session refusal.
 - If the user asks a question or requests an edit at an idle approval/clarification boundary, call
   mdd_revisit before handling it. Respond or supply revised context, then prepare advancement again;
   use mdd_change_request only for genuinely material changes. Never infer approval from prose;

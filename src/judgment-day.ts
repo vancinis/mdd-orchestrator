@@ -73,14 +73,24 @@ export async function inspectJudgmentTarget(root: string, value: unknown, signal
     GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null', GIT_TERMINAL_PROMPT: '0',
     GIT_OPTIONAL_LOCKS: '0', GIT_LITERAL_PATHSPECS: '1', GIT_ATTR_NOSYSTEM: '1' });
   const git = async (args: string[]) => {
-    signal?.throwIfAborted();
+    const started = performance.now();
     try {
+      signal?.throwIfAborted();
       const result = await execute(executable, ['--no-pager', '--no-replace-objects', '--no-lazy-fetch',
         `--attr-source=${commit}`,
         '-c', 'core.fsmonitor=false', '-c', 'core.pager=', ...args],
       { cwd: root, env, shell: false, windowsHide: true, timeout: 5000, maxBuffer: LIMIT, encoding: 'buffer', signal });
       return new TextDecoder('utf-8', { fatal: true }).decode(result.stdout);
-    } catch { throw new Error('Immutable Git inspection failed, was cancelled, or exceeded its 128 KiB / 5 second limit. No partial output is evidence.'); }
+    } catch (error) {
+      const failure = error as { code?: unknown; killed?: unknown } | null;
+      const classification = signal?.aborted || failure?.code === 'ABORT_ERR' ? 'cancelled' :
+        failure?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' ? 'output-overflow' :
+        failure?.code === 'ERR_ENCODING_INVALID_ENCODED_DATA' ? 'invalid-decode' :
+        failure?.killed === true ? 'timeout' : 'process-failure';
+      const elapsedMs = Math.round(performance.now() - started);
+      throw new Error(`Immutable Git inspection failed, was cancelled, or exceeded its 128 KiB / 5 second limit. No partial output is evidence. classification=${classification} elapsedMs=${elapsedMs}`,
+        { cause: { classification, elapsedMs } });
+    }
   };
   for (const id of base ? [base, commit] : [commit]) {
     if ((await git(['cat-file', '-t', id])).trim() !== 'commit') throw new Error('Inspection target must be a commit object.');

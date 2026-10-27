@@ -7,15 +7,281 @@ import { createHash } from 'node:crypto';
 import { Workflow } from '../dist/workflow.js';
 import { CheckpointStorageError, CheckpointStore, reconcileProgress, sealResumeData, validateCheckpoint } from '../dist/checkpoint.js';
 import { PhaseRunner } from '../dist/phase-runner.js';
+import { nextAction } from '../dist/next-action.js';
 import { ProgressGuard } from '../dist/progress.js';
 import { projectTargetTransfer } from '../dist/transfer.js';
 import { memoryServer, request as nativeRequest, result as nativeResult, reportDocument, riskReport, runtime, call, answers } from './adapter-fixture.mjs';
 
 const parent = 'session-1';
+
+for (const fault of ['checkpoint', 'progress']) test(`R04: contextual ${fault} uncertainty cannot replay or dispatch`, async t => {
+  const root = mkdtempSync(join(tmpdir(), 'mdd-context-uncertain-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const here = { ...runtime, directory: root, worktree: root }, checkpoint = new CheckpointStore(root), progress = new ProgressGuard(root);
+  const inspect = { parent: async () => {}, result: async (_r, _c, _p, text) => text };
+  const runner = new PhaseRunner(inspect, { checkpoint, progress });
+  await runner.start({ preflight: { answers }, requirements: 'Retain uncertain context.' }, here,
+    { requirementsConfirmed: true, userMessageID: 'uncertain-context' });
+  for (const phase of ['mdd-explore', 'mdd-risk', 'mdd-plan']) {
+    const current = runner.status(here.sessionID), dispatch = { sessionID: here.sessionID, callID: `uncertain-${phase}` };
+    await runner.after(dispatch, await runner.before(dispatch, current.task), phase === 'mdd-risk' ? riskReport('low') : nativeResult(current));
+  }
+  await runner.explore({ purpose: 'Inspect one uncertain dependency.' }, here);
+  const dispatch = { sessionID: here.sessionID, callID: 'uncertain-side' };
+  const args = await runner.before(dispatch, runner.status(here.sessionID).task);
+  if (fault === 'checkpoint') {
+    const write = checkpoint.write.bind(checkpoint);
+    t.mock.method(checkpoint, 'write', (...args) => { write(...args); throw new CheckpointStorageError('Context readback unavailable.'); });
+  } else {
+    const write = progress.write.bind(progress);
+    t.mock.method(progress, 'write', (parent, value) => {
+      if (value.state === 'settled') throw new Error('Context progress unavailable.');
+      return write(parent, value);
+    });
+  }
+  const report = reportDocument({ evidenceSummary: 'Context accepted once.', artifact: 'Retained context bytes.' });
+  await assert.rejects(runner.after(dispatch, args, report));
+  const status = runner.status(here.sessionID);
+  assert.equal(status.uncertain, true);
+  assert.equal(status.task, undefined);
+  assert.throws(() => runner.reset(here.sessionID, 'phase'));
+  await assert.rejects(runner.after(dispatch, args, report));
+  const cold = new PhaseRunner(inspect, { checkpoint: new CheckpointStore(root), progress: new ProgressGuard(root) });
+  assert.equal((await cold.restore(here)).restored, false);
+  assert.equal(cold.status(here.sessionID).task, undefined);
+});
+
+for (const restored of [false, true]) for (const planned of [false, true]) test(`R04: accepted contextual bytes survive failed main preparation without replay (${restored ? 'restored' : 'fresh'}, planned=${planned})`, async t => {
+  const root = mkdtempSync(join(tmpdir(), 'mdd-context-commit-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const here = { ...runtime, directory: root, worktree: root };
+  const checkpoint = new CheckpointStore(root), progress = new ProgressGuard(root);
+  const inspect = { parent: async () => {}, result: async (_r, _c, _p, text) => text };
+  const options = { checkpoint, progress };
+  let runner = new PhaseRunner(inspect, options);
+  await runner.start({ preflight: { answers }, requirements: 'Preserve accepted contextual evidence.' }, here,
+    { requirementsConfirmed: true, userMessageID: 'context-user' });
+  for (const phase of planned ? ['mdd-explore', 'mdd-risk', 'mdd-plan'] : []) {
+    const current = runner.status(here.sessionID), dispatch = { sessionID: here.sessionID, callID: `context-${phase}` };
+    await runner.after(dispatch, await runner.before(dispatch, current.task), phase === 'mdd-risk' ? riskReport('low') : nativeResult(current));
+  }
+  await runner.explore({ purpose: 'Resolve a prerequisite uncertainty.' }, here);
+  const dispatch = { sessionID: here.sessionID, callID: 'context-accepted' };
+  const args = await runner.before(dispatch, runner.status(here.sessionID).task);
+  const content = 'Mandatory contextual source "é😀".\n'.repeat(4000);
+  const report = reportDocument({ evidenceSummary: 'Context evidence accepted.', artifact: content });
+  await runner.after(dispatch, args, report);
+  const saved = checkpoint.read(here.sessionID).checkpoint;
+  assert.equal(saved.data.contexts.length, 1);
+  assert.equal(saved.data.contexts[0].content, content.trim());
+  assert.equal(saved.attempt, undefined, 'context is not a fabricated main-phase result');
+  assert.equal(progress.read(here.sessionID).state, 'settled');
+  if (restored) {
+    runner = new PhaseRunner(inspect, options);
+    assert.deepEqual(await runner.restore(here), { restored: true });
+  }
+  const status = runner.status(here.sessionID);
+  assert.equal(status.state, 'blocked');
+  assert.equal(status.uncertain, false);
+  assert.equal(status.task, undefined);
+  assert.match(status.reason, /handoff.*bytes/);
+  assert.equal(status.workflow.results.length, planned ? 2 : 0);
+  const guidance = nextAction(status);
+  assert.equal(guidance.tool, 'mdd_status');
+  assert.equal(guidance.args, undefined);
+  assert.match(guidance.why, /original diagnostic/);
+  assert.match(guidance.why, /after.*corrected/);
+  assert.match(guidance.why, /never replay/);
+  await assert.rejects(runner.after(dispatch, args, report), /does not match/);
+  assert.throws(() => runner.reset(here.sessionID, 'phase'), /handoff/);
+  assert.deepEqual(checkpoint.read(here.sessionID).checkpoint.data.contexts, saved.data.contexts);
+  inspect.artifactCaller = async () => { throw new Error('No native child has been dispatched.'); };
+  runner.reset(here.sessionID, 'phase');
+  assert.equal(runner.status(here.sessionID).state, 'ready');
+  assert.equal(runner.status(here.sessionID).workflow.results.length, planned ? 2 : 0);
+  assert.deepEqual(checkpoint.read(here.sessionID).checkpoint.data.contexts, saved.data.contexts);
+  await assert.rejects(runner.after(dispatch, args, report), /does not match/);
+});
+
+for (const restored of [false, true]) test(`R04: retained reader requires a new active binding (${restored ? 'restored' : 'fresh'})`, async t => {
+  const root = mkdtempSync(join(tmpdir(), 'mdd-retained-read-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const here = { ...runtime, directory: root, worktree: root };
+  const options = { checkpoint: new CheckpointStore(root), progress: new ProgressGuard(root) };
+  let binding;
+  const inspect = { parent: async () => {}, result: async (_r, _c, _p, text) => text,
+    artifactCaller: async () => structuredClone(binding) };
+  let runner = new PhaseRunner(inspect, options);
+  await runner.start({ preflight: { answers }, requirements: 'Retain exact evidence.' }, here,
+    { requirementsConfirmed: true, userMessageID: 'retained-user' });
+  const content = 'Exact source evidence é😀 and deferred Verify obligation.';
+  const first = { sessionID: here.sessionID, callID: 'read-source' };
+  await runner.after(first, await runner.before(first, runner.status(here.sessionID).task),
+    reportDocument({ evidenceSummary: 'Source evidence.', artifact: content }));
+  await runner.explore({ purpose: 'Inspect one contextual uncertainty.' }, here);
+  const contextual = { sessionID: here.sessionID, callID: 'read-context' };
+  const contextContent = 'Exact contextual evidence remains separate from phase history.';
+  await runner.after(contextual, await runner.before(contextual, runner.status(here.sessionID).task),
+    reportDocument({ evidenceSummary: 'Context inspected.', artifact: contextContent }));
+  const request = { document: 'history:0', digest: createHash('sha256').update(content).digest('hex'), offset: 0, limit: 8192 };
+  const child = { ...here, sessionID: 'retained-child', agent: 'mdd-risk', messageID: 'child-message', callID: 'child-read' };
+  if (restored) {
+    runner = new PhaseRunner(inspect, options);
+    assert.deepEqual(await runner.restore(here), { restored: true });
+  }
+  await assert.rejects(async () => runner.readArtifact(request, child));
+  const next = { sessionID: here.sessionID, callID: 'read-consumer' };
+  const ready = runner.status(here.sessionID).task;
+  const args = await runner.before(next, ready);
+  binding = { parent: here.sessionID, callID: next.callID, args };
+  const checkpointBefore = options.checkpoint.read(here.sessionID).checkpoint;
+  assert.equal((await runner.readArtifact(request, child)).content, content);
+  assert.equal((await runner.readArtifact({ ...request, document: 'context:0',
+    digest: createHash('sha256').update(contextContent).digest('hex') }, child)).content, contextContent);
+  for (const change of [{ parent: 'unrelated-parent' }, { callID: first.callID }, { args: { ...args, prompt: 'substituted' } }]) {
+    const held = binding; binding = { ...binding, ...change };
+    await assert.rejects(runner.readArtifact(request, child), /active|binding/);
+    binding = held;
+  }
+  for (const invalid of [{ ...request, runID: 'forged' }, { ...request, document: '../private' },
+    { ...request, document: 'context:0' }, { ...request, digest: '0'.repeat(64) }]) {
+    await assert.rejects(runner.readArtifact(invalid, child));
+  }
+  assert.deepEqual(options.checkpoint.read(here.sessionID).checkpoint, checkpointBefore);
+  await runner.after(next, args, riskReport('low'));
+  await assert.rejects(runner.readArtifact(request, child), /active|binding/);
+});
 const request = { answers: { certainty: 'very-sure', artifactStore: 'none', mode: 'interactive', summary: 'low', complexity: 'not-complex' } };
 const checkpoint = (workflow, sequence, attempt) => ({ version: 1, runID: 'run-1', parent, sequence, request,
   events: workflow.history(), ...(attempt ? { attempt } : {}) });
 const marker = { runID: 'run-1', userMessageID: 'message-1', state: 'pending', attemptID: 'attempt-1' };
+
+for (const restart of [false, true]) test(`R02: confirmed Plan survives successor preparation failure (${restart ? 'restart' : 'same session'})`, async t => {
+  const root = mkdtempSync(join(tmpdir(), 'mdd-preparation-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const durable = new CheckpointStore(root), progress = new ProgressGuard(root);
+  let unavailable = false, planPublications = 0;
+  const store = { read: parent => durable.read(parent), clear: parent => durable.clear(parent),
+    write(parent, value) {
+      durable.write(parent, value);
+      if (value.attempt?.phase === 'mdd-plan' && value.attempt.state === 'settled') {
+        planPublications++;
+        if (planPublications === 1) unavailable = true;
+      }
+    } };
+  const inspect = { parent: async () => {}, result: async (_runtime, _call, _phase, output) => output };
+  const options = { checkpoint: store, progress, now: () => {
+    if (unavailable) throw new Error('Preparation clock unavailable.');
+    return 100;
+  } };
+  let runner = new PhaseRunner(inspect, options);
+  await runner.start({ preflight: { answers }, requirements: 'Plan a safe change.' }, runtime,
+    { requirementsConfirmed: true, userMessageID: 'message-1' });
+  let sourceCall, sourceArgs, sourceText;
+  for (const phase of ['mdd-explore', 'mdd-risk', 'mdd-plan']) {
+    const ready = runner.status(runtime.sessionID);
+    sourceCall = { ...call, callID: `preparation-${phase}` };
+    sourceArgs = await runner.before(sourceCall, ready.task);
+    sourceText = phase === 'mdd-risk' ? riskReport('low') : nativeResult(ready);
+    await runner.after(sourceCall, sourceArgs, sourceText);
+  }
+  const committed = durable.read(runtime.sessionID).checkpoint;
+  assert.equal(committed.attempt.state, 'settled');
+  assert.equal(progress.read(runtime.sessionID).state, 'settled');
+  if (restart) {
+    runner = new PhaseRunner(inspect, options);
+    assert.deepEqual(await runner.restore(runtime), { restored: true });
+  }
+  const blocked = runner.status(runtime.sessionID);
+  assert.equal(blocked.state, 'blocked');
+  assert.equal(blocked.uncertain, false);
+  assert.equal(blocked.task, undefined);
+  assert.match(blocked.reason, /Preparation clock unavailable/);
+  assert.doesNotMatch(blocked.reason, /unconfirmed|unknown|discard/i);
+  assert.equal(blocked.workflow.results.filter(item => item.phase === 'mdd-plan').length, 1);
+  assert.equal(blocked.workflow.nextAction.phase, 'mdd-apply');
+  await assert.rejects(runner.after(sourceCall, sourceArgs, sourceText), /does not match/);
+  // A retry while the cause persists is a preparation-only refusal, never a result replay.
+  assert.throws(() => runner.reset(runtime.sessionID, 'phase'), /Preparation clock unavailable/);
+  assert.equal(runner.status(runtime.sessionID).state, 'blocked');
+  assert.deepEqual(durable.read(runtime.sessionID).checkpoint, committed);
+  assert.equal(planPublications, 1);
+  unavailable = false;
+  const settled = progress.read(runtime.sessionID);
+  progress.write(runtime.sessionID, { ...settled, attemptID: 'unrelated-attempt' });
+  assert.throws(() => runner.reset(runtime.sessionID, 'phase'), /matching confirmed checkpoint and settled progress/);
+  assert.equal(runner.status(runtime.sessionID).task, undefined);
+  assert.deepEqual(durable.read(runtime.sessionID).checkpoint, committed);
+  // A matching attemptID cannot authenticate an unrelated native call, even after restart.
+  const unrelatedCall = { ...settled, callID: 'unrelated-call' };
+  progress.write(runtime.sessionID, unrelatedCall);
+  assert.throws(() => runner.reset(runtime.sessionID, 'phase'), /matching confirmed checkpoint and settled progress/);
+  const mismatched = new PhaseRunner(inspect, options);
+  assert.equal((await mismatched.restore(runtime)).restored, false, 'restart must enforce the live call correlation fence');
+  assert.equal(mismatched.status(runtime.sessionID).task, undefined);
+  assert.deepEqual(progress.read(runtime.sessionID), unrelatedCall);
+  assert.deepEqual(durable.read(runtime.sessionID).checkpoint, committed);
+  progress.write(runtime.sessionID, settled);
+  runner.reset(runtime.sessionID, 'phase');
+  const ready = runner.status(runtime.sessionID);
+  assert.equal(ready.state, 'ready');
+  assert.equal(ready.phase, 'mdd-apply');
+  assert.equal(ready.reason, '');
+  assert.deepEqual(ready.workflow.results, blocked.workflow.results);
+  assert.deepEqual(durable.read(runtime.sessionID).checkpoint.events, committed.events);
+  // Preparation recovery does not need another publication of the accepted source result.
+  assert.equal(planPublications, 1);
+  const restored = new PhaseRunner(inspect, options);
+  assert.deepEqual(await restored.restore(runtime), { restored: true });
+  assert.equal(restored.status(runtime.sessionID).phase, 'mdd-apply');
+});
+
+for (const fault of ['checkpoint-write', 'checkpoint-readback', 'progress-write', 'progress-readback']) test(`R02: ${fault} uncertainty still fences accepted-result recovery`, async t => {
+  const root = mkdtempSync(join(tmpdir(), 'mdd-result-fault-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const durable = new CheckpointStore(root), real = new ProgressGuard(root);
+  let settlingPlan = false;
+  const store = { read: parent => durable.read(parent), clear: parent => durable.clear(parent),
+    write(parent, value) {
+      settlingPlan = value.attempt?.phase === 'mdd-plan' && value.attempt.state === 'settled';
+      if (settlingPlan && fault === 'checkpoint-write') throw new CheckpointStorageError('Result write unavailable.');
+      durable.write(parent, value);
+      if (settlingPlan && fault === 'checkpoint-readback') throw new CheckpointStorageError('Result readback unavailable.');
+    } };
+  const progress = { read: parent => real.read(parent), clear: parent => real.clear(parent), write(parent, value) {
+    if (settlingPlan && fault === 'progress-write' && value.state === 'settled') throw new Error('Progress settlement unavailable.');
+    real.write(parent, value);
+    if (settlingPlan && fault === 'progress-readback' && value.state === 'settled') throw new Error('Progress readback unavailable.');
+  } };
+  const inspect = { parent: async () => {}, result: async (_runtime, _call, _phase, output) => output };
+  const runner = new PhaseRunner(inspect, { checkpoint: store, progress });
+  await runner.start({ preflight: { answers }, requirements: 'Plan a safe change.' }, runtime,
+    { requirementsConfirmed: true, userMessageID: 'message-1' });
+  for (const phase of ['mdd-explore', 'mdd-risk', 'mdd-plan']) {
+    const ready = runner.status(runtime.sessionID), taskCall = { ...call, callID: `fault-${phase}` };
+    const args = await runner.before(taskCall, ready.task);
+    const recording = runner.after(taskCall, args, phase === 'mdd-risk' ? riskReport('low') : nativeResult(ready));
+    if (phase === 'mdd-plan') await assert.rejects(recording, /unconfirmed/);
+    else await recording;
+  }
+  const status = runner.status(runtime.sessionID);
+  assert.equal(status.uncertain, true);
+  assert.equal(status.checkpointFailed, true);
+  assert.equal(status.task, undefined);
+  assert.throws(() => runner.reset(runtime.sessionID, 'phase'), /durability is unknown/);
+  const restored = new PhaseRunner(inspect, { checkpoint: durable, progress: real });
+  const result = await restored.restore(runtime);
+  if (fault.startsWith('progress-')) {
+    // A fresh process can reconcile the exact pending attempt against its confirmed result.
+    assert.equal(result.restored, true);
+    assert.equal(restored.status(runtime.sessionID).phase, 'mdd-apply');
+    assert.equal(restored.status(runtime.sessionID).workflow.results.filter(item => item.phase === 'mdd-plan').length, 1);
+  } else {
+    assert.equal(result.restored, false);
+    assert.equal(restored.status(runtime.sessionID).task, undefined);
+    assert.equal(real.read(runtime.sessionID).state, 'pending');
+  }
+});
 
 /** Drives a fresh workflow through exploration and a passed mdd-risk verdict for `route`. */
 function throughRisk(workflow, route) {

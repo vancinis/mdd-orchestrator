@@ -30,7 +30,10 @@ assessments. Use not-verified or deviation for gaps; passing commands alone do n
 requirements and plan match. Give a simple outcome/change summary and material remaining limits.
 Give each not-verified or deviation row a cause: implementation when code can close it, design when
 the held decisions cannot satisfy it, requirements when the acceptance itself is contradictory or
-infeasible. MDD recommends where to rework from these causes; a design gap sent to Apply only moves.
+infeasible, or verification for execution/evidence-only gaps without an established semantic defect.
+Mixed precedence is requirements > design > implementation > verification; omitted cause defaults to implementation.
+Evidence gaps still block acceptance, but repeated evidence failures do not establish a design defect.
+MDD recommends where to rework from these causes; a design gap sent to Apply only moves.
 Save each reproduction probe you write as a file in the dispatched probe directory (gitignored MDD
 data, not project source) and cite its path, exact command, observed and expected result, so a
 correction pass can run it unchanged. Writing a probe there is not a source repair.

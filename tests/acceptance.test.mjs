@@ -29,6 +29,47 @@ function structuredFixture() {
   return { planned, report, checks, held, read: () => verifyReport(checks, report, held, 1) };
 }
 
+for (const structured of [false, true]) {
+  for (const section of ['scenarios', 'steps', 'decisions']) {
+    test(`R03: ${structured ? 'structured' : 'legacy'} ${section} accepts evidence cause only on gaps`, () => {
+      const f = structured ? structuredFixture() : fixture();
+      const result = structured ? f.report : f.result;
+      const read = structured ? f.read : () => verifyReport([{ command: 'npm test', exit: 0 }], result,
+        { accepted: f.accepted, choices: f.choices, planned: f.steps });
+      const row = result[section][0];
+      row.cause = 'verification';
+      assert.throws(read, /cannot name a cause/);
+      row.status = 'not-verified';
+      row.checks = [];
+      row.assessment = 'Execution evidence is unavailable; no semantic defect established.';
+      assert.equal(read().verification.matched, false);
+      assert.equal(read().verification[section][0].cause, 'verification');
+      row.cause = 'unknown';
+      assert.throws(read, /unknown cause/);
+      delete row.cause;
+      assert.equal(read().verification.matched, false);
+    });
+  }
+}
+
+for (const state of ['failed', 'blocked', 'interrupted', 'missing']) {
+  test(`R03: evidence-only gaps cannot waive a required ${state} check`, () => {
+    const f = structuredFixture();
+    for (const row of [...f.report.scenarios, ...f.report.steps, ...f.report.decisions]) {
+      Object.assign(row, { status: 'not-verified', cause: 'verification', checks: [] });
+    }
+    f.report.checkResults = state === 'missing' ? [] : [{ checkID: 'C1',
+      disposition: state === 'interrupted' ? 'ran' : state,
+      executions: state === 'blocked' ? [] : ['E1'], reason: 'Execution evidence incomplete.' }];
+    if (state === 'blocked' || state === 'missing') f.checks.length = 0;
+    else f.checks[0].exit = state === 'failed' ? 1 : null;
+    if (state === 'missing') assert.throws(f.read, /omits planned check C1/);
+    else assert.equal(f.read().verification.matched, false);
+    f.report.steps = [];
+    assert.throws(f.read, /omits coverage of planned deliverable/);
+  });
+}
+
 test('SA-2: structured checks preserve IDs and require complete held accounting', () => {
   const f = structuredFixture();
   assert.deepEqual(deliverables(f.planned, 1), f.planned);

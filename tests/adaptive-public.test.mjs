@@ -792,7 +792,7 @@ for (const outcome of ['unverified', 'verified']) for (const restart of [false, 
 test('grill: active runs, pending MDD questions and interrupted durable questions still refuse other questions', async t => {
   const active = await fixture(t);
   await active.entry(active.contract());
-  await assert.rejects(ownQuestion(active, round), /no restored intake/);
+  await assert.rejects(ownQuestion(active, round), /requires an idle run/);
   const f = await fixture(t);
   await closeRun(f, 'unverified');
   const draft = grilledDraft(f, 'Add a different new capability.'), userID = f.user(draft.objective);

@@ -51,6 +51,18 @@ export function nextAction(status: unknown): NextAction | undefined {
   if (!value) return undefined;
   const state = typeof value.state === 'string' ? value.state : '';
   const nativeProtocol = value.lane === 'adaptive-native-protocol-internal';
+  if (value.checkpointFailed === true) return { tool: 'mdd_status',
+    why: 'Checkpoint or progress durability is unconfirmed. Inspect retained records and the blocked reason; no phase retry, result replay or dispatch is authorized. Do not clear uncertainty flags.' };
+  const successor = object(value.next);
+  const results = object(value.workflow)?.results;
+  // Accepted context can precede every main result. It authorizes inspection of a
+  // preparation failure, not a fabricated phase outcome or an automatic reset.
+  const contextualPreparation = Array.isArray(results) && results.length === 0 && value.contextual === false &&
+    Array.isArray(value.contexts) && value.contexts.length > 0;
+  if (state === 'blocked' && value.uncertain === false && Array.isArray(results) &&
+      (object(results.at(-1))?.outcome === 'passed' || contextualPreparation) &&
+      successor && ['execute', 'execute-risk'].includes(String(successor.kind)))
+    return { tool: 'mdd_status', why: 'Successor preparation is blocked. Present the original diagnostic and inspect its cause. Only after the cause is corrected, explicitly use mdd_reset with scope phase to prepare the successor; never replay the accepted result. A persistent oversized handoff is not fixed by retrying.' };
 
   if (value.lane === 'adaptive-low-internal' && ['completed', 'closed-unverified'].includes(state)) return { tool: 'mdd_status',
     why: 'Internal closure retains reported coverage, failures and assurance limits. It grants no Plan, Verify, review authority, new work, public activation or durable resume; unverified closure is not verified completion.' };

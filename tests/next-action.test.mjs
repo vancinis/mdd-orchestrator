@@ -13,6 +13,46 @@ import { nextAction, withNextAction } from '../dist/next-action.js';
 
 const task = { description: 'MDD plan phase', subagent_type: 'mdd-plan', prompt: 'mdd:dispatch:token' };
 
+test('R04: accepted context before first main result requires inspection and cause correction', () => {
+  const status = { state: 'blocked', uncertain: false, contextual: false,
+    contexts: [{ explorationID: 'context-one', outcome: 'passed' }], workflow: { results: [] },
+    next: { kind: 'execute', phase: 'mdd-explore' }, reason: 'Original preparation overflow: excess=1200.' };
+  const original = structuredClone(status);
+  const attached = withNextAction(status);
+  assert.equal(attached.nextAction.tool, 'mdd_status');
+  assert.equal(attached.nextAction.args, undefined);
+  assert.match(attached.nextAction.why, /original diagnostic/);
+  assert.match(attached.nextAction.why, /after.*corrected/);
+  assert.match(attached.nextAction.why, /never replay/);
+  assert.equal(attached.reason, original.reason);
+  assert.deepEqual(status, original);
+  assert.deepEqual(attached.workflow.results, []);
+  const uncertain = nextAction({ ...status, uncertain: true, checkpointFailed: true });
+  assert.equal(uncertain.tool, 'mdd_status');
+  assert.doesNotMatch(uncertain.why, /scope phase/);
+  for (const change of [{ contexts: [] }, { contextual: true }, { next: { kind: 'await-result' } }])
+    assert.doesNotMatch(nextAction({ ...status, ...change }).why, /after.*corrected/);
+});
+
+test('R02: uncertain persistence never recommends phase reset', () => {
+  const action = nextAction({ state: 'blocked', uncertain: true, checkpointFailed: true });
+  assert.equal(action.tool, 'mdd_status');
+  assert.equal(action.args, undefined);
+  assert.match(action.why, /durability/i);
+  assert.doesNotMatch(action.why, /scope phase/);
+});
+
+test('R02: preparation recovery is conditional on correcting its cause', () => {
+  const action = nextAction({ state: 'blocked', uncertain: false,
+    workflow: { results: [{ phase: 'mdd-design', outcome: 'passed' }] },
+    next: { kind: 'execute', phase: 'mdd-tasks' }, reason: 'combined phase handoff exceeds 96000 bytes' });
+  assert.equal(action.tool, 'mdd_status');
+  assert.match(action.why, /preparation/i);
+  assert.match(action.why, /after.*corrected/i);
+  assert.match(action.why, /scope phase/);
+  assert.match(action.why, /never replay/i);
+});
+
 for (const state of ['completed', 'closed-unverified']) test(`AL-03: internal ${state} offers status only, never public or review authority`, () => {
   const action = nextAction({ lane: 'adaptive-low-internal', state });
   assert.equal(action.tool, 'mdd_status'); assert.equal(action.args, undefined);

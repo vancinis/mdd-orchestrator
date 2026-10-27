@@ -9,7 +9,7 @@ export type Decision = { id: string; description: string; requirements: string[]
  * one the design itself had declared it could not meet: three correction passes each moved the same
  * failure one fallback deeper. Only a gap carries a cause; a verified row has nothing to fix.
  */
-export const FINDING_CAUSES = ['implementation', 'design', 'requirements'] as const;
+export const FINDING_CAUSES = ['implementation', 'design', 'requirements', 'verification'] as const;
 export type FindingCause = typeof FINDING_CAUSES[number];
 type Assessment = { status: 'verified' | 'not-verified' | 'deviation'; checks: string[]; assessment: string; cause?: FindingCause };
 /** A held requirement a planning phase states it cannot satisfy within its scope. */
@@ -46,12 +46,12 @@ export const PHASE_RESULT_FIELDS: Record<Phase, readonly string[]> = Object.free
   'mdd-apply': ['changes', 'noChangeReason', 'checks', 'delivered', 'completed'],
   'mdd-verify': ['checks', 'verification'],
 });
-const CAUSE_RULE = 'Any gap row may add cause: implementation (default), design (held decisions cannot satisfy it) or requirements (acceptance infeasible).';
+const CAUSE_RULE = 'Any gap row may add cause: implementation (default), design (held decisions cannot satisfy it), requirements (acceptance infeasible) or verification (execution/evidence-only gaps, without an established semantic defect). Mixed precedence: requirements > design > implementation > verification. Only gap rows may name a cause; evidence gaps still block acceptance and require closure.';
 const DELIVERABLE_RULES = 'Keep IDs stable. Every scenario and relevant decision must map to an applicable step. Optional parallel metadata requires explicit dependsOn (including [] when independent) and complete exact root-relative file scopes, including shared outputs/tests/docs/lockfiles; include every task/code/data dependency, never guess independence. Use slash-separated portable ASCII paths without traversal, aliases, directories or globs. Apply eligibility needs nonempty writes; missing/incomplete scopes or omitted dependencies remain sequential. This records eligibility only; the runtime selects eligible worker batches under its capability and independence checks.';
 export const FIELD_SCHEMA: Record<string, string> = {
   completed: 'completed=[assignedStepID] lists exactly the one assigned deliverable actually finished; a correction pass lists every deliverable it owns, in plan order. A failed or partial batch earns no completion; report outcome failed, never guess or claim another step.',
   unmet: 'unmet=[{requirementID,reason}] names each held requirement no design within this scope can satisfy; omit it when there is none. Any entry requires outcome failed: never pass with a decision that accepts a residual gap against a held requirement. MDD then stops before implementation so the user can revise the requirement or the scope.',
-  closure: 'closure=[{id,status:"closed"|"open",evidence}] only in a correction pass: one entry per finding ID the prompt lists. evidence names the reproduction or regression test with its command and exit, and the change that closed it. Any open entry requires outcome failed.',
+  closure: 'closure=[{id,status:"closed"|"open",evidence}] only in a correction pass: one entry per finding ID the prompt lists. evidence names the reproduction or regression test and code fix for semantic defects, or actual execution/evidence recovery for evidence-only gaps, with command and exit. Use noChangeReason when no source change was needed. Any open entry requires outcome failed.',
   acceptance: 'acceptance={goal,requirements:[{id,description,scenarios:[{id,given,when,then}]}]}. Keep IDs stable.',
   decisions: 'decisions=[{id,description,requirements:[requirementID]}]; empty when the work needs no decision.',
   deliverables: 'deliverables=[{id,description,path,check,scenarios:[scenarioID],decisions:[decisionID],dependsOn:[earlierStepID],parallel?:{complete:true,reads:[filePath],writes:[filePath]}}]. ' + DELIVERABLE_RULES,
@@ -256,20 +256,21 @@ export function verificationFindings(checked: Verification | undefined): string[
   ];
   return [...new Set(ids)].slice(0, 64);
 }
-/** The requirements a verification left unverified: what a repeated failure is compared on. */
+/** Semantic requirement gaps only: execution/evidence gaps do not establish a repeated defect. */
 export function failingRequirements(checked: unknown): string[] {
   // Read defensively: an earlier verification is recovered from an artifact, not from held state.
   const rows = checked && typeof checked === 'object' && Array.isArray((checked as { scenarios?: unknown }).scenarios) ? (checked as { scenarios: unknown[] }).scenarios : [];
   return [...new Set(rows.flatMap(row => {
     const item = row && typeof row === 'object' ? row as Record<string, unknown> : {};
-    return item.status !== 'verified' && typeof item.requirementID === 'string' ? [item.requirementID] : [];
+    return item.status !== 'verified' && item.cause !== 'verification' && typeof item.requirementID === 'string' ? [item.requirementID] : [];
   }))];
 }
-/** The deepest cause Verify gave its gaps: requirements outrank design, design outranks code. */
+/** Semantic causes outrank evidence gaps; omitted causes retain the historical code default. */
 export function deepestCause(checked: Verification | undefined): FindingCause {
   const causes = new Set([...(checked?.scenarios ?? []), ...(checked?.steps ?? []), ...(checked?.decisions ?? [])]
     .filter(row => row.status !== 'verified').map(row => row.cause ?? 'implementation'));
-  return causes.has('requirements') ? 'requirements' : causes.has('design') ? 'design' : 'implementation';
+  return causes.has('requirements') ? 'requirements' : causes.has('design') ? 'design'
+    : causes.has('implementation') ? 'implementation' : 'verification';
 }
 /**
  * The links section MDD appended to an artifact, read back. Earlier verifications are only kept

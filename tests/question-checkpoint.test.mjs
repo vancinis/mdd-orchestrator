@@ -31,16 +31,37 @@ for (const state of ['pending', 'answered']) test(`PF-3: historical storage-cont
   assert.equal(status.question, undefined);
   assert.match(status.reason, /frozen preflight field order.*unapplied answer.*never interpreted/);
   await assert.rejects(restarted.start({ requirements: 'Original objective.' }, runtime, 'new-user'), /unresolved outcome/);
-  await restarted.afterQuestion({ sessionID: runtime.sessionID, callID: pending.callID }, args, output(args, labels));
-  assert.deepEqual(f.store.read(runtime.sessionID), frozen, 'old field order, count, correlation and unapplied answer remain untouched');
-  assert.equal(f.workflow(), undefined);
-  assert.equal(f.approvals(), 0);
+  const changed = structuredClone(args);
+  changed.questions[0].question += ' changed';
+  const staleCallbacks = [[pending.callID, args], [pending.callID, changed], ['new-unissued-call', args]];
+  for (const [callID, envelope] of staleCallbacks) {
+    await assert.rejects(restarted.afterQuestion({ sessionID: runtime.sessionID, callID }, envelope, output(envelope, labels)), /no current issued question/);
+    assert.deepEqual(f.store.read(runtime.sessionID), frozen, 'old field order, count, correlation and unapplied answer remain untouched');
+    assert.equal(f.workflow(), undefined);
+    assert.equal(f.approvals(), 0);
+    assert.equal(restarted.status(runtime.sessionID).state, 'recovery-blocked');
+  }
   restarted.reset(runtime, 'run');
   f.settings.profiles.default.answers = {};
-  const fresh = await f.gate().start({ requirements: 'New objective.' }, runtime, 'new-user');
+  const freshGate = f.gate();
+  const fresh = await freshGate.start({ requirements: 'New objective.' }, runtime, 'new-user');
   assert.deepEqual(fresh.question.questions.map(q => q.header), ['Certeza', 'Modo', 'Resumen', 'Notas']);
   assert.equal(fresh.storage.backend, 'local');
   assert.equal(f.store.read(runtime.sessionID).answer, undefined, 'discard never reapplies old selections');
+  const freshCall = { sessionID: runtime.sessionID, callID: 'fresh-issued-call' };
+  await freshGate.beforeQuestion(freshCall, fresh.question);
+  const freshPending = f.store.read(runtime.sessionID);
+  for (const [callID, envelope] of staleCallbacks) {
+    await assert.rejects(freshGate.afterQuestion({ sessionID: runtime.sessionID, callID }, envelope, output(envelope, labels)), /already pending; no unrelated question may run/);
+    assert.deepEqual(f.store.read(runtime.sessionID), freshPending);
+    assert.equal(f.workflow(), undefined);
+    assert.equal(f.approvals(), 0);
+  }
+  const selections = fresh.question.questions.map(question => [question.options[0].label]);
+  await freshGate.afterQuestion(freshCall, fresh.question, output(fresh.question, selections));
+  assert.ok(f.workflow(), 'only the newly issued correlated answer starts a workflow');
+  assert.equal(f.store.read(runtime.sessionID).state, 'settled');
+  assert.equal(f.approvals(), 0);
 });
 
 /** Drives a fresh workflow through the mandatory exploration and risk stop every run now starts with. */

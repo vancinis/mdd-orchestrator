@@ -11,6 +11,30 @@ import { applyModelOverrides } from '../dist/native-models.js';
 import { PHASE_AGENTS, CHECK_AGENTS, pinPhaseAgents } from '../dist/opencode-plugin.js';
 import { FIELD_SCHEMA } from '../dist/acceptance.js';
 
+test('R04: packaged instructions permit bound reads without granting scoped workers or controls', () => {
+  const text = fs.readFileSync('assets/opencode/mdd-instructions.md', 'utf8').replace(/\s+/g, ' ');
+  assert.match(text, /mdd_artifact_read/);
+  assert.match(text, /history:N.*context:N/);
+  assert.match(text, /No reset, rework, acceptance or approval authority/);
+  assert.match(text, /Scoped workers cannot use this reader/);
+  assert.match(text, /mustRead/);
+  assert.match(text, /before.*dependent work/);
+  assert.doesNotMatch(text, /It is the only MDD tool you may call/);
+});
+
+test('R03: shipped Verify and Apply distinguish semantic defects from evidence recovery', () => {
+  const verify = fs.readFileSync('assets/opencode/agents/mdd-verify.md', 'utf8').replace(/\s+/g, ' ');
+  const apply = fs.readFileSync('assets/opencode/agents/mdd-apply.md', 'utf8').replace(/\s+/g, ' ');
+  assert.match(verify, /verification for execution\/evidence-only gaps/);
+  assert.match(verify, /requirements > design > implementation > verification/);
+  assert.match(verify, /Required applicable failed, interrupted, blocked or missing checks cannot support PASS/);
+  assert.match(apply, /For semantic defects, first run/);
+  assert.match(apply, /execution\/evidence-only gaps/);
+  assert.match(apply, /noChangeReason/);
+  assert.match(apply, /actual execution\/evidence recovery/);
+  assert.match(apply, /only when all are closed/);
+});
+
 test('evidence handoff: shipped prose keeps compact locators, uncertainty and independent verification', () => {
   for (const path of ['assets/opencode/agents/mdd-orchestrator.md', 'assets/opencode/mdd-instructions.md']) {
     const text = fs.readFileSync(path, 'utf8').replace(/\s+/g, ' ');
@@ -62,9 +86,11 @@ test('checkout handoff: retained phase and risk briefs compose the same workspac
   const phase = source.slice(source.indexOf('#phasePrompts(run: Run'), source.indexOf('#riskRecoveryReport(run: Run)'));
   for (const builder of [risk, phase]) {
     assert.match(builder, /workspaceData\(run\.runtime\)/);
-    assert.match(builder, /const compose = .*closing/s);
-    assert.match(builder, /\.\.\.data/);
-    assert.match(builder, /brief = compose\(/);
+    assert.match(builder, /const compose = /);
+    assert.match(builder, /const body = .*data/);
+    assert.match(builder, /prompt: [^\n]*body/);
+    assert.match(builder, /brief: [^\n]*body/);
+    assert.match(builder, /this\.#projectHandoff\(/);
   }
 });
 
@@ -622,6 +648,14 @@ test('assets: the coordinator records improvements and reviews them without star
   assert.match(text, /Recording is not fixing/);
   assert.match(text, /call\nmdd_improvements and present the returned report as it is/);
   assert.match(text, /never turn a review into a run/);
+});
+
+test('R05: coordinator recovery questions are discussion rather than consent', () => {
+  const text = fs.readFileSync('assets/opencode/agents/mdd-orchestrator.md', 'utf8');
+  assert.match(text, /settled failed Verify/);
+  assert.match(text, /Both native hooks recheck/);
+  assert.match(text, /never records consent, changes the plan, or starts work/);
+  assert.match(text, /Active adaptive runs retain their question-session refusal/);
 });
 
 // A user answered an approval question in their own words and the run was thrown away; the

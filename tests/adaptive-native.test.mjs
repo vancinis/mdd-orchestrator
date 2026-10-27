@@ -1,9 +1,10 @@
+import './isolate-home.mjs';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import { PhaseRunner } from '../dist/phase-runner.js';
 import { NativeIntake } from '../dist/native-intake.js';
 import { AdaptiveStore } from '../dist/adaptive-store.js';
@@ -12,6 +13,7 @@ import { ProgressGuard } from '../dist/progress.js';
 import { RunOwnershipStore } from '../dist/run-ownership.js';
 import { defaultSettings } from '../dist/settings.js';
 import { createInspector } from '../dist/opencode-plugin.js';
+import { consumeNativeOperation } from '../dist/adaptive-native.js';
 import { validateQuestionRecord } from '../dist/question-checkpoint.js';
 
 function fixture(t, mode) {
@@ -675,4 +677,487 @@ test('AL05a P1 control: current interactive approval still rejects drift after n
   assert.equal(f.ownership.read(source.runID).ownerSessionID, 'parent');
   assert.equal(readFileSync(join(f.root, 'own.txt'), 'utf8'), 'preserved interactive drift');
   assert.deepEqual(f.questions.read('target').nativeReceipt.answers, [['Approve operation']]);
+});
+
+// Admission stuck after a pre-bootstrap rejection (ADM-01..ADM-07).
+const SERIAL = /use serial execution\./;
+const AUTO = [['Autom\u00e1tico']];
+const blockPlugins = f => mkdirSync(join(f.root, '.opencode', 'plugins'), { recursive: true });
+const unblockPlugins = f => rmSync(join(f.root, '.opencode'), { recursive: true, force: true });
+
+test('ADM-01/02/05: mode answer then scope rejection is fenced; reset releases only that fence and fresh admission re-asks', async t => {
+  const f = fixture(t); blockPlugins(f);
+  await f.admit();
+  await assert.rejects(f.answer(AUTO), SERIAL);
+  // ADM-01-S01: real diagnostic retained, question settled, nothing fabricated.
+  assert.equal(f.gate.status('parent').state, 'blocked');
+  assert.match(f.gate.status('parent').reason, SERIAL);
+  assert.equal(f.questions.read('parent').state, 'settled');
+  assert.equal(f.store.read('parent'), undefined); assert.equal(f.ownership.parent('parent'), undefined);
+  // ADM-02-S01: the applied run reset releases exactly that bridge fence.
+  const reset = f.gate.reset(f.runtime, 'run');
+  assert.equal(reset.reset.scope, 'run'); assert.deepEqual(reset.reset.nativeEntry, { released: true });
+  assert.equal(f.store.read('parent'), undefined); assert.equal(f.ownership.parent('parent'), undefined);
+  // ADM-05-S03: the unchanged invalid scope is still rejected and the old mode answer is not reused (mode is asked again).
+  const again = await f.admit(); assert.equal(again.state, 'question-ready'); assert.equal(again.question.questions[0].header, 'Modo');
+  await assert.rejects(f.answer(AUTO), SERIAL);
+  assert.deepEqual(f.gate.reset(f.runtime, 'run').reset.nativeEntry, { released: true });
+  unblockPlugins(f);
+  // ADM-02-S02 / ADM-05-S01: fresh admission goes through the ordinary path and reaches actor selection.
+  const fresh = await f.admit(); assert.equal(fresh.question.questions[0].header, 'Modo');
+  await f.answer(AUTO);
+  assert.ok(f.store.read('parent'));
+  assert.equal(f.runner.status('parent').state, 'await-selection');
+});
+
+test('ADM-06-S01: repeating an applied reset is idle and omits the bridge report', async t => {
+  const f = fixture(t); blockPlugins(f); await f.admit();
+  await assert.rejects(f.answer(AUTO), SERIAL);
+  assert.deepEqual(f.gate.reset(f.runtime, 'run').reset.nativeEntry, { released: true });
+  const second = f.gate.reset(f.runtime, 'run');
+  assert.equal(second.reset.scope, 'run'); assert.equal(second.reset.nativeEntry, undefined);
+  assert.equal(f.store.read('parent'), undefined);
+});
+
+test('ADM-01-S02: a blocked entry without attempt-bound proof keeps its fence', async t => {
+  const f = fixture(t, 'automatic');
+  t.mock.method(f.inspect, 'intake', async () => { throw new Error('Generic inspection failure.'); });
+  await assert.rejects(f.admit(), /Generic inspection failure/);
+  assert.equal(f.gate.status('parent').state, 'blocked');
+  const reset = f.gate.reset(f.runtime, 'run');
+  assert.equal(reset.reset.nativeEntry.released, false); assert.match(reset.reset.nativeEntry.reason, /attempt-bound proof/);
+  assert.equal(f.gate.status('parent').state, 'blocked');
+});
+
+test('ADM-03: bootstrap interruption keeps durable data and the fence; reset refuses', async t => {
+  const f = fixture(t, 'interactive'); await f.admit();
+  const claim = f.ownership.claim.bind(f.ownership); let fail = true;
+  t.mock.method(f.ownership, 'claim', (...args) => { if (fail) { fail = false; throw new Error('Injected bootstrap interruption.'); } return claim(...args); });
+  await assert.rejects(f.answer([['Approve operation']]), /bootstrap/);
+  const before = f.store.read('parent');
+  assert.throws(() => f.gate.reset(f.runtime, 'run'), /Adaptive records cannot enter fixed reset/);
+  assert.deepEqual(f.store.read('parent'), before); assert.equal(f.gate.status('parent').state, 'blocked');
+});
+
+test('ADM-04-S01: an unresolved question keeps its checkpoint bytes and fence through reset and stays answerable', async t => {
+  const f = fixture(t); blockPlugins(f); await f.admit();
+  const before = structuredClone(f.questions.read('parent')), bytes = readFileSync(checkpointFile(f, 'question'));
+  assert.ok(['prepared', 'pending'].includes(before.state));
+  const reset = f.gate.reset(f.runtime, 'run');
+  assert.equal(reset.reset.nativeEntry.released, false);
+  assert.match(reset.reset.nativeEntry.reason, /question is unresolved/);
+  assert.deepEqual(f.questions.read('parent'), before);
+  assert.ok(readFileSync(checkpointFile(f, 'question')).equals(bytes), 'raw checkpoint bytes are unchanged');
+  assert.ok(f.gate.status('parent').question);
+  // The retained question is still the one the user can answer; the real scope rejection then follows.
+  await assert.rejects(f.answer(AUTO), SERIAL);
+  assert.equal(f.questions.read('parent').state, 'settled');
+});
+
+test('ADM-04-S01/ADM-03-S02: an unreadable question is held, never cleared, by reset', async t => {
+  const f = fixture(t); blockPlugins(f); await f.admit();
+  const clear = t.mock.method(f.questions, 'clear'), bytes = readFileSync(checkpointFile(f, 'question'));
+  t.mock.method(f.questions, 'read', () => { throw new Error('Injected unreadable question.'); });
+  const reset = f.gate.reset(f.runtime, 'run');
+  assert.equal(reset.reset.nativeEntry.released, false);
+  assert.equal(clear.mock.callCount(), 0);
+  assert.ok(readFileSync(checkpointFile(f, 'question')).equals(bytes), 'raw checkpoint bytes are unchanged');
+  assert.equal(f.store.read('parent'), undefined); assert.equal(f.ownership.parent('parent'), undefined);
+});
+
+test('ADM-02-S01 control: releasing a proven orphan still clears its settled question exactly once', async t => {
+  const f = fixture(t); blockPlugins(f); await f.admit();
+  await assert.rejects(f.answer(AUTO), SERIAL);
+  const clear = t.mock.method(f.questions, 'clear');
+  assert.deepEqual(f.gate.reset(f.runtime, 'run').reset.nativeEntry, { released: true });
+  assert.equal(clear.mock.callCount(), 1);
+  assert.equal(f.questions.read('parent'), undefined);
+});
+
+test('ADM-07-S01: resetting another parent leaves this parent\'s unresolved question and fence untouched', async t => {
+  const f = fixture(t); blockPlugins(f); await f.admit();
+  const before = structuredClone(f.questions.read('parent'));
+  f.gate.reset({ ...f.runtime, sessionID: 'other' }, 'run');
+  assert.deepEqual(f.questions.read('parent'), before);
+  assert.ok(f.gate.status('parent').question);
+});
+
+test('ADM-06-S03: a runner that cannot confirm release leaves the fence in place', async t => {
+  const f = fixture(t); blockPlugins(f); await f.admit();
+  await assert.rejects(f.answer(AUTO), SERIAL);
+  const mock = t.mock.method(f.runner, 'consumeAdaptiveEntryRejectionInternal', () => 'Injected occupancy.');
+  const reset = f.gate.reset(f.runtime, 'run');
+  assert.deepEqual(reset.reset.nativeEntry, { released: false, reason: 'Injected occupancy.' });
+  assert.equal(f.gate.status('parent').state, 'blocked');
+  // The refusal was temporary: once it lifts, a retried reset still releases the exact retained orphan.
+  mock.mock.restore();
+  assert.deepEqual(f.gate.reset(f.runtime, 'run').reset.nativeEntry, { released: true });
+});
+
+test('ADM-06-S03: a failed question clear keeps the fence and a retry releases it', async t => {
+  const f = fixture(t); blockPlugins(f); await f.admit();
+  await assert.rejects(f.answer(AUTO), SERIAL);
+  const before = f.questions.read('parent');
+  const mock = t.mock.method(f.questions, 'clear', () => { throw new Error('Injected clear fault.'); });
+  assert.throws(() => f.gate.reset(f.runtime, 'run'), /clear fault/);
+  assert.equal(f.gate.status('parent').state, 'blocked'); assert.deepEqual(f.questions.read('parent'), before);
+  mock.mock.restore();
+  assert.deepEqual(f.gate.reset(f.runtime, 'run').reset.nativeEntry, { released: true });
+});
+
+for (const state of ['pending', 'answered', 'settled']) test(`ADM-04-S01: reset preserves the checkpoint after a failed ${state} publication`, async t => {
+  const f = fixture(t); blockPlugins(f); await f.admit();
+  const write = f.questions.write.bind(f.questions);
+  const mock = t.mock.method(f.questions, 'write', (id, record) => {
+    if (record.state === state) throw new Error('Injected publication fault.'); return write(id, record);
+  });
+  await assert.rejects(f.answer(AUTO), /publication fault/);
+  mock.mock.restore();
+  const before = structuredClone(f.questions.read('parent')), bytes = readFileSync(checkpointFile(f, 'question'));
+  const result = f.gate.reset(f.runtime, 'run');
+  assert.equal(result.reset.nativeEntry.released, false);
+  assert.deepEqual(f.questions.read('parent'), before);
+  assert.ok(readFileSync(checkpointFile(f, 'question')).equals(bytes), 'raw checkpoint bytes are unchanged');
+  assert.equal(f.store.read('parent'), undefined);
+});
+
+test('ADM-06-S02: a newer admission replaces the entry; the old proof cannot release it', async t => {
+  const f = fixture(t); blockPlugins(f); await f.admit();
+  await assert.rejects(f.answer(AUTO), SERIAL);
+  const fresh = await f.admit(); assert.equal(fresh.state, 'question-ready');
+  assert.equal(f.gate.reset(f.runtime, 'run').reset.nativeEntry.released, false);
+});
+
+const checkpointFile = (f, kind, id = 'parent') => join(f.root, '.mdd', `${kind}-${createHash('sha256').update(id).digest('hex')}.json`);
+
+test('ADM-06-S02: a replacement admission started at questions.clear cannot be released by the old reset', async t => {
+  const f = fixture(t); blockPlugins(f); await f.admit();
+  await assert.rejects(f.answer(AUTO), SERIAL);
+  const clear = f.questions.clear.bind(f.questions); let next;
+  t.mock.method(f.questions, 'clear', id => { clear(id); next = f.admit(); });
+  const reset = f.gate.reset(f.runtime, 'run');
+  assert.deepEqual(reset.reset.nativeEntry, { released: false, reason: 'The native entry changed before release.' });
+  const fresh = await next;
+  assert.equal(fresh.state, 'question-ready');
+  assert.equal(f.questions.read('parent').state, 'prepared');
+  assert.equal(f.store.read('parent'), undefined);
+});
+
+test('ADM-06-S02/ADM-03-S02: durable occupancy appearing at questions.clear prevents the final release and stays byte-identical', async t => {
+  const f = fixture(t); blockPlugins(f); await f.admit();
+  await assert.rejects(f.answer(AUTO), SERIAL);
+  const clear = f.questions.clear.bind(f.questions);
+  t.mock.method(f.questions, 'clear', id => { clear(id); writeFileSync(checkpointFile(f, 'adaptive', id), 'occupied-corrupt'); });
+  const reset = f.gate.reset(f.runtime, 'run');
+  assert.equal(reset.reset.nativeEntry.released, false);
+  assert.equal(readFileSync(checkpointFile(f, 'adaptive'), 'utf8'), 'occupied-corrupt');
+  assert.equal(f.gate.status('parent').state, 'blocked');
+});
+
+test('ADM-05-S01: an old reply replayed after safe reset cannot authorize the fresh question', async t => {
+  const f = fixture(t); blockPlugins(f); await f.admit();
+  const old = f.gate.status('parent').question;
+  await assert.rejects(f.answer(AUTO), SERIAL);
+  assert.deepEqual(f.gate.reset(f.runtime, 'run').reset.nativeEntry, { released: true });
+  await f.admit(); const before = f.questions.read('parent');
+  await assert.rejects(f.gate.afterQuestion({ sessionID: 'parent', callID: 'question-1' }, old, output(old, AUTO)));
+  assert.deepEqual(f.questions.read('parent'), before);
+  assert.equal(f.store.read('parent'), undefined);
+});
+
+for (const choice of ['Pause', 'Decline']) test(`ADM-04-S03: ${choice} then reset supplies no retry authority`, async t => {
+  const f = fixture(t, 'interactive'); await f.admit(); await f.answer([[choice]]);
+  const reset = f.gate.reset(f.runtime, 'run');
+  assert.equal(reset.reset.nativeEntry.released, false);
+  assert.equal(f.store.read('parent'), undefined); assert.equal(f.ownership.parent('parent'), undefined);
+});
+
+test('ADM-07-S01: resetting a rejected parent preserves another admitted parent and its owner', async t => {
+  const f = fixture(t, 'automatic'); blockPlugins(f);
+  await assert.rejects(f.admit(), SERIAL);
+  unblockPlugins(f);
+  const other = { ...f.runtime, sessionID: 'other' };
+  await f.gate.adaptiveInternal({ kind: 'entry', args: { contract: f.contract, messageID: 'other-message' } }, other);
+  const record = structuredClone(f.store.read('other')), owner = structuredClone(f.ownership.read(record.runID));
+  assert.deepEqual(f.gate.reset(f.runtime, 'run').reset.nativeEntry, { released: true });
+  assert.deepEqual(f.store.read('other'), record); assert.deepEqual(f.ownership.read(record.runID), owner);
+  assert.equal(f.runner.status('other').state, 'await-selection');
+  assert.equal(f.store.read('parent'), undefined);
+});
+
+test('ADM-05-S02/ADM-05-S03: after safe reset a failed native identity check admits nothing, and an unchanged invalid scope is still rejected', async t => {
+  const f = fixture(t, 'automatic'); blockPlugins(f);
+  await assert.rejects(f.admit(), SERIAL);
+  assert.deepEqual(f.gate.reset(f.runtime, 'run').reset.nativeEntry, { released: true });
+  const intake = t.mock.method(f.inspect, 'intake', async () => { throw new Error('Forged native identity.'); });
+  await assert.rejects(f.admit(), /Forged native identity/);
+  assert.equal(f.store.read('parent'), undefined); assert.equal(f.ownership.parent('parent'), undefined);
+  intake.mock.restore();
+  await assert.rejects(f.admit(), SERIAL);
+  assert.equal(f.store.read('parent'), undefined); assert.equal(f.ownership.parent('parent'), undefined);
+});
+
+// ---- D16 reset liveness and authorization matrix (N01-N20) ----
+const BUSY = 'A native policy intake is pending.';
+const startError = async (f, gate = f.gate, id = 'fresh-message') => {
+  try { await gate.start({ requirements: f.contract.objective }, f.runtime, id); return 'ok'; } catch (error) { return error.message; }
+};
+const restart = f => f.makeGate(new PhaseRunner(f.inspect, f.options));
+const entryOp = f => ({ kind: 'entry', args: { contract: f.contract, messageID: 'native-message' } });
+const noRun = f => { assert.equal(f.store.read('parent'), undefined); assert.equal(f.ownership.parent('parent'), undefined); };
+const raw = (f, kind = 'question') => readFileSync(checkpointFile(f, kind));
+/** Parks the next call of an inspector method until released; later calls use the original. */
+function hold(target, method) {
+  const original = target[method]; let release, reach;
+  const gate = new Promise(resolve => { release = resolve; }), reached = new Promise(resolve => { reach = resolve; });
+  target[method] = async (...args) => { reach(); await gate; return original.apply(target, args); };
+  return { reached, release: () => { release(); target[method] = original; } };
+}
+/** Records each single-use execution token together with the original executor. */
+function captureAttempts(f) {
+  const attempts = [], original = f.runner.executeAdaptiveNativeInternal.bind(f.runner);
+  f.runner.executeAdaptiveNativeInternal = (token, runtime) => { attempts.push({ token, original }); return original(token, runtime); };
+  return attempts;
+}
+const orphan = async (f, labels = AUTO) => { blockPlugins(f); await f.admit(); await assert.rejects(f.answer(labels), SERIAL); };
+
+test('ADM-07-S02/ADM-02-S01: N01 stale-busy symptom - start is refused until the applied reset, then no longer busy', async t => {
+  const f = fixture(t); await orphan(f);
+  assert.equal(await startError(f), BUSY);
+  const reset = f.gate.reset(f.runtime, 'run');
+  // The stale-busy symptom is asserted first: it is the observable failure, independent of the new response field.
+  assert.notEqual(await startError(f), BUSY);
+  assert.deepEqual(reset.reset.nativeEntry, { released: true });
+});
+
+test('ADM-04-S01: N02 permanent Verify probe - an unresolved question keeps its record and raw bytes through reset', async t => {
+  const f = fixture(t); blockPlugins(f); await f.admit();
+  noRun(f); assert.equal(f.questions.read('parent').state, 'prepared');
+  const record = structuredClone(f.questions.read('parent')), bytes = raw(f);
+  const reset = f.gate.reset(f.runtime, 'run');
+  assert.equal(reset.reset.nativeEntry.released, false);
+  assert.deepEqual(f.questions.read('parent'), record); assert.ok(raw(f).equals(bytes));
+  assert.equal(await startError(f), BUSY); noRun(f);
+});
+
+for (const phase of ['prepared', 'pending', 'answered']) test(`ADM-04-S01/ADM-05-S01: N04 restart after interrupted ${phase} question stays fenced, then a reset gives fresh Modo [parity]`, async t => {
+  const f = fixture(t); await f.admit();
+  const status = f.gate.status('parent'), call = { sessionID: 'parent', callID: 'interrupted-mode' };
+  if (phase !== 'prepared') await f.gate.beforeQuestion(call, status.question);
+  if (phase === 'answered') {
+    const write = f.questions.write.bind(f.questions);
+    t.mock.method(f.questions, 'write', (id, record) => { if (record.state === 'settled') throw new Error('Injected question publication failure.'); return write(id, record); });
+    await assert.rejects(f.gate.afterQuestion(call, status.question, output(status.question, AUTO)), /publication/);
+    t.mock.restoreAll();
+    assert.equal(f.questions.read('parent').state, 'answered');
+  }
+  const gate = restart(f);
+  assert.equal(gate.status('parent').state, 'blocked');
+  assert.equal(gate.status('parent').reason, 'Interrupted native question is not consent. Its unresolved outcome remains fenced.');
+  await assert.rejects(gate.afterQuestion(call, status.question, output(status.question, AUTO)), /Interrupted native question cannot resume as live consent/);
+  await assert.rejects(gate.adaptiveInternal(entryOp(f), f.runtime), { message: 'A native question is unresolved; no overlapping intake or actor operation.' });
+  noRun(f);
+  assert.deepEqual(gate.reset(f.runtime, 'run').reset, { scope: 'run' }); noRun(f);
+  const fresh = await gate.adaptiveInternal(entryOp(f), f.runtime);
+  assert.equal(fresh.question.questions[0].header, 'Modo'); assert.notDeepEqual(fresh.question, status.question);
+});
+
+test('ADM-04-S02: N05 a starting admission stays exclusive against reset, overlap and start, then yields one run [parity]', async t => {
+  const f = fixture(t, 'automatic'); const parked = hold(f.inspect, 'parent');
+  const admitting = f.admit(); await parked.reached;
+  assert.throws(() => f.gate.reset(f.runtime, 'run'), { message: 'Live internal adaptive selection cannot enter public fixed-phase reset.' });
+  await assert.rejects(f.admit(), { message: 'A native policy operation is already pending.' });
+  assert.equal(await startError(f), BUSY);
+  parked.release(); await admitting;
+  assert.ok(f.store.read('parent')); assert.equal(f.runner.status('parent').state, 'await-selection');
+});
+
+test('ADM-04-S02/ADM-06-S02: N06 a bridge entry still starting is not releasable and admits exactly once', async t => {
+  const f = fixture(t, 'automatic'); const parked = hold(f.inspect, 'intake');
+  const admitting = f.admit(); await parked.reached;
+  assert.deepEqual(f.gate.reset(f.runtime, 'run').reset.nativeEntry, { released: false, reason: 'Only a blocked entry rejected before bootstrap can be released.' });
+  await assert.rejects(f.admit(), { message: 'A native policy operation is already pending.' });
+  assert.equal(await startError(f), BUSY);
+  parked.release(); await admitting;
+  assert.ok(f.store.read('parent')); assert.equal(f.runner.status('parent').state, 'await-selection');
+});
+
+test('ADM-04-S02: N07 a dispatched child keeps the run exclusive; an overlapping attempt cannot be released', async t => {
+  const f = fixture(t, 'automatic'); const attempts = captureAttempts(f);
+  await f.admit(); await f.gate.adaptiveInternal(f.operation(), f.runtime);
+  await f.runner.before({ sessionID: 'parent', callID: 'live-child' }, f.runner.status('parent').task);
+  assert.equal(f.runner.status('parent').state, 'await-result');
+  const stored = structuredClone(f.store.read('parent'));
+  assert.throws(() => f.gate.reset(f.runtime, 'run'), { message: 'Adaptive records cannot enter fixed reset or discard.' });
+  await assert.rejects(f.admit(), { message: 'An existing or unfinished native run occupies this parent; internal admission requires idle ownership.' });
+  assert.deepEqual(f.store.read('parent'), stored); assert.equal(f.runner.status('parent').state, 'await-result');
+  assert.equal(f.runner.consumeAdaptiveEntryRejectionInternal(attempts.at(-1).token, f.runtime), 'Live or in-memory run state occupies this parent.');
+});
+
+test('ADM-04-S02/ADM-06-S03: N08 unconfirmed child liveness (pending progress) keeps an orphan fenced until cleared', async t => {
+  const f = fixture(t); await orphan(f);
+  f.options.progress.write('parent', { runID: 'mdd-run-older', callID: 'older-child', attemptID: 'older-child', state: 'pending', userMessageID: 'older-user' });
+  assert.throws(() => f.gate.reset(f.runtime, 'run'), /unconfirmed liveness/);
+  assert.equal(f.gate.status('parent').state, 'blocked'); assert.equal(await startError(f), BUSY);
+  f.options.progress.clear('parent');
+  assert.deepEqual(f.gate.reset(f.runtime, 'run').reset.nativeEntry, { released: true });
+  assert.notEqual(await startError(f), BUSY);
+});
+
+test('ADM-03-S01/ADM-01-S02: N09 a failed bootstrap publication has no rejection proof and stays fenced, also after restart', async t => {
+  const f = fixture(t, 'automatic');
+  t.mock.method(f.ownership, 'bootstrapAdaptive', () => { throw new Error('Injected bootstrap publication failure.'); });
+  await assert.rejects(f.admit(), { message: 'Injected bootstrap publication failure.' });
+  assert.deepEqual(f.gate.reset(f.runtime, 'run').reset.nativeEntry, { released: false, reason: 'No attempt-bound proof that bootstrap was never reached.' });
+  assert.equal(await startError(f), BUSY); noRun(f);
+  assert.deepEqual(restart(f).reset(f.runtime, 'run').reset, { scope: 'run' });
+});
+
+test('ADM-03-S01: N10 interrupted claim then restart keeps durable data; a fresh approval cannot take the parent [parity]', async t => {
+  const f = fixture(t, 'interactive'); await f.admit();
+  const claim = f.ownership.claim.bind(f.ownership); let fail = true;
+  t.mock.method(f.ownership, 'claim', (...args) => { if (fail) { fail = false; throw new Error('Injected bootstrap interruption.'); } return claim(...args); });
+  await assert.rejects(f.answer([['Approve operation']]), /bootstrap/);
+  const gate = restart(f), stored = structuredClone(f.store.read('parent')), owner = f.ownership.parent('parent');
+  assert.throws(() => gate.reset(f.runtime, 'run'), /Adaptive records cannot enter fixed reset/);
+  const status = await gate.adaptiveInternal(entryOp(f), f.runtime);
+  assert.equal(status.question.questions[0].header, 'Operation approval');
+  await assert.rejects(f.answer([['Approve operation']], gate), /existing or unfinished native run occupies this parent/);
+  assert.deepEqual(f.store.read('parent'), stored); assert.equal(f.ownership.parent('parent'), owner);
+});
+
+for (const injection of ['foreign owner', 'occupied read throws', 'malformed retirement pointer']) test(`ADM-03-S02/ADM-06-S02: N11 occupancy appearing at questions.clear (${injection}) blocks release and keeps the injected state`, async t => {
+  const f = fixture(t); await orphan(f);
+  const pointer = join(f.root, '.mdd', `adaptive-retirement-${createHash('sha256').update(JSON.stringify('parent')).digest('hex')}.json`);
+  const clear = f.questions.clear.bind(f.questions);
+  t.mock.method(f.questions, 'clear', id => {
+    clear(id);
+    if (injection === 'foreign owner') f.ownership.claimParent('parent', 'mdd-run-foreign');
+    else if (injection === 'occupied read throws') f.store.occupied = () => { throw new Error('Injected unreadable store.'); };
+    else writeFileSync(pointer, 'malformed');
+  });
+  const reset = f.gate.reset(f.runtime, 'run');
+  assert.equal(reset.reset.nativeEntry.released, false);
+  assert.equal(reset.reset.nativeEntry.reason, injection === 'foreign owner' ? 'Ownership, intake, checkpoint or progress state occupies this parent.' : 'Occupancy could not be established reliably.');
+  assert.equal(f.gate.status('parent').state, 'blocked'); assert.equal(await startError(f), BUSY);
+  if (injection === 'foreign owner') assert.equal(f.ownership.parent('parent'), 'mdd-run-foreign');
+  if (injection === 'malformed retirement pointer') assert.equal(readFileSync(pointer, 'utf8'), 'malformed');
+});
+
+for (const dismissal of ['free text', 'nativeError']) test(`ADM-04-S03: N12 ${dismissal} dismissal supplies no release proof`, async t => {
+  const f = fixture(t, 'interactive'); const status = await f.admit(), call = { sessionID: 'parent', callID: 'dismissed-approval' };
+  await f.gate.beforeQuestion(call, status.question);
+  if (dismissal === 'free text') await f.gate.afterQuestion(call, status.question, output(status.question, [['Please do something else']]));
+  else f.gate.nativeError(call);
+  assert.equal(f.questions.read('parent').state, 'cancelled');
+  assert.equal(f.gate.status('parent').reason, 'Native question ended without authorization. Free text, pause and dismissal do not approve operations.');
+  assert.deepEqual(f.gate.reset(f.runtime, 'run').reset.nativeEntry, { released: false, reason: 'No attempt-bound proof that bootstrap was never reached.' });
+  noRun(f);
+});
+
+test('ADM-04-S03: N13 an automatic product question answered Pause supplies no release proof', async t => {
+  const f = fixture(t, 'automatic'); f.contract.productQuestions = ['Keep the bounded format?'];
+  const questions = [{ question: 'Keep the bounded format?', why: 'A decision is needed.', options: [{ label: 'Keep', description: 'Keep the format.' }, { label: 'Stop', description: 'Do not continue.' }] }];
+  await f.gate.adaptiveInternal({ kind: 'entry', args: { contract: f.contract, messageID: 'native-message', questions } }, f.runtime);
+  await f.answer([['Stop']]);
+  assert.equal(f.gate.status('parent').reason, 'The native product question remains unresolved; no operation was authorized.');
+  assert.deepEqual(f.gate.reset(f.runtime, 'run').reset.nativeEntry, { released: false, reason: 'No attempt-bound proof that bootstrap was never reached.' });
+  noRun(f);
+});
+
+test('ADM-05-S01: N14 interactive consent is asked again after reset; the old reply cannot authorize it', async t => {
+  const f = fixture(t, 'interactive'); blockPlugins(f); const first = await f.admit();
+  await assert.rejects(f.answer([['Approve operation']]), SERIAL);
+  assert.deepEqual(f.gate.reset(f.runtime, 'run').reset.nativeEntry, { released: true }); unblockPlugins(f);
+  const fresh = await f.admit(); assert.equal(fresh.question.questions[0].header, 'Operation approval');
+  assert.notDeepEqual(fresh.question, first.question);
+  await assert.rejects(f.gate.afterQuestion({ sessionID: 'parent', callID: 'question-1' }, first.question, output(first.question, [['Approve operation']])), { message: 'Question differs from the exact proposed native envelope.' });
+  assert.equal(f.store.read('parent'), undefined);
+  await f.answer([['Approve operation']]);
+  assert.ok(f.store.read('parent')); assert.equal(f.store.read('parent').nativePolicy.questions.at(-1).callID, 'question-2');
+});
+
+test('ADM-05-S01: N15 explicitly automatic profile is admitted after reset with no extra question', async t => {
+  const f = fixture(t, 'automatic'); blockPlugins(f);
+  await assert.rejects(f.admit(), SERIAL);
+  assert.deepEqual(f.gate.reset(f.runtime, 'run').reset.nativeEntry, { released: true }); unblockPlugins(f);
+  const count = f.inspected.length; await f.admit();
+  assert.equal(f.inspected.length, count); assert.equal(f.questions.read('parent'), undefined);
+  assert.deepEqual(f.store.read('parent').nativePolicy.answers, { mode: 'automatic' });
+  assert.equal(f.runner.status('parent').state, 'await-selection');
+});
+
+test('ADM-05-S01: N16 the consumed single-use rejection proof cannot be replayed or reused', async t => {
+  const f = fixture(t, 'automatic'); const attempts = captureAttempts(f); blockPlugins(f);
+  await assert.rejects(f.admit(), SERIAL);
+  const { token, original } = attempts[0];
+  assert.throws(() => consumeNativeOperation(token, f.runtime), { message: 'Actual single-use native operation proof is required.' });
+  assert.deepEqual(f.gate.reset(f.runtime, 'run').reset.nativeEntry, { released: true });
+  await assert.rejects(original(token, f.runtime), { message: 'Actual single-use native operation proof is required.' });
+  assert.equal(f.runner.consumeAdaptiveEntryRejectionInternal(token, f.runtime), 'No attempt-bound proof that bootstrap was never reached.');
+  noRun(f);
+});
+
+test('ADM-05-S02: N17 reset and fresh admission keep coordinator, workspace, caller and real native-identity guards', async t => {
+  const f = fixture(t, 'automatic'); blockPlugins(f);
+  await assert.rejects(f.admit(), SERIAL);
+  assert.throws(() => f.gate.reset({ ...f.runtime, agent: 'general' }, 'run'), { message: 'Only the coordinator may reset MDD state.' });
+  const foreign = f.root + '-foreign';
+  assert.deepEqual(f.gate.reset({ ...f.runtime, directory: foreign, worktree: foreign }, 'run').reset.nativeEntry, { released: false, reason: 'Native coordinator or workspace differs from the rejected attempt.' });
+  assert.equal(f.gate.status('parent').state, 'blocked');
+  assert.deepEqual(f.gate.reset(f.runtime, 'run').reset.nativeEntry, { released: true });
+  const entry = id => wire('entry', { contract: f.contract, messageID: id });
+  await assert.rejects(f.gate.adaptiveInternal(entry('old-message'), f.runtime, 'host-turn'), { message: 'Entry must bind the current native user turn, not a caller-chosen old identity.' }); noRun(f);
+  await assert.rejects(f.gate.adaptiveInternal(entryOp(f), { ...f.runtime, agent: 'general' }), { message: 'Only the native coordinator may propose adaptive operations.' }); noRun(f);
+  // A non-canonical workspace spelling is refused by the runner on a separate parent (a blocked entry keeps its own runtime).
+  const h = fixture(t, 'automatic'), dotted = h.root + sep + '.';
+  await assert.rejects(h.gate.adaptiveInternal(entryOp(h), { ...h.runtime, directory: dotted, worktree: dotted }), { message: 'Internal adaptive admission requires the exact coordinator workspace.' }); noRun(h);
+  unblockPlugins(f);
+  const parent = { id: 'parent', directory: f.root, projectID: 'project', agent: 'mdd-orchestrator' };
+  const current = { info: { id: 'native-message', sessionID: 'parent', role: 'assistant', agent: 'mdd-orchestrator', parentID: 'native-user', path: { cwd: f.root, root: f.root } }, parts: [] };
+  const history = [{ info: { id: 'native-user', sessionID: 'parent', role: 'user' }, parts: [{ type: 'text', text: f.contract.objective, sessionID: 'parent', messageID: 'native-user' }] }, current];
+  const inspector = createInspector({ directory: f.root, worktree: f.root, project: { id: 'project' }, client: { session: { get: async () => ({ data: parent }), messages: async () => ({ data: history }) } } });
+  f.inspect.intake = inspector.intake; f.inspect.parent = inspector.parent; f.inspect.question = inspector.question;
+  await assert.rejects(f.gate.adaptiveInternal(entry('native-user'), f.runtime, 'forged-message'), { message: 'Start does not match the actual native caller message.' }); noRun(f);
+  await f.gate.adaptiveInternal(entry('native-user'), f.runtime, 'native-message');
+  assert.equal(f.store.read('parent').userMessageID, 'native-user'); assert.equal(f.runner.status('parent').state, 'await-selection');
+});
+
+test('ADM-05-S02: N18 a consumed request identity and a drifted question generation are refused after reset', async t => {
+  const f = fixture(t, 'automatic'); blockPlugins(f);
+  await assert.rejects(f.admit(), SERIAL);
+  assert.deepEqual(f.gate.reset(f.runtime, 'run').reset.nativeEntry, { released: true });
+  unblockPlugins(f);
+  f.options.progress.write('parent', { runID: 'mdd-run-older', callID: 'older-child', attemptID: 'older-child', state: 'settled', userMessageID: 'native-user' });
+  await assert.rejects(f.admit(), { message: 'This exact request already ran in this conversation. Send a new request, or use mdd_reset to start it over deliberately.' });
+  noRun(f); f.options.progress.clear('parent');
+  const g = fixture(t, 'interactive'); const status = await g.admit(), call = { sessionID: 'parent', callID: 'drifted-answer' };
+  await g.gate.beforeQuestion(call, status.question);
+  const record = g.questions.read('parent');
+  const read = t.mock.method(g.questions, 'read', () => ({ ...record, adaptive: { ...record.adaptive, directory: record.adaptive.directory + '-foreign' } }));
+  await assert.rejects(g.gate.afterQuestion(call, status.question, output(status.question, [['Approve operation']])), { message: 'Native question or proposed operation generation changed; no authority was consumed.' });
+  read.mock.restore();
+  assert.equal(g.questions.read('parent').state, 'pending'); assert.equal(g.store.read('parent'), undefined);
+});
+
+test('ADM-06-S03: N19 a retained fence refuses start and automatic internal admission until the retried release succeeds', async t => {
+  const f = fixture(t, 'automatic'); blockPlugins(f);
+  await assert.rejects(f.admit(), SERIAL);
+  const mock = t.mock.method(f.runner, 'consumeAdaptiveEntryRejectionInternal', () => 'Injected occupancy.');
+  assert.deepEqual(f.gate.reset(f.runtime, 'run').reset.nativeEntry, { released: false, reason: 'Injected occupancy.' });
+  assert.equal(await startError(f), BUSY);
+  await assert.rejects(f.gate.admitAdaptiveInternal({ contract: f.contract }, f.runtime, 'native-message'), /A native policy intake is pending/);
+  mock.mock.restore();
+  assert.deepEqual(f.gate.reset(f.runtime, 'run').reset.nativeEntry, { released: true });
+  assert.notEqual(await startError(f), BUSY);
+});
+
+test('ADM-02-S02: N20 a fresh run after reset records only its own question and native user', async t => {
+  const f = fixture(t); await orphan(f);
+  assert.deepEqual(f.gate.reset(f.runtime, 'run').reset.nativeEntry, { released: true }); unblockPlugins(f);
+  await f.admit(); await f.answer(AUTO);
+  const saved = f.store.read('parent');
+  assert.equal(saved.userMessageID, 'native-user');
+  assert.ok(!saved.nativePolicy.questions.some(q => q.callID === 'question-1'));
+  assert.deepEqual(saved.nativePolicy.questions.map(q => q.callID), ['question-2']);
 });

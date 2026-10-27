@@ -107,6 +107,19 @@ stale evidence remains a lead, not fresh proof. This prose guidance adds no repo
 approval or authority and never substitutes for the required structured semantic coverage or
 project-knowledge freshness checks. Scoped-worker footprints and command limits still apply.
 
+### Retained artifact reads
+
+For a singular active phase, including native fallback, `mdd_artifact_read` can read retained
+artifact bytes using `document` (`history:N` or `context:N`, zero-based), the artifact's `digest`,
+byte `offset` (start at 0) and `limit` (4–8192 bytes). Continue from `nextOffset` until `eof`;
+UTF-8 characters are never split. Read every `mustRead` manifest to `eof` before dependent work,
+including planning prose, prerequisites and correction evidence. Structured obligations remain
+inline. A summary is not equivalent to the original; one page does not prove other pages were read.
+If the provider or binding is unavailable, report the evidence gap; do not guess a path or
+substitute a serialized reference. Restored refs and store:none refs do not promise external
+retrieval. No reset, rework, acceptance or approval authority is granted by this reader.
+Scoped workers cannot use this reader; their existing file and custom-tool restrictions apply.
+
 ## Reporting
 
 Answer in the markdown form the task prompt specifies. The summary is prose a person reads
@@ -128,8 +141,9 @@ this phase cannot be completed safely without an answer, report outcome `failed`
 For any scoped worker, return the report directly: `mdd_check_report` and all custom/MDD tools
 except Apply's scoped editor are denied. The adapter checks the report at the exact parent callback.
 Otherwise, outside native fallback, before you return it, call `mdd_check_report` once with your
-phase and the exact report you intend to send. It is the only MDD tool you may call. It answers
-about form — the required sections, the types of the fields, the identifiers — and it records
+phase and the exact report you intend to send. Apart from the bound reader above, it is the
+only MDD tool you may call. It answers about form — the required sections, the types of the
+fields, the identifiers — and it records
 nothing: no attempt is spent and nothing about the run changes. If it names problems, fix all
 of them and check again; if it comes back clean, report as normal.
 

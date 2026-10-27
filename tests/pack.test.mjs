@@ -4,11 +4,27 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import { MDD_ASSETS, MDD_PACKAGED_ASSETS } from '../dist/project-assets.js';
 
+function assertPack(output, started) {
+  const token = value => typeof value === 'string' && /^[A-Z_0-9]{1,40}$/.test(value) ? value : null;
+  const diagnostic = `npm pack elapsedMs=${Math.round(performance.now() - started)} code=${token(output.error?.code)} status=${Number.isInteger(output.status) ? output.status : null} signal=${token(output.signal)}`;
+  assert.ok(!output.error && output.status === 0 && output.signal === null, diagnostic);
+}
+
+test('R06: pack failures report bounded subprocess metadata', () => {
+  const output = { status: null, signal: 'SIGTERM', error: { code: 'ETIMEDOUT' }, stderr: 'PRIVATE stderr' };
+  assert.throws(() => assertPack(output, performance.now()), error => {
+    assert.match(error.message, /elapsedMs=\d+ code=ETIMEDOUT status=null signal=SIGTERM/);
+    assert.doesNotMatch(error.message, /PRIVATE/);
+    return true;
+  });
+});
+
 test('package dry-run includes runnable build and exact owned assets without private runtime data', () => {
+  const started = performance.now();
   const output = spawnSync(process.platform === 'win32' ? 'cmd.exe' : 'npm', process.platform === 'win32' ? ['/d', '/s', '/c', 'npm pack --dry-run --json --ignore-scripts'] : ['pack', '--dry-run', '--json', '--ignore-scripts'], {
     encoding: 'utf8', timeout: 30000, env: { ...process.env, npm_config_update_notifier: 'false' },
   });
-  assert.equal(output.status, 0, output.stderr);
+  assertPack(output, started);
   const files = JSON.parse(output.stdout)[0].files.map(file => file.path);
   for (const role of ['mdd-jd-judge-a', 'mdd-jd-judge-b', 'mdd-jd-fix']) {
     const file = `assets/opencode/agents/${role}.md`;

@@ -19,7 +19,7 @@ const COORDINATOR = 'mdd-orchestrator';
 const MODEL_AGENTS = MODEL_ROLES.filter(role => role !== 'orchestrator');
 /**
  * Actors pinned to the phase-actor tool profile: dispatch nothing further, read no skill by
- * name, and may call only `mdd_check_report`. `mdd-risk` gets the same profile as the eight
+ * name, with narrow report-checker and execution-bound reader exceptions. `mdd-risk` gets the same profile as the eight
  * workflow phases even though nothing dispatches it yet in this increment, because when it is
  * dispatched it must already be unable to reach tools no phase actor can reach.
  */
@@ -212,6 +212,8 @@ export async function setupV2(ctx: Plugin.Context, createMotor: LegacyPlugin): P
         { action: '*', resource: '*', effect: 'deny' },
         { action: 'mdd_check_report', resource: '*', effect: 'allow' });
       if (id !== COORDINATOR && id !== SECURITY_AGENT) draft.permissions.push({ action: 'mdd_*', resource: '*', effect: 'deny' });
+      if (PINNED_AGENTS.includes(id as typeof PINNED_AGENTS[number]) || ['general', 'explore'].includes(id))
+        draft.permissions.push({ action: 'mdd_artifact_read', resource: '*', effect: 'allow' });
       if (PINNED_AGENTS.includes(id as typeof PINNED_AGENTS[number])) draft.permissions.push(
         { action: 'subagent', resource: '*', effect: 'deny' }, { action: 'skill', resource: '*', effect: 'deny' },
         { action: 'mdd_check_report', resource: '*', effect: 'allow' });
@@ -232,6 +234,7 @@ export async function setupV2(ctx: Plugin.Context, createMotor: LegacyPlugin): P
     for (const [name, definition] of Object.entries(hooks.tool ?? {})) editor.add({
       name, description: definition.description, input: z.object(definition.args), options: { codemode: false },
       async execute(args, context) {
+        if (name === 'mdd_artifact_read' && controller.signal.aborted) throw new Error('Retained artifact provider is inactive.');
         await enforceSecurity(context.sessionID, name, args, context.agent);
         await settleAgentPolicy();
         const session = await ctx.session.get({ sessionID: context.sessionID }, { signal: context.signal });
@@ -239,11 +242,13 @@ export async function setupV2(ctx: Plugin.Context, createMotor: LegacyPlugin): P
         if (session.location.directory !== directory || session.projectID !== ctx.location.project.id)
           throw new Error('Native MDD tool context differs from its plugin location.');
         const output = await definition.execute(args, { ...context, callID: context.id, abort: context.signal, directory, worktree } as never);
+        if (name === 'mdd_artifact_read' && controller.signal.aborted) throw new Error('Retained artifact provider is inactive.');
         return { content: v2Payload(typeof output === 'string' ? output : output.output) };
       },
     });
   });
   await ctx.tool.hook('execute.before', async event => {
+    if (event.tool === 'mdd_artifact_read' && controller.signal.aborted) throw new Error('Retained artifact provider is inactive.');
     const call = { sessionID: event.sessionID, messageID: event.messageID, callID: event.id, tool: event.tool === 'subagent' ? 'task' : event.tool, agent: event.agent };
     await enforceSecurity(event.sessionID, call.tool, event.input, event.agent);
     await settleAgentPolicy();

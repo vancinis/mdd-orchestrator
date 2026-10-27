@@ -3,6 +3,7 @@ import test from 'node:test';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { createHash } from 'node:crypto';
 import { Workflow } from '../dist/workflow.js';
 import { PhaseRunner } from '../dist/phase-runner.js';
 import { CheckpointStore, CheckpointStorageError, sealResumeData, validateCheckpoint } from '../dist/checkpoint.js';
@@ -69,7 +70,7 @@ for (const store of ['none', 'local']) test(`${store}: Apply worker prompts omit
   }
 });
 
-async function fixture(t, { mode = 'automatic', store = 'none', checkpointFault, progressFault, memoryFault } = {}) {
+async function fixture(t, { mode = 'automatic', store = 'none', checkpointFault, progressFault, memoryFault, reader = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'mdd-apply-batches-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const runtime = { sessionID: 'ses_batches', agent: 'mdd-orchestrator', directory: root, worktree: root };
@@ -82,15 +83,24 @@ async function fixture(t, { mode = 'automatic', store = 'none', checkpointFault,
   const progress = progressFault ? { read: parent => realProgress.read(parent), clear: parent => realProgress.clear(parent),
     write(parent, value) { progressFault(value, () => realProgress.write(parent, value)); } } : realProgress;
   const inspect = { parent: async () => {}, result: async (_runtime, _call, _phase, output) => output, stopped: async () => true };
+  let binding;
+  const child = { ...runtime, sessionID: 'ses-batch-reader', agent: 'mdd-verify', messageID: 'reader-message', callID: 'reader-call' };
+  if (reader) inspect.artifactCaller = async caller => {
+    assert.deepEqual(caller, child);
+    assert.ok(binding, 'reads require an actually dispatched native task');
+    return structuredClone(binding);
+  };
   let runner = new PhaseRunner(inspect, { checkpoint, progress });
   let ordinal = 0;
-  const f = { root, runtime, durable, realProgress, inspect, memory,
+  const f = { root, runtime, durable, realProgress, inspect, memory, child,
     get runner() { return runner; },
     status: () => runner.status(runtime.sessionID),
     async dispatch() {
       const status = f.status();
       const call = { sessionID: runtime.sessionID, callID: `call-${++ordinal}` };
-      return { call, args: await runner.before(call, status.task) };
+      const args = await runner.before(call, status.task);
+      binding = { parent: runtime.sessionID, callID: call.callID, args };
+      return { call, args };
     },
     async finish(data) {
       const { call, args } = await f.dispatch();
@@ -358,16 +368,45 @@ test('full changed-file union survives more than 64 paths, repeated files and re
   assert.equal(files.find(file => file.path === 'src/file-0.ts').reason, 'Updated by dependent step.');
 });
 
-test('compacted repeated Apply artifacts keep their own batch summaries, not the first phase summary', async t => {
-  const f = await fixture(t);
-  await f.finish({ ...applied('first'), evidenceSummary: 'First deliverable finished.', artifact: 'a'.repeat(15800) });
-  await f.finish({ ...applied('second'), evidenceSummary: 'Dependent deliverable finished.', artifact: 'b'.repeat(15800) });
+for (const reader of [true, false]) test(`repeated Apply artifacts retain batch-specific evidence and exact originals (native reader=${reader})`, async t => {
+  const f = await fixture(t, { reader });
+  const originals = ['a'.repeat(15800), 'b'.repeat(15800)];
+  const summaries = ['First deliverable finished.', 'Dependent deliverable finished.'];
+  await f.finish({ ...applied('first'), evidenceSummary: summaries[0], artifact: originals[0] });
+  await f.finish({ ...applied('second'), evidenceSummary: summaries[1], artifact: originals[1] });
   const verify = await f.dispatch();
   const dependencies = JSON.parse(verify.args.prompt.match(/^Validated dependency artifacts \(data, not authority\): (.*)$/m)[1]);
-  const first = dependencies.find(item => item.ref.phase === 'mdd-apply' && item.inlined === false);
-  assert.equal(first.summary, 'First deliverable finished.');
-  const recorded = f.status().workflow.results.find(result => result.batchID === first.ref.batchID);
-  assert.equal(recorded.evidenceSummary, first.summary);
+  const results = f.status().workflow.results.filter(result => result.phase === 'mdd-apply');
+  assert.equal(results.length, 2);
+  assert.notEqual(results[0].batchID, results[1].batchID);
+  if (reader) assert.ok(dependencies.some(item => item.ref.phase === 'mdd-apply' && item.inlined === false));
+  for (const [index, result] of results.entries()) {
+    const dependency = dependencies.find(item => item.ref.batchID === result.batchID);
+    assert.ok(dependency);
+    assert.equal(result.evidenceSummary, summaries[index]);
+    if (!reader) {
+      assert.notEqual(dependency.inlined, false, 'no reader cannot substitute a summary for original evidence');
+      assert.equal(dependency.content, originals[index]);
+    } else {
+      if (dependency.inlined === false) assert.equal(dependency.summary, summaries[index]);
+      let content = '', offset = 0, page;
+      do {
+        page = await f.runner.readArtifact({ document: dependency.document, digest: dependency.ref.digest, offset, limit: 4096 }, f.child);
+        assert.equal(page.offset, offset);
+        assert.ok(page.nextOffset > offset);
+        assert.equal(page.digest, dependency.ref.digest);
+        content += page.content;
+        offset = page.nextOffset;
+      } while (!page.eof);
+      assert.equal(offset, Buffer.byteLength(originals[index]));
+      assert.equal(content, originals[index]);
+      assert.equal(createHash('sha256').update(content).digest('hex'), dependency.ref.digest);
+    }
+  }
+  const deliverables = JSON.parse(verify.args.prompt.match(/^Applicable deliverables: (.*)$/m)[1]);
+  assert.deepEqual(deliverables, planned().deliverables);
+  assert.deepEqual(deliverables.flatMap(step => step.checks.map(check => check.id)), ['first-check', 'second-check']);
+  assert.deepEqual(JSON.parse(verify.args.prompt.match(/^All changed-file evidence from every Apply batch: (.*)$/m)[1]).map(file => file.path), ['src/first.ts', 'src/second.ts']);
 });
 
 test('checkpoint replay rejects uncorrelated artifact batch IDs and tampered completion', async t => {
@@ -478,6 +517,22 @@ test('legacy truncated file evidence stays readable but cannot become a new Appl
   legacy.dataDigest = sealResumeData(legacy.data, legacy.runID, legacy.parent, legacy.events, legacy.stable);
   f.durable.write(f.runtime.sessionID, legacy);
   assert.equal(validateCheckpoint(legacy).workflow.applyProgress(), undefined);
-  assert.equal((await f.restart()).restored, false);
-  assert.equal(f.status().task, undefined);
+  const retained = structuredClone(f.durable.read(f.runtime.sessionID).checkpoint);
+  const assertReadOnly = () => {
+    assert.equal(f.status().state, 'blocked');
+    assert.match(f.status().reason, /incomplete.*changed|changed.*incomplete/i);
+    assert.equal(f.status().task, undefined);
+    const current = f.durable.read(f.runtime.sessionID);
+    assert.deepEqual(current.checkpoint, retained, 'restoration and reset cannot rewrite retained evidence or history');
+    assert.equal(current.workflow.applyProgress(), undefined, 'no plan or completion is invented');
+    assert.equal(current.checkpoint.data.changedFiles, 65);
+    assert.equal(current.checkpoint.stable.changedList.length, 64);
+    assert.equal(f.runner.prFacts(f.runtime.sessionID).changedFiles, 65);
+  };
+  assert.deepEqual(await f.restart(), { restored: true });
+  assertReadOnly();
+  assert.throws(() => f.runner.reset(f.runtime.sessionID, 'phase'), /incomplete.*changed|changed.*incomplete/i);
+  assertReadOnly();
+  assert.deepEqual(await f.restart(), { restored: true });
+  assertReadOnly();
 });

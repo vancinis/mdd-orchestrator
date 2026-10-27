@@ -7,6 +7,26 @@ Verify reports commands and their outcomes. MDD validates the **consistency of a
 evidence**, not independent execution attestation, semantic correctness or independent review.
 Model-backed E2E is pending.
 
+## Bound artifact reader
+
+Singular dispatched phase actors can call `mdd_artifact_read` for bounded pages of their run's
+retained phase-history/contextual artifacts. The [artifact contract](artifacts-and-actors.md#execution-bound-retained-reads)
+defines locators, digest checks and UTF-8 paging. This is a narrow exception to `mdd_*` isolation,
+not coordinator access: actual native invocation identity and the exact active parent task are
+required at both the hook and executor. Native fallback uses the same checks. Scoped workers,
+security actors, unrelated sessions and completed attempts gain no access. No checkpoint schema
+changes or serialized store capabilities are involved.
+
+When a handoff omits retained narrative, its manifest marks the original `mustRead`: the active
+child must consult every page before dependent work. Structured operational and correction facts
+remain inline. Unsupported/scoped lanes retain full bytes and fail on overflow. Prompt/brief
+composition reserves call-ID space and checks escaped transport size, including assignment
+suffixes and optional knowledge. A contextual result commits before main-task preparation, so
+preparation failure cannot turn accepted evidence into another investigation attempt.
+
+These are transport and read-page bounds, not per-artifact or report-prose length limits.
+Retained originals remain complete; aggregate durable-record and checkpoint bounds still apply.
+
 ## Structured verification and legacy replay
 
 New runs capture `verificationVersion: 1` before planning. The runner supplies the frozen contract
@@ -91,10 +111,16 @@ deeper. The correction path now has four parts:
   decision could not be met (Design → `mdd-spec`, Tasks → `mdd-design`). Revising the
   specification is also how a gap the user accepts becomes an explicit exclusion.
 - **Verify attributes each gap.** A not-verified or deviation row may carry
-  `cause: implementation | design | requirements`. Status reports `reworkTargets`, the recommended
+  `cause: implementation | design | requirements | verification`. `verification` means execution/evidence-only
+  gaps without an established semantic defect; omitted cause retains the `implementation` default.
+  Mixed precedence is requirements > design > implementation > verification. Status reports `reworkTargets`, the recommended
   `reworkable` and `reworkReason`: requirements recommend `mdd-spec` (`mdd-plan` on low), design
-  recommends `mdd-design` (`mdd-plan`), and the same requirement failing again after a correction
-  pass recommends redesign instead of another Apply. The user still chooses; without `phase`,
+  recommends `mdd-design` (`mdd-plan`), and the same semantic requirement gap failing again after a successful
+  corrective Apply, without intervening planning rework, recommends redesign instead of another Apply.
+  Explicit evidence-only rows are excluded from both historical and current repetition comparisons;
+  semantic rows on the same requirement still count. Evidence-only and check-only failures recommend Apply
+  without asserting an implementation defect; `scope:"phase"` remains an explicit Verify retry option.
+  All findings, required-check blockers and coverage/closure validation remain mandatory. The user still chooses; without `phase`,
   rework after Verify returns to Apply as before.
 - **A planning rework releases what it replaces.** Returning to Spec, Design or Plan clears the
   held plan and verification (and decisions, for Spec), withdraws plan, implementation and check
@@ -103,7 +129,9 @@ deeper. The correction path now has four parts:
 - **The Apply correction is one pass that answers for every finding.** It is dispatched once,
   never as scoped workers, owns every remaining deliverable and completes them together in plan
   order. Verify saves its reproduction probes under `.mdd/probes/<runID>/` in MDD's gitignored data
-  root; the correction runs or converts each probe and observes it fail before changing code. It
+  root; for semantic defects the correction runs or converts each probe and observes it fail before changing code.
+  Evidence-only gaps require actual execution/evidence recovery with commands, exits and recovered coverage,
+  not unnecessary source edits; `noChangeReason` records when no source change was needed. It
   reports `closure=[{id,status,evidence}]` for every structured finding of the failed Verify
   (unverified scenarios, deliverables and decisions, and failing held or required checks). An open
   finding cannot pass. Histories recorded step by step before this still replay.
@@ -347,6 +375,25 @@ validated configured Engram automatically, otherwise local; configured failures 
 fallback. Legacy profile storage values do not select a new backend. `mdd_status.storage.backend`
 and `storage.taskDirectory` expose the actual backend and validated local directory. See
 [complete local task storage](artifacts-and-actors.md#complete-local-task-storage).
+
+#### Accepted result, failed successor preparation
+
+A confirmed result remains accepted when preparing its successor fails. The runner stages the
+successor prompt and phase metadata before exposing them; a preparation error blocks dispatch,
+retains the accepted report and evidence, and shows the original diagnostic in `status.reason`.
+It does not label that result's persistence unknown or request report restatement.
+
+1. Inspect the preparation diagnostic. Status recommends inspection, not an automatic retry.
+2. After correcting the cause, explicitly call `mdd_reset({scope:"phase"})`. At this boundary it
+   checks the matching settled checkpoint/progress evidence and prepares only the authorized
+   successor. It does not replay the source phase or republish its result.
+3. A restart validates the same durable evidence and rebuilds preparation. If the cause persists,
+   the restored run remains blocked with no dispatchable task; otherwise the successor is ready.
+
+A handoff exceeding 96,000 bytes remains oversized after retry. This recovery path does not
+compact inputs, remove held obligations, or edit journals. Checkpoint/publication or progress
+failures remain fail-closed; their status does not recommend phase reset, which cannot establish
+unknown durability. No uncertainty flag is cleared to enable preparation recovery.
 
 #### Explicit read-only exploration
 
@@ -1692,3 +1739,16 @@ their contract tests together; do not leave a widened actor with an older dispat
 - Installed `@opencode-ai/plugin@1.18.31` and `@opencode-ai/sdk@1.18.31`
   declarations. Current runtime agent fields absent from legacy SDK types are
   decoded and checked explicitly, not cast to invented v2 client methods.
+## Coordinator questions at fixed-run recovery boundaries
+
+An ordinary coordinator question can pass both native hooks while a validated fixed run is idle,
+including a durably settled failed Verify restored without an intake. Ownership alone is insufficient:
+a held-here reservation remains busy. The shared guard checks current native call input, retained
+question envelopes and call identities, pending intake/questions, actor/contextual operations,
+uncertain progress, transfer claims and writer reservations on each hook.
+
+Success is a read-only return. It does not parse the answer, mint a receipt, record consent, contribute
+context, change a plan or dispatch work. Exact issued-question consent and the version-2 settled
+native-receipt exception remain separate. Active adaptive question-session refusal is unchanged.
+If activity starts between hooks, completion is refused; the adapter does not swallow that rejection.
+Test hosts explicitly settle their native parts and do not establish undocumented host behavior.

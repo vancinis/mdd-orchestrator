@@ -5,7 +5,7 @@ import { setupV2 } from './opencode-v2.js';
 import { isDeepStrictEqual } from 'node:util';
 import { createHash, randomUUID } from 'node:crypto';
 import { boundedText, movedMessage, nonemptyText, PhaseRunner } from './phase-runner.js';
-import type { Inspect, Liveness, Runtime } from './phase-runner.js';
+import type { Inspect, Liveness, Runtime, TaskCall } from './phase-runner.js';
 import { freezeProfile, setupDiagnostic } from './settings.js';
 import { loadGlobalSettings } from './global-settings.js';
 import { installationPaths } from './installation-paths.js';
@@ -87,6 +87,7 @@ export const MDD_TOOLS = ['mdd_adapt', 'mdd_security', 'mdd_start', 'mdd_status'
  * answers a question about a document it is handed.
  */
 export const CHECK_TOOL = 'mdd_check_report';
+export const ARTIFACT_READ_TOOL = 'mdd_artifact_read';
 export const COORDINATOR = 'mdd-orchestrator';
 /** Translation attempts a single conversation gets per PR body before drafting refuses outright. */
 export const PR_TRANSLATION_ATTEMPTS = 3;
@@ -153,14 +154,16 @@ export function pinPhaseAgents(config: { agent?: Record<string, Record<string, u
     permission: { '*': 'deny', [CHECK_TOOL]: 'allow' }, tools: { '*': false, [CHECK_TOOL]: true } };
   for (const name of PINNED_AGENTS) {
     const agent = { ...config.agent[name] };
-    // `mdd_check_report` is the one MDD tool a phase actor may call, and it runs after the
+    // The report checker and execution-bound reader are narrow exceptions after the
     // blanket `mdd_*: false` that `restrictTools` writes, so the explicit entry is what grants
-    // it. It reads nothing and records nothing; it only tells the actor whether the document it
+    // it. The checker reads nothing and records nothing; it only tells the actor whether the document it
     // is about to return can be read. That question has to be answerable here, because the
     // session that can still fix the document is gone by the time MDD validates it.
-    agent.tools = { ...(agent.tools as Record<string, boolean> | undefined), task: false, skill: false, [CHECK_TOOL]: true };
+    agent.tools = { ...(agent.tools as Record<string, boolean> | undefined), task: false, skill: false, [CHECK_TOOL]: true, [ARTIFACT_READ_TOOL]: true };
     config.agent[name] = agent;
   }
+  for (const name of ['general', 'explore']) config.agent[name] = { ...config.agent[name],
+    tools: { ...(config.agent[name]?.tools as Record<string, boolean> | undefined), [ARTIFACT_READ_TOOL]: true } };
 }
 
 /**
@@ -389,6 +392,43 @@ export function createInspector(input: PluginInput, timeout = 5000, now: () => n
     nativeActor(sessionID: string, liveAgent?: string): Promise<{ agent: string; session: Record<string, unknown> }>;
     judgeInspection(runtime: Runtime & { messageID: string }, args: unknown): Promise<void>;
   } = {
+    async artifactCaller(runtime, args) {
+      checkWorkspace(runtime);
+      if (!runtime.messageID && !runtime.callID) throw new Error('Retained artifact read needs a native invocation identity.');
+      const child = await session(runtime.sessionID, runtime.directory);
+      const history = await messages(runtime.sessionID, runtime.directory);
+      const latest = history.at(-1);
+      const info = record(latest?.info, 'artifact reader caller');
+      const location = record(info.path, 'artifact reader location');
+      const reads = list(latest?.parts, 'artifact reader parts', PARTS_MAX).filter(part =>
+        part.type === 'tool' && part.tool === ARTIFACT_READ_TOOL && record(part.state).status === 'running' &&
+        (runtime.callID ? part.callID === runtime.callID : isDeepStrictEqual(record(part.state).input, args)));
+      const read = reads[0];
+      if (child.id !== runtime.sessionID || typeof child.parentID !== 'string' || child.parentID === child.id ||
+          child.directory !== runtime.directory || child.projectID !== input.project.id ||
+          (child.agent !== undefined && child.agent !== runtime.agent) ||
+          (runtime.messageID !== undefined && info.id !== runtime.messageID) || info.sessionID !== runtime.sessionID || info.role !== 'assistant' || info.agent !== runtime.agent ||
+          location.cwd !== runtime.directory || location.root !== runtime.worktree || reads.length !== 1 ||
+          read?.sessionID !== runtime.sessionID || read.messageID !== info.id ||
+          record(read.state).status !== 'running' || !isDeepStrictEqual(record(read.state).input, args))
+        throw new Error('Retained artifact read lacks its exact native child invocation.');
+      const parentRuntime = { ...runtime, sessionID: child.parentID, agent: COORDINATOR };
+      await inspector.parent(parentRuntime);
+      const parents = await messages(child.parentID, runtime.directory);
+      const tasks = parents.flatMap(message => list(message.parts, 'artifact parent parts', PARTS_MAX)
+        .filter(part => part.type === 'tool' && part.tool === 'task' && record(record(part.state).metadata ?? {}).sessionId === child.id)
+        .map(part => ({ part, info: record(message.info) })));
+      if (tasks.length !== 1) throw new Error('Retained artifact read has no unique native parent task.');
+      const task = tasks[0]!, state = record(task.part.state), path = record(task.info.path);
+      const taskArgs = record(state.input);
+      if (state.status !== 'running' || task.info.role !== 'assistant' || task.info.agent !== COORDINATOR ||
+          task.info.sessionID !== child.parentID || task.part.sessionID !== child.parentID || task.part.messageID !== task.info.id ||
+          path.cwd !== runtime.directory || path.root !== runtime.worktree || taskArgs.subagent_type !== runtime.agent ||
+          typeof taskArgs.description !== 'string' || typeof taskArgs.prompt !== 'string')
+        throw new Error('Retained artifact read parent task is not the active native actor.');
+      return { parent: child.parentID, callID: boundedText(task.part.callID, 'artifact parent call ID', 256),
+        args: taskArgs as { subagent_type: string; description: string; prompt: string } };
+    },
     async securityCaller(runtime, messageID, userText) {
       await inspector.parent(runtime);
       const history = await messages(runtime.sessionID, runtime.directory);
@@ -762,6 +802,18 @@ export function createInspector(input: PluginInput, timeout = 5000, now: () => n
         throw new Error('The user wrote this before the question was shown, or the question is no longer in the readable history. Ask it again with the native question tool. Nothing was recorded.');
       }
       return boundedText(info.id, 'native user message ID', 256);
+    },
+    async questionInput(call: TaskCall) {
+      const history = await messages(call.sessionID, input.directory);
+      const matches = history.flatMap(message => list(message.parts, 'question identity', PARTS_MAX)
+        .filter(part => part.type === 'tool' && part.tool === 'question' && part.callID === call.callID)
+        .map(part => ({ part, info: record(message.info) })));
+      if (matches.length !== 1) throw new Error('Native coordinator question call is not uniquely readable.');
+      const { part, info } = matches[0]!, state = record(part.state);
+      if (info.role !== 'assistant' || info.sessionID !== call.sessionID || part.sessionID !== call.sessionID || part.messageID !== info.id ||
+          !['pending', 'running', 'completed'].includes(String(state.status)))
+        throw new Error('Native coordinator question identity differs.');
+      return state.input;
     },
     async question(runtime, call, args) {
       if (call.sessionID !== runtime.sessionID) throw new Error('Native question parent mismatch.');
@@ -1615,6 +1667,19 @@ const plugin: Plugin = async input => {
           return reply(intake.contribute(args, context));
         },
       }),
+      mdd_artifact_read: tool({
+        description: 'Read a bounded UTF-8 page of retained history for this exact active dispatched child. Document is history:N or context:N (zero-based); digest must match the retained artifact. No file paths, serialized refs or caller identities are accepted. This grants no workflow control.',
+        args: { document: tool.schema.string(), digest: tool.schema.string(), offset: tool.schema.number().int().min(0),
+          limit: tool.schema.number().int().min(4).max(8192) },
+        async execute(args, context) {
+          await security.enforce(context.sessionID, ARTIFACT_READ_TOOL, args, context.agent);
+          if (context.abort.aborted) throw new Error('Retained artifact read requires a live native invocation.');
+          const callID = (context as typeof context & { callID?: string }).callID;
+          const chunk = await runner.readArtifact(args, { ...nativeRuntime(context), messageID: context.messageID, ...(callID ? { callID } : {}) });
+          if (context.abort.aborted) throw new Error('Retained artifact read was aborted.');
+          return JSON.stringify(chunk);
+        },
+      }),
       mdd_contextual_explore: tool({
         description: 'Request one useful read-only investigation, with or without an accepted run. Use it for information-only questions instead of stopping. Never starts implementation and never changes the main route, answers or pending approval. Returns exact native task arguments through status.',
         args: { purpose: tool.schema.string().min(1), workItems: tool.schema.array(explorationWorkItemSchema()).max(2).optional() },
@@ -1629,12 +1694,19 @@ const plugin: Plugin = async input => {
     // boundary; phase tasks and consent questions keep their existing workflow observation.
     'tool.execute.before': async (input, output) => {
       await security.enforce(input.sessionID, input.tool, output.args);
-      if (nativeChildren.has(input.sessionID) && (['task', 'skill', CHECK_TOOL].includes(input.tool) || input.tool.startsWith('mdd_') && input.tool !== 'mdd_worker_edit')) {
+      if (nativeChildren.has(input.sessionID) && (['task', 'skill', CHECK_TOOL].includes(input.tool) || input.tool.startsWith('mdd_') && !['mdd_worker_edit', ARTIFACT_READ_TOOL].includes(input.tool))) {
         throw new Error('A tracked native fallback must work directly and return its report to the parent. Recursive orchestration, skill loading, and MDD tools are not allowed.');
       }
       // V2 supplies the live hook actor before its assistant history necessarily catches up.
       const liveAgent = (input as typeof input & { agent?: string }).agent;
       const actor = await inspector.nativeActor(input.sessionID, liveAgent);
+      if (input.tool === ARTIFACT_READ_TOOL) {
+        if (liveAgent !== undefined && liveAgent !== actor.agent) throw new Error('Retained artifact read native actor differs.');
+        const messageID = (input as typeof input & { messageID?: string }).messageID;
+        await runner.readArtifact(output.args, { sessionID: input.sessionID, agent: actor.agent, directory: inputDirectory,
+          worktree: inputWorktree, ...(messageID ? { messageID } : {}), callID: input.callID });
+        return;
+      }
       if (isJudge(actor.agent) || isJudge(liveAgent)) judgeSessions.add(input.sessionID);
       if (judgeSessions.has(input.sessionID)) {
         if (input.tool !== JD_INSPECT) throw new Error('A judge may use only immutable Git inspection; live reads, shell, delegation, memory and other tools are denied.');
@@ -1712,7 +1784,12 @@ const plugin: Plugin = async input => {
         finally { settleStandalone(input.sessionID, input.callID); }
         return;
       }
-      if (input.tool === 'question') await intake.afterQuestion(input, input.args, output);
+      if (input.tool === 'question') {
+        security.control(input.sessionID);
+        if (pendingStandalone(input.sessionID) || standaloneFixes.has(input.sessionID))
+          throw new Error('Standalone work is in flight; wait before another native interaction.');
+        await intake.afterQuestion(input, input.args, output);
+      }
       if (input.tool === 'task') {
         const auditTask = input.args as { subagent_type?: unknown; prompt?: unknown };
         if (security.ownsCall(input) || auditTask?.subagent_type === SECURITY_AGENT ||

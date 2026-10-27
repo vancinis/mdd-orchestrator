@@ -51,6 +51,37 @@ function addNativeUser(f, requirements) {
     parts: [{ type: 'text', text: requirements, sessionID: f.runtime.sessionID, messageID: 'msg_user' }] });
 }
 
+test('R04: native artifact reader verifies actual child tool and parent task identities', async () => {
+  const f = sdkFixture();
+  const args = { document: 'history:0', digest: 'a'.repeat(64), offset: 0, limit: 8192 };
+  const task = { subagent_type: f.phase, description: 'Read retained history', prompt: 'bound prompt' };
+  const part = f.parentMessages[0].parts[0];
+  Object.assign(part, { sessionID: f.parent.id, messageID: 'msg_parent' });
+  Object.assign(part.state, { input: task, metadata: { sessionId: f.child.id } });
+  delete f.childMessages[0].info.time.completed;
+  delete f.childMessages[0].info.finish;
+  f.childMessages[0].parts = [{ type: 'tool', tool: 'mdd_artifact_read', callID: 'read-call',
+    sessionID: f.child.id, messageID: 'msg_child', state: { status: 'running', input: args } }];
+  const caller = { ...f.runtime, sessionID: f.child.id, agent: f.phase, messageID: 'msg_child', callID: 'read-call' };
+  const inspector = createInspector(f.input);
+  assert.deepEqual(await inspector.artifactCaller(caller, args), { parent: f.parent.id, callID: call.callID, args: task });
+  const { callID: _readID, ...legacyCaller } = caller;
+  assert.deepEqual(await inspector.artifactCaller(legacyCaller, args), { parent: f.parent.id, callID: call.callID, args: task });
+  f.childMessages[0].parts.push({ ...f.childMessages[0].parts[0], callID: 'ambiguous' });
+  await assert.rejects(inspector.artifactCaller(legacyCaller, args));
+  f.childMessages[0].parts.pop();
+  for (const change of [{ sessionID: f.parent.id }, { agent: 'general' }, { messageID: 'old-message' }, { callID: 'old-call' }]) {
+    await assert.rejects(inspector.artifactCaller({ ...caller, ...change }, args));
+  }
+  await assert.rejects(inspector.artifactCaller(caller, { ...args, offset: 4 }));
+  for (const status of ['completed', 'error', 'pending']) {
+    part.state.status = status;
+    await assert.rejects(inspector.artifactCaller(caller, args));
+  }
+  part.state.status = 'running'; part.state.metadata.sessionId = 'sibling';
+  await assert.rejects(inspector.artifactCaller(caller, args));
+});
+
 test('organic knowledge tools are coordinator-only, disabled without provider calls, and native-grounded when enabled', async t => {
   isolateHome(t);
   const root = await mkdtemp(join(tmpdir(), 'mdd-knowledge-plugin-'));
@@ -435,7 +466,7 @@ test('OpenCode SDK contract: bounded callback even if injected client ignores ab
 test('plugin contract: scoped tools, in-place native args, result gating, no native override', async t => {
   const f = await pluginFixture(t);
   const { hooks, context, writes } = f;
-  assert.deepEqual(Object.keys(hooks.tool).sort(), ['mdd_adapt', 'mdd_answer', 'mdd_change_request', 'mdd_check_report', 'mdd_context', 'mdd_contextual_explore', 'mdd_improve', 'mdd_improvements', 'mdd_jd_inspect', 'mdd_knowledge', 'mdd_knowledge_record', 'mdd_phase_result', 'mdd_pr_body', 'mdd_prepare_advance', 'mdd_reset', 'mdd_revisit', 'mdd_security', 'mdd_start', 'mdd_status', 'mdd_transfer', 'mdd_transfer_recover']);
+  assert.deepEqual(Object.keys(hooks.tool).sort(), ['mdd_adapt', 'mdd_answer', 'mdd_artifact_read', 'mdd_change_request', 'mdd_check_report', 'mdd_context', 'mdd_contextual_explore', 'mdd_improve', 'mdd_improvements', 'mdd_jd_inspect', 'mdd_knowledge', 'mdd_knowledge_record', 'mdd_phase_result', 'mdd_pr_body', 'mdd_prepare_advance', 'mdd_reset', 'mdd_revisit', 'mdd_security', 'mdd_start', 'mdd_status', 'mdd_transfer', 'mdd_transfer_recover']);
   assert.deepEqual(Object.keys(hooks.tool.mdd_adapt.args), ['payload']);
   assert.deepEqual(Object.keys(hooks.tool.mdd_start.args), ['requirements', 'context', 'exploration', 'questions']);
   assert.deepEqual(Object.keys(hooks.tool.mdd_contextual_explore.args), ['purpose', 'workItems']);
@@ -1332,15 +1363,16 @@ test('plugin config contract: settings frozen at startup; only explicit model ov
   const denied = { mdd_adapt: false, mdd_security: false, mdd_start: false, mdd_status: false, mdd_prepare_advance: false, mdd_revisit: false, mdd_answer: false, mdd_phase_result: false, mdd_reset: false, mdd_change_request: false, mdd_contextual_explore: false, mdd_context: false, mdd_pr_body: false, mdd_improve: false, mdd_improvements: false, mdd_knowledge: false, mdd_knowledge_record: false, mdd_transfer: false, mdd_transfer_recover: false, 'mdd_*': false, mdd_jd_inspect: false };
   // And every phase actor loses `task` and `skill`: it is the actor, and the skills it needs are
   // already inlined in its prompt by value, so a name lookup can only reach someone else's. It
-  // gains exactly one MDD tool back, which reads nothing and only tells it whether the report it
-  // is about to return can be read — the question its own session is the last place to answer.
-  const pinned = { task: false, skill: false, mdd_check_report: true };
+  // gains the report checker and execution-bound reader, never workflow controls.
+  const pinned = { task: false, skill: false, mdd_check_report: true, mdd_artifact_read: true };
   assert.deepEqual(config, {
     default_agent: 'build', permission: { bash: 'ask' },
     agent: {
       'mdd-apply': { model: 'existing/apply', tools: { ...denied, ...pinned } },
       other: { model: 'user/choice', tools: { write: false, ...denied } },
       'mdd-orchestrator': { model: 'selected/main' },
+      general: { tools: { mdd_artifact_read: true } },
+      explore: { tools: { mdd_artifact_read: true } },
       'mdd-plan': { model: 'selected/planner', tools: { ...denied, ...pinned } },
       'mdd-explore': { tools: { ...pinned } },
       'mdd-propose': { tools: { ...pinned } },
@@ -1349,7 +1381,7 @@ test('plugin config contract: settings frozen at startup; only explicit model ov
       'mdd-tasks': { tools: { ...pinned } },
       'mdd-verify': { tools: { ...pinned } },
       // mdd-risk is not one of the eight phase actors, but it shares their restricted tool
-      // profile: it may call only mdd_check_report, the same as every phase actor above.
+      // profile, including the execution-bound reader.
       'mdd-risk': { tools: { ...pinned } },
       'mdd-security': { permission: { '*': 'deny', mdd_check_report: 'allow' }, tools: { '*': false, mdd_check_report: true } },
       'mdd-jd-judge-a': { permission: { '*': 'deny', mdd_jd_inspect: 'allow' }, tools: { '*': false, mdd_jd_inspect: true } },

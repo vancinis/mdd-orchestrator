@@ -1,11 +1,53 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import childProcess, { execFileSync } from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+import { promisify } from 'node:util';
 import { tmpdir } from 'node:os';
 import { join, delimiter } from 'node:path';
 import { test } from 'node:test';
 
 const inspect = async (...args) => (await import('../dist/judgment-day.js')).inspectJudgmentTarget(...args);
+
+test('R06: immutable failures retain only sanitized classification and elapsed time', async t => {
+  const f = fixture(t);
+  const cases = [
+    ['cancelled', { code: 'ABORT_ERR', name: 'AbortError' }],
+    ['timeout', { killed: true, signal: 'SIGTERM', code: null }],
+    ['output-overflow', { code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER', killed: true }],
+    ['process-failure', { code: 128, signal: null }],
+    ['invalid-decode', null],
+  ];
+  for (const [classification, fault] of cases) {
+    const replacement = Object.assign(() => {}, { [promisify.custom]: async (_file, _args, options) => {
+      assert.equal(options.timeout, 5000); assert.equal(options.maxBuffer, 128 * 1024);
+      assert.equal(options.shell, false); assert.equal(options.encoding, 'buffer');
+      if (!fault) return { stdout: Buffer.from([0xff]) };
+      throw Object.assign(new Error('PRIVATE raw args environment source /secret/path'), fault,
+        { stdout: 'PRIVATE stdout', stderr: 'PRIVATE stderr', path: '/secret/path' });
+    } });
+    const original = childProcess.execFile;
+    childProcess.execFile = replacement;
+    syncBuiltinESMExports();
+    try {
+      const { inspectJudgmentTarget } = await import(`../dist/judgment-day.js?r06=${classification}`);
+      await assert.rejects(inspectJudgmentTarget(f.root, { operation: 'tree', commit: f.commit }), error => {
+        assert.match(error.message, /^Immutable Git inspection failed,/);
+        assert.equal(error.cause.classification, classification);
+        assert.deepEqual(Object.keys(error.cause).sort(), ['classification', 'elapsedMs']);
+        assert.ok(Number.isFinite(error.cause.elapsedMs) && error.cause.elapsedMs >= 0);
+        assert.doesNotMatch(JSON.stringify(error.cause) + error.message, /PRIVATE|secret|stdout|stderr/);
+        return true;
+      });
+    } finally { childProcess.execFile = original; syncBuiltinESMExports(); }
+  }
+  const controller = new AbortController(); controller.abort(new Error('PRIVATE cancellation reason'));
+  await assert.rejects(inspect(f.root, { operation: 'tree', commit: f.commit }, controller.signal), error => {
+    assert.equal(error.cause.classification, 'cancelled');
+    assert.doesNotMatch(error.message + JSON.stringify(error.cause), /PRIVATE/);
+    return true;
+  });
+});
 function fixture(t) {
   const root = fs.mkdtempSync(join(tmpdir(), 'mdd-jd-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -31,7 +73,8 @@ test('immutable inspection returns committed trees/blobs/diffs, never dirty or u
   const diff = await inspect(f.root, { operation: 'diff', commit: f.commit, base: f.base });
   assert.match(diff.content, /-committed source/); assert.match(diff.content, /\+committed delta/);
   assert.doesNotMatch(diff.content, /DIRTY|UNTRACKED/);
-  await assert.rejects(inspect(f.root, { operation: 'blob', commit: f.commit, path: 'untracked.txt' }));
+  await assert.rejects(inspect(f.root, { operation: 'blob', commit: f.commit, path: 'untracked.txt' }),
+    error => error.cause.classification === 'process-failure');
 });
 
 test('immutable inspection rejects refs, flags, revision expressions, unsafe paths and unknown arguments', async t => {
@@ -78,8 +121,10 @@ test('immutable inspection fails closed on oversized output, binary blobs and ca
   fs.writeFileSync(join(f.root, 'nul-blob'), Buffer.from([0x61, 0x00, 0x62]));
   f.git('add', '--', 'large.txt', 'binary', 'nul-blob'); f.git('-c', 'commit.gpgsign=false', 'commit', '--quiet', '-m', 'bounded');
   const commit = f.git('rev-parse', 'HEAD');
-  await assert.rejects(inspect(f.root, { operation: 'blob', commit, path: 'large.txt' }));
-  await assert.rejects(inspect(f.root, { operation: 'blob', commit, path: 'binary' }));
+  await assert.rejects(inspect(f.root, { operation: 'blob', commit, path: 'large.txt' }),
+    error => error.cause.classification === 'output-overflow');
+  await assert.rejects(inspect(f.root, { operation: 'blob', commit, path: 'binary' }),
+    error => error.cause.classification === 'invalid-decode');
   await assert.rejects(inspect(f.root, { operation: 'blob', commit, path: 'nul-blob' }));
   const controller = new AbortController(); controller.abort();
   await assert.rejects(inspect(f.root, { operation: 'tree', commit }, controller.signal));

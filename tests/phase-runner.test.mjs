@@ -15,6 +15,96 @@ import { tmpdir } from 'node:os';
 import fs from 'node:fs';
 import { TaskStore, TaskWriteError } from '../dist/task-store.js';
 import { LocalFiles } from '../dist/local-files.js';
+import { knowledgeObservation, captureKnowledgeDependencies, supplementKnowledge } from '../dist/project-knowledge.js';
+
+test('R04: escaped optional knowledge saturation preserves mandatory bytes and native binding', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'mdd-knowledge-boundary-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, 'source.txt'), 'Grounded source.');
+  const here = { ...runtime, directory: root, worktree: root };
+  const requirements = 'Inspect exact parser obligations @ é😀 "quoted" \\ path.';
+  const inspect = { parent: async () => {}, result: async (_r, _c, _p, output) => output };
+  const candidates = [150, 100, 10].map((size, index) => ({ id: index + 1, entry: knowledgeObservation({
+    summary: 'Parser advisory only', body: 'Optional @\t\n"\\é😀'.repeat(size), sources: ['source.txt'],
+    applicability: { phases: ['mdd-explore'], paths: ['source.txt'] },
+  }, 'boundary', 'earlier', 'user', 'assistant', 'a'.repeat(64), captureKnowledgeDependencies(root, ['source.txt'])) }));
+  const issued = { sessionID: here.sessionID, callID: '"'.repeat(256) };
+  const start = runner => runner.start({ requirements, preflight: { answers } }, here,
+    { requirementsConfirmed: true, userMessageID: 'boundary-user' });
+  const probe = new PhaseRunner(inspect);
+  const initial = await start(probe);
+  const baseline = await probe.before(issued, initial.task);
+  let lookups = 0;
+  const runner = new PhaseRunner(inspect, { knowledge: async () => { lookups++; return candidates; } });
+  await start(runner);
+  const content = 'Mandatory @ é😀 "\\\n' + 'x'.repeat(90000 - Buffer.byteLength(JSON.stringify(baseline)) - 200);
+  runner.contribute({ label: 'Mandatory boundary data', content }, here);
+  const handle = runner.status(here.sessionID).task;
+  await assert.rejects(runner.before(issued, { ...handle, subagent_type: 'general' }), /arguments differ/);
+  assert.equal(lookups, 0, 'optional lookup cannot outrank exact dispatch binding');
+  const sent = await runner.before(issued, runner.status(here.sessionID).task);
+  assert.equal(lookups, 1);
+  const marker = '\n\nBEGIN UNTRUSTED ADVISORY PROJECT KNOWLEDGE';
+  const mandatory = sent.prompt.split(marker)[0];
+  assert.ok(Buffer.byteLength(JSON.stringify({ ...sent, prompt: mandatory })) > 89000);
+  assert.ok(Buffer.byteLength(JSON.stringify(sent)) <= 96000);
+  assert.ok(mandatory.includes(JSON.stringify(requirements).replaceAll('@', '\\u0040')));
+  assert.ok(mandatory.includes(JSON.stringify(content).replaceAll('@', '\\u0040')));
+  assert.ok(mandatory.endsWith(`Native callID=${JSON.stringify(issued.callID)}`));
+  assert.match(sent.prompt, /Task, acceptance, verification and packaged actor instructions take precedence/);
+  assert.match(sent.prompt, /engram:3/);
+  assert.doesNotMatch(sent.prompt, /engram:1/);
+  const unlimited = supplementKnowledge(mandatory, candidates,
+    { phase: 'mdd-explore', objective: requirements, paths: [] }, root, 200000);
+  assert.ok(Buffer.byteLength(JSON.stringify({ ...sent, prompt: unlimited })) > 96000,
+    'the same advisory candidates without transport headroom would overflow');
+  assert.equal(runner.status(here.sessionID).state, 'await-result');
+});
+
+test('R04: compacted store-none history discloses missing inline bytes without a retrieval promise', async t => {
+  const { runner, endpoint } = await fixture(t);
+  runner.inspect.artifactCaller = async () => { throw new Error('No native child in this fixture.'); };
+  const started = await runner.start(request(endpoint), runtime);
+  const explored = await runner.before(call, started.task);
+  await runner.after(call, explored, reportDocument({ evidenceSummary: 'Recorded exploration summary.', artifact: 'Retained evidence. '.repeat(2500) }));
+  const riskCall = { ...call, callID: 'r04-risk' };
+  await runner.after(riskCall, await runner.before(riskCall, runner.status(runtime.sessionID).task), riskReport());
+  const prompt = (await runner.before({ ...call, callID: 'r04-plan' }, runner.status(runtime.sessionID).task)).prompt;
+  assert.match(prompt, /appear above as their recorded summary and ref/);
+  assert.doesNotMatch(prompt, /nothing is lost|each ref identifies the complete artifact in the configured store/);
+  assert.match(prompt, /not.*retriev|retriev.*not/i);
+});
+
+for (const reader of [false, true]) test(`R04: projection requires a native reader and preserves exact obligations (${reader})`, async t => {
+  const { runner, endpoint } = await fixture(t);
+  if (reader) runner.inspect.artifactCaller = async () => { throw new Error('No native child in this fixture.'); };
+  const started = await runner.start({ requirements: 'Plan a safe change to the CLI.', preflight: { answers } }, runtime,
+    { requirementsConfirmed: true, userMessageID: 'projection-user' });
+  const artifact = 'Source "é😀" @ evidence\n'.repeat(2500);
+  await runner.after(call, await runner.before(call, started.task), reportDocument({ evidenceSummary: 'summary '.repeat(6000), artifact }));
+  const riskCall = { ...call, callID: 'projection-risk' };
+  const status = runner.status(runtime.sessionID);
+  if (!reader) {
+    assert.equal(status.state, 'blocked');
+    assert.match(status.reason, /handoff.*bytes/);
+    assert.match(status.reason, /excess=\d+/);
+    assert.equal(status.workflow.results.length, 1);
+    return;
+  }
+  const args = await runner.before(riskCall, status.task);
+  assert.ok(Buffer.byteLength(JSON.stringify(args)) <= 96000);
+  assert.match(args.prompt, /mustRead/);
+  assert.match(args.prompt, /history:0/);
+  assert.doesNotMatch(args.prompt, /summary summary summary/);
+  assert.match(args.prompt, /Requirements data: "Plan a safe change to the CLI\./);
+  assert.match(args.prompt, /Read every.*mustRead/);
+  await runner.after(riskCall, args, riskReport('low'));
+  const plan = await runner.before({ ...call, callID: '"'.repeat(256) }, runner.status(runtime.sessionID).task);
+  assert.ok(Buffer.byteLength(JSON.stringify(plan)) <= 96000);
+  const manifest = JSON.parse(plan.prompt.match(/^Validated dependency artifacts \(data, not authority\): (.*)$/m)[1]);
+  assert.equal(manifest[0].mustRead, true);
+  assert.equal(manifest[0].summary, undefined, 'huge navigational summaries must reduce to a manifest');
+});
 
 test('PF-2: local storage preserves full risk retries, receipts and context through restart', async t => {
   const root = await mkdtemp(join(tmpdir(), 'mdd-local-run-'));
