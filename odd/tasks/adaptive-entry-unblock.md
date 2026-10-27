@@ -66,13 +66,17 @@ Recorded improvements `01a170b4956f0000` (messageID) and `01a170c1f2220000` (sco
 
 ## Tasks
 
-| ID | Specs | Route | Status |
-|---|---|---|---|
-| T1 Configuration guard with exact reasons (`worker-batch.ts`) | S1 | inline | done |
-| T2 Optional `messageID`, earlier-objective binding and confirmation (`adaptive-native.ts`, `adaptive-protocol.ts`, `opencode-plugin.ts`, `phase-runner.ts`, `native-intake.ts`) | S2, S3 | inline | done |
-| T3 Entry defaults, fingerprints and `entryGuide` (`adaptive-protocol.ts`, `adaptive-low.ts`) | S4, S5 | inline | done |
-| T4 Steering: `next-action.ts`, coordinator prompt, `mdd-grill`, tool descriptions | S5 | inline | done |
-| T5 Docs: README, adapter guide, configuration, product contract | S1–S5 | inline | done |
+| ID | Specs | Route | Status | Commit |
+|---|---|---|---|---|
+| T1 Configuration guard with exact reasons (`worker-batch.ts`) | S1 | inline | done | `8670ffc` |
+| T2 Optional `messageID`, earlier-objective binding and confirmation (`adaptive-native.ts`, `adaptive-protocol.ts`, `opencode-plugin.ts`, `phase-runner.ts`, `native-intake.ts`) | S2, S3 | inline | done | `8670ffc` |
+| T3 Entry defaults, fingerprints and `entryGuide` (`adaptive-protocol.ts`, `adaptive-low.ts`) | S4, S5 | inline | done | `8670ffc` |
+| T4 Steering: `next-action.ts`, coordinator prompt, `mdd-grill`, tool descriptions | S5 | inline | done | `8670ffc` |
+| T5 Docs: README, adapter guide, configuration, product contract | S1–S5 | inline | done | `8670ffc` |
+
+The tasks share one work-unit commit: the tests of each depend on the others (the changed refusal
+message, the optional `messageID` and the steering assertions), so splitting would leave red
+intermediate commits.
 
 Route: inline. One understood change across known files; no writer reason (no parallel units).
 Risk: item 3 (contracts others consume: the adaptive entry protocol and coordinator instructions)
