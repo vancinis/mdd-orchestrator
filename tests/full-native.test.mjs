@@ -1656,6 +1656,8 @@ test('a failed verification can send the run back to Apply with its findings, on
   await f.phase({ coverageFault: 'partial' });
   const blocked = await f.status();
   assert.equal(blocked.state, 'blocked'); assert.equal(blocked.reworkable, 'mdd-apply');
+  const stopped = (await readFile(join(f.root, '.mdd/runs.jsonl'), 'utf8')).trimEnd().split('\n').map(line => JSON.parse(line));
+  assert.deepEqual(stopped.map(row => [row.state, row.stop]), [['blocked', 'verify-implementation']]);
   assert.equal(blocked.nextAction.tool, 'mdd_reset'); assert.match(blocked.nextAction.why, /scope rework/);
   // Rework changes the route, so the coordinator cannot choose it on its own.
   await assert.rejects(f.hooks.tool.mdd_reset.execute({ scope: 'rework' }, f.context), /needs the user's own word/);
@@ -1692,6 +1694,12 @@ test('by default a failed verification of the implementation is corrected automa
   assert.equal(done.state, 'complete'); assert.equal(done.coverage, 100);
   assert.deepEqual(done.workflow.results.map(item => `${item.phase}:${item.outcome}`),
     ['mdd-explore:passed', 'mdd-plan:passed', 'mdd-apply:passed', 'mdd-verify:failed', 'mdd-apply:passed', 'mdd-verify:passed']);
+  // One row for the run, complete, with the correction it needed; telemetry counts it as MDD's own.
+  const rows = (await readFile(join(f.root, '.mdd/runs.jsonl'), 'utf8')).trimEnd().split('\n').map(line => JSON.parse(line));
+  assert.deepEqual(rows.map(row => [row.state, row.stop, row.corrections]), [['complete', undefined, 1]]);
+  const { text } = retroReport(f.root);
+  assert.match(text, /Ruta fija: 1 de 1 ejecución\(es\) registradas terminaron completas \(100%\)/);
+  assert.match(text, /1 corrección\(es\) automática\(s\) tras un Verify fallido/);
 });
 test('rework is refused where there is no failed verification to correct', async t => {
   const f = await fixture(t); await f.phase({ outcome: 'failed' });

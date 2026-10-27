@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { renderRetroReport } from '../dist/retro.js';
+import { adaptiveCompletionOf, completionOf, renderRetroReport } from '../dist/retro.js';
 import { emptyRollup } from '../dist/telemetry.js';
 
 const all = { requirements: 'confirmed', plan: 'confirmed', implementation: 'confirmed', checks: 'confirmed' };
@@ -90,6 +90,33 @@ test('open improvements are surfaced with their identifiers and never invented',
     lessons: [{ id: 'abc0000000000001', timestamp: 1789000000000, source: 'user', title: 'El reporte salió en inglés', detail: 'x', state: 'open' }] });
   assert.match(text, /1 automejora\(s\) anotada\(s\) sin revisar, sobre 3 en total/);
   assert.match(text, /\[abc0000000000001\] El reporte salió en inglés/);
+});
+
+// The number the Verify changes were made to move, read first, and never without its causes.
+test('regression: the completion rate is reported per route and broken down by recorded cause', () => {
+  const blocked = (runID, stop) => run({ runID, state: 'blocked', ...(stop ? { stop } : {}), evidence: { ...all, checks: 'invalidated' }, coverage: 65 });
+  const runs = [run({ runID: 'a', corrections: 2, pending: 1 }), run({ runID: 'b' }), run({ runID: 'c', corrections: 1 }),
+    blocked('d', 'verify-implementation'), blocked('e', 'verify-implementation'), blocked('f', 'report-unreadable'), blocked('g')];
+  const completion = completionOf(runs);
+  assert.deepEqual(completion, { total: 7, complete: 3, blocked: 4, corrected: 2, corrections: 3, pending: 1,
+    causes: { 'verify-implementation': 2, 'report-unreadable': 1, unrecorded: 1 } });
+  const adaptive = adaptiveCompletionOf([
+    { data: { state: 'completed', repairs: 1, matched: true, report: { scenarios: [{ status: 'external' }], checkResults: [] } } },
+    { data: { state: 'closed-unverified', repairs: 2, matched: false, report: { scenarios: [], checkResults: [] } } },
+    { data: { state: 'closed-unverified', repairs: 0, matched: false } }, { data: { state: 'await-selection', repairs: 0 } }, null, { data: {} }]);
+  assert.deepEqual(adaptive, { closed: 3, verified: 1, unverified: { 'evidence-gaps': 1, 'no-evidence': 1 }, active: 1, repairs: 3, pending: 1 });
+  const text = renderRetroReport({ runs, runTotal: 7, lessons: [], lessonTotal: 0, completion, adaptive,
+    rollup: rollup({ runs: { started: 9, completed: 3, blocked: 4, reset: 0, corrected: 3, compacted: 0 } }) });
+  const section = text.slice(text.indexOf('Finalización'), text.indexOf('Señales'));
+  assert.match(section, /Ruta fija: 3 de 7 ejecución\(es\) registradas terminaron completas \(43%\); 4 detenida\(s\)\./);
+  assert.match(section, /Detenidas por causa: Verify encontró defectos de la implementación 2, reporte ilegible tras los reintentos 1, sin causa registrada \(filas anteriores a este dato\) 1\./);
+  assert.match(section, /2 de las completas pasaron por corrección \(3 pasada\(s\) en total\); 1 quedaron con pendientes externos o ajenos al cambio\./);
+  assert.match(section, /Ruta adaptativa: 1 de 3 ejecución\(es\) cerradas terminaron verificadas \(33%\); 2 cerrada\(s\) sin verificar \(con brechas en la evidencia 1, sin evidencia presentada 1\); 1 en curso\./);
+  assert.match(section, /La telemetría de la ruta fija cuenta 9 iniciada\(s\), de las que 2 no tienen fila de final registrada, y 3 corrección\(es\) automática\(s\)/);
+  assert.match(text, /detenida en mdd-verify \(Verify encontró defectos de la implementación\)/);
+  assert.match(text, /completa en mdd-verify · 100% de cobertura · 3 archivo\(s\) · 2 chequeo\(s\), 0 con salida distinta de 0 · 2 corrección\(es\) · 1 pendiente\(s\) externo\(s\)/);
+  // Nothing recorded, nothing claimed: the section is simply absent.
+  assert.doesNotMatch(renderRetroReport({ runs: [], runTotal: 0, lessons: [], lessonTotal: 1 }), /Finalización/);
 });
 
 // Counts are what MDD has. Why eleven explorations stopped is not something it can know.

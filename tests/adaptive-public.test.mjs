@@ -15,6 +15,7 @@ import { LocalFiles } from '../dist/local-files.js';
 import { RunOwnershipStore } from '../dist/run-ownership.js';
 import { adaptiveTransferRequest } from '../dist/adaptive-transfer.js';
 import { adaptiveCorrection } from '../dist/adaptive-protocol.js';
+import { retroReport } from '../dist/retro.js';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 
@@ -407,6 +408,10 @@ test('regression: a declared external scenario closes verified as pending, never
   assert.equal(status.evidence.matched, true, 'restore revalidates the external row');
   status = await f.send('close', { handle: status.handle, outcome: 'verified' });
   assert.equal(status.state, 'completed');
+  // The retro counts adaptive runs too, from their own records, with what they left pending.
+  const { text } = retroReport(mddDataRoot(f.root));
+  assert.match(text, /Ruta adaptativa: 1 de 1 ejecución\(es\) cerradas terminaron verificadas \(100%\); 0 cerrada\(s\) sin verificar; 0 en curso\./);
+  assert.match(text, /0 reparación\(es\) en total; 1 verificada\(s\) con pendientes externos o ajenos al cambio\./);
   // A scenario the contract did not declare external cannot be reported as pending.
   const g = await fixture(t), local = g.contract();
   status = await g.entry(local);

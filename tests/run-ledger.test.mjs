@@ -46,6 +46,28 @@ test('a run that reaches a further state replaces its own row instead of adding 
   assert.equal(readRuns(path).total, 2);
 });
 
+test('regression: a row keeps why a blocked run stopped, its correction passes and what it left pending', t => {
+  const path = root(t);
+  const blocked = recordRun(path, entry({ state: 'blocked', stop: 'verify-implementation', corrections: 2, evidence: { ...all, checks: 'invalidated' } }), 1000);
+  assert.equal(blocked.ok, true);
+  assert.equal(readRuns(path).runs[0].stop, 'verify-implementation');
+  assert.equal(readRuns(path).runs[0].corrections, 2);
+  // Completion replaces the row: the stop cause belongs to the blocked state only.
+  recordRun(path, entry({ corrections: 2, pending: 1 }), 2000);
+  const [row] = readRuns(path).runs;
+  assert.deepEqual([row.state, row.stop, row.corrections, row.pending], ['complete', undefined, 2, 1]);
+  // Zero counts are left out, so a row is as compact as before.
+  recordRun(path, entry({ runID: 'run-two', corrections: 0, pending: 0 }), 3000);
+  assert.deepEqual(['corrections', 'pending'].filter(key => key in readRuns(path).runs[0]), []);
+  assert.equal(recordRun(path, entry({ runID: 'bad', state: 'blocked', stop: 'luck' }), 4000).ok, false);
+  assert.equal(recordRun(path, entry({ runID: 'bad', corrections: -1 }), 4000).ok, false);
+  // A row written before these fields existed still reads.
+  fs.appendFileSync(join(path, '.mdd', 'runs.jsonl'), `${JSON.stringify({ version: 1, runID: 'old', timestamp: 5000, state: 'blocked', directory: '/repo',
+    route: ['mdd-verify'], phase: 'mdd-verify', coverage: 40, evidence: { ...all, implementation: 'invalidated', checks: 'invalidated' }, changedFiles: 1,
+    checks: { total: 1, passed: 0, failed: 1 }, concerns: 0, limits: [] })}\n`);
+  assert.equal(readRuns(path).runs[0].stop, undefined);
+});
+
 test('runs are read newest first and can be limited', t => {
   const path = root(t);
   for (let index = 0; index < 5; index++) recordRun(path, entry({ runID: `run-${index}` }), 1000 + index);

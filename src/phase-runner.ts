@@ -10,7 +10,7 @@ import type { Answers, Phase } from './policy.js';
 import { mddInstructions, packagedSkillPath, PHASE_SKILLS } from './phase-assets.js';
 import type { PackagedSkillName } from './phase-assets.js';
 import type { LessonInput } from './lessons.js';
-import type { RunLedgerInput } from './run-ledger.js';
+import type { RunLedgerInput, StopCause } from './run-ledger.js';
 import { changed, deliverables, delivered, executed, VERIFICATION_VERSION, verificationVersion, verifyReport, type VerificationVersion } from './phase-evidence.js';
 import type { ChangedFile, Check, Deliverable, Delivered } from './phase-evidence.js';
 import { emptyEvidence, invalidateEvidence, renderReport, renderClosure, phaseLabel, evidenceCoverage } from './reporting.js';
@@ -4369,9 +4369,28 @@ export class PhaseRunner {
         concerns: run.concerns.length,
         ...(run.acceptance?.goal ? { goal: run.acceptance.goal } : {}),
         limits: [...(run.verification?.limits ?? [])],
+        ...(run.state === 'blocked' ? { stop: this.#stopCause(run) } : {}),
+        corrections: run.workflow.snapshot().results.filter((result, index, results) => result.phase === 'mdd-apply' && result.outcome === 'passed' &&
+          results[index - 1]?.phase === 'mdd-verify' && results[index - 1]?.outcome === 'failed').length,
+        pending: pendingExternal(run.verification).length,
       }, this.#now());
       run.ledgered = run.state;
     } catch { /* A ledger row is never worth a route. */ }
+  }
+
+  /** Why a blocked run stopped, from what the adapter already recorded; never an actor's claim. */
+  #stopCause(run: Run): StopCause {
+    if (run.checkpointFailed || run.uncertain) return 'uncertain';
+    if (run.reportRepairExhausted) return 'report-unreadable';
+    if (run.fallbackExhausted) return 'fallback-exhausted';
+    const last = run.workflow.snapshot().results.at(-1);
+    if (last?.outcome !== 'failed' || last.phase !== run.phase) return 'other';
+    if (last.phase === 'mdd-verify') return run.verification
+      ? ({ implementation: 'verify-implementation', design: 'verify-design', requirements: 'verify-requirements', verification: 'verify-evidence' } as const)[deepestCause(run.verification)]
+      : 'verify-implementation';
+    const named = tracedLinks(run.history.at(-1)?.content ?? '')?.unmet;
+    if (['mdd-plan', 'mdd-design', 'mdd-tasks'].includes(last.phase) && Array.isArray(named) && named.length) return 'planning-unmet';
+    return 'phase-failed';
   }
 
   /**

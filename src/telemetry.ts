@@ -432,7 +432,7 @@ export function renderTelemetryReport(rollup: TelemetryRollup | undefined, recen
   const days = Math.max(1, Math.round((rollup.updated - rollup.since) / 86400000));
   lines.push(`${rollup.events} evento(s) desde ${new Date(rollup.since).toISOString().slice(0, 10)} (${days} día(s)); ${recent} siguen dentro de la ventana de 30 días.`,
     '',
-    `Ejecuciones: ${rollup.runs.started} iniciadas, ${rollup.runs.completed} completadas, ${rollup.runs.blocked} detenidas, ${rollup.runs.reset} reiniciadas. Rutas: ${rollup.routes.low} corta, ${rollup.routes.high} larga.`,
+    `Ejecuciones: ${rollup.runs.started} iniciadas, ${rollup.runs.completed} completadas, ${rollup.runs.blocked} detenidas, ${rollup.runs.reset} reiniciadas${rollup.runs.corrected ? `, ${rollup.runs.corrected} corrección(es) automática(s)` : ''}. Rutas: ${rollup.routes.low} corta, ${rollup.routes.high} larga.`,
     ...(rollup.runs.compacted
       ? [`El entorno compactó una conversación del coordinador ${rollup.runs.compacted} vez/veces en mitad de una ejecución. Cada una le cuesta el estado que estaba sosteniendo, así que si el número sube conviene mirar qué está cargando esa conversación.`]
       : []),

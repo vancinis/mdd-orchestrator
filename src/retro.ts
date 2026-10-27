@@ -1,7 +1,9 @@
 import { readLessons } from './lessons.js';
 import type { Lesson } from './lessons.js';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { readRuns } from './run-ledger.js';
-import type { RunRecord } from './run-ledger.js';
+import type { RunRecord, StopCause } from './run-ledger.js';
 import { FAILURE_CLASSES, telemetryRetained, telemetryTotals } from './telemetry.js';
 import type { FailureClass, TelemetryRollup } from './telemetry.js';
 import { PHASES } from './policy.js';
@@ -22,18 +24,136 @@ const FAILURE_LABELS: Record<FailureClass, string> = {
   'native-error': 'error nativo', 'route-blocked': 'ruta detenida', stopped: 'detenido',
 };
 
-export type RetroSources = { runs: RunRecord[]; runTotal: number; rollup?: TelemetryRollup; lessons: Lesson[]; lessonTotal: number; events?: number };
+/** Labels for printing only; the causes stay English wherever they are recorded or compared. */
+const STOP_LABELS: Record<StopCause | 'unrecorded', string> = {
+  'verify-implementation': 'Verify encontró defectos de la implementación',
+  'verify-design': 'Verify atribuyó la brecha al diseño',
+  'verify-requirements': 'Verify atribuyó la brecha a los requisitos',
+  'verify-evidence': 'Verify no reunió la evidencia (chequeos o entorno)',
+  'planning-unmet': 'la planificación no puede cumplir un requisito',
+  'phase-failed': 'otra fase falló',
+  'report-unreadable': 'reporte ilegible tras los reintentos',
+  'fallback-exhausted': 'se agotó el respaldo nativo',
+  uncertain: 'estado incierto (checkpoint o progreso)',
+  other: 'otra causa',
+  unrecorded: 'sin causa registrada (filas anteriores a este dato)',
+};
+const ADAPTIVE_LABELS: Record<AdaptiveStop, string> = {
+  'evidence-gaps': 'con brechas en la evidencia', 'no-evidence': 'sin evidencia presentada', other: 'por otra causa',
+};
+
+/**
+ * How many runs finished, and why the others stopped. A completion rate alone says how often runs
+ * stop and nothing about which part of the route to fix, so it is always broken down by the cause
+ * the adapter recorded. Every ledger row counts, not only the recent ones the listing shows.
+ */
+export type Completion = { total: number; complete: number; blocked: number; causes: Partial<Record<StopCause | 'unrecorded', number>>;
+  corrected: number; corrections: number; pending: number };
+export function completionOf(runs: readonly RunRecord[]): Completion {
+  const result: Completion = { total: runs.length, complete: 0, blocked: 0, causes: {}, corrected: 0, corrections: 0, pending: 0 };
+  for (const run of runs) {
+    if (run.state === 'complete') {
+      result.complete++;
+      if (run.corrections) { result.corrected++; result.corrections += run.corrections; }
+      if (run.pending) result.pending++;
+    } else {
+      result.blocked++;
+      const cause = run.stop ?? 'unrecorded';
+      result.causes[cause] = (result.causes[cause] ?? 0) + 1;
+    }
+  }
+  return result;
+}
+
+/** Adaptive (version 3) runs keep their own records; only their terminal facts are read here. */
+type AdaptiveStop = 'evidence-gaps' | 'no-evidence' | 'other';
+export type AdaptiveCompletion = { closed: number; verified: number; unverified: Partial<Record<AdaptiveStop, number>>; active: number; repairs: number; pending: number };
+const ADAPTIVE_FILE = /^adaptive-(?:archive-)?[a-f0-9]{64}\.json$/;
+const ADAPTIVE_FILE_MAX = 20 * 1024 * 1024;
+const ADAPTIVE_FILES_MAX = 512;
+export function adaptiveCompletionOf(records: readonly unknown[]): AdaptiveCompletion {
+  const result: AdaptiveCompletion = { closed: 0, verified: 0, unverified: {}, active: 0, repairs: 0, pending: 0 };
+  for (const record of records) {
+    const data = record && typeof record === 'object' ? (record as { data?: Record<string, unknown> }).data : undefined;
+    if (!data || typeof data.state !== 'string') continue;
+    if (Number.isSafeInteger(data.repairs)) result.repairs += data.repairs as number;
+    const report = data.report && typeof data.report === 'object' ? data.report as { scenarios?: { status?: unknown }[]; checkResults?: { disposition?: unknown }[] } : undefined;
+    if (data.state === 'completed') {
+      result.closed++; result.verified++;
+      if ((report?.scenarios ?? []).some(row => row?.status === 'external') || (report?.checkResults ?? []).some(row => row?.disposition === 'environmental')) result.pending++;
+    } else if (data.state === 'closed-unverified') {
+      result.closed++;
+      const cause: AdaptiveStop = !report ? 'no-evidence' : data.matched !== true ? 'evidence-gaps' : 'other';
+      result.unverified[cause] = (result.unverified[cause] ?? 0) + 1;
+    } else result.active++;
+  }
+  return result;
+}
+/** Read-only and bounded: a file that cannot be read is skipped, never repaired or reported as a run. */
+function adaptiveRecords(root: string): unknown[] {
+  const directory = join(root, '.mdd');
+  let names: string[];
+  try { names = readdirSync(directory).filter(name => ADAPTIVE_FILE.test(name)).slice(0, ADAPTIVE_FILES_MAX); } catch { return []; }
+  return names.flatMap(name => {
+    try {
+      const path = join(directory, name);
+      if (statSync(path).size > ADAPTIVE_FILE_MAX) return [];
+      const value = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+      // An archive holds the closed run it replaced; the live record holds the current one.
+      return [name.startsWith('adaptive-archive-') ? value.previous : value];
+    } catch { return []; }
+  });
+}
+
+export type RetroSources = { runs: RunRecord[]; runTotal: number; rollup?: TelemetryRollup; lessons: Lesson[]; lessonTotal: number; events?: number;
+  completion?: Completion; adaptive?: AdaptiveCompletion };
 
 export function retroSources(root: string, limit = 20, now = Date.now()): RetroSources {
   const runs = readRuns(root, { limit });
+  const every = readRuns(root);
   const lessons = readLessons(root, { state: 'open' });
   const rollup = telemetryTotals(root);
+  const adaptive = adaptiveCompletionOf(adaptiveRecords(root));
   return {
     runs: runs.ok ? runs.runs : [], runTotal: runs.ok ? runs.total : 0,
     ...(rollup ? { rollup } : {}),
     lessons: lessons.ok ? lessons.lessons : [], lessonTotal: lessons.ok ? lessons.total : 0,
     events: telemetryRetained(root, now),
+    ...(every.ok && every.runs.length ? { completion: completionOf(every.runs) } : {}),
+    ...(adaptive.closed || adaptive.active ? { adaptive } : {}),
   };
+}
+
+const percent = (part: number, whole: number) => `${Math.round(part * 100 / whole)}%`;
+/** Causes from most to least frequent, each with its count. */
+function ranked<Key extends string>(counts: Partial<Record<Key, number>>, labels: Record<Key, string>): string {
+  return (Object.entries(counts) as [Key, number][]).sort((a, b) => b[1] - a[1]).map(([key, count]) => `${labels[key]} ${count}`).join(', ');
+}
+
+/**
+ * The share of runs that finished, per route, and why the rest stopped. It is the number the
+ * Verify changes were made to move, so it is read first; each line is still a count, not a cause.
+ */
+function completionLines(sources: RetroSources): string[] {
+  const lines: string[] = [];
+  const fixed = sources.completion;
+  if (fixed?.total) {
+    lines.push(`- Ruta fija: ${fixed.complete} de ${fixed.total} ejecución(es) registradas terminaron completas (${percent(fixed.complete, fixed.total)}); ${fixed.blocked} detenida(s).`);
+    if (fixed.blocked) lines.push(`  Detenidas por causa: ${ranked(fixed.causes, STOP_LABELS)}.`);
+    if (fixed.corrected || fixed.pending) lines.push(`  ${fixed.corrected} de las completas pasaron por corrección (${fixed.corrections} pasada(s) en total); ${fixed.pending} quedaron con pendientes externos o ajenos al cambio.`);
+  }
+  const adaptive = sources.adaptive;
+  if (adaptive && (adaptive.closed || adaptive.active)) {
+    const unverified = adaptive.closed - adaptive.verified;
+    lines.push(`- Ruta adaptativa: ${adaptive.verified} de ${adaptive.closed} ejecución(es) cerradas terminaron verificadas${adaptive.closed ? ` (${percent(adaptive.verified, adaptive.closed)})` : ''}; ${unverified} cerrada(s) sin verificar${unverified ? ` (${ranked(adaptive.unverified, ADAPTIVE_LABELS)})` : ''}; ${adaptive.active} en curso.`);
+    if (adaptive.repairs || adaptive.pending) lines.push(`  ${adaptive.repairs} reparación(es) en total; ${adaptive.pending} verificada(s) con pendientes externos o ajenos al cambio.`);
+  }
+  const rollup = sources.rollup;
+  if (rollup && (rollup.runs.started || rollup.runs.corrected)) {
+    const ended = fixed ? fixed.total : 0;
+    lines.push(`- La telemetría de la ruta fija cuenta ${rollup.runs.started} iniciada(s)${rollup.runs.started > ended ? `, de las que ${rollup.runs.started - ended} no tienen fila de final registrada` : ''}, y ${rollup.runs.corrected ?? 0} corrección(es) automática(s) tras un Verify fallido.`);
+  }
+  return lines;
 }
 
 /**
@@ -94,12 +214,13 @@ function runLine(run: RunRecord): string {
   const checks = run.checks.total
     ? `${run.checks.total} chequeo(s), ${run.checks.failed} con salida distinta de 0`
     : 'sin chequeos registrados';
-  return `${date} · ${state} en ${run.phase} · ${run.coverage}% de cobertura · ${run.changedFiles} archivo(s) · ${checks}`;
+  return `${date} · ${state} en ${run.phase}${run.stop ? ` (${STOP_LABELS[run.stop]})` : ''} · ${run.coverage}% de cobertura · ${run.changedFiles} archivo(s) · ${checks}` +
+    `${run.corrections ? ` · ${run.corrections} corrección(es)` : ''}${run.pending ? ` · ${run.pending} pendiente(s) externo(s)` : ''}`;
 }
 
 export function renderRetroReport(sources: RetroSources): string {
   const lines = ['Retrospectiva de MDD en este repositorio — local, nunca se exporta.'];
-  if (!sources.runTotal && !sources.rollup && !sources.lessonTotal) {
+  if (!sources.runTotal && !sources.rollup && !sources.lessonTotal && !sources.adaptive) {
     // Events without an aggregate are the ordinary state of a workspace that ran MDD before it
     // kept totals. Reporting that as "nothing happened" would be wrong about its own record.
     lines.push('', sources.events
@@ -107,6 +228,8 @@ export function renderRetroReport(sources: RetroSources): string {
       : 'Todavía no hay nada que revisar acá: ninguna ejecución registrada, ningún total acumulado y ninguna automejora anotada.');
     return `${lines.join('\n')}\n`;
   }
+  const finished = completionLines(sources);
+  if (finished.length) lines.push('', 'Finalización', ...finished);
   const found = signals(sources);
   lines.push('', 'Señales', ...(found.length
     ? found.map(item => `- ${item}`)

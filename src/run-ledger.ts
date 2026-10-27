@@ -31,6 +31,14 @@ const CONTROL = /[\x00-\x1f\x7f]/;
 
 export const RUN_STATES = Object.freeze(['complete', 'blocked'] as const);
 export type RunState = typeof RUN_STATES[number];
+/**
+ * Why a blocked run stopped, named by the adapter where it already knows, never by an actor. The
+ * retro breaks the completion rate down by these: a rate alone says how often runs stop, and
+ * nothing about which part of the route to fix. Rows written before this field have none.
+ */
+export const STOP_CAUSES = Object.freeze(['verify-implementation', 'verify-design', 'verify-requirements', 'verify-evidence',
+  'planning-unmet', 'phase-failed', 'report-unreadable', 'fallback-exhausted', 'uncertain', 'other'] as const);
+export type StopCause = typeof STOP_CAUSES[number];
 
 export type RunRecord = {
   version: typeof RUN_LEDGER_VERSION;
@@ -50,12 +58,18 @@ export type RunRecord = {
   /** The requested outcome, as the planning phase recorded it. Actor prose, kept verbatim. */
   goal?: string;
   limits: string[];
+  /** Why a blocked run stopped. Present on blocked rows recorded since causes were kept. */
+  stop?: StopCause;
+  /** Apply correction passes after a failed Verify, automatic or chosen. Omitted when none. */
+  corrections?: number;
+  /** What it left pending without a gap: external checks and failures outside the change. Omitted when none. */
+  pending?: number;
 };
 
 export type RunLedgerInput = {
   runID: string; state: RunState; directory: string; route: readonly Phase[]; phase: Phase;
   evidence: Evidence; changedFiles: number; checks: { total: number; passed: number; failed: number };
-  concerns: number; goal?: string; limits?: readonly string[];
+  concerns: number; goal?: string; limits?: readonly string[]; stop?: StopCause; corrections?: number; pending?: number;
 };
 
 export type RunLedgerResult =
@@ -86,7 +100,7 @@ function phase(value: unknown, subject: string): Phase {
 /** Written by this module, so parsing only has to fail closed on a damaged or foreign row. */
 function parseRecord(value: unknown): RunRecord {
   const input = objectWithKeys(value, 'run', ['version', 'runID', 'timestamp', 'state', 'directory',
-    'route', 'phase', 'coverage', 'evidence', 'changedFiles', 'checks', 'concerns', 'goal', 'limits']);
+    'route', 'phase', 'coverage', 'evidence', 'changedFiles', 'checks', 'concerns', 'goal', 'limits', 'stop', 'corrections', 'pending']);
   if (input.version !== RUN_LEDGER_VERSION) throw new ValidationError('Unknown run ledger version.');
   clock(input.timestamp as number);
   if (!RUN_STATES.includes(input.state as RunState)) throw new ValidationError('Invalid run state.');
@@ -108,6 +122,12 @@ function parseRecord(value: unknown): RunRecord {
     limits: input.limits.slice(0, MAX_LIMITS).map(item => text(item, 'recorded limit', LIMIT_MAX)),
   };
   if (input.goal !== undefined) record.goal = text(input.goal, 'run goal', GOAL_MAX);
+  if (input.stop !== undefined) {
+    if (record.state !== 'blocked' || !STOP_CAUSES.includes(input.stop as StopCause)) throw new ValidationError('Invalid run stop cause.');
+    record.stop = input.stop as StopCause;
+  }
+  if (input.corrections !== undefined) record.corrections = count(input.corrections, 'correction count');
+  if (input.pending !== undefined) record.pending = count(input.pending, 'pending count');
   // Coverage is derived, so a row claiming a different one is a damaged row, not a disagreement.
   if (record.coverage !== evidenceCoverage(record.evidence)) throw new ValidationError('Run coverage does not match its evidence.');
   return record;
@@ -126,7 +146,7 @@ function serialize(runs: readonly RunRecord[]): string | undefined {
 
 function parseInput(value: RunLedgerInput, now: number): RunRecord {
   const input = objectWithKeys(value, 'run', ['runID', 'state', 'directory', 'route', 'phase',
-    'evidence', 'changedFiles', 'checks', 'concerns', 'goal', 'limits']);
+    'evidence', 'changedFiles', 'checks', 'concerns', 'goal', 'limits', 'stop', 'corrections', 'pending']);
   return parseRecord({
     version: RUN_LEDGER_VERSION, timestamp: now,
     runID: input.runID, state: input.state, directory: input.directory,
@@ -135,6 +155,9 @@ function parseInput(value: RunLedgerInput, now: number): RunRecord {
     changedFiles: input.changedFiles, checks: input.checks, concerns: input.concerns,
     ...(input.goal === undefined ? {} : { goal: String(input.goal).slice(0, GOAL_MAX) }),
     limits: ((input.limits ?? []) as readonly string[]).slice(0, MAX_LIMITS).map(item => String(item).slice(0, LIMIT_MAX)),
+    ...(input.state === 'blocked' && input.stop !== undefined ? { stop: input.stop } : {}),
+    ...(input.corrections ? { corrections: input.corrections } : {}),
+    ...(input.pending ? { pending: input.pending } : {}),
   });
 }
 
