@@ -58,6 +58,13 @@
       "additionalProperties": false,
       "required": ["enabled"],
       "properties": { "enabled": { "type": "boolean" } }
+    },
+    "verify": {
+      "description": "Automatic correction after a failed Verify, automatic mode only. Each pass corrects every implementation finding in Apply, then Verify rechecks only those findings; a second pass runs only when the first recheck closed findings and opened none. Design or requirement causes and interactive mode always stop for the user. 0 keeps every failed Verify waiting for the user. Defaults to 2 when omitted.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["automaticCorrections"],
+      "properties": { "automaticCorrections": { "type": "integer", "minimum": 0, "maximum": 2, "default": 2 } }
     }
   },
   "$defs": {

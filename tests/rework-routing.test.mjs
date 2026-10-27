@@ -1,4 +1,4 @@
-﻿import assert from 'node:assert/strict';
+import assert from 'node:assert/strict';
 import test from 'node:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -35,20 +35,23 @@ function failedVerify(cause, requirementID = 'R1') {
 }
 const closure = (ids = FINDINGS) => ids.map(id => ({ id, status: 'closed', evidence: `Probe for ${id} failed first and passes after the change (exit 0).` }));
 
-async function fixture(t, route = 'low', sessionID = 'ses_rework') {
+async function fixture(t, route = 'low', sessionID = 'ses_rework', options = {}) {
   const root = mkdtempSync(join(tmpdir(), 'mdd-rework-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const runtime = { sessionID, agent: 'mdd-orchestrator', directory: root, worktree: root };
   const durable = new CheckpointStore(root);
   const progress = new ProgressGuard(root);
   const inspect = { parent: async () => {}, result: async (_runtime, _call, _phase, output) => output, stopped: async () => true };
-  let runner = new PhaseRunner(inspect, { checkpoint: durable, progress });
+  const settings = { checkpoint: durable, progress, ...(options.automaticCorrections !== undefined ? { automaticCorrections: options.automaticCorrections } : {}) };
+  let runner = new PhaseRunner(inspect, settings);
   let ordinal = 0;
   const f = {
     root, runtime, durable,
     get runner() { return runner; },
     status: () => runner.status(runtime.sessionID),
     async dispatch() {
+      // Interactive mode holds each tail phase for approval; these tests approve it as the user would.
+      if (f.status().state === 'await-approval') runner.approveNative(runtime.sessionID, f.status().workflow.nextAction.phase);
       const call = { sessionID: runtime.sessionID, callID: `call-${++ordinal}` };
       return { call, args: await runner.before(call, f.status().task) };
     },
@@ -58,12 +61,12 @@ async function fixture(t, route = 'low', sessionID = 'ses_rework') {
       return { call, args };
     },
     async restart() {
-      runner = new PhaseRunner(inspect, { checkpoint: durable, progress });
+      runner = new PhaseRunner(inspect, settings);
       return runner.restore(runtime);
     },
     saved: () => durable.read(runtime.sessionID),
   };
-  await runner.start({ preflight: { answers }, requirements: 'Keep failed logins signed out across restarts.' }, runtime,
+  await runner.start({ preflight: { answers: { ...answers, ...(options.mode ? { mode: options.mode } : {}) } }, requirements: 'Keep failed logins signed out across restarts.' }, runtime,
     { requirementsConfirmed: true, userMessageID: 'user-rework' });
   await throughRiskStop(runner, runtime.sessionID, route);
   return f;
@@ -417,4 +420,160 @@ test('next action: a failed planning phase offers the earlier phase, not continu
   assert.match(action.why, /phase set to their choice \(mdd-spec\)/);
   assert.match(action.why, /scope phase retries mdd-design/);
   assert.doesNotMatch(action.why, /scope continue/);
+});
+
+// Automatic correction (gentle-orchestrator's bound): in automatic mode a failed Verify of the
+// implementation goes back to one Apply correction pass without stopping, and the Verify after it
+// rechecks only the findings; a second pass only when that recheck closed findings and opened none.
+
+/** A Verify that verified every held link except the named scenarios, which it found unmet. */
+function partialVerify(failing, { execution = 'E1', cause } = {}) {
+  const data = structuredVerificationFixture(trace());
+  data.outcome = failing.length ? 'failed' : 'passed';
+  data.checks = [{ id: execution, command: 'npm test', exit: 0 }];
+  const rows = [...data.verification.scenarios, ...data.verification.steps, ...data.verification.decisions];
+  for (const row of rows) row.checks = [execution];
+  data.verification.checkResults[0].executions = [execution];
+  for (const row of data.verification.scenarios) if (failing.includes(row.scenarioID))
+    Object.assign(row, { status: 'not-verified', checks: [], assessment: `${row.scenarioID}: a failed login still restores after restart.`, ...(cause ? { cause } : {}) });
+  return data;
+}
+/** A scoped recheck: rows only for the given scenarios, failing those listed in `failing`. */
+function recheckOf(scenarios, failing = [], execution = 'E2') {
+  const data = partialVerify(failing, { execution });
+  data.verification.scenarios = data.verification.scenarios.filter(row => scenarios.includes(row.scenarioID));
+  data.verification.steps = []; data.verification.decisions = [];
+  return data;
+}
+const results = status => status.workflow.results.map(item => `${item.phase}:${item.outcome}`).slice(3);
+
+test('automatic correction: a failed Verify is corrected without stopping and rechecked only on its findings', async t => {
+  const f = await fixture(t, 'low', 'ses_auto', { automaticCorrections: 2 });
+  await f.finish(trace());
+  await f.finish({ completed: [STEP], changes: ['src/session.ts'] });
+  await f.finish(partialVerify(['S2']));
+  const correcting = f.status();
+  assert.equal(correcting.state, 'ready'); assert.equal(correcting.phase, 'mdd-apply');
+  assert.deepEqual(correcting.rework, { after: 'mdd-verify', summary: 'Phase evidence.' });
+  assert.equal(correcting.reworkable, undefined);
+  assert.match(correcting.report, /automatic correction 1 of 2 for 1 finding\(s\): S2\. Verify then rechecks only those findings/);
+  assert.deepEqual(results(correcting), ['mdd-verify:failed']);
+  validateCheckpoint(f.saved().checkpoint);
+  assert.deepEqual(await f.restart(), { restored: true });
+  assert.equal(f.status().state, 'ready'); assert.equal(f.status().phase, 'mdd-apply');
+  const correction = await f.dispatch();
+  assert.equal(correction.args.description, 'MDD apply correction');
+  assert.match(correction.args.prompt, /Report closure for each finding ID S2\b/);
+  await f.runner.after(correction.call, correction.args, report({ completed: [STEP], changes: ['src/session.ts'], closure: closure(['S2']) }));
+  const verify = await f.dispatch();
+  assert.match(verify.args.prompt, /This Verify is a scoped recheck after a correction pass\. Recheck ONLY these findings of the failed Verify against the current code: S2\./);
+  // Rows for the finding alone, and an extra row that found a new problem outside it.
+  const scoped = recheckOf(['S2']);
+  scoped.verification.decisions = [{ decisionID: 'D1', status: 'not-verified', checks: [], assessment: 'Boundary validation also misses a trimmed empty name.' }];
+  await f.runner.after(verify.call, verify.args, report(scoped));
+  const done = f.status();
+  assert.equal(done.state, 'complete');
+  assert.equal(done.verification.matched, true);
+  // Earlier verified rows are kept and bound to the recheck's own execution of the held check.
+  assert.deepEqual(done.verification.scenarios.map(row => `${row.scenarioID}:${row.status}:${row.checks}`), ['S1:verified:E2', 'S2:verified:E2']);
+  assert.deepEqual([done.verification.steps[0].checks, done.verification.decisions[0].checks], [['E2'], ['E2']]);
+  assert.equal(done.verification.decisions[0].status, 'verified');
+  assert.deepEqual(done.verification.limits, ['Follow-up outside this recheck (D1): Boundary validation also misses a trimmed empty name.']);
+  assert.deepEqual(results(done), ['mdd-verify:failed', 'mdd-apply:passed', 'mdd-verify:passed']);
+});
+
+test('automatic correction: a second pass only after progress, then the user decides', async t => {
+  const f = await fixture(t, 'low', 'ses_auto_twice', { automaticCorrections: 2 });
+  await f.finish(trace());
+  await f.finish({ completed: [STEP], changes: ['src/session.ts'] });
+  await f.finish(partialVerify(['S1', 'S2']));
+  assert.match(f.status().report, /automatic correction 1 of 2 for 2 finding\(s\): S1, S2/);
+  await f.finish({ completed: [STEP], changes: ['src/session.ts'], closure: closure(['S1', 'S2']) });
+  // S1 closed and nothing new opened: progress earns the second pass, for S2 alone.
+  await f.finish(recheckOf(['S1', 'S2'], ['S2']));
+  const second = f.status();
+  assert.equal(second.state, 'ready'); assert.equal(second.phase, 'mdd-apply');
+  assert.match(second.report, /automatic correction 2 of 2 for 1 finding\(s\): S2\./);
+  const correction = await f.dispatch();
+  assert.match(correction.args.prompt, /Report closure for each finding ID S2\b/);
+  await f.runner.after(correction.call, correction.args, report({ completed: [STEP], changes: ['src/session.ts'], closure: closure(['S2']) }));
+  const verify = await f.dispatch();
+  assert.match(verify.args.prompt, /against the current code: S2\./);
+  await f.runner.after(verify.call, verify.args, report(recheckOf(['S2'], ['S2'], 'E3')));
+  const stopped = () => {
+    const status = f.status();
+    assert.equal(status.state, 'blocked'); assert.equal(status.phase, 'mdd-verify');
+    assert.deepEqual(status.reworkTargets, ['mdd-apply', 'mdd-plan']);
+    assert.match(nextAction(status).why, /Never choose or continue automatically/);
+    assert.deepEqual(results(status), ['mdd-verify:failed', 'mdd-apply:passed', 'mdd-verify:failed', 'mdd-apply:passed', 'mdd-verify:failed']);
+    assert.deepEqual(status.verification.scenarios.map(row => `${row.scenarioID}:${row.status}`), ['S1:verified', 'S2:not-verified']);
+  };
+  stopped();
+  validateCheckpoint(f.saved().checkpoint);
+  assert.deepEqual(await f.restart(), { restored: true });
+  stopped();
+});
+
+test('automatic correction: no progress, a regression, a design cause or interactive mode stop for the user', async t => {
+  // The recheck found the same finding open: no second pass.
+  const same = await fixture(t, 'low', 'ses_auto_same', { automaticCorrections: 2 });
+  await same.finish(trace());
+  await same.finish({ completed: [STEP], changes: ['src/session.ts'] });
+  await same.finish(partialVerify(['S2']));
+  await same.finish({ completed: [STEP], changes: ['src/session.ts'], closure: closure(['S2']) });
+  await same.finish(recheckOf(['S2'], ['S2']));
+  assert.equal(same.status().state, 'blocked');
+  assert.equal(same.status().reworkable, 'mdd-plan', 'the same requirement failed again after a correction pass');
+  // The held check now fails: every earlier row that relied on it is a regression, never a pass.
+  const regressed = await fixture(t, 'low', 'ses_auto_regression', { automaticCorrections: 2 });
+  await regressed.finish(trace());
+  await regressed.finish({ completed: [STEP], changes: ['src/session.ts'] });
+  await regressed.finish(partialVerify(['S2']));
+  await regressed.finish({ completed: [STEP], changes: ['src/session.ts'], closure: closure(['S2']) });
+  const broken = recheckOf(['S2']);
+  broken.outcome = 'failed';
+  broken.checks = [{ id: 'E2', command: 'npm test', exit: 1 }, { id: 'E3', command: 'node .mdd/probes/restart.mjs', exit: 0 }];
+  broken.verification.checkResults = [{ checkID: `${STEP}-check`, disposition: 'failed', executions: ['E2'], reason: 'Two session tests fail.' }];
+  broken.verification.supplementalChecks = [{ id: 'probe', requirement: 'optional', disposition: 'passed', executions: ['E3'] }];
+  broken.verification.scenarios[0].checks = ['E3'];
+  await regressed.finish(broken);
+  const after = regressed.status();
+  assert.equal(after.state, 'blocked');
+  assert.deepEqual(after.verification.scenarios.map(row => `${row.scenarioID}:${row.status}:${row.cause ?? ''}`), ['S1:not-verified:implementation', 'S2:verified:']);
+  assert.match(after.verification.scenarios[0].assessment, new RegExp(`^Regression in the recheck: ${STEP}-check no longer passes\\.`));
+  validateCheckpoint(regressed.saved().checkpoint);
+  // A design cause goes back to planning, which only the user chooses.
+  const design = await fixture(t, 'low', 'ses_auto_design', { automaticCorrections: 2 });
+  await design.finish(trace());
+  await design.finish({ completed: [STEP], changes: ['src/session.ts'] });
+  await design.finish(partialVerify(['S2'], { cause: 'design' }));
+  assert.equal(design.status().state, 'blocked'); assert.equal(design.status().reworkable, 'mdd-plan');
+  // Interactive mode always presents the failure and waits.
+  const interactive = await fixture(t, 'low', 'ses_auto_interactive', { automaticCorrections: 2, mode: 'interactive' });
+  await interactive.finish(trace());
+  await interactive.finish({ completed: [STEP], changes: ['src/session.ts'] });
+  await interactive.finish(partialVerify(['S2']));
+  assert.equal(interactive.status().state, 'blocked'); assert.equal(interactive.status().reworkable, 'mdd-apply');
+  // Without the option (or with 0), the runner keeps the manual stop.
+  const manual = await fixture(t, 'low', 'ses_auto_off', { automaticCorrections: 0 });
+  await manual.finish(trace());
+  await manual.finish({ completed: [STEP], changes: ['src/session.ts'] });
+  await manual.finish(partialVerify(['S2']));
+  assert.equal(manual.status().state, 'blocked');
+});
+
+test('a user-chosen correction pass is also followed by a recheck of only its findings', async t => {
+  const f = await fixture(t, 'low', 'ses_manual_recheck');
+  await f.finish(trace());
+  await f.finish({ completed: [STEP], changes: ['src/session.ts'] });
+  await f.finish(partialVerify(['S1']));
+  f.runner.reset(f.runtime.sessionID, 'rework');
+  await f.finish({ completed: [STEP], changes: ['src/session.ts'], closure: closure(['S1']) });
+  const verify = await f.dispatch();
+  assert.match(verify.args.prompt, /against the current code: S1\./);
+  // A recheck that omits the finding is restated, naming what it must cover.
+  await assert.rejects(f.runner.after(verify.call, verify.args, report(recheckOf(['S2']))), /omits scenario coverage for S1 on cli-validation/);
+  await f.runner.submit({ result: report(recheckOf(['S1'])) }, f.runtime);
+  assert.equal(f.status().state, 'complete');
+  assert.equal(f.status().verification.matched, true);
 });

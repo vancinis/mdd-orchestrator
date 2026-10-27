@@ -798,7 +798,7 @@ test('opt-in failed Verify restores rework and complete runs close before a fres
 });
 
 // Native SDK/hook contract fixtures. No model or real shell execution is performed.
-async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', partial = false, summary = 'low', telemetry = true, memoryEnabled = true, memoryFault, start = true, worktree: worktreeLayout = false, distinctWorktree = false, autoReview = true } = {}) {
+async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', partial = false, summary = 'low', telemetry = true, memoryEnabled = true, memoryFault, start = true, worktree: worktreeLayout = false, distinctWorktree = false, autoReview = true, automaticCorrections = 0 } = {}) {
   isolateHome(t);
   // When asked, the session runs inside a linked git worktree laid out as git does on disk — a
   // `.git` file pointing at the administrative directory, which names the shared git directory. It
@@ -834,6 +834,8 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
   if (partial) delete settings.profiles.default.answers.mode;
   if (memoryEnabled) settings.engram = { endpoint: memory.endpoint, project: 'mdd-test' };
   settings.telemetry.enabled = telemetry;
+  // Most tests here pin the manual stop after a failed Verify; null keeps the shipped default (2).
+  if (automaticCorrections !== null) settings.verify = { automaticCorrections };
   saveGlobalSettings(settings);
   const runtime = { sessionID: 'ses_parent', agent: 'mdd-orchestrator', directory: root, worktree: hostWorktree };
   const model = { providerID: 'contract-only', modelID: 'model' };
@@ -1656,6 +1658,22 @@ test('a failed verification can send the run back to Apply with its findings, on
   await f.phase();
   const done = await f.status();
   assert.equal(done.state, 'complete'); assert.equal(done.coverage, 100);
+});
+test('by default a failed verification of the implementation is corrected automatically, then rechecked on its findings', async t => {
+  const f = await fixture(t, { automaticCorrections: null }); await f.phase(); await f.phase();
+  await f.phase({ coverageFault: 'partial' });
+  const correcting = await f.status();
+  assert.equal(correcting.state, 'ready'); assert.equal(correcting.phase, 'mdd-apply');
+  assert.equal(correcting.rework.after, 'mdd-verify'); assert.equal(correcting.reworkable, undefined);
+  assert.match(correcting.nextAction.why, /automatic correction/i);
+  await f.phase();
+  assert.match(f.delivered(), /This is a correction pass: mdd-verify reported failure/);
+  await f.phase();
+  assert.match(f.delivered(), /This Verify is a scoped recheck after a correction pass\. Recheck ONLY these findings of the failed Verify against the current code: D1\./);
+  const done = await f.status();
+  assert.equal(done.state, 'complete'); assert.equal(done.coverage, 100);
+  assert.deepEqual(done.workflow.results.map(item => `${item.phase}:${item.outcome}`),
+    ['mdd-explore:passed', 'mdd-plan:passed', 'mdd-apply:passed', 'mdd-verify:failed', 'mdd-apply:passed', 'mdd-verify:passed']);
 });
 test('rework is refused where there is no failed verification to correct', async t => {
   const f = await fixture(t); await f.phase({ outcome: 'failed' });

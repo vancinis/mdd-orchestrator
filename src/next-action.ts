@@ -120,8 +120,13 @@ export function nextAction(status: unknown): NextAction | undefined {
       why: 'Dispatch each exact issued object once as a native foreground call. These are members of one bounded batch, not separate phases. Wait for every member; one result never releases a sibling or advances the phase.' };
   }
   if (task) {
+    // A correction after a failed Verify is already chosen: by the user, or by MDD's bounded
+    // automatic correction in automatic mode. Asking again only stalled the run it was meant to finish.
+    const rework = object(value.rework);
+    const correction = rework?.after === 'mdd-verify' && rework.target === undefined
+      ? ' This is a correction pass after a failed Verify, chosen by the user or started by MDD\'s automatic correction (automatic mode only: at most two passes, each followed by a Verify that rechecks only the findings). Tell the user in a few lines what Verify found and that the correction is running, then dispatch it without asking for confirmation.' : '';
     return { tool: 'task', args: task,
-      why: 'This phase is ready to delegate. Call the native task tool once, foreground, with exactly this object and no extra arguments. The prompt may be a single-use MDD dispatch handle; pass it through unchanged.' };
+      why: `This phase is ready to delegate. Call the native task tool once, foreground, with exactly this object and no extra arguments. The prompt may be a single-use MDD dispatch handle; pass it through unchanged.${correction}` };
   }
 
   if (value.lane === 'adaptive-native') return { tool: 'mdd_adapt',

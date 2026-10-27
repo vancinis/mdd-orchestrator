@@ -17,7 +17,7 @@ import { emptyEvidence, invalidateEvidence, renderReport, renderClosure, phaseLa
 import type { Evidence, EvidenceFlag, PhaseReport } from './reporting.js';
 import type { FailureClass, TelemetryEvent, TelemetryResult, TelemetryUsage } from './telemetry.js';
 import { acceptance, assertNoTraceSection, closure, decisions, deepestCause, failingRequirements, OPEN_CLOSURE_PASS, phaseFields, PHASE_RESULT_FIELDS, tracedLinks,
-  UNMATCHED_PASS, unmet, UNMET_PASS, linkDecisions, pendingExternal, validatePlan, traceArtifact, verificationFindings } from './acceptance.js';
+  UNMATCHED_PASS, unmet, UNMET_PASS, linkDecisions, mergeRecheck, pendingExternal, validatePlan, traceArtifact, verificationFindings } from './acceptance.js';
 import type { Closure, Unmet } from './acceptance.js';
 import { MALFORMED_RESTATEMENTS, MalformedReport, narrativeOf, parsePhaseReport, parseRiskReport, reportFormatLines } from './phase-report.js';
 import { checkRiskReportForm } from './report-check.js';
@@ -395,6 +395,9 @@ export type Liveness = { verdict: 'stopped' | 'running' | 'unknown'; child?: str
 /** How a pending child was released: by host evidence, or on the word of the user who interrupted it. */
 type Released = Liveness & { released?: 'host' | 'user' };
 const ATTEST_HINT = 'If the user says the subagent is stopped or was interrupted, call mdd_reset again with userText set to their exact latest message: MDD stops it through OpenCode when it can and releases it, unless OpenCode still reports it busy.';
+/** Automatic correction passes after a failed Verify before the user decides (gentle-orchestrator's bound). */
+export const AUTOMATIC_CORRECTIONS = 2;
+const PLANNING_PHASES: readonly Phase[] = ['mdd-plan', 'mdd-propose', 'mdd-spec', 'mdd-design', 'mdd-tasks'];
 export type Inspect = {
   /** Internal admission still proves the objective from the real native conversation. */
   intake?(runtime: Runtime, requirements: string, messageID: string, scope?: 'latest' | 'objective' | 'native-current' | 'native-current-objective'): Promise<void | string>;
@@ -568,6 +571,12 @@ export class PhaseRunner {
     knowledge?: (runtime: Runtime, selection: KnowledgeSelection, memory?: EngramHttp) => Promise<KnowledgeResolution>;
     /** Phase-scoped production read fence. confined:true is retained only for legacy synthetic Apply hosts. */
     workerCapability?: Readonly<{ confined: true } | { phase: 'mdd-explore'; readOnly: true; applyEditing?: true }>;
+    /**
+     * Automatic correction passes a failed Verify of the implementation gets in automatic mode
+     * before the user decides: 0 to 2. The plugin passes the configured value (default 2); a
+     * runner built without it keeps the manual path, where every failed Verify waits for the user.
+     */
+    automaticCorrections?: number;
     now?: () => number; progress?: ProgressGuard; dossier?: RunDossierStore; checkpoint?: CheckpointStore; ownership?: RunOwnershipStore; adaptiveStore?: AdaptiveStore; telemetry?: (root: string, value: TelemetryEvent, now: number) => TelemetryResult; lessons?: (root: string, value: LessonInput, now: number) => void; ledger?: (root: string, value: RunLedgerInput, now: number) => void } = {}) {}
 
   #adaptiveCurrent(run: AdaptiveRun): void {
@@ -3110,10 +3119,17 @@ export class PhaseRunner {
           if (!accepted) throw new Error('Verification has no held requirement map.');
           // The checks and the verification that cites them are read as one report, so every problem
           // in either reaches the restatement together instead of one rejection per round trip.
-          const read = verifyReport(result.checks, result.verification, { accepted, choices, planned, verificationVersion: run.verificationVersion });
+          // After a correction pass Verify rechecks only the findings it corrected; the earlier rows
+          // are kept and re-bound to this recheck's executions, so the stored result is complete.
+          const recheck = this.#recheckScope(run);
+          const read = verifyReport(result.checks, result.verification, { accepted, choices, planned, verificationVersion: run.verificationVersion,
+            ...(recheck ? { recheck: { findings: recheck } } : {}) });
           ran = read.ran;
-          if (outcome === 'passed' && !read.verification!.matched) throw new MalformedReport(UNMATCHED_PASS);
-          run.verification = read.verification!;
+          const checked = recheck ? mergeRecheck(run.verification!, read.verification!, ran, !!run.verificationVersion, recheck) : read.verification!;
+          if (outcome === 'passed' && !checked.matched) throw new MalformedReport(recheck && read.verification!.matched
+            ? `An earlier verified row relied on a check that did not pass in this recheck: ${verificationFindings(checked).join(', ')}. Report outcome failed, or run that check again.`
+            : UNMATCHED_PASS);
+          run.verification = checked;
         }
         // A planning phase that cannot satisfy a held requirement says so and stops the route,
         // instead of passing with a decision that accepts the gap and leaving it for Apply.
@@ -3263,6 +3279,8 @@ export class PhaseRunner {
         }
         throw new Error('Progress settlement failed.');
       }
+      // Only once the failed Verify is durably settled: the correction is a new, recorded transition.
+      if (outcome === 'failed' && run.phase === 'mdd-verify') this.#automaticCorrection(run);
     }
   }
 
@@ -3724,6 +3742,29 @@ export class PhaseRunner {
       catch { throw new Error('The preserved run record could not be set aside. Inspect the .mdd directory.'); }
       return { scope: 'run', ...(preserved ? { preserved } : {}) };
     }
+    this.#releaseAttempt(run);
+    if (scope === 'rework') return this.#rework(run, reworkTarget!);
+    run.workflow.retry();
+    const next = run.workflow.nextAction();
+    // A run stopped at an approval boundary is not waiting for work to be prepared, it is waiting
+    // for the user. Releasing it re-opens that question; preparing a phase nobody authorized is
+    // exactly what this must not do, and refusing to release it at all left the only escape route
+    // as discarding the whole run.
+    if (next.kind === 'approve') {
+      run.state = 'await-approval';
+      run.report = { phase: run.phase, summary: `Quedó registrada la fase de ${phaseLabel(run.phase).toLowerCase()}; la siguiente espera aprobación.`, how: [], status: 'in-progress', evidence: run.evidence };
+      this.#checkpoint(run);
+      this.#settle(run);
+      return { scope: 'phase', phase: next.phase, approval: true };
+    }
+    this.#prepare(run);
+    this.#checkpoint(run);
+    this.#settle(run);
+    return { scope: 'phase', phase: run.phase };
+  }
+
+  /** Clears a settled attempt so the same or another phase can be prepared again. */
+  #releaseAttempt(run: Run): void {
     if (run.side) this.#restoreSide(run);
     if (run.workerState) delete run.workerState.batch;
     delete run.workerTasks;
@@ -3742,47 +3783,95 @@ export class PhaseRunner {
     delete run.reportRepairExhausted;
     run.malformed = 0;
     delete run.lastFailure;
-    if (scope === 'rework') {
-      delete run.workerState;
-      // The user chose to correct rather than re-check unchanged work. The target phase runs again
-      // with the failed report as its newest dependency artifact, and the route follows it through
-      // its ordinary approvals. Apply corrects in one pass; a planning target plans again.
-      const target = reworkTarget!;
-      const failed = run.workflow.snapshot().results.at(-1)!;
-      run.workflow.rework(target);
-      run.rework = { after: failed.phase, ...(target !== 'mdd-apply' ? { target } : {}), summary: failed.evidenceSummary };
-      if (target !== 'mdd-apply') {
-        // What is held after this point is replaced by the phases that run again. Keeping it would
-        // let a revised acceptance or design be checked against a plan written for the old one.
-        // Changed files stay: they are still in the working tree and the new plan must account for them.
-        run.planned = [];
-        delete run.verification;
-        run.executedChecks = [];
-        if (target === 'mdd-spec') run.decisions = [];
-        run.evidence = invalidateEvidence(run.evidence, ['plan', 'implementation', 'checks']);
-      }
-      this.#prepare(run);
-      this.#checkpoint(run);
-      this.#settle(run);
-      return { scope: 'rework', phase: target };
-    }
-    run.workflow.retry();
-    const next = run.workflow.nextAction();
-    // A run stopped at an approval boundary is not waiting for work to be prepared, it is waiting
-    // for the user. Releasing it re-opens that question; preparing a phase nobody authorized is
-    // exactly what this must not do, and refusing to release it at all left the only escape route
-    // as discarding the whole run.
-    if (next.kind === 'approve') {
-      run.state = 'await-approval';
-      run.report = { phase: run.phase, summary: `Quedó registrada la fase de ${phaseLabel(run.phase).toLowerCase()}; la siguiente espera aprobación.`, how: [], status: 'in-progress', evidence: run.evidence };
-      this.#checkpoint(run);
-      this.#settle(run);
-      return { scope: 'phase', phase: next.phase, approval: true };
+    // The run left the state its ledger row records; a later stop or completion is recorded again.
+    delete run.ledgered;
+  }
+
+  /**
+   * Sends a failed route back to `target`. The target phase runs again with the failed report as
+   * its newest dependency artifact, and the route follows it through its ordinary approvals. Apply
+   * corrects in one pass; a planning target plans again.
+   */
+  #rework(run: Run, target: Phase, report?: Run['report']): { scope: 'rework'; phase: Phase } {
+    delete run.workerState;
+    const failed = run.workflow.snapshot().results.at(-1)!;
+    run.workflow.rework(target);
+    run.rework = { after: failed.phase, ...(target !== 'mdd-apply' ? { target } : {}), summary: failed.evidenceSummary };
+    if (target !== 'mdd-apply') {
+      // What is held after this point is replaced by the phases that run again. Keeping it would
+      // let a revised acceptance or design be checked against a plan written for the old one.
+      // Changed files stay: they are still in the working tree and the new plan must account for them.
+      run.planned = [];
+      delete run.verification;
+      run.executedChecks = [];
+      if (target === 'mdd-spec') run.decisions = [];
+      run.evidence = invalidateEvidence(run.evidence, ['plan', 'implementation', 'checks']);
     }
     this.#prepare(run);
+    // An automatic correction keeps the failed report as the one presented first.
+    if (report) run.report = report;
     this.#checkpoint(run);
     this.#settle(run);
-    return { scope: 'phase', phase: run.phase };
+    return { scope: 'rework', phase: target };
+  }
+
+  /**
+   * The findings a Verify after a correction pass rechecks, or undefined for an ordinary Verify.
+   * Only a Verify that follows a failed Verify and a successful Apply correction, with no planning
+   * in between, is a recheck: gentle-orchestrator's bound, one recheck limited to the blockers and
+   * never a new full sweep, because a full sweep after each correction is what turned one failure
+   * into chains of five to twenty Verify attempts.
+   */
+  #recheckScope(run: Run): string[] | undefined {
+    if (run.side || !run.verification || run.verification.matched) return undefined;
+    const results = run.workflow.snapshot().results;
+    const last = results.findLastIndex(result => result.phase === 'mdd-verify');
+    if (last < 0 || results[last]!.outcome !== 'failed') return undefined;
+    const since = results.slice(last + 1);
+    if (!since.some(result => result.phase === 'mdd-apply' && result.outcome === 'passed') || since.some(result => result.phase !== 'mdd-apply')) return undefined;
+    const findings = verificationFindings(run.verification);
+    return findings.length ? findings : undefined;
+  }
+
+  /**
+   * In automatic mode a failed Verify of the implementation is corrected without stopping, within
+   * gentle-orchestrator's bound: one correction pass for every finding, then a recheck of only those
+   * findings; a second pass only when that recheck closed some findings and opened none; then the
+   * user decides. Design or requirement causes, interactive mode and anything uncertain always stop.
+   */
+  #automaticCorrection(run: Run): boolean {
+    const budget = Math.min(AUTOMATIC_CORRECTIONS, Math.max(0, Math.trunc(this.options.automaticCorrections ?? 0)));
+    if (!budget || run.side || run.uncertain || run.checkpointFailed || run.rejected || run.workflow.snapshot().answers.mode !== 'automatic' || !this.#failedVerify(run)) return false;
+    if (!this.#reworkPlan(run)?.targets.includes('mdd-apply') || ['design', 'requirements'].includes(deepestCause(run.verification))) return false;
+    const results = run.workflow.snapshot().results;
+    const planning = results.findLastIndex(result => PLANNING_PHASES.includes(result.phase));
+    const failures = results.map((result, index) => ({ result, index }))
+      .filter(item => item.index > planning && item.result.phase === 'mdd-verify' && item.result.outcome === 'failed');
+    if (failures.length > budget) return false;
+    const findings = verificationFindings(run.verification);
+    if (!findings.length) return false;
+    if (failures.length > 1) {
+      // A further pass only when the recheck closed some findings and opened none.
+      const earlier = verificationFindings(tracedLinks(run.history[failures.at(-2)!.index]?.content ?? '')?.verification as Verification | undefined);
+      if (findings.length >= earlier.length || findings.some(id => !earlier.includes(id))) return false;
+    }
+    // The coordinator presents the Verify that failed first, then dispatches the ready correction.
+    const report = { ...run.report, summary: `${run.report.summary} MDD started automatic correction ${failures.length} of ${budget} for ${findings.length} finding(s): ${findings.join(', ')}. Verify then rechecks only those findings.` };
+    // Prepared off-run, as a successor is: a failure leaves the settled failed Verify untouched.
+    const staged: Run = { ...run, workflow: Workflow.replay(run.checkpointRequest ??
+      Workflow.recordedRequest({ answers: run.workflow.snapshot().answers }, run.workflow), run.workflow.history()) };
+    try {
+      this.#releaseAttempt(staged);
+      this.#rework(staged, 'mdd-apply', report);
+    } catch (error) {
+      if (staged.checkpointFailed) { run.checkpointFailed = true; run.uncertain = true; }
+      run.reason = `Verify failed and the automatic correction could not be prepared: ${error instanceof Error ? error.message : String(error)} Choose the correction explicitly.`;
+      return false;
+    }
+    this.#event(staged, 'correction');
+    for (const key of Object.keys(run) as (keyof Run)[]) if (!(key in staged)) delete run[key];
+    Object.assign(run, staged);
+    return true;
   }
 
   approvalStopped(sessionID: string): void { const run = this.#runs.get(sessionID); if (run) this.#event(run, 'approval', 'cancelled'); }
@@ -5059,6 +5148,7 @@ export class PhaseRunner {
         : 'Planning is read-only for project sources: never implement or repair sources, tests, fixtures, snapshots, configuration or dependencies. Investigative checks may produce ordinary generated test/build outputs; report findings and gaps without changing declared inputs.',
       ...(phase === 'mdd-explore' ? [SINGULAR_EXPLORATION] : []),
       ...this.#reworkLines(run, phase),
+      ...(phase === 'mdd-verify' && this.#recheckScope(run) ? [`This Verify is a scoped recheck after a correction pass. Recheck ONLY these findings of the failed Verify against the current code: ${this.#recheckScope(run)!.join(', ')}. Report verification rows for them (every held link of a listed scenario); you may leave every other row out: MDD keeps the earlier verified rows and binds them to your new executions. Run and account for every held check again, because they guard the kept rows against regressions. A new problem outside these findings is a follow-up MDD lists under limits; it does not reopen the run. The earlier assessments are in the held execution and correction facts below.`] : []),
       ...reportFormatLines(phase, run.verificationVersion, phase === 'mdd-apply' && run.workflow.correcting() && assignedID === undefined),
     ];
     const data = (handoff: readonly unknown[], contexts: readonly unknown[], notice: string) => [

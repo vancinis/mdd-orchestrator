@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { acceptance, decisions, linkDecisions, pendingExternal, reportText, shortText, summaryText, validatePlan, verification, verificationFindings, MAX_REPORTED_PROBLEMS } from '../dist/acceptance.js';
-import { deliverables, executed, verifyReport } from '../dist/phase-evidence.js';
+import { acceptance, decisions, linkDecisions, mergeRecheck, pendingExternal, reportText, shortText, summaryText, validatePlan, verification, verificationFindings, MAX_REPORTED_PROBLEMS } from '../dist/acceptance.js';
+import { deliverables, executed, retainedVerification, verifyReport } from '../dist/phase-evidence.js';
 import { traceFixture } from './adapter-fixture.mjs';
 
 function fixture() {
@@ -203,6 +203,48 @@ for (const [name, change] of Object.entries({
     assert.throws(() => { const accepted = acceptance(data.acceptance); validatePlan(accepted, decisions(data.decisions, accepted), deliverables(data.deliverables)); });
   });
 }
+test('regression: a recheck covers its findings, keeps earlier rows bound to its own executions and never hides lost evidence', () => {
+  const f = structuredFixture();
+  f.report.supplementalChecks = [{ id: 'probe', requirement: 'optional', disposition: 'passed', executions: ['E2'] }];
+  f.checks.push({ id: 'E2', command: 'node probe.mjs', exit: 0 });
+  f.report.scenarios[0].checks = ['E1', 'E2'];
+  Object.assign(f.report.scenarios[1], { status: 'not-verified', checks: [], assessment: 'S2 still fails.', cause: 'implementation' });
+  const previous = f.read().verification;
+  assert.deepEqual(verificationFindings(previous), ['S2']);
+  const scoped = { ...f.held, recheck: { findings: ['S2'] } };
+  const report = { scenarios: [{ ...f.report.scenarios[1], status: 'verified', checks: ['E5'], assessment: 'S2 now passes.', cause: undefined }],
+    steps: [], decisions: [], changes: 'Corrected S2.', limits: [], checkResults: [{ checkID: 'C1', disposition: 'passed', executions: ['E5'] }], supplementalChecks: [] };
+  delete report.scenarios[0].cause;
+  const checks = [{ id: 'E5', command: 'npm test', exit: 0 }];
+  // Only the findings are required, and they decide `matched` for the recheck itself.
+  const read = verifyReport(checks, report, scoped, 1).verification;
+  assert.equal(read.matched, true);
+  assert.throws(() => verifyReport(checks, { ...report, scenarios: [] }, scoped, 1), /omits scenario coverage for S2 on cli-validation/);
+  assert.throws(() => verifyReport(checks, report, f.held, 1), /omits scenario coverage for S1/);
+  // S1 rested on the held check (rerun, passed) and on a probe the recheck did not run again.
+  const merged = mergeRecheck(previous, read, checks, true, ['S2']);
+  assert.equal(merged.matched, false);
+  assert.deepEqual(merged.scenarios.map(row => `${row.scenarioID}:${row.status}:${row.checks}:${row.cause ?? ''}`), ['S1:not-verified::verification', 'S2:verified:E5:']);
+  assert.match(merged.scenarios[0].assessment, /^The recheck did not run probe again/);
+  assert.deepEqual([merged.steps[0].checks, merged.decisions[0].checks], [['E5'], ['E5']]);
+  // The stored result is valid on its own, against the recheck's executions only.
+  assert.equal(retainedVerification(merged, checks, f.held).matched, false);
+  // A failing held check turns every kept row that relied on it into a regression.
+  const failing = [{ id: 'E5', command: 'npm test', exit: 1 }];
+  const broken = verifyReport(failing, { ...report, scenarios: [{ ...report.scenarios[0], status: 'not-verified', checks: [] }],
+    checkResults: [{ checkID: 'C1', disposition: 'failed', executions: ['E5'], reason: 'Two session tests fail.' }] }, scoped, 1).verification;
+  const regressed = mergeRecheck(previous, broken, failing, true, ['S2']);
+  assert.deepEqual([regressed.steps[0].cause, regressed.decisions[0].cause], ['implementation', 'implementation']);
+  assert.match(regressed.steps[0].assessment, /^Regression in the recheck: C1 no longer passes\./);
+  // Legacy command evidence is bound by command.
+  const legacy = fixture();
+  Object.assign(legacy.result.scenarios[1], { status: 'not-verified', checks: [], assessment: 'S2 fails.' });
+  const before = verification(legacy.result, legacy.accepted, legacy.choices, legacy.steps, legacy.reported);
+  const again = { ...legacy.result, scenarios: [{ ...legacy.result.scenarios[1], status: 'verified', checks: ['npm test'], assessment: 'S2 passes.' }], steps: [], decisions: [] };
+  const rechecked = verifyReport([{ command: 'npm test', exit: 0 }], again, { accepted: legacy.accepted, choices: legacy.choices, planned: legacy.steps, recheck: { findings: ['S2'] } }).verification;
+  assert.equal(mergeRecheck(before, rechecked, [{ command: 'npm test', exit: 0 }], false, ['S2']).matched, true);
+});
+
 test('regression: a held check failing for a reason outside the change is environmental, corroborated, visible and non-blocking', () => {
   const f = structuredFixture();
   f.checks.splice(0, 1, { id: 'E1', command: 'npm test', exit: 1 }, { id: 'E2', command: 'node --test tests/cli.test.mjs', exit: 0 });

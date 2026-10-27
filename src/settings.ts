@@ -28,7 +28,11 @@ export type Settings = {
   telemetry: { enabled: boolean };
   workers: { enabled: boolean };
   knowledge: { enabled: boolean };
+  /** Omitted means the default: two automatic correction passes after a failed Verify in automatic mode. */
+  verify?: { automaticCorrections: number };
 };
+/** Automatic correction passes after a failed Verify when settings do not choose (gentle-orchestrator's bound). */
+export const DEFAULT_AUTOMATIC_CORRECTIONS = 2;
 
 export function profileName(value: unknown): string {
   if (typeof value !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(value) ||
@@ -55,7 +59,7 @@ export function defaultSettings(): Settings {
 }
 
 export function parseSettings(value: unknown): Settings {
-  const input = objectWithKeys(value, 'settings', ['version', 'activeProfile', 'profiles', 'engram', 'telemetry', 'workers', 'knowledge']);
+  const input = objectWithKeys(value, 'settings', ['version', 'activeProfile', 'profiles', 'engram', 'telemetry', 'workers', 'knowledge', 'verify']);
   if (input.version !== 1) throw new ValidationError('settings.version must be 1.');
   const names = typeof input.profiles === 'object' && input.profiles !== null ? Object.keys(input.profiles) : [];
   if (!names.length || names.length > 64) throw new ValidationError('Settings require 1–64 named profiles.');
@@ -86,6 +90,12 @@ export function parseSettings(value: unknown): Settings {
     const knowledge = objectWithKeys(input.knowledge, 'knowledge', ['enabled']);
     if (typeof knowledge.enabled !== 'boolean') throw new ValidationError('knowledge.enabled must be boolean.');
     result.knowledge.enabled = knowledge.enabled;
+  }
+  if (Object.hasOwn(input, 'verify')) {
+    const verify = objectWithKeys(input.verify, 'verify', ['automaticCorrections']);
+    if (!Number.isInteger(verify.automaticCorrections) || (verify.automaticCorrections as number) < 0 || (verify.automaticCorrections as number) > DEFAULT_AUTOMATIC_CORRECTIONS)
+      throw new ValidationError(`verify.automaticCorrections must be an integer from 0 to ${DEFAULT_AUTOMATIC_CORRECTIONS}.`);
+    result.verify = { automaticCorrections: verify.automaticCorrections as number };
   }
   if (Object.hasOwn(input, 'engram')) {
     const engram = objectWithKeys(input.engram, 'engram', ['mode', 'binary', 'dataDirectory', 'endpoint', 'project']);

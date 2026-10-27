@@ -220,13 +220,15 @@ test('the rollup accumulates runs, attempts and usage, and outlives the events i
     { ...base, event: 'phase-start', phase: 'mdd-plan', attempt: 2 },
     { ...base, event: 'phase-end', phase: 'mdd-plan', attempt: 2, outcome: 'passed', duration: 1000, usage: usage() },
     { ...base, event: 'compaction', phase: 'mdd-plan' },
+    { ...base, event: 'correction', phase: 'mdd-apply' },
     { ...base, event: 'report', outcome: 'passed' },
   ]) assert.equal(recordTelemetry(root, row, now).ok, true, row.event);
   const rollup = rollupOf(root);
   assert.equal(rollup.version, 1);
-  assert.equal(rollup.events, 8);
-  // A host compaction is counted as what it is: not a failure, and not free either.
-  assert.deepEqual(rollup.runs, { started: 1, completed: 1, blocked: 0, reset: 0, compacted: 1 });
+  assert.equal(rollup.events, 9);
+  // A host compaction is counted as what it is: not a failure, and not free either. An automatic
+  // correction is MDD's own, never a reset someone asked for.
+  assert.deepEqual(rollup.runs, { started: 1, completed: 1, blocked: 0, reset: 0, corrected: 1, compacted: 1 });
   assert.deepEqual(rollup.routes, { low: 1, high: 0 });
   // The retry repeats the class of the attempt it follows and must not be counted as a second one.
   assert.equal(rollup.failures['result-rejected'], 1);

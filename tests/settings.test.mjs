@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { defaultSettings, parseSettings, loadSettings, saveSettings, freezeProfile, modelFor, MODEL_ROLES } from '../dist/settings.js';
+import { defaultSettings, parseSettings, loadSettings, saveSettings, freezeProfile, modelFor, MODEL_ROLES, DEFAULT_AUTOMATIC_CORRECTIONS } from '../dist/settings.js';
 import { LocalFiles } from '../dist/local-files.js';
 import { runConfigUI } from '../dist/config-ui.js';
 
@@ -106,6 +106,21 @@ test('knowledge defaults on for legacy settings, round trips explicitly, and rej
   for (const knowledge of [null, {}, true, { enabled: 'true' }, { enabled: true, policy: true }]) {
     assert.throws(() => parseSettings({ ...legacy, knowledge }));
   }
+});
+
+test('verify automatic corrections default to two when omitted, round trip 0 to 2 and reject anything else', t => {
+  const legacy = { version: 1, activeProfile: 'default', profiles: { default: {} } };
+  assert.equal(parseSettings(legacy).verify, undefined);
+  assert.equal(DEFAULT_AUTOMATIC_CORRECTIONS, 2);
+  const root = fixture(t);
+  for (const automaticCorrections of [0, 1, 2]) {
+    saveSettings(root, { ...defaultSettings(), verify: { automaticCorrections } });
+    assert.deepEqual(loadSettings(root).verify, { automaticCorrections });
+  }
+  for (const verify of [null, {}, { automaticCorrections: 3 }, { automaticCorrections: -1 }, { automaticCorrections: 1.5 }, { automaticCorrections: '2' }, { automaticCorrections: 1, rounds: 1 }])
+    assert.throws(() => parseSettings({ ...legacy, verify }), /verify|automaticCorrections|unknown|object/i);
+  const schema = JSON.parse(fs.readFileSync(new URL('../docs/mdd-config.schema.json', import.meta.url), 'utf8'));
+  assert.deepEqual(schema.properties.verify.properties.automaticCorrections, { type: 'integer', minimum: 0, maximum: DEFAULT_AUTOMATIC_CORRECTIONS, default: DEFAULT_AUTOMATIC_CORRECTIONS });
 });
 
 for (const enabled of [undefined, false]) {

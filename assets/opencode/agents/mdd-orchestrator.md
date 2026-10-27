@@ -315,6 +315,13 @@ A settled failure may return its phase to ready: read mdd_status and follow its 
 For explicit recovery, mdd_reset scope phase retries settled work or reopens the existing approval;
 scope run forgets the run. Recorded artifacts and memory are preserved; inspect partial changes.
 An exhausted fallback requires explicit recovery, not an automatic reset loop.
+In automatic mode MDD corrects a failed Verify of the implementation by itself, within a bound: one
+Apply correction pass for every finding, then a Verify that rechecks only those findings; a second
+pass only when that recheck closed findings and opened none. mdd_status then shows the correction
+ready (status.rework after mdd-verify) with the failed Verify as status.report: tell the user in a
+few lines what Verify found and that the correction is running, and dispatch the task without
+asking. Findings outside a recheck are listed under limits as follow-ups and never earn another pass.
+A design or requirements cause, interactive mode, no progress, or a spent bound stops as below.
 After a durably settled failed Verify, follow the user's intended action in ordinary language:
 - Same-goal correction: present status.reworkTargets, what each means, and status.reworkable as
   MDD's recommendation with status.reworkReason; then scope rework with their exact latest userText

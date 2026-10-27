@@ -419,7 +419,9 @@ export function validatePlan(accepted: Acceptance, choices: Decision[], steps: D
   raise(problems, 'The plan');
 }
 /** The plan a verification answers to. Without it, only the report's own consistency is checked. */
-export type HeldPlan = { accepted: Acceptance; choices: Decision[]; planned: Deliverable[]; verificationVersion?: VerificationVersion | undefined };
+export type HeldPlan = { accepted: Acceptance; choices: Decision[]; planned: Deliverable[]; verificationVersion?: VerificationVersion | undefined;
+  /** A recheck after a correction pass: only these finding IDs are assessed again. */
+  recheck?: { findings: readonly string[] } };
 
 /** Checks consistency of actor-reported evidence, not independent execution or applicability proof. */
 export function checkAccounting(input: Record<string, unknown>, held: { planned: { checks?: PlannedCheck[] }[] } | undefined, ran: readonly Check[] | undefined) {
@@ -566,16 +568,20 @@ export function readVerification(value: unknown, held: HeldPlan | undefined, rep
   };
   // A row whose assessment is malformed still covers its link: counting it as missing too would
   // report one mistake twice.
-  const expected = held ? held.planned.flatMap(step => step.scenarios.map(scenarioID => ({ step, scenarioID, requirementID: held.accepted.requirements.find(item => item.scenarios.some(scenario => scenario.id === scenarioID))!.id }))) : [];
+  // A recheck must cover only the findings it corrects; any other row it adds is optional and
+  // `mergeRecheck` decides what it changes. Coverage and `matched` are about the findings alone.
+  const inScope = (id: string) => !held?.recheck || held.recheck.findings.includes(id);
+  const links = held ? held.planned.flatMap(step => step.scenarios.map(scenarioID => ({ step, scenarioID, requirementID: held.accepted.requirements.find(item => item.scenarios.some(scenario => scenario.id === scenarioID))!.id }))) : [];
+  const expected = links.filter(item => inScope(item.scenarioID));
   const scenarios: Verification['scenarios'] = [];
   const coveredLinks: { scenarioID: string; stepID: string }[] = [];
-  for (const value of attempt(problems, () => items(input.scenarios, 'scenario coverage')) ?? []) {
+  for (const value of attempt(problems, () => items(input.scenarios, 'scenario coverage', !!held?.recheck)) ?? []) {
     const entry = attempt(problems, () => objectWithKeys(value, 'scenario coverage', ['requirementID', 'scenarioID', 'stepID', 'status', 'checks', 'assessment', 'cause']));
     if (!entry) continue;
     let link: { requirementID: string; scenarioID: string; stepID: string } | undefined;
     if (held) {
-      const found = expected.find(item => item.requirementID === entry.requirementID && item.scenarioID === entry.scenarioID && item.step.id === entry.stepID);
-      if (!found) { problems.push(`Verification invents the link ${preview(entry.requirementID)}/${preview(entry.scenarioID)}/${preview(entry.stepID)}. Held links: ${expected.map(item => `${item.requirementID}/${item.scenarioID}/${item.step.id}`).join(', ')}.`); continue; }
+      const found = links.find(item => item.requirementID === entry.requirementID && item.scenarioID === entry.scenarioID && item.step.id === entry.stepID);
+      if (!found) { problems.push(`Verification invents the link ${preview(entry.requirementID)}/${preview(entry.scenarioID)}/${preview(entry.stepID)}. Held links: ${links.map(item => `${item.requirementID}/${item.scenarioID}/${item.step.id}`).join(', ')}.`); continue; }
       link = { requirementID: found.requirementID, scenarioID: found.scenarioID, stepID: found.step.id };
     } else {
       link = attempt(problems, () => ({ requirementID: id(entry.requirementID, 'scenario coverage requirementID'), scenarioID: id(entry.scenarioID, 'scenario coverage scenarioID'), stepID: id(entry.stepID, 'scenario coverage stepID') }));
@@ -591,7 +597,7 @@ export function readVerification(value: unknown, held: HeldPlan | undefined, rep
   if (repeatedLink) problems.push(`Verification covers scenario ${repeatedLink.scenarioID} on deliverable ${repeatedLink.stepID} more than once.`);
   const steps: Verification['steps'] = [];
   const coveredSteps: string[] = [];
-  for (const value of attempt(problems, () => items(input.steps, 'step coverage')) ?? []) {
+  for (const value of attempt(problems, () => items(input.steps, 'step coverage', !!held?.recheck)) ?? []) {
     const entry = attempt(problems, () => objectWithKeys(value, 'step coverage', ['stepID', 'status', 'checks', 'assessment', 'cause']));
     if (!entry) continue;
     const stepID = held ? held.planned.find(item => item.id === entry.stepID)?.id : attempt(problems, () => id(entry.stepID, 'step coverage stepID'));
@@ -617,10 +623,10 @@ export function readVerification(value: unknown, held: HeldPlan | undefined, rep
     const checked = assess(entry, `decision ${decisionID}`);
     if (checked) decisions.push({ decisionID, ...checked });
   }
-  for (const step of held?.planned ?? []) if (!coveredSteps.includes(step.id)) problems.push(`Verification omits coverage of planned deliverable ${step.id}.`);
+  for (const step of held?.planned ?? []) if (inScope(step.id) && !coveredSteps.includes(step.id)) problems.push(`Verification omits coverage of planned deliverable ${step.id}.`);
   const repeatedStep = coveredSteps.find((item, index) => coveredSteps.indexOf(item) !== index);
   if (repeatedStep !== undefined) problems.push(`Verification covers planned deliverable ${repeatedStep} more than once.`);
-  for (const decision of held?.choices ?? []) if (!coveredDecisions.includes(decision.id)) problems.push(`Verification omits coverage of plan decision ${decision.id}.`);
+  for (const decision of held?.choices ?? []) if (inScope(decision.id) && !coveredDecisions.includes(decision.id)) problems.push(`Verification omits coverage of plan decision ${decision.id}.`);
   const repeatedDecision = coveredDecisions.find((item, index) => coveredDecisions.indexOf(item) !== index);
   if (repeatedDecision !== undefined) problems.push(`Verification covers plan decision ${repeatedDecision} more than once.`);
   const listed = attempt(problems, () => items(input.limits, 'remaining limits', true)) ?? [];
@@ -631,13 +637,72 @@ export function readVerification(value: unknown, held: HeldPlan | undefined, rep
   if (problems.length) return { problems };
   return { problems, verification: { scenarios, steps, decisions, changes: changes!, limits: limits as string[],
     ...(accounting ? { checkResults: accounting.checkResults, supplementalChecks: accounting.supplementalChecks } : {}),
-    matched: (accounting?.complete ?? true) && [...scenarios, ...steps, ...decisions].every(item => SETTLED.has(item.status)) } };
+    matched: (accounting?.complete ?? true) && [...scenarios.filter(item => inScope(item.scenarioID)), ...steps.filter(item => inScope(item.stepID)),
+      ...decisions.filter(item => inScope(item.decisionID))].every(item => SETTLED.has(item.status)) } };
 }
 export function verification(value: unknown, accepted: Acceptance, choices: Decision[], planned: Deliverable[], reported: string[] = [], passed: string[] = reported): Verification {
   const read = readVerification(value, { accepted, choices, planned }, reported, passed);
   raise(read.problems, 'The verification report');
   return read.verification!;
 }
+/**
+ * The complete verification after a recheck. The rows the recheck assessed replace the failed
+ * Verify's findings; every other earlier row is kept, and its check references are re-bound to this
+ * recheck's executions of the same held or supplemental check, so the stored verification cites only
+ * executions that exist now. A kept verified row whose check no longer passes becomes a regression
+ * (implementation); one whose check was not run again loses its evidence (verification). Neither is
+ * hidden: a recheck that left the rest unexamined cannot claim it still holds without a passing check.
+ */
+export function mergeRecheck(previous: Verification, recheck: Verification, checks: readonly Check[], structured: boolean, findings: readonly string[]): Verification {
+  const now = new Map<string, string>(), failed = new Set<string>();
+  if (structured) {
+    for (const result of recheck.checkResults ?? []) {
+      const usable = result.disposition === 'passed' || result.disposition === 'replaced' ? result.executions.at(-1)
+        : result.disposition === 'environmental' ? result.executions.filter(id => checks.find(check => check.id === id)?.exit === 0).at(-1) : undefined;
+      if (usable) now.set(`held:${result.checkID}`, usable);
+      else if (result.disposition === 'failed' || result.disposition === 'ran') failed.add(`held:${result.checkID}`);
+    }
+    for (const result of recheck.supplementalChecks ?? [])
+      if (result.disposition === 'passed') now.set(`extra:${result.id}`, result.executions.at(-1)!); else failed.add(`extra:${result.id}`);
+  } else for (const check of checks) {
+    if (check.exit === 0) now.set(check.command, check.command); else failed.add(check.command);
+  }
+  // What an earlier execution reference stood for: the held or supplemental check it executed.
+  const origin = (reference: string) => !structured ? reference
+    : previous.checkResults?.find(result => result.executions.includes(reference)) ? `held:${previous.checkResults.find(result => result.executions.includes(reference))!.checkID}`
+    : previous.supplementalChecks?.find(result => result.executions.includes(reference)) ? `extra:${previous.supplementalChecks.find(result => result.executions.includes(reference))!.id}` : reference;
+  const keep = <Row extends Assessment>(row: Row): Row => {
+    const origins = row.checks.map(origin);
+    // A pending external row is not evidence of a pass: it keeps only the references still current.
+    if (row.status !== 'verified') return { ...row, checks: [...new Set(origins.filter(key => now.has(key)).map(key => now.get(key)!))] };
+    const lost = origins.filter(key => !now.has(key));
+    if (!lost.length) return { ...row, checks: [...new Set(origins.map(key => now.get(key)!))] };
+    const regressed = lost.some(key => failed.has(key));
+    const named = lost.map(key => key.replace(/^(held|extra):/, '')).join(', ');
+    return { ...row, status: 'not-verified', checks: [], cause: regressed ? 'implementation' : 'verification',
+      assessment: regressed ? `Regression in the recheck: ${named} no longer passes. Earlier assessment: ${row.assessment}`
+        : `The recheck did not run ${named} again, so this earlier verified row has no current evidence. Earlier assessment: ${row.assessment}` };
+  };
+  // A finding takes its rechecked row. Outside the findings a reassessed row replaces the earlier
+  // one only when it holds; a new problem there is a follow-up in limits, never a new gap, because
+  // a new finding never earns another correction round (gentle-orchestrator's rule).
+  const followUps: string[] = [];
+  const choose = <Row extends Assessment>(row: Row, id: string, label: string, fresh: Row | undefined): Row => {
+    if (findings.includes(id)) return fresh ?? keep(row);
+    if (fresh && SETTLED.has(fresh.status)) return fresh;
+    if (fresh) followUps.push(`Follow-up outside this recheck (${label}): ${fresh.assessment}`);
+    return keep(row);
+  };
+  const scenarios = previous.scenarios.map(row => choose(row, row.scenarioID, `${row.scenarioID} on ${row.stepID}`,
+    recheck.scenarios.find(item => item.scenarioID === row.scenarioID && item.stepID === row.stepID)));
+  const steps = previous.steps.map(row => choose(row, row.stepID, row.stepID, recheck.steps.find(item => item.stepID === row.stepID)));
+  const decisions = previous.decisions.map(row => choose(row, row.decisionID, row.decisionID, recheck.decisions.find(item => item.decisionID === row.decisionID)));
+  const settled = [...scenarios, ...steps, ...decisions].every(item => SETTLED.has(item.status));
+  return { scenarios, steps, decisions, changes: recheck.changes, limits: [...recheck.limits, ...followUps],
+    ...(recheck.checkResults ? { checkResults: recheck.checkResults, supplementalChecks: recheck.supplementalChecks ?? [] } : {}),
+    matched: recheck.matched && settled };
+}
+
 export const TRACE_HEADING = '## Acceptance and plan links';
 /** The canonical trace section is adapter-owned; an actor writing it would fabricate links. */
 export function assertNoTraceSection(artifact: string): string {

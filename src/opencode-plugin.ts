@@ -6,7 +6,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { createHash, randomUUID } from 'node:crypto';
 import { boundedText, movedMessage, nonemptyText, PhaseRunner } from './phase-runner.js';
 import type { Inspect, Liveness, Runtime, TaskCall } from './phase-runner.js';
-import { freezeProfile, setupDiagnostic } from './settings.js';
+import { DEFAULT_AUTOMATIC_CORRECTIONS, freezeProfile, setupDiagnostic } from './settings.js';
 import { loadGlobalSettings } from './global-settings.js';
 import { installationPaths } from './installation-paths.js';
 import { applyModelOverrides } from './native-models.js';
@@ -941,6 +941,7 @@ const plugin: Plugin = async input => {
   const runner = new PhaseRunner(inspector, {
     ...(settings.knowledge.enabled ? { knowledge: (runtime, selection, memory) => intake.resolveKnowledge(selection, runtime, memory) } : {}),
     workers: profile.workers,
+    automaticCorrections: settings.verify?.automaticCorrections ?? DEFAULT_AUTOMATIC_CORRECTIONS,
     ...(workerHost ? { workerCapability: { phase: 'mdd-explore' as const, readOnly: true as const,
       ...(workerHost.applyEditing ? { applyEditing: true as const } : {}) } } : {}),
     // The runner passes the run's own checkout directory to these callbacks; MDD writes to the

@@ -50,8 +50,12 @@ export type TelemetryEvent = {
    * them: a coordinator that forgets which phase it is on redispatches, re-reports or stops. It
    * was invisible until now, which is why the cost of an oversized phase handoff was only ever
    * argued about rather than measured.
+   *
+   * `correction` records that MDD itself sent a failed Verify back to an Apply correction pass
+   * (automatic mode, bounded). It is not `reset`: nobody asked for it, and counting it as one would
+   * make a run that corrected itself look like one a person had to restart.
    */
-  event: 'preflight' | 'phase-start' | 'phase-end' | 'approval' | 'report' | 'retry' | 'handover' | 'reset' | 'compaction' | 'knowledge-dispatch';
+  event: 'preflight' | 'phase-start' | 'phase-end' | 'approval' | 'report' | 'retry' | 'handover' | 'reset' | 'correction' | 'compaction' | 'knowledge-dispatch';
   knowledge?: KnowledgeDiagnostics;
   phase?: Phase;
   duration?: number;
@@ -124,7 +128,7 @@ function parseEvent(value: unknown): TelemetryEvent {
   // Model configuration also includes standalone actors; it grants no phase telemetry membership.
   if (input.executor !== undefined && ![...PHASES, 'explore', 'general', 'coordinator'].includes(input.executor as string)) throw new ValidationError('Invalid executor.');
   if (!Number.isSafeInteger(input.timestamp) || (input.timestamp as number) < 0 || (input.timestamp as number) > 8640000000000000 ||
-      !['preflight', 'phase-start', 'phase-end', 'approval', 'report', 'retry', 'handover', 'reset', 'compaction', 'knowledge-dispatch'].includes(input.event as string)) {
+      !['preflight', 'phase-start', 'phase-end', 'approval', 'report', 'retry', 'handover', 'reset', 'correction', 'compaction', 'knowledge-dispatch'].includes(input.event as string)) {
     throw new ValidationError('Invalid telemetry event.');
   }
   const result: TelemetryEvent = { timestamp: input.timestamp as number, event: input.event as TelemetryEvent['event'] };
@@ -182,7 +186,7 @@ type PhaseRollup = {
 export type TelemetryRollup = {
   version: typeof ROLLUP_VERSION;
   since: number; updated: number; events: number;
-  runs: { started: number; completed: number; blocked: number; reset: number; compacted: number };
+  runs: { started: number; completed: number; blocked: number; reset: number; corrected: number; compacted: number };
   routes: { low: number; high: number };
   failures: Record<FailureClass, number>;
   phases: { [Key in Phase]?: PhaseRollup };
@@ -197,7 +201,7 @@ function emptyPhase(): PhaseRollup {
 
 export function emptyRollup(now: number): TelemetryRollup {
   return { version: ROLLUP_VERSION, since: now, updated: now, events: 0,
-    runs: { started: 0, completed: 0, blocked: 0, reset: 0, compacted: 0 }, routes: { low: 0, high: 0 },
+    runs: { started: 0, completed: 0, blocked: 0, reset: 0, corrected: 0, compacted: 0 }, routes: { low: 0, high: 0 },
     failures: Object.fromEntries(FAILURE_CLASSES.map(name => [name, 0])) as Record<FailureClass, number>,
     phases: {} };
 }
@@ -241,6 +245,7 @@ function fold(rollup: TelemetryRollup, event: TelemetryEvent): TelemetryRollup {
   if (event.event === 'report' && event.outcome === 'passed') rollup.runs.completed = add(rollup.runs.completed, 1);
   if (event.event === 'report' && event.outcome === 'blocked') rollup.runs.blocked = add(rollup.runs.blocked, 1);
   if (event.event === 'reset') rollup.runs.reset = add(rollup.runs.reset, 1);
+  if (event.event === 'correction') rollup.runs.corrected = add(rollup.runs.corrected, 1);
   if (event.event === 'compaction') rollup.runs.compacted = add(rollup.runs.compacted, 1);
   // An ended attempt and an ended run are both counted, because they are different facts: one
   // route dying after a rejected result is two things worth knowing. The `retry` and `handover`
