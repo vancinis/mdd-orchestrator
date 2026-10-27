@@ -226,12 +226,28 @@ Reglas clave de la versión 3:
   anterior y de hacer un CAS exacto de propiedad.
 - **Modo:** el modo configurado se congela. Si no hay modo configurado, se pregunta solo el modo.
   En modo interactivo cada operación necesita una aprobación nativa real, de un solo uso.
+- **Entrada mínima:** `entry` solo necesita el contrato. El host vincula solo el mensaje del
+  usuario cuyo texto exacto es `contract.objective`; `messageID` es opcional y, si se pasa, tiene
+  que coincidir. Las listas vacías (`exclusions`, `decisions`, `productQuestions`, dependencias de
+  las asignaciones) y `context.fingerprints` se pueden omitir: MDD usa listas vacías y registra el
+  SHA-256 actual de cada lectura y escritura del alcance (`null` para un archivo nuevo).
+- **Pedido anterior:** si tu último mensaje solo confirma un pedido previo ("sí, confirmo"), el
+  objetivo es el texto exacto de ese pedido. Como el modo automático no pide aprobación por
+  operación, MDD hace **una** pregunta nativa (`Pedido anterior`) antes de admitirlo. Solo
+  `Approve operation` lo admite; `Pause`, `Decline` o descartarla no admiten nada.
+- **Guía de entrada:** el estado que ofrece `entry` trae `entryGuide`, con un contrato mínimo
+  válido y las reglas que más rechazos causan. Un rechazo nombra qué corregir (campo, ruta o clave
+  de configuración); el coordinador lo corrige y reintenta, nunca cambia a `mdd_start`.
+- **Configuración de OpenCode:** los prompts y descripciones de tus agentes no se tratan como rutas.
+  Solo las referencias que pueden llegar a un archivo que se va a escribir (`{file:…}`, `{env:…}`,
+  URLs `file:`, valores con forma de ruta, patrones de `instructions`) frenan la admisión, y el
+  error nombra el archivo, la clave JSON y la escritura, nunca el valor.
 
 Operaciones del protocolo (`{routingVersion: 3, kind, args}`, como máximo 160.000 bytes):
 
 | `kind` | `args` requeridos | Opcionales |
 |---|---|---|
-| `entry` | `contract`, `messageID` | `questions` |
+| `entry` | `contract` | `messageID`, `questions` |
 | `select` (incluye reparación) | `handle`, `actor`, `assignmentID`, `purpose` | `context`, `repairOf` |
 | `prepare` | `handle` | — |
 | `submit` | `handle`, `evidence` | — |
@@ -256,7 +272,7 @@ sequenceDiagram
   participant A as Actor acotado
   U->>O: Pedido de implementación
   O->>M: mdd_status (recuerda ejecuciones previas)
-  O->>M: mdd_adapt entry (contrato y messageID)
+  O->>M: mdd_adapt entry (contrato; el host vincula el mensaje)
   opt Modo sin configurar
     M-->>U: Pregunta nativa, solo el modo
   end
@@ -318,8 +334,9 @@ flowchart TD
   Después MDD pide el modo (si no está configurado) y, en modo interactivo, las aprobaciones de
   siempre.
 - **Mismo turno:** las rondas usan la herramienta nativa `question` en el mismo turno, porque
-  `entry` se vincula al último mensaje nativo del usuario. Si contestás en el chat en vez de en el
-  formulario, el coordinador te pide reenviar el pedido en un solo mensaje, que pasa a ser el objetivo.
+  así `entry` se vincula a tu último mensaje sin preguntas extra. Si contestás en el chat en vez
+  de en el formulario, no hace falta reenviar nada: el pedido original sigue siendo el objetivo y
+  MDD pide una confirmación nativa antes de admitirlo.
 
 | Límite | Comportamiento |
 |---|---|
@@ -1360,6 +1377,7 @@ planificación y entrega, está en [`odd/tasks/`](odd/tasks).
 
 | Fecha | Funcionalidad | Qué agrega | Registro |
 |---|---|---|---|
+| 2026-10-27 | Entrada adaptativa sin bloqueos | La configuración global de OpenCode ya no frena toda admisión v3; `entry` solo necesita el contrato (vínculo del mensaje, listas vacías y huellas los pone el host); un pedido anterior se confirma con una pregunta nativa; `nextAction` y el coordinador llevan a v3 en vez de `mdd_start` | [adaptive-entry-unblock.md](odd/tasks/adaptive-entry-unblock.md) |
 | 2026-10-23 | Sesión de preguntas antes de la admisión | Skill `mdd-grill`: rondas de decisiones antes del `entry` de pedidos grandes, con documentación opcional (glosario/ADR); una ejecución v3 cerrada ya no impide preguntas del coordinador | Commit `97fc1b8` ([docs](docs/opencode-adapter.md#question-session-before-admission)) |
 | 2026-10-16 | Retrabajo Apply/Verify | Verify atribuye la causa, el retrabajo puede volver a Design, Spec o Plan, sondas de reproducción, corrección en una sola pasada con `closure` | [apply-verify-rework.md](odd/tasks/apply-verify-rework.md) |
 | 2026-10-15 | Flujos adaptativos low/medium/high | Protocolo versión 3 (`mdd_adapt`), low guiado por la necesidad, escalado a medium o high, reemplazo de ejecuciones terminadas | [adaptive-low.md](odd/tasks/adaptive-low.md) |

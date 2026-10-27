@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createHash } from 'node:crypto';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import plugin from '../dist/opencode-plugin.js';
 import { defaultSettings } from '../dist/settings.js';
@@ -320,10 +320,70 @@ test('AL05c public: current user identity is distinct from the assistant tool me
   assert.ok(status.handle);
 });
 
-test('AL05c public: a matching old objective cannot replace the current native turn', async t => {
-  const f = await fixture(t), draft = f.contract(), oldID = f.user(draft.objective);
-  f.user('A different current objective.');
-  await assert.rejects(f.send('entry', { contract: draft, messageID: oldID }), /latest|current|native/i);
+test('AL05c public: an earlier objective is never admitted on an unrelated current turn without fresh native confirmation', async t => {
+  for (const [label, admitted] of [['Decline', false], ['Pause', false], ['Approve operation', true]]) {
+    const f = await fixture(t), draft = f.contract(), oldID = f.user(draft.objective);
+    const currentID = f.user('A different current objective.');
+    // A supplied identity is only an assertion: the current turn is not the message carrying the objective.
+    await assert.rejects(f.send('entry', { contract: draft, messageID: currentID }), /current|identity/i);
+    let status = await f.send('entry', { contract: draft });
+    assert.equal(status.state, 'question-ready');
+    assert.equal(status.question.questions[0].header, 'Pedido anterior');
+    assert.match(status.question.questions[0].question, /Replace only the bounded source\./);
+    assert.equal(f.store.read(f.sessionID), undefined, 'nothing is admitted before the native answer');
+    status = await f.answer(status, [[label]]);
+    if (!admitted) {
+      assert.equal(f.store.read(f.sessionID), undefined, `${label} admits nothing`);
+      continue;
+    }
+    assert.equal(status.state, 'await-selection');
+    assert.equal(f.store.read(f.sessionID).userMessageID, oldID, 'the run binds the message that carries the objective');
+    assert.deepEqual(f.store.read(f.sessionID).nativePolicy.questions.map(item => item.adaptive.purpose), ['operation']);
+  }
+});
+
+test('regression: entry needs only the contract; the host binds the current user turn and fills observable defaults', async t => {
+  const f = await fixture(t), full = f.contract(), userID = f.user(full.objective);
+  const { exclusions, decisions, productQuestions, ...draft } = structuredClone(full);
+  delete draft.context.fingerprints;
+  for (const assignment of draft.assignments) { delete assignment.decisions; delete assignment.dependsOn; delete assignment.obligations.checks; }
+  const status = await f.send('entry', { contract: draft });
+  assert.equal(status.state, 'await-selection', status.reason);
+  assert.equal(status.question, undefined, 'the current turn needs no extra confirmation');
+  const saved = f.store.read(f.sessionID);
+  assert.equal(saved.userMessageID, userID);
+  assert.deepEqual(saved.data.contract.context.fingerprints, full.context.fingerprints, 'the host recorded the same bytes the coordinator would have');
+  assert.deepEqual([saved.data.contract.exclusions, saved.data.contract.decisions, saved.data.contract.productQuestions], [[], [], []]);
+  assert.deepEqual(saved.data.contract.assignments[0].obligations.checks, []);
+});
+
+test('regression: a fresh status carries the entry guide and a refused entry says what to correct', async t => {
+  const f = await fixture(t), draft = f.contract(); f.user(draft.objective);
+  const status = await f.call('mdd_status');
+  assert.ok(status.entryGuide, 'entry is offered with its compact guide');
+  assert.match(status.entryGuide.messageID, /Optional/);
+  assert.equal(status.entryGuide.example.contractVersion, 1);
+  assert.doesNotMatch(status.nextAction.why, /call mdd_start once/);
+  await assert.rejects(f.send('entry', {}), /requires contract/);
+  const outside = structuredClone(draft); delete outside.context.fingerprints;
+  outside.scope = { complete: true, reads: ['own.txt'], writes: ['own.txt', 'package.json'] };
+  outside.assignments[0].scope = structuredClone(outside.scope);
+  await assert.rejects(f.send('entry', { contract: outside }), /Apply scope has unproven paths or implicit runtime\/instruction effects: the write package\.json/);
+});
+
+test('regression: a real global OpenCode configuration with multi-line prompts admits adaptive work', async t => {
+  const f = await fixture(t), draft = f.contract();
+  const dir = join(homedir(), '.config', 'opencode');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(join(dir, 'opencode.json'), JSON.stringify({ agent: {
+    'gentle-orchestrator': { prompt: '# Orchestrator\n\nWork inline by default.\nDelegate only for a named reason.' },
+    gentleman: { mode: 'primary', prompt: '{file:./AGENTS.md}' } }, plugins: ['opencode-gemini-auth@latest'] }));
+  // The explicit identity isolates this regression to the configuration guard alone.
+  const userID = f.user(draft.objective);
+  const status = await f.send('entry', { contract: draft, messageID: userID });
+  assert.equal(status.state, 'await-selection', status.reason);
+  const selected = await f.select(status);
+  assert.equal(selected.task.agent, 'mdd-apply');
 });
 
 test('AL05c public: coordinator isolation and authority-bearing payload fields fail closed', async t => {
@@ -699,16 +759,17 @@ test('grill: the documentation option admits new glossary and ADR files and Appl
   assert.equal(fs.readFileSync(join(f.root, 'own.txt'), 'utf8'), 'before', 'the documentation assignment touched only its own scope');
 });
 
-test('grill: a chat reply during the session refuses the old objective until the request is resent', async t => {
+test('grill: a chat reply during the session keeps the request; it is confirmed natively instead of resent', async t => {
   const f = await fixture(t), draft = grilledDraft(f), first = f.user(draft.objective);
   await ownQuestion(f, offer);
   f.user('Q1 sí, Q2 la opción B.');
-  await assert.rejects(f.send('entry', { contract: draft, messageID: first }), /latest|current|native/i);
-  assert.equal(f.store.read(f.sessionID), undefined, 'a refused entry leaves no run behind');
-  const resent = f.user(draft.objective);
-  await ownQuestion(f, confirm);
-  const status = await f.send('entry', { contract: draft, messageID: resent });
+  let status = await f.send('entry', { contract: draft, messageID: first });
+  assert.equal(status.state, 'question-ready');
+  assert.equal(status.question.questions[0].header, 'Pedido anterior');
+  assert.equal(f.store.read(f.sessionID), undefined, 'nothing is admitted before the native confirmation');
+  status = await f.answer(status, [['Approve operation']]);
   assert.equal(status.state, 'await-selection'); assert.equal(status.route, 'high');
+  assert.equal(f.store.read(f.sessionID).userMessageID, first);
 });
 
 test('grill: a session cannot run over a pending MDD question, and the refusal leaves it answerable', async t => {

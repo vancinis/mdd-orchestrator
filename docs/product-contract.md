@@ -101,7 +101,7 @@ not the full contract body. Public startup uses version 3; fixed version-3 entry
 
 | Boundary | Internal guarantee |
 |---|---|
-| Admission | Intake proves genuine native objective text/message; runner independently rechecks it, exact coordinator/workspace, idle ownership and current local source fingerprints. Public entry binds the actual host assistant caller to its latest native user lineage and requires the payload messageID to match that user. The legacy internal helper remains automatic-only; the native policy bridge supports configured interactive mode. |
+| Admission | Intake proves genuine native objective text/message; runner independently rechecks it, exact coordinator/workspace, idle ownership and current local source fingerprints. Public entry binds the actual host assistant caller to its current native user turn and binds the user message whose exact text is the objective: the current turn, or an earlier message of the conversation after one fresh native confirmation in that turn. A payload messageID is optional and, when supplied, must match that message. The legacy internal helper remains automatic-only and still requires the exact identity; the native policy bridge supports configured interactive mode. |
 | Compact contract | Version 1, stable globally unique acceptance/decision/assignment/evidence IDs, exclusions, complete exact scopes, dependency-ordered assignments and source or real command obligations are validated and copied before native awaits. Contract-authored links do not claim Plan provenance. |
 | Selection | Unresolved product ambiguity pauses all actors. Technical uncertainty permits a brief scoped Explore only. Apply requires low impact independently of complexity, understood bounded dependencies, current fingerprints, completed prerequisites and real scoped-editor capability. |
 | Native execution | Exact issued handles are consumed once, with one actor/writer and existing native result/liveness inspection. Apply edits only through the existing single-child WorkerFence and `mdd_worker_edit`; generic editors, shell and out-of-scope writes remain denied. Unsafe bootstrap/config footprints and unsupported hosts have no serial fallback. |
@@ -144,7 +144,7 @@ This grants no version-3 execution through the fixed CLI/Workflow. Internal obje
 
 | Operation | Required `args` keys | Optional keys |
 |---|---|---|
-| `entry` | `contract`, `messageID` | `questions` |
+| `entry` | `contract` | `messageID`, `questions` |
 | `select` (including explicit repair) | `handle`, `actor`, `assignmentID`, `purpose` | `context`, `repairOf` |
 | `prepare` | `handle` | none |
 | `submit` | `handle`, `evidence` | none |

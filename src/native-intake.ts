@@ -29,9 +29,20 @@ import { AdaptiveNative } from './adaptive-native.js';
 import { AdaptiveProtocol } from './adaptive-protocol.js';
 import type { SessionPreferences, SessionPreferenceStore } from './session-preferences.js';
 
+/**
+ * Which user text may prove a request: the latest message; any message in this conversation; the
+ * latest message answered by the current native coordinator turn; or, for adaptive entry, any
+ * message in this conversation answered from the current native coordinator turn.
+ */
+export type IntakeScope = 'latest' | 'objective' | 'native-current' | 'native-current-objective';
 export type IntakeInspect = {
   setupPending?(runtime: Runtime, requirements?: string, messageID?: string): Promise<{ requirements: string; userMessageID: string } | undefined>;
-  intake(runtime: Runtime, requirements: string, messageID: string, scope?: 'latest' | 'objective' | 'native-current'): Promise<void | string>;
+  intake(runtime: Runtime, requirements: string, messageID: string, scope?: IntakeScope): Promise<void | string>;
+  /**
+   * The user turn the current native assistant caller answers. Adaptive entry compares it with the
+   * message that carries the objective: an earlier request needs fresh native confirmation.
+   */
+  currentUser?(runtime: Runtime, callerMessageID: string): Promise<string>;
   question(runtime: Runtime, call: TaskCall, args: QuestionEnvelope): Promise<void>;
   /** Read-only identity check for an ordinary question; never supplies consent. */
   questionInput?(call: TaskCall): Promise<unknown>;

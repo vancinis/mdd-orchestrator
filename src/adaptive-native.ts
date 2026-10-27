@@ -74,7 +74,20 @@ export type Entry = {
   attempt?: object;
   userMessageID?: string;
   callerMessageID?: string;
+  /** The objective is an earlier user message than the turn being answered; it needs fresh confirmation. */
+  earlierObjective?: boolean;
 };
+
+/**
+ * Fresh native confirmation for an earlier request. The labels are the existing operation consent
+ * tokens; the question shows the exact objective the user wrote, in Spanish.
+ */
+function earlierObjectiveEnvelope(objective: string): QuestionEnvelope {
+  return { questions: [{ header: 'Pedido anterior',
+    question: `Tu último mensaje no repite el pedido. ¿Autorizás implementar este pedido anterior, tal como lo escribiste?\n«${objective}»`,
+    multiple: false, options: [{ label: 'Approve operation', description: 'Autorizar la implementación de ese pedido con el contrato presentado.' },
+      { label: 'Pause', description: 'Conservar el borrador sin autorizar nada.' }, { label: 'Decline', description: 'No implementar ese pedido.' }] }] };
+}
 
 /** Native policy bridge. It selects guarded runner operations; it never executes commands. */
 export class AdaptiveNative {
@@ -159,12 +172,17 @@ export class AdaptiveNative {
       if (operation.kind === 'entry') {
         const input = objectWithKeys(operation.args, 'native adaptive entry', ['contract', 'messageID', 'questions']);
         const draft = adaptiveContract(input.contract); entry.draft = draft;
-        const userID = typeof input.messageID === 'string' ? await this.inspect.intake(runtime, draft.objective,
-          callerMessageID ?? input.messageID, callerMessageID ? 'native-current' : 'objective') : undefined;
-        if (callerMessageID && userID !== input.messageID) throw new Error('Entry must bind the current native user turn, not a caller-chosen old identity.');
+        // The host binds the user message itself from the actual caller; a supplied messageID is
+        // only an assertion it checks. Without a host caller the exact identity stays required.
+        const userID = callerMessageID || typeof input.messageID === 'string' ? await this.inspect.intake(runtime, draft.objective,
+          callerMessageID ?? String(input.messageID), callerMessageID ? 'native-current-objective' : 'objective') : undefined;
+        if (callerMessageID && input.messageID !== undefined && userID !== input.messageID)
+          throw new Error('Entry messageID must be the user message whose exact text is the objective (normally the current native user turn); a caller-chosen old identity is refused. Omit messageID and the host binds it.');
         if (typeof userID !== 'string')
           throw new Error('Native entry requires its exact original user authorization.');
         entry.userMessageID = userID;
+        if (input.messageID === undefined) entry.operation = nativeOperation({ kind: 'entry', args: { ...operation.args, messageID: userID } });
+        if (callerMessageID && this.inspect.currentUser) entry.earlierObjective = await this.inspect.currentUser(runtime, callerMessageID) !== userID;
         if (held?.version === 2 && held.adaptive?.purpose === 'product' && held.adaptive.operation.kind === 'entry' &&
             previous?.state !== 'await-contract' && held.userMessageID === userID)
           throw new Error('The original pre-admission draft is not restored as authority; an explicit revised native user request is required.');
@@ -213,6 +231,9 @@ export class AdaptiveNative {
       question: `Authorize only this exact adaptive operation? Native tool permissions still apply.\n${JSON.stringify(entry.operation)}`,
       multiple: false, options: [{ label: 'Approve operation', description: 'Authorize only the operation shown above.' },
         { label: 'Pause', description: 'Keep the work without authorizing this operation.' }, { label: 'Decline', description: 'Do not authorize this operation.' }] }] });
+    // Automatic mode skips operation approval, so an earlier request is never admitted on the
+    // strength of an unrelated latest turn: the user confirms it natively, once, in this turn.
+    if (entry.operation.kind === 'entry' && entry.earlierObjective && entry.draft) return this.#ask(entry, 'operation', earlierObjectiveEnvelope(entry.draft.objective));
     return this.#execute(entry);
   }
   #ask(entry: Entry, purpose: AdaptiveQuestionBinding['purpose'], envelope: QuestionEnvelope): unknown {

@@ -577,12 +577,35 @@ cross-project access or configuration edits.
 
 Fresh implementation, including precise edits, uses coordinator-only `mdd_adapt({payload:string})`.
 Read `mdd_status`, then supply `{routingVersion:3,kind,args}` as bounded JSON. Follow the emitted
-operation descriptors and paged input/detail references rather than guessing nested schemas.
-Entry and transfer `messageID` identify the current native **user**, while the SDK tool context's
-`messageID` identifies the **assistant**. The adapter supplies that host caller separately; native
-inspection proves its coordinator/workspace/current-user lineage, and the runner independently
-rechecks the objective and current source bytes before admission. Raw IDs, preferences, approval,
-stopped claims and caller-supplied runtime never establish authority.
+operation descriptors and paged input/detail references rather than guessing nested schemas. A
+status that offers `entry` also carries `entryGuide`: the call shape, a minimal valid low contract
+and the rules that refuse most drafts, so the first entry does not need every definition page.
+An idle reply without that projection (for example after `mdd_reset` with `scope: run`) points
+`nextAction` at the exact version-3 status call, never at `mdd_start`.
+
+Entry needs only `contract`. The host binds the native **user** message whose exact authored text
+is `contract.objective`; the SDK tool context's `messageID` identifies the **assistant** caller,
+which the adapter supplies separately. Native inspection proves the caller's coordinator,
+workspace and current-turn lineage, and the runner rechecks the objective and current source bytes
+before admission. An entry `messageID` is optional and is only an assertion: when supplied it must
+equal that bound user message. Transfer and transfer-recovery `messageID` still identify the
+current native user request. Raw IDs, preferences, approval, stopped claims and caller-supplied
+runtime never establish authority.
+
+The objective normally is the current turn. When the latest message only confirms an earlier
+request ("sí, confirmo las recomendaciones"), the coordinator uses that request's exact text: it is
+still the user's own words, and the fixed route has always accepted it. Because automatic mode
+asks no operation approval, admitting an earlier request needs one fresh native question in the
+current turn (`Pedido anterior`, the exact objective quoted). Only `Approve operation` admits it;
+`Pause`, `Decline` or a dismissal admit nothing. Interactive mode already asks its operation
+approval, which shows the objective. Identical texts in several messages are refused rather than
+chosen between, and a request consumed by preserved run history is still refused.
+
+The adapter fills only what is empty by definition or observable by the host: omitted
+`exclusions`, `decisions`, `productQuestions`, assignment `decisions`/`dependsOn` and obligation
+lists become empty, and an omitted `context.fingerprints` becomes the current SHA-256 bytes of
+every declared read/write (`null` for a new file), under the same alias and credential exclusions
+as every later freshness check. Supplied values are kept and validated unchanged.
 
 Unknown context may use idle read-only contextual Explore before immutable admission. Known,
 bounded low can dispatch Apply only; Explore/Risk/Plan/Verify are selected by need, not required.
@@ -683,8 +706,9 @@ reverse, surprising and a real trade-off become one more requirement and assignm
 writes nothing.
 
 The rounds use the native `question` tool in the same turn, because entry binds the latest native
-user message. If the user answers in chat instead, the coordinator asks them to resend the request
-in one message, which then becomes the objective.
+user message without an extra question. If the user answers in chat instead, the original request
+stays the objective and is never resent: entry binds it as an earlier request and MDD asks its one
+native confirmation before admission.
 
 | Limit | Behaviour |
 |---|---|

@@ -1,6 +1,7 @@
 import { lstatSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { homedir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { objectWithKeys } from './validation.js';
 import type { Deliverable } from './phase-evidence.js';
 
@@ -161,60 +162,176 @@ export function safeApplyWrite(path: string): boolean {
     !/\.(?:json[cl]?|ya?ml|toml|ini|lock|env)$/i.test(path);
 }
 
-/** Unknown bootstrap references/effects are serial, even when declared filenames are disjoint. */
-function safeApplyBootstrap(root: string, writes: string[]): boolean {
-  try {
-    for (const name of ['plugins', 'plugin']) {
-      const path = join(root, '.opencode', name);
-      if (lstatSync(path, { throwIfNoEntry: false })) return false;
-    }
-    const files = new Set<string>();
-    const add = (dir: string) => { for (const name of ['opencode.json', 'opencode.jsonc']) files.add(join(dir, name)); };
-    add(join(homedir(), '.config', 'opencode'));
-    if (process.env.XDG_CONFIG_HOME) add(join(process.env.XDG_CONFIG_HOME, 'opencode'));
-    if (process.env.OPENCODE_CONFIG_DIR) add(resolve(process.env.OPENCODE_CONFIG_DIR));
-    if (process.env.OPENCODE_CONFIG) {
-      if (!isAbsolute(process.env.OPENCODE_CONFIG)) return false;
-      files.add(process.env.OPENCODE_CONFIG);
-    }
-    for (let dir = resolve(root); ; dir = dirname(dir)) {
-      add(dir); add(join(dir, '.opencode'));
-      if (dirname(dir) === dir) break;
-    }
-    const known = (value: unknown, base: string): boolean => {
-      if (typeof value === 'string') {
-        if (/\{(?:file|env):|^file:|[\x00-\x1f]/.test(value)) return false;
-        if (!value || /^[*?]+$/.test(value)) return true; // Generic policy values, not local path declarations.
-        // Treat local path/glob-like config values conservatively; bootstrap may import or read them.
-        const candidate = resolve(base, value.replace(/\\/g, '/').split(/[*?]/)[0]!).replace(/\\/g, '/');
-        return !writes.some(path => overlap(path.replace(/\\/g, '/'), candidate) ||
-          value.replace(/\\/g, '/').toLowerCase().includes(relative(root, path).replace(/\\/g, '/').toLowerCase()));
-      }
-      if (Array.isArray(value)) return value.every(item => known(item, base));
-      if (value && typeof value === 'object') return Object.entries(value).every(([key, item]) =>
-        key !== 'instructions' && known(item, base));
-      return true;
-    };
-    if (process.env.OPENCODE_CONFIG_CONTENT && !known(JSON.parse(process.env.OPENCODE_CONFIG_CONTENT), root)) return false;
-    for (const file of files) {
-      const stat = lstatSync(file, { throwIfNoEntry: false });
-      if (!stat) continue;
-      if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.size > 512 * 1024 ||
-          writes.some(path => overlap(path.replace(/\\/g, '/'), resolve(file).replace(/\\/g, '/')))) return false;
-      // Opaque JSONC/substitution/custom bootstrap falls back rather than inventing implicit reads.
-      if (!known(JSON.parse(readFileSync(file, 'utf8')), dirname(file))) return false;
-    }
-    return true;
-  } catch { return false; }
+/** A configuration file is inspected whole; past this size it is reported rather than parsed. */
+const CONFIG_INSPECTION_BYTES = 4 * 1024 * 1024;
+const slashes = (path: string) => path.replace(/\\/g, '/');
+const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** Glob as OpenCode instruction patterns use it: `**` crosses directories, `*` and `?` do not. */
+function globMatcher(pattern: string): RegExp {
+  let source = '';
+  for (let index = 0; index < pattern.length; index++) {
+    const char = pattern[index]!;
+    if (char === '*' && pattern[index + 1] === '*') {
+      index++;
+      if (pattern[index + 1] === '/') { index++; source += '(?:.*/)?'; } else source += '.*';
+    } else if (char === '*') source += '[^/]*';
+    else if (char === '?') source += '[^/]';
+    else if (char === '{') {
+      const end = pattern.indexOf('}', index);
+      if (end < 0) { source += '\\{'; continue; }
+      source += `(?:${pattern.slice(index + 1, end).split(',').map(escapeRegExp).join('|')})`;
+      index = end;
+    } else source += escapeRegExp(char);
+  }
+  return new RegExp(`^${source}$`, 'i');
 }
+
+/**
+ * Why OpenCode's own configuration could read or run a declared write, or undefined when it
+ * provably cannot. Agent prompts, descriptions and other prose are not file references: only
+ * `{file:…}` substitutions, `{env:…}` values, `file:` URLs, path-like values and `instructions`
+ * patterns are, and each is resolved and compared with the writes. Reasons name the file, the
+ * JSON location and the write, never a configuration value, so a token cannot leak through them.
+ */
+function bootstrapIssue(root: string, writes: string[]): string | undefined {
+  for (const name of ['plugins', 'plugin']) {
+    if (lstatSync(join(root, '.opencode', name), { throwIfNoEntry: false }))
+      return `project plugins in .opencode/${name} can read or run any file, so no write footprint is provable there`;
+  }
+  const home = homedir();
+  const label = (file: string) => { const relativeHome = relative(home, file); return relativeHome && !relativeHome.startsWith('..') && !isAbsolute(relativeHome) ? `~/${slashes(relativeHome)}` : slashes(file); };
+  const targets = writes.map(path => ({ absolute: slashes(path).toLowerCase(), name: slashes(relative(root, path)) }));
+  const hit = (candidate: string) => targets.find(target => overlap(target.absolute, slashes(candidate).toLowerCase()));
+  const named = (value: string) => targets.find(target => new RegExp(`(?:^|[/\\s"'(=:])${escapeRegExp(target.name.toLowerCase())}(?:$|[\\s"'),;])`)
+    .test(slashes(value).toLowerCase()));
+  const local = (reference: string, base: string) => resolve(base, reference.startsWith('~/') ? join(home, reference.slice(2)) : reference);
+  const text = (value: string, base: string, at: string, substitutions = true): string | undefined => {
+    if (substitutions) {
+      for (const match of value.matchAll(/\{file:([^}]*)\}/g)) {
+        const reference = match[1]!.trim();
+        if (!reference) return `${at} has an empty {file:} substitution`;
+        const target = hit(local(reference, base));
+        if (target) return `${at} reads the write ${target.name} through a {file:} substitution`;
+      }
+      // An environment value is substituted once, as text; it is not expanded again.
+      for (const match of value.matchAll(/\{env:([^}]*)\}/g)) {
+        const issue = text(process.env[match[1]!.trim()] ?? '', base, `${at} {env:${match[1]!.trim()}}`, false);
+        if (issue) return issue;
+      }
+    }
+    const rest = (substitutions ? value.replace(/\{(?:file|env):[^}]*\}/g, '') : value).trim();
+    if (!rest || /^[*?]+$/.test(rest)) return undefined;
+    if (/[\x00-\x1f]/.test(rest)) {
+      // Prose (prompts, descriptions, multi-line text) is not a path declaration. A multi-line value
+      // of something the host executes (an MCP, formatter or LSP server) still runs what it names.
+      const target = /\.(?:mcp|formatter|lsp)\./i.test(at) ? named(rest) : undefined;
+      return target ? `${at} runs a command that names the write ${target.name}` : undefined;
+    }
+    if (/^file:/i.test(rest)) {
+      let path: string;
+      try { path = rest.startsWith('file://') ? fileURLToPath(rest) : local(rest.slice(5), base); }
+      catch { return `${at} is a file: URL that cannot be resolved`; }
+      const target = hit(path);
+      return target ? `${at} loads the write ${target.name} as a file: URL` : undefined;
+    }
+    const target = hit(local(slashes(rest).split(/[*?]/)[0]!, base)) ?? named(rest);
+    return target ? `${at} names the write ${target.name}` : undefined;
+  };
+  const instructions = (value: unknown, base: string, at: string): string | undefined => {
+    const patterns = Array.isArray(value) ? value : [value];
+    for (const [index, pattern] of patterns.entries()) {
+      const where = Array.isArray(value) ? `${at}[${index}]` : at;
+      if (typeof pattern !== 'string') return `${where} is not an instruction path`;
+      if (/^https?:\/\//i.test(pattern.trim())) continue;
+      // Substitutions are checked as anywhere else; the pattern itself is matched, not prefixed.
+      if (/\{(?:file|env):/.test(pattern)) {
+        const issue = text(pattern.match(/\{(?:file|env):[^}]*\}/g)!.join(''), base, where);
+        if (issue) return issue;
+      }
+      const plain = pattern.replace(/\{(?:file|env):[^}]*\}/g, '').trim();
+      if (!plain) continue;
+      for (const scopeBase of new Set([base, root])) {
+        const matcher = globMatcher(slashes(local(plain, scopeBase)));
+        const target = targets.find(target => matcher.test(target.absolute));
+        if (target) return `${where} loads the write ${target.name} as agent instructions`;
+      }
+    }
+    return undefined;
+  };
+  const visit = (value: unknown, base: string, at: string): string | undefined => {
+    if (typeof value === 'string') return text(value, base, at);
+    if (Array.isArray(value)) {
+      for (const [index, item] of value.entries()) { const issue = visit(item, base, `${at}[${index}]`); if (issue) return issue; }
+      return undefined;
+    }
+    if (value && typeof value === 'object') for (const [key, item] of Object.entries(value)) {
+      const issue = key === 'instructions' ? instructions(item, base, `${at}.${key}`) : visit(item, base, `${at}.${key}`);
+      if (issue) return issue;
+    }
+    return undefined;
+  };
+  const files = new Set<string>();
+  const add = (dir: string) => { for (const name of ['opencode.json', 'opencode.jsonc']) files.add(join(dir, name)); };
+  add(join(home, '.config', 'opencode'));
+  if (process.env.XDG_CONFIG_HOME) add(join(process.env.XDG_CONFIG_HOME, 'opencode'));
+  if (process.env.OPENCODE_CONFIG_DIR) add(resolve(process.env.OPENCODE_CONFIG_DIR));
+  if (process.env.OPENCODE_CONFIG) {
+    if (!isAbsolute(process.env.OPENCODE_CONFIG)) return 'OPENCODE_CONFIG is a relative path, so the configuration it loads cannot be located';
+    files.add(process.env.OPENCODE_CONFIG);
+  }
+  for (let dir = resolve(root); ; dir = dirname(dir)) {
+    add(dir); add(join(dir, '.opencode'));
+    if (dirname(dir) === dir) break;
+  }
+  if (process.env.OPENCODE_CONFIG_CONTENT) {
+    let parsed: unknown;
+    try { parsed = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT); }
+    catch { return 'OPENCODE_CONFIG_CONTENT is not plain JSON, so its file references cannot be inspected'; }
+    const issue = visit(parsed, root, '$');
+    if (issue) return `OPENCODE_CONFIG_CONTENT: ${issue}`;
+  }
+  for (const file of files) {
+    let stat;
+    try { stat = lstatSync(file, { throwIfNoEntry: false }); } catch { return `${label(file)} cannot be inspected`; }
+    if (!stat) continue;
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) return `${label(file)} is a link or not a plain regular file`;
+    if (stat.size > CONFIG_INSPECTION_BYTES) return `${label(file)} exceeds the ${CONFIG_INSPECTION_BYTES / 1024 / 1024} MiB configuration inspection budget`;
+    const own = hit(resolve(file));
+    if (own) return `the write ${own.name} is the OpenCode configuration ${label(file)}`;
+    let parsed: unknown;
+    // JSONC comments, trailing commas and unreadable bytes cannot be inspected: report, never guess.
+    try { parsed = JSON.parse(readFileSync(file, 'utf8')); }
+    catch { return `${label(file)} is not plain JSON (comments or trailing commas), so its file references cannot be inspected`; }
+    const issue = visit(parsed, dirname(file), '$');
+    if (issue) return `${label(file)}: ${issue}`;
+  }
+  return undefined;
+}
+
+/**
+ * Why a declared Apply footprint cannot be proven, or undefined when it can. The reason is
+ * actionable: it names the path, write or configuration location that prevents the proof.
+ */
+export function applyScopeIssue(root: string, scope: ParallelScope | undefined): string | undefined {
+  const complete = completeScope(scope);
+  if (!complete) return 'the scope is not a complete exact read/write footprint, or two of its paths overlap or differ only by case';
+  if (!complete.writes.length) return 'the scope declares no writes';
+  if (realpathSync(root) !== resolve(root)) return 'the workspace root is reached through a link or alias';
+  const unsafe = complete.writes.find(path => !safeApplyWrite(path));
+  if (unsafe !== undefined) return `the write ${unsafe} is a hidden, dependency, lock, configuration or agent-instruction file that the runtime reads implicitly`;
+  const aliased = [...complete.reads, ...complete.writes].find(path => !exactFiles(root, { complete: true, reads: [path], writes: [] }));
+  if (aliased !== undefined) return `the path ${aliased} is a link, an alias, a case variant or not a regular file`;
+  return bootstrapIssue(root, complete.writes.map(path => resolve(root, path)));
+}
+
+export const APPLY_SCOPE_UNPROVEN = 'Apply scope has unproven paths or implicit runtime/instruction effects';
 
 /** Used only by production scoped editing; legacy synthetic hosts keep their existing semantics. */
 export function applyScopeFiles(root: string, scope: ParallelScope | undefined): { reads: string[]; writes: string[] } {
-  const complete = completeScope(scope);
-  if (!complete || !complete.writes.length || realpathSync(root) !== resolve(root) ||
-      !complete.writes.every(safeApplyWrite) || !exactFiles(root, complete) ||
-      !safeApplyBootstrap(root, complete.writes.map(path => resolve(root, path))))
-    throw new Error('Apply scope has unproven paths or implicit runtime/instruction effects; use serial execution.');
+  const issue = applyScopeIssue(root, scope);
+  if (issue !== undefined) throw new Error(`${APPLY_SCOPE_UNPROVEN}: ${issue}. Correct the declared scope or that reference; a fixed run falls back to serial execution.`);
+  const complete = completeScope(scope)!;
   return { reads: [...new Set([...complete.reads, ...complete.writes])].map(path => resolve(root, path)),
     writes: complete.writes.map(path => resolve(root, path)) };
 }

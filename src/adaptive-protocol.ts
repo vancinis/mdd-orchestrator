@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import { AdaptiveLow, adaptiveContract, ADAPTIVE_EVIDENCE_FIELDS, statusText } from './adaptive-low.js';
+import { AdaptiveLow, adaptiveContract, ADAPTIVE_EVIDENCE_FIELDS, sourceFingerprints, statusText } from './adaptive-low.js';
+import { parseParallelScope } from './worker-batch.js';
 import { nativeOperation } from './adaptive-native.js';
 import type { AdaptiveNative, NativeOperation } from './adaptive-native.js';
 import type { PhaseRunner, Runtime } from './phase-runner.js';
@@ -14,7 +15,8 @@ import { adaptiveTransferRequest } from './adaptive-transfer.js';
 const REQUEST_BYTES = 160000;
 const PAGE_CHARS = 6000;
 const specs = {
-  entry: { required: ['contract', 'messageID'], optional: ['questions'] },
+  // The host binds the user message from the actual caller; a supplied messageID is a checked assertion.
+  entry: { required: ['contract'], optional: ['messageID', 'questions'] },
   select: { required: ['handle', 'actor', 'assignmentID', 'purpose'], optional: ['context', 'repairOf'] },
   prepare: { required: ['handle'], optional: [] },
   submit: { required: ['handle', 'evidence'], optional: [] },
@@ -33,6 +35,73 @@ const objectFields = new Set(['contract', 'context', 'assessment', 'evidence']);
 const arrayFields = new Set(['questions', 'limits']);
 /** Prose arguments: no length limit of their own, only the request's. Every other string is an identity. */
 const PROSE_FIELDS = new Set(['purpose', 'rationale']);
+
+const plain = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value) &&
+  [Object.prototype, null].includes(Object.getPrototypeOf(value));
+
+/**
+ * Public entry conveniences, applied before validation. The host fills only what is empty by
+ * definition or what it can observe itself: omitted optional lists become empty, and an omitted
+ * context.fingerprints becomes the current SHA-256 bytes of the declared footprint (null for a new
+ * file). Everything the coordinator supplied is kept as written and validated unchanged; nothing
+ * here adds scope, acceptance, identity or consent.
+ */
+export function completeAdaptiveEntry(value: unknown, root: string): unknown {
+  if (typeof value !== 'string' || Buffer.byteLength(value) > REQUEST_BYTES) return value;
+  let parsed: unknown;
+  try { parsed = JSON.parse(value); } catch { return value; }
+  if (!plain(parsed) || parsed.kind !== 'entry' || !plain(parsed.args) || !plain(parsed.args.contract)) return value;
+  const contract: Record<string, unknown> = { ...parsed.args.contract };
+  for (const key of ['exclusions', 'decisions', 'productQuestions']) if (contract[key] === undefined) contract[key] = [];
+  if (Array.isArray(contract.assignments)) contract.assignments = contract.assignments.map((item: unknown) => {
+    if (!plain(item)) return item;
+    const assignment: Record<string, unknown> = { ...item };
+    for (const key of ['decisions', 'dependsOn']) if (assignment[key] === undefined) assignment[key] = [];
+    if (plain(assignment.obligations)) {
+      const obligations: Record<string, unknown> = { ...assignment.obligations };
+      for (const key of ['source', 'checks']) if (obligations[key] === undefined) obligations[key] = [];
+      assignment.obligations = obligations;
+    }
+    return assignment;
+  });
+  if (plain(contract.context) && contract.context.fingerprints === undefined) {
+    const footprint = parseParallelScope(contract.scope);
+    if (footprint.complete === true && footprint.reads && footprint.writes)
+      contract.context = { ...contract.context, fingerprints: sourceFingerprints(root, { reads: footprint.reads, writes: footprint.writes }) };
+  }
+  return JSON.stringify({ ...parsed, args: { ...parsed.args, contract } });
+}
+
+/**
+ * The shortest correct way into version 3, carried in the projection that offers entry so a
+ * coordinator does not have to page through every definition first. Documentation only: the
+ * validators named in `inputRef` remain the authority, and a refusal names what to correct.
+ */
+export const ENTRY_GUIDE = Object.freeze({
+  call: 'mdd_adapt({payload: JSON.stringify({routingVersion:3,kind:"entry",args:{contract}})})',
+  objective: 'contract.objective is the exact text of the user request in this conversation, never a summary. Prefer the current turn; an earlier request (for example after "si, confirmo") is confirmed once with a native question.',
+  messageID: 'Optional: the host binds the user message that carries the objective. Supply it only to assert that exact ID.',
+  defaults: 'exclusions, decisions, productQuestions, assignment decisions/dependsOn and context.fingerprints may be omitted: MDD uses empty lists and records the current SHA-256 bytes of every scope read/write (null for a new file).',
+  example: {
+    contractVersion: 1, objective: '<exact text of the user request>',
+    acceptance: { goal: '<observable outcome>', requirements: [{ id: 'R1', description: '<requirement>',
+      scenarios: [{ id: 'S1', given: '<starting state>', when: '<action>', then: '<observable result>' }] }] },
+    scope: { complete: true, reads: ['src/existing.ts'], writes: ['src/existing.ts', 'src/new-file.ts'] },
+    context: { technical: 'understood', dependencies: 'bounded', reason: '<what you inspected and why it is enough>' },
+    assessment: { assessmentVersion: 1, complexity: 'low', impact: 'low' },
+    assignments: [{ id: 'A1', description: '<the change>', path: 'src/existing.ts', scenarios: ['S1'],
+      scope: { complete: true, reads: ['src/existing.ts'], writes: ['src/existing.ts', 'src/new-file.ts'] },
+      obligations: { source: [{ id: 'E1', description: '<what proves it in the source>', paths: ['src/existing.ts'] }],
+        checks: [{ id: 'C1', command: '<exact check command>', requirement: 'required' }] } }],
+  },
+  rules: [
+    'Paths are exact root-relative files with forward slashes: no directories, globs or aliases. Writes cannot be hidden, dependency, lock, configuration or agent-instruction files.',
+    'Every scenario is covered by at least one assignment; an assignment writes its own path and stays inside the contract scope.',
+    'IDs are unique across requirements, scenarios, decisions, assignments and evidence obligations.',
+    'Each assignment needs source or check obligations. complexity or impact medium/high freezes the medium/high stages.',
+    'Ask productQuestions only for decisions the repository cannot answer. Read inputRef for complete definitions.',
+  ],
+});
 
 /** Wire identity and consent are deliberately absent. Native host runtime is a separate argument. */
 export function decodeAdaptiveRequest(value: unknown): Request {
@@ -284,6 +353,7 @@ export class AdaptiveProtocol {
       projection.next ??= { internal: operations[0]?.kind, inputContract: 'operations', automatic: false };
     } else if (state === 'not-started' || publicAdapter && ['completed', 'closed-unverified'].includes(state)) {
       operation('entry'); operation('transfer', { runtime: 'target native parent; sourceSessionID/runID must identify held source authority' });
+      if (publicAdapter) projection.entryGuide = ENTRY_GUIDE;
     }
     else if (['await-result', 'recovery-blocked'].includes(state)) {
       operation('recover', { binding: { runID: record?.runID, callID: record?.attempt?.callID },
@@ -316,7 +386,10 @@ export class AdaptiveProtocol {
         checks: data.report?.checkResults.filter(item => !['passed', 'replaced', 'not-applicable'].includes(item.disposition))
           .map(({ checkID, disposition }) => ({ checkID, disposition })) ?? [] },
       completeCoverage: details.held };
-    if (state === 'await-contract') { operation('entry'); projection.clarification = 'Read held native answers in details.policy; rebuild without expanding original authority.'; }
+    if (state === 'await-contract') {
+      operation('entry'); projection.clarification = 'Read held native answers in details.policy; rebuild without expanding original authority.';
+      if (publicAdapter) projection.entryGuide = ENTRY_GUIDE;
+    }
     if (snapshot.native) details.policy = this.#reference(held, 'policy', snapshot.native);
     operation('status'); operation('detail');
     if (publicAdapter && projection.next && typeof projection.next === 'object') {

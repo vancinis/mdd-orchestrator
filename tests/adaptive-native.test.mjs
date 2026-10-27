@@ -680,7 +680,7 @@ test('AL05a P1 control: current interactive approval still rejects drift after n
 });
 
 // Admission stuck after a pre-bootstrap rejection (ADM-01..ADM-07).
-const SERIAL = /use serial execution\./;
+const SERIAL = /Apply scope has unproven paths or implicit runtime\/instruction effects: project plugins in \.opencode\/plugins/;
 const AUTO = [['Autom\u00e1tico']];
 const blockPlugins = f => mkdirSync(join(f.root, '.opencode', 'plugins'), { recursive: true });
 const unblockPlugins = f => rmSync(join(f.root, '.opencode'), { recursive: true, force: true });
@@ -1107,7 +1107,7 @@ test('ADM-05-S02: N17 reset and fresh admission keep coordinator, workspace, cal
   assert.equal(f.gate.status('parent').state, 'blocked');
   assert.deepEqual(f.gate.reset(f.runtime, 'run').reset.nativeEntry, { released: true });
   const entry = id => wire('entry', { contract: f.contract, messageID: id });
-  await assert.rejects(f.gate.adaptiveInternal(entry('old-message'), f.runtime, 'host-turn'), { message: 'Entry must bind the current native user turn, not a caller-chosen old identity.' }); noRun(f);
+  await assert.rejects(f.gate.adaptiveInternal(entry('old-message'), f.runtime, 'host-turn'), { message: 'Entry messageID must be the user message whose exact text is the objective (normally the current native user turn); a caller-chosen old identity is refused. Omit messageID and the host binds it.' }); noRun(f);
   await assert.rejects(f.gate.adaptiveInternal(entryOp(f), { ...f.runtime, agent: 'general' }), { message: 'Only the native coordinator may propose adaptive operations.' }); noRun(f);
   // A non-canonical workspace spelling is refused by the runner on a separate parent (a blocked entry keeps its own runtime).
   const h = fixture(t, 'automatic'), dotted = h.root + sep + '.';
@@ -1121,6 +1121,33 @@ test('ADM-05-S02: N17 reset and fresh admission keep coordinator, workspace, cal
   await assert.rejects(f.gate.adaptiveInternal(entry('native-user'), f.runtime, 'forged-message'), { message: 'Start does not match the actual native caller message.' }); noRun(f);
   await f.gate.adaptiveInternal(entry('native-user'), f.runtime, 'native-message');
   assert.equal(f.store.read('parent').userMessageID, 'native-user'); assert.equal(f.runner.status('parent').state, 'await-selection');
+});
+
+test('regression: public entry binds the host-resolved user turn without messageID; internal entry still needs exact identity', async t => {
+  const f = fixture(t, 'automatic');
+  await assert.rejects(f.gate.adaptiveInternal(wire('entry', { contract: f.contract }), f.runtime), { message: 'Native entry requires its exact original user authorization.' });
+  noRun(f);
+  const status = await f.gate.adaptiveInternal(wire('entry', { contract: f.contract }), f.runtime, 'host-turn');
+  assert.equal(status.state, 'await-selection');
+  assert.equal(f.store.read('parent').userMessageID, 'native-user');
+});
+
+test('regression: an earlier request answered from the current turn is admitted only after one native confirmation', async t => {
+  const f = fixture(t, 'automatic');
+  const parent = { id: 'parent', directory: f.root, projectID: 'project', agent: 'mdd-orchestrator' };
+  const user = (id, text) => ({ info: { id, sessionID: 'parent', role: 'user' }, parts: [{ type: 'text', text, sessionID: 'parent', messageID: id }] });
+  const current = { info: { id: 'native-message', sessionID: 'parent', role: 'assistant', agent: 'mdd-orchestrator', parentID: 'confirm-user', path: { cwd: f.root, root: f.root } }, parts: [] };
+  const history = [user('request-user', f.contract.objective), user('confirm-user', 'sí, confirmo las recomendaciones'), current];
+  const inspector = createInspector({ directory: f.root, worktree: f.root, project: { id: 'project' }, client: { session: { get: async () => ({ data: parent }), messages: async () => ({ data: history }) } } });
+  Object.assign(f.inspect, { intake: inspector.intake, parent: inspector.parent, currentUser: inspector.currentUser });
+  const status = await f.gate.adaptiveInternal(wire('entry', { contract: f.contract }), f.runtime, 'native-message');
+  assert.equal(status.state, 'question-ready');
+  assert.equal(status.question.questions[0].header, 'Pedido anterior');
+  assert.match(status.question.questions[0].question, /Replace bounded text\./);
+  noRun(f);
+  await f.answer([['Approve operation']]);
+  assert.equal(f.store.read('parent').userMessageID, 'request-user', 'the run binds the message that carries the objective');
+  assert.equal(f.runner.status('parent').state, 'await-selection');
 });
 
 test('ADM-05-S02: N18 a consumed request identity and a drifted question generation are refused after reset', async t => {

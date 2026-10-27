@@ -23,7 +23,8 @@ mattpocock/skills `grilling` and `domain-modeling` skills under MIT; see `NOTICE
 - The session is clarification. It grants no mode, approval, operation consent or implementation
   authority and writes no file; MDD still validates and approves the contract it shapes.
 - Run every round with the native question tool in this same turn: entry binds the latest native
-  user message, and a chat reply replaces it. Entry reads only the latest 100 native messages, so
+  user message without an extra question. After a chat reply the request is earlier, and MDD
+  confirms it once natively before admission. Entry reads only the latest 100 native messages, so
   keep the session to a few rounds.
 - Facts are yours, decisions are the user's. Read sources, or settle a foreground
   `mdd_contextual_explore` first, for anything the repository can answer; never ask the user for
@@ -41,7 +42,7 @@ mattpocock/skills `grilling` and `domain-modeling` skills under MIT; see `NOTICE
 | A session question is refused | Stop without retrying or rephrasing; continue with the ordinary entry. |
 | Explicit request | Skip the offer; ask only whether to add documentation. |
 | `Seguir sin sesión` or `Cancelar` | Continue with the ordinary entry. |
-| User leaves the form and writes in chat | Keep what was resolved; ask them to resend the request in one message, quoting the original verbatim; that message becomes the objective. |
+| User leaves the form and writes in chat | Keep what was resolved and the original request as the objective; never ask them to resend it. MDD asks one native confirmation at entry. |
 | Five rounds done, or answers ask to stop | Ask whether to continue or close with the rest as `productQuestions` or stated assumptions. |
 | Decisions reveal several independent objectives | Propose splitting before entry; the user chooses. |
 
@@ -88,5 +89,5 @@ format and numbering; without them use a root `GLOSSARY.md` and `docs/adr/NNNN-s
 - ADR: only when the decision is hard to reverse, surprising without context and the result of a
   real trade-off. One paragraph: context, decision and why.
 - When something qualifies, the contract adds one requirement with its scenarios, the exact paths
-  in `scope.writes` with fingerprints (`null` for a new file) and an assignment that writes them:
-  Apply writes, Verify checks. When nothing qualifies, create nothing.
+  in `scope.writes` (MDD fingerprints them, `null` for a new file) and an assignment that writes
+  them: Apply writes, Verify checks. When nothing qualifies, create nothing.

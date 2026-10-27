@@ -154,9 +154,22 @@ test('next action: a pending objective is offered with its own exact arguments',
 
 test('next action: an idle conversation is never told to start implementation blindly', () => {
   const action = nextAction({ state: 'not-started' });
-  assert.equal(action.tool, 'mdd_start');
-  assert.equal(action.args, undefined, 'requirements are the user\'s text and are never invented here');
+  assert.equal(action.tool, 'mdd_adapt');
+  assert.deepEqual(action.args, { payload: JSON.stringify({ routingVersion: 3, kind: 'status', args: {} }) },
+    'only the read-only version-3 status is dispatchable as written; requirements are never invented here');
   assert.match(action.why, /mdd_contextual_explore/);
+  assert.match(action.why, /mdd_start is only for an explicit user request for the fixed compatibility route/);
+});
+
+test('regression: a reset or idle reply without the adaptive projection still leads to version 3, not mdd_start', () => {
+  for (const status of [{ state: 'not-started', reset: { scope: 'run' } }, { state: 'not-started', sessionID: 'ses_idle' }]) {
+    const action = nextAction(status);
+    assert.equal(action.tool, 'mdd_adapt');
+    assert.doesNotMatch(action.why, /call mdd_start once/);
+  }
+  // Preserved data-only work keeps its fixed recovery path.
+  assert.equal(nextAction({ state: 'recoverable', recoverable: true }).tool, 'mdd_start');
+  assert.match(nextAction({ state: 'not-started', lane: 'adaptive-native' }).why, /never a reason to switch to mdd_start/);
 });
 
 test('next action: a finished run proposes nothing, and unknown shapes are left alone', () => {

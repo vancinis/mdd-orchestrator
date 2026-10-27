@@ -3,8 +3,9 @@ import { test } from 'node:test';
 import * as fs from 'node:fs';
 import mutableFs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { WorkerEdit } from '../dist/worker-edit.js';
 import { WorkerFence } from '../dist/worker-fence.js';
 import { applyScopeFiles } from '../dist/worker-batch.js';
@@ -200,5 +201,75 @@ test('project-local plugin effects cannot be inferred from disjoint declared fil
   const f = fixture(t);
   fs.mkdirSync(join(f.root, '.opencode/plugins'), { recursive: true });
   fs.writeFileSync(join(f.root, '.opencode/plugins/custom.ts'), 'export {default} from "../../a.txt";');
-  assert.throws(() => applyScopeFiles(f.root, f.scope), /bootstrap|implicit/);
+  assert.throws(() => applyScopeFiles(f.root, f.scope), /implicit.*\.opencode\/plugins/);
+});
+
+/** The user's own global OpenCode configuration, written into the isolated test home. */
+function globalConfig(t, config) {
+  const dir = join(homedir(), '.config', 'opencode');
+  fs.mkdirSync(dir, { recursive: true });
+  const file = join(dir, 'opencode.json');
+  fs.writeFileSync(file, typeof config === 'string' ? config : JSON.stringify(config, null, 2));
+  t.after(() => fs.rmSync(file, { force: true }));
+  return file;
+}
+function withEnv(t, name, value) {
+  const previous = process.env[name];
+  process.env[name] = value;
+  t.after(() => { if (previous === undefined) delete process.env[name]; else process.env[name] = previous; });
+}
+
+test('regression: a real global configuration with multi-line prompts, substitutions and plugins does not block Apply', t => {
+  const f = fixture(t);
+  const elsewhere = fs.mkdtempSync(join(tmpdir(), 'mdd-plugin-elsewhere-'));
+  t.after(() => fs.rmSync(elsewhere, { recursive: true, force: true }));
+  withEnv(t, 'MDD_TEST_NOTION_TOKEN', 'sk-not-a-path-0123456789');
+  globalConfig(t, {
+    $schema: 'https://opencode.ai/config.json',
+    agent: {
+      'gentle-orchestrator': { model: 'anthropic/claude-opus-5-5', prompt: '# Orchestrator\n\nRead a.txt carefully.\nKeep nested/new.txt in mind.', permission: { task: { '*': 'deny', explore: 'allow' } } },
+      gentleman: { description: 'Senior Architect mentor - helpful first', mode: 'primary', prompt: '{file:./AGENTS.md}' },
+    },
+    agents: { 'issue-planner': { system: '{file:./issue-planner.md}', permissions: [{ action: 'shell', effect: 'allow', resource: '*' }] } },
+    mcp: { servers: { notion: { environment: { NOTION_TOKEN: '{env:MDD_TEST_NOTION_TOKEN}' } } } },
+    plugins: ['opencode-gemini-auth@latest', pathToFileURL(join(elsewhere, 'dist')).href],
+    instructions: ['~/.config/opencode/rules/*.md', 'https://example.com/team-rules.md'],
+  });
+  const files = applyScopeFiles(f.root, f.scope);
+  assert.deepEqual(files.writes, [join(f.root, 'a.txt'), join(f.root, 'nested/new.txt')]);
+});
+
+for (const [name, setup, cause] of [
+  ['a {file:} substitution of a write', (t, f) => globalConfig(t, { agent: { x: { prompt: `Intro\n{file:${join(f.root, 'a.txt')}}` } } }),
+    /~\/\.config\/opencode\/opencode\.json: \$\.agent\.x\.prompt reads the write a\.txt through a \{file:\} substitution/],
+  ['an {env:} value naming a write', (t, f) => { withEnv(t, 'MDD_TEST_REFERENCE', join(f.root, 'nested', 'new.txt'));
+    globalConfig(t, { mcp: { servers: { s: { command: ['node', '{env:MDD_TEST_REFERENCE}'] } } } }); },
+    /\$\.mcp\.servers\.s\.command\[1\] \{env:MDD_TEST_REFERENCE\} names the write nested\/new\.txt/],
+  ['a file: URL plugin inside a write', (t, f) => globalConfig(t, { plugins: [pathToFileURL(join(f.root, 'a.txt')).href] }),
+    /\$\.plugins\[0\] loads the write a\.txt as a file: URL/],
+  ['a multi-line MCP command that runs a write', (t, f) => globalConfig(t, { mcp: { servers: { s: { command: ['bash', '-c', 'set -e\nnode nested/new.txt'] } } } }),
+    /\$\.mcp\.servers\.s\.command\[2\] runs a command that names the write nested\/new\.txt/],
+  ['instructions matching a write', (t, f) => fs.writeFileSync(join(f.root, 'opencode.json'), JSON.stringify({ instructions: ['nested/*.txt'] })),
+    /opencode\.json: \$\.instructions\[0\] loads the write nested\/new\.txt as agent instructions/],
+  ['an uninspectable JSONC configuration', (t, f) => fs.writeFileSync(join(f.root, 'opencode.jsonc'), '{ // comment\n "agent": {} }'),
+    /opencode\.jsonc is not plain JSON/],
+  ['an implicit runtime write', (t, f) => { f.scope.writes.push('package.json'); },
+    /the write package\.json is a hidden, dependency, lock, configuration or agent-instruction file/],
+]) test(`Apply scope refusal names its exact cause: ${name}`, t => {
+  const f = fixture(t);
+  withEnv(t, 'MDD_TEST_SECRET', 'sk-secret-value-must-not-leak');
+  setup(t, f);
+  assert.throws(() => applyScopeFiles(f.root, f.scope), error => {
+    assert.match(error.message, /^Apply scope has unproven paths or implicit runtime\/instruction effects: /);
+    assert.match(error.message, cause);
+    assert.doesNotMatch(error.message, /sk-secret|use serial execution\.$/);
+    return true;
+  });
+});
+
+test('instructions and plain values that cannot reach a write keep Apply provable', t => {
+  const f = fixture(t);
+  fs.writeFileSync(join(f.root, 'opencode.json'), JSON.stringify({ instructions: ['docs/*.md', 'CONTRIBUTING.md'],
+    agent: { build: { description: 'Builds data.txt reports', model: 'openai/gpt-6.1-sol' } } }));
+  assert.doesNotThrow(() => applyScopeFiles(f.root, f.scope));
 });

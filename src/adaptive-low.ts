@@ -238,6 +238,15 @@ function fingerprint(root: string, path: string): string | null {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
+/**
+ * Current SHA-256 bytes of an exact footprint (null for a file that does not exist yet), under the
+ * same alias and credential exclusions as every later freshness check. Used when a coordinator lets
+ * the host record the sources it inspected instead of hashing them itself.
+ */
+export function sourceFingerprints(root: string, footprint: { reads: string[]; writes: string[] }): { path: string; digest: string | null }[] {
+  return [...new Set([...footprint.reads, ...footprint.writes])].map(path => ({ path: scopePath(path), digest: fingerprint(root, path) }));
+}
+
 /** Compact actor receipts, never a Workflow, a Plan artifact, or native execution authority. */
 export class AdaptiveLow {
   readonly #contract: AdaptiveContract;

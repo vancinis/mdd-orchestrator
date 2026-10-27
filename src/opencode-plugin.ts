@@ -27,7 +27,7 @@ import { TranslationError } from './pr-translation.js';
 import { mddDataRoot } from './engram-http.js';
 import { AdaptiveStore } from './adaptive-store.js';
 import { adaptiveTransferRequest } from './adaptive-transfer.js';
-import { decodeAdaptiveRequest } from './adaptive-protocol.js';
+import { completeAdaptiveEntry, decodeAdaptiveRequest } from './adaptive-protocol.js';
 import { statusPayload } from './status-budget.js';
 import type { StatusView } from './status-budget.js';
 import { phaseName } from './phase-assets.js';
@@ -718,7 +718,7 @@ export function createInspector(input: PluginInput, timeout = 5000, now: () => n
       const caller = history.at(-1);
       if (!caller || record(caller.info, 'caller message').id !== messageID || record(caller.info, 'caller message').role !== 'assistant') throw new Error('Start does not match the actual native caller message.');
       const users = history.slice(0, -1).filter(message => record(message.info, 'message').role === 'user');
-      if (scope === 'native-current') {
+      if (scope === 'native-current' || scope === 'native-current-objective') {
         const info = record(caller.info), path = record(info.path);
         if (info.sessionID !== runtime.sessionID || info.agent !== COORDINATOR || info.error != null ||
             path.cwd !== runtime.directory || path.root !== runtime.worktree || info.parentID !== record(users.at(-1)?.info).id)
@@ -738,9 +738,9 @@ export function createInspector(input: PluginInput, timeout = 5000, now: () => n
         }
       }
       const candidates = scope === 'objective' ? users : users.slice(-1);
-      if (!candidates.length) throw new Error('No actual native user requirements found.');
+      if (!users.length) throw new Error('No actual native user requirements found.');
       const canonicalRequirements = canonicalNativeText(requirements);
-      const matches = candidates.filter(user => {
+      const matching = (list_: typeof users) => list_.filter(user => {
         const info = record(user.info, 'message');
         if (info.sessionID !== runtime.sessionID) return false;
         const parts = list(user.parts, 'message parts', PARTS_MAX).filter(part => part.type === 'text');
@@ -748,6 +748,10 @@ export function createInspector(input: PluginInput, timeout = 5000, now: () => n
         try { candidate = authoredNativeText(parts, runtime.sessionID, String(info.id)); } catch { return false; }
         return candidate !== undefined && canonicalNativeText(candidate) === canonicalRequirements;
       });
+      let matches = matching(candidates);
+      // Adaptive entry prefers the current turn; an earlier request ("si, confirmo" after it) is
+      // still the user's own words, and the bridge asks fresh native confirmation before admitting it.
+      if (scope === 'native-current-objective' && !matches.length) matches = matching(users.slice(0, -1));
       if (matches.length > 1) throw new Error('Several native user messages carry exactly this text; ask the user to restate the objective so the run binds to one message.');
       if (!matches.length) {
         // A full page proves nothing about what came before it, so the honest answer is that the
@@ -770,11 +774,22 @@ export function createInspector(input: PluginInput, timeout = 5000, now: () => n
             }
           } catch { /* diagnosis is best-effort; the base error still stands without it. */ }
         }
-        throw new Error((scope === 'objective'
+        throw new Error((scope === 'objective' || scope === 'native-current-objective'
           ? 'Requirements must exactly match an actual native user message in this conversation; do not rewrite or invent them.'
           : 'Requirements must exactly match the latest native user text; do not rewrite or invent them.') + detail);
       }
       return boundedText(record(matches[0]!.info, 'message').id, 'native user message ID', 256);
+    },
+    /** The user turn the actual running coordinator message answers; read-only, never consent. */
+    async currentUser(runtime, callerMessageID) {
+      await inspector.parent(runtime);
+      const history = await messages(runtime.sessionID, runtime.directory);
+      const caller = history.at(-1);
+      if (!caller || record(caller.info, 'caller message').id !== callerMessageID || record(caller.info, 'caller message').role !== 'assistant')
+        throw new Error('Start does not match the actual native caller message.');
+      const latest = history.slice(0, -1).filter(message => record(message.info, 'message').role === 'user').at(-1);
+      if (!latest) throw new Error('No actual native user requirements found.');
+      return boundedText(record(latest.info, 'message').id, 'native user message ID', 256);
     },
     /**
      * Proves a written answer is the user's own: exactly their latest message, as they wrote it
@@ -1079,15 +1094,16 @@ const plugin: Plugin = async input => {
     },
     tool: {
       mdd_adapt: tool({
-        description: 'Native version-3 implementation entry and guarded adaptive operations. Supply only a bounded JSON payload {routingVersion:3,kind,args}. Read status and its exact operation/input/detail references. Entry and transfer messageID must identify the current native USER request; the host independently binds its assistant caller. No runtime, profile, approval or stopped claims. Low selects actors by need; medium/high require genuine structured stages and Verify. Fixed mdd_start is compatibility-only.',
+        description: 'Native version-3 implementation entry and guarded adaptive operations: the default for every new implementation, including precise edits. Supply only a bounded JSON payload {routingVersion:3,kind,args}. Read status, its entryGuide and its exact operation/input/detail references. Entry needs only the contract: the host binds the user message whose exact text is contract.objective (messageID is an optional assertion) and fills omitted empty lists and source fingerprints. Transfer messageID must identify the current native USER request. No runtime, profile, approval or stopped claims. A refusal names what to correct; fix it and retry instead of switching routes. Low selects actors by need; medium/high require genuine structured stages and Verify. Fixed mdd_start is compatibility-only, on explicit request.',
         args: { payload: tool.schema.string().min(1).max(160000) },
         async execute(args, context) {
           enter(context, 'mdd_adapt');
           if (context.abort.aborted) throw new Error('Native adaptive operation aborted.');
-          decodeAdaptiveRequest(args.payload);
           const here = nativeRuntime(context);
+          const payload = completeAdaptiveEntry(args.payload, here.directory);
+          decodeAdaptiveRequest(payload);
           if (runner.options.adaptiveStore!.occupied(here.sessionID)) await runner.restore(here);
-          return reply({ ...record(await intake.adaptiveInternal(args.payload, here, boundedText(context.messageID, 'actual native assistant caller', 256))),
+          return reply({ ...record(await intake.adaptiveInternal(payload, here, boundedText(context.messageID, 'actual native assistant caller', 256))),
             memory: settings.engram ? 'enabled' : 'off' });
         },
       }),
@@ -1390,7 +1406,7 @@ const plugin: Plugin = async input => {
         },
       }),
       mdd_start: tool({
-        description: 'Start implementation with exact latest native user text, or exact pendingStart requirements proven by legacy setup-only history. Never pass continuation/status text as a new objective: first read mdd_status workspaceRuns and project memory, and when the request continues recorded work, tell the user how that run resumes instead of starting. Never use it to commit, push or open the PR of a recorded run: that delivery is not a new objective and needs no preflight. Never use it for a precise, small edit of any kind that the user spelled out: make that edit directly, asking only when it cannot be located unambiguously. Optional Engram memory bootstraps the actual native parent only when enabled.',
+        description: 'Fixed version-2 compatibility route: use it only when the user explicitly asks for the fixed route, for preserved data-only work, or for exact pendingStart requirements proven by legacy setup-only history. Every other new implementation, including a precise edit, uses mdd_adapt, and a refused mdd_adapt operation is corrected and retried, never moved here. Requirements are the exact native user text. Never pass continuation/status text as a new objective: first read mdd_status workspaceRuns and project memory, and when the request continues recorded work, tell the user how that run resumes instead of starting. Never use it to commit, push or open the PR of a recorded run: that delivery is not a new objective and needs no preflight. Optional Engram memory bootstraps the actual native parent only when enabled.',
         args: {
           requirements: tool.schema.string().min(1).describe('Exact latest native user text or authenticated pendingStart requirements, without rewriting. Never substitute continuation text for a pending objective.'),
           context: tool.schema.object({ label: tool.schema.string().min(1), content: tool.schema.string().min(1) }).optional()

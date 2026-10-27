@@ -95,8 +95,8 @@ test('the listing stays bounded however many conversations recorded a run', t =>
 
 test('an idle conversation is told to recall recorded work before starting', () => {
   const plain = nextAction({ state: 'not-started' });
-  assert.equal(plain.tool, 'mdd_start');
-  assert.equal(plain.args, undefined);
+  assert.equal(plain.tool, 'mdd_adapt');
+  assert.deepEqual(plain.args, { payload: JSON.stringify({ routingVersion: 3, kind: 'status', args: {} }) });
   assert.match(plain.why, /search project memory/);
   assert.match(plain.why, /continues recorded work, it is not a new objective: do not call mdd_start/);
   assert.doesNotMatch(plain.why, /workspaceRuns/);

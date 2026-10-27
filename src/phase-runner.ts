@@ -397,7 +397,7 @@ type Released = Liveness & { released?: 'host' | 'user' };
 const ATTEST_HINT = 'If the user says the subagent is stopped or was interrupted, call mdd_reset again with userText set to their exact latest message: MDD stops it through OpenCode when it can and releases it, unless OpenCode still reports it busy.';
 export type Inspect = {
   /** Internal admission still proves the objective from the real native conversation. */
-  intake?(runtime: Runtime, requirements: string, messageID: string, scope?: 'latest' | 'objective' | 'native-current'): Promise<void | string>;
+  intake?(runtime: Runtime, requirements: string, messageID: string, scope?: 'latest' | 'objective' | 'native-current' | 'native-current-objective'): Promise<void | string>;
   /** A transferred target must prove its original native user request, not only local receipt bytes. */
   confirmTransfer?(runtime: Runtime, receipt: NonNullable<RunOwner['receipt']>, runID: string): Promise<void>;
   confirmAdaptiveTransfer?(runtime: Runtime, receipt: AdaptiveReceipt, runID: string): Promise<void>;
@@ -917,8 +917,10 @@ export class PhaseRunner {
     const low = new AdaptiveLow(contract, here.directory);
     this.#adaptiveAdmissions.add(here.sessionID);
     try {
+      // A current native turn may admit an earlier request; the bridge already obtained fresh
+      // native confirmation for it in that turn, so the objective proof reaches the whole history.
       const inspectObjective = () => this.inspect.intake!(here, contract.objective, proof?.callerMessageID ?? messageID,
-        proof?.callerMessageID ? 'native-current' : 'objective');
+        proof?.callerMessageID ? 'native-current-objective' : 'objective');
       const userID = await inspectObjective();
       if (typeof userID !== 'string') throw new Error('Exact native objective proof must return its genuine user identity.');
       if (proof?.callerMessageID && userID !== messageID) throw new Error('Entry native user identity differs from the current host turn.');

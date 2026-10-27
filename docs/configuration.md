@@ -160,11 +160,21 @@ Include tests/docs, implicit reads and shared effects, not just different main f
 children automatically receive the registered **formatter-free `mdd_worker_edit`** tool; there is
 no additional human workflow step. It supports bounded UTF-8 create, exact replace/edit and delete
 within declared writes. Generic native editing, patches and all alternate execution routes are denied.
-Runtime/config/instruction writes, aliases and unproven effects stay serial. Bootstrap file/env
-substitutions, instruction declarations, overlapping local config paths, opaque JSONC and project-local
-plugin effects also stay serial; the adapter does not guess their dependency footprint. The scoped editor
+Runtime/config/instruction writes, aliases and unproven effects stay serial. The OpenCode
+configurations a run can load (global, `XDG_CONFIG_HOME`, `OPENCODE_CONFIG_DIR`, `OPENCODE_CONFIG`,
+`OPENCODE_CONFIG_CONTENT`, and `opencode.json(c)` in the workspace and every parent directory) are
+inspected value by value. Prompts, descriptions and other prose (any multi-line value) are not
+file references, except a multi-line MCP, formatter or LSP value, which still runs what it names.
+`{file:…}` substitutions, `{env:…}` values, `file:` URLs, path-like values and
+`instructions` patterns are resolved and compared with the declared writes; only one that can
+reach a write keeps Apply serial. Opaque JSONC, a configuration over 4 MiB and project-local
+`.opencode/plugins` also stay serial, because their footprint cannot be proven. The refusal names
+the file, the JSON location and the write, never a configuration value. The scoped editor
 capability is attested on any V2 host, without an exact version pin. A refused operation
 reports its blocker and retained work rather than switching editors or replaying a sibling.
+
+The adaptive route has no serial fallback: the same refusal at `mdd_adapt` entry means the
+contract scope or that configuration reference must change before admission.
 
 The internal capable-host contract caps each phase batch at **two** independent foreground
 members. Explicit complete scopes and dependencies are mandatory; disabled, unsupported,

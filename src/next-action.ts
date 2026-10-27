@@ -22,6 +22,8 @@
  * Said wherever an MDD question is waiting, closed or not, so that answer is recorded, not asked again.
  */
 const WRITTEN = 'If the user already answered it in their own words, typed inside the form or written in a message after it was shown, record that with mdd_answer instead of asking again.';
+/** The read-only version-3 status call, exact as a coordinator dispatches it. */
+export const ADAPTIVE_STATUS = JSON.stringify({ routingVersion: 3, kind: 'status', args: {} });
 
 export type NextAction = {
   tool: 'question' | 'task' | 'mdd_adapt' | 'mdd_start' | 'mdd_status' | 'mdd_prepare_advance' | 'mdd_phase_result' | 'mdd_reset';
@@ -123,7 +125,7 @@ export function nextAction(status: unknown): NextAction | undefined {
   }
 
   if (value.lane === 'adaptive-native') return { tool: 'mdd_adapt',
-    why: 'Read workspaceRuns for relevant existing work before fresh entry; do not call mdd_start for continuation or fresh native work (explicit fixed compatibility only). Use the published version-3 operation descriptors and exact input/detail references. Compose only required data; never invent identity, preferences, approval, stopped proof or dispatch authority. Closed work stays closed; entry requires a genuine fresh current native request.' };
+    why: 'Read workspaceRuns for relevant existing work before fresh entry; do not call mdd_start for continuation or fresh native work (explicit fixed compatibility only). Use the published version-3 operation descriptors, entryGuide and exact input/detail references. Compose only required data; never invent identity, preferences, approval, stopped proof or dispatch authority. When an operation is refused, correct exactly what the refusal names and retry; a refusal is never a reason to switch to mdd_start. Closed work stays closed; entry requires a genuine native user request in this conversation, answered from the current turn.' };
 
   // Its explicit internal next/input contract owns continuation. There is no public adapter yet.
   if (nativeProtocol) return undefined;
@@ -180,8 +182,14 @@ export function nextAction(status: unknown): NextAction | undefined {
   // in this workspace all along; recalling it is the step that has to come first.
   if (state === 'not-started' || state === 'recoverable') {
     const recorded = Array.isArray(value.workspaceRuns) && value.workspaceRuns.length > 0;
+    const recall = `No run is active here. Before starting anything, recall where the project stands: ${recorded ? 'workspaceRuns lists earlier runs recorded in this workspace; compare the request with them, and also ' : ''}search project memory when memory tools are available (recent project context, plus the request's own terms such as issue numbers or feature names). If the request continues recorded work, it is not a new objective: do not call mdd_start or a fresh entry. Tell the user where that run stopped and how it resumes${recorded ? ' (its resume field: transfer only after the user\'s own message names sourceSessionID=<id> runID=<id>; source-conversation means it continues in its own conversation)' : ''}, and let them choose.`;
+    const information = 'For an information-only question, answer directly or use mdd_contextual_explore instead: that route needs no run.';
+    // A fresh conversation implements through the version-3 adaptive entry. The fixed route stays
+    // for preserved data-only work and for an explicit request for it, never as the default.
+    if (state === 'not-started') return { tool: 'mdd_adapt', args: { payload: ADAPTIVE_STATUS },
+      why: `${recall} For a new implementation request, including a precise edit, read this version-3 status (exact arguments) and follow its entry and entryGuide; when an operation is refused, correct what the refusal names and retry it. mdd_start is only for an explicit user request for the fixed compatibility route. ${information}` };
     return { tool: 'mdd_start',
-      why: `No run is active here. Before starting anything, recall where the project stands: ${recorded ? 'workspaceRuns lists earlier runs recorded in this workspace; compare the request with them, and also ' : ''}search project memory when memory tools are available (recent project context, plus the request's own terms such as issue numbers or feature names). If the request continues recorded work, it is not a new objective: do not call mdd_start. Tell the user where that run stopped and how it resumes${recorded ? ' (its resume field: transfer only after the user\'s own message names sourceSessionID=<id> runID=<id>; source-conversation means it continues in its own conversation)' : ''}, and let them choose. For a new implementation request, call mdd_start once with requirements equal to the exact latest native user text, handing what you found over as context. For an information-only question, answer directly or use mdd_contextual_explore instead: that route needs no run.` };
+      why: `${recall} For a new implementation request, call mdd_start once with requirements equal to the exact latest native user text, handing what you found over as context. ${information}` };
   }
 
   return undefined;
