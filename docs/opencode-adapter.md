@@ -52,6 +52,24 @@ Disposition rules:
   explaining how it covers the held check. Replacement references execution IDs, never another
   replacement disposition. Command equality binds an attempt to a declared check; it does not
   determine whether a check is material.
+- **environmental:** the held command failed for a reason outside this change. Its own attempts come
+  first, the last one failing, then at least one corroborating execution with a different command:
+  the failing part rerun alone that passed (load, timeouts), or the check run against the unchanged
+  baseline that fails the same way (an already failing test, a missing service or variable). The
+  reason names which. It does not block, a passing corroboration is usable evidence, and every
+  closure, ledger row and PR body lists it as pending outside the change.
+
+A scenario may declare `evidence: "external"` while planning (Spec or Plan, or the adaptive entry
+contract) when it can only be observed outside this workspace: a device, staging or production, a
+live third-party service, a real background worker or a person. Verify (and adaptive parent
+evidence) may then report that scenario `external`, with what to check, where and how; it is
+pending, not a gap, and is listed under limits. No other row may be external, and a scenario not
+declared external while planning cannot be reclassified afterwards.
+
+Decision links are derived rather than refused. In Plan, Tasks, the adaptive continuation and an
+adaptive entry that omits assignment decisions, MDD keeps every applicable link the actor wrote,
+drops unknown or inapplicable ones and links each decision to the deliverables covering a
+requirement it shapes. Scenario coverage, dependencies and IDs are still refused when wrong.
 
 Every disposition except `passed` requires a reason. Multiple attempts also require a reason.
 Preserve failed attempts and their order: the final attempt determines the disposition, and an
@@ -65,10 +83,15 @@ executions cannot support verified rows. Supplemental dispositions are `passed`,
 required supplemental failures also prevent PASS. Successful checks alone never replace run-wide
 semantic acceptance coverage.
 
-`mdd_check_report` uses the version reported in the document for advisory form checking. It has no
-held plan and cannot authenticate requiredness or applicability. The runner checks the same report
-against its frozen plan. Neither validates that an actor actually executed a command or that its
-source-based applicability/equivalence rationale is true; these remain reported evidence.
+`mdd_check_report` resolves the run from the actor's parent conversation (or the coordinator's
+own). When that fixed-route run is at the phase being checked, it checks the links too, with the
+runner's own validators and wording: plan and task coverage after deriving decision links, design
+decisions, unmet IDs, Verify links (a scoped recheck included), correction closure, spec domain
+and the frozen contract version. Otherwise, or when the lookup fails, it checks form alone with the
+version the document reports. Either way it records nothing and a clean answer is not acceptance;
+the runner checks the report again on arrival. Neither validates that an actor actually executed a
+command or that its source-based applicability/equivalence rationale is true; these remain
+reported evidence. Adaptive (version 3) actors get the form-only check.
 
 **Legacy records have no marker.** They resume the recorded command-based schema, retaining
 commands, outcomes and historical matched fields. MDD does not synthesize IDs, requiredness or
@@ -86,9 +109,41 @@ Recorded limits, missing implementation evidence and uncertainty continue to be 
 
 ## Continue working after failed verification
 
-A recorded failed Verify stops the current run, not all future work. Nothing continues automatically.
-The coordinator interprets the user's request and selects an existing typed action; the runtime
-authenticates the exact latest native text without parsing intent or requiring special consent words.
+### Automatic correction
+
+In automatic mode a failed Verify of the implementation does not wait for the user first. Within
+gentle-orchestrator's bound, once the failed result is durably settled MDD sends the route back to
+one Apply correction pass for every finding (the same pass `scope:"rework"` starts) and records a
+`correction` telemetry event. `status.rework` shows it, `status.report` is the failed Verify, and
+the coordinator presents the findings and dispatches the correction without asking.
+
+The Verify after any correction pass, automatic or chosen, is a scoped recheck:
+
+- It must cover the findings of the failed Verify (every held link of a listed scenario); any other
+  row is optional. Every held check is still run and accounted for.
+- The earlier rows are kept and re-bound to the recheck's own execution of the same held or
+  supplemental check. A kept row whose check now fails becomes a regression (`implementation`); one
+  whose check was not run again loses its evidence (`verification`). A passing report whose kept
+  rows lost their evidence is refused.
+- A new problem outside the findings is listed under limits as a follow-up and never earns another
+  pass.
+
+A second automatic pass runs only when the recheck closed findings and opened none. A design or
+requirements cause, interactive mode, uncertainty, no progress or a spent bound stops the run for
+the user's decision below. `verify.automaticCorrections` (0–2, default 2) sets the bound; a
+`PhaseRunner` built without it keeps the manual stop. Adaptive (version 3) routes leave selection to
+the coordinator, so failed evidence of completed work publishes `status.correction` instead: the
+repairable assignments, the repairs each already had and one instruction that applies the same
+bound (repair unasked in automatic mode, at most two per assignment, a further one only after
+progress; otherwise present the gaps once and let the user choose between a repair and closing
+unverified with every gap as a limit).
+
+### After the stop
+
+A recorded failed Verify that MDD does not correct stops the current run, not all future work.
+Nothing else continues automatically. The coordinator interprets the user's request and selects an
+existing typed action; the runtime authenticates the exact latest native text without parsing intent
+or requiring special consent words.
 
 | User intent | Action |
 |---|---|
@@ -921,6 +976,13 @@ SDK question replies on the user's behalf. Model strings alone cannot set consen
 question replies arrive through OpenCode's service; that local service and installed plugins
 remain trusted infrastructure, not a cryptographic proof of who operated the UI.
 
+OpenCode 2 runs each model step as its own assistant message, so a question MDD returns from an
+adaptive operation is shown, and answered, in a later message than the `mdd_adapt` call that
+proposed it. The question inspection returns the message running that exact, verified call, and
+the adaptive bridge binds the operation's caller to it before admission. Admission then checks the
+same user turn and objective as before. Checking against the proposing message refused every
+approved interactive entry with "Start does not match the actual native caller message".
+
 `mdd_status` returns the exact `question` or executable `task`, provenance only after accepted
 intake, and retained `questionReceipts`. `await-answer` means wait, never reprompt. Errors,
 changed/stale/duplicate callbacks, or a task before consent block the intake. A dismissed or
@@ -1518,9 +1580,18 @@ objective, so a repository could run MDD for months and hold no evidence that an
 When a run reaches `complete` or `blocked` the adapter appends a compact row — outcome, route,
 phase reached, coverage, changed-file count, check totals with failures counted apart, concerns,
 the recorded goal and up to four verification limits. A run that reaches a further state replaces
-its own row, so one run is one row. It is bounded to 200 rows, holds no artifacts, prompts or
-source, and is written best-effort: a row is never worth a route. `mdd retro` reads it together
-with the accumulated counters and the unreviewed improvements.
+its own row, so one run is one row. A blocked row also keeps `stop`, why it stopped, in a fixed
+English taxonomy the adapter derives (`verify-implementation`, `verify-design`,
+`verify-requirements`, `verify-evidence`, `planning-unmet`, `phase-failed`, `report-unreadable`,
+`fallback-exhausted`, `uncertain`, `other`); any row may keep `corrections`, the Apply correction
+passes after a failed Verify, and `pending`, the external or environmental items it left. Rows
+written before these fields read unchanged. It is bounded to 200 rows, holds no artifacts, prompts
+or source, and is written best-effort: a row is never worth a route. `mdd retro` reads it together
+with the accumulated counters and the unreviewed improvements, and opens with **Finalización**: per
+route, the share of runs that finished with the stop causes ranked, the corrections and pending
+items; adaptive runs counted from their own `.mdd/adaptive-*.json` records (verified versus closed
+unverified, and whether evidence was missing or had gaps); and the telemetry count of started runs
+without an ending and of automatic corrections.
 
 ### Preserved runs (`.mdd/run-<SHA256(parentID)>.json`)
 

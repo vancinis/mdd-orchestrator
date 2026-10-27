@@ -31,6 +31,19 @@ applicable planned check reference or explicit not-verified/deviation assessment
 duplicate, invented or inapplicable links cannot yield successful completion. Genuine gaps
 remain visible and cannot earn 100% coverage. Only planned checks are executed.
 
+Verify blocks only on what the change causes. A held check that fails for a reason outside the
+change, corroborated by a narrower rerun or a baseline run, is reported `environmental`; a scenario
+declared `evidence: "external"` while planning is reported `external`, with what to check and
+where. Neither is a gap, both stay visible as pending, and neither can be claimed after the fact
+for something that was not declared or corroborated. Decision links between a plan and its
+decisions are derived rather than refused.
+
+In automatic mode a failed Verify of the implementation is corrected without asking, within a
+bound: one Apply pass for every finding, then a Verify that rechecks only those findings (earlier
+rows are kept and re-bound to its executions, a lost check becomes a regression), and a second
+pass only after progress. A design or requirements cause, interactive mode or a spent bound stops
+for one decision by the user. The bound is the `verify.automaticCorrections` setting (0–2).
+
 Structural completeness does **not** prove that the agent interpreted every user requirement
 correctly, that its semantic assessments are true, or that the checks are sufficient. The
 agent must explain source evidence and limits; native execution provenance is independently

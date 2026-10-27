@@ -541,23 +541,54 @@ puede cerrarse como completa, pero **no** es una probabilidad de corrección ni 
 `verificationVersion: 1`):
 
 - **Disposición de checks:** cada check retenido recibe exactamente una: `passed`, `failed`, `ran`,
-  `blocked`, `not-applicable` o `replaced`.
+  `blocked`, `not-applicable`, `replaced` o `environmental`.
 - **Estado de cada fila:** `verified`, `not-verified` o `deviation`, con un `cause` opcional
-  (`implementation`, `design` o `requirements`).
+  (`implementation`, `design`, `requirements` o `verification`). Un escenario declarado externo puede
+  quedar `external`.
 - **Fallos que bloquean:** un check obligatorio que falla o se omite no puede dar PASS. Los fallos
   opcionales quedan visibles.
+- **Solo bloquea lo que causó el cambio:** un check que falla por algo ajeno al cambio (se cae por
+  carga y pasa al correrlo solo, o ya fallaba igual en la base sin el cambio) se reporta
+  `environmental`, con su intento fallido y una ejecución que lo corrobora. No bloquea y siempre
+  aparece en el cierre, en el ledger y en el cuerpo del PR. Que falte un test de regresión no es una
+  brecha si la propia sonda de Verify demuestra el comportamiento: queda como límite.
+- **Evidencia externa:** un escenario que solo se puede observar fuera del workspace (un
+  dispositivo, staging o producción, un servicio externo en vivo, un worker real o una persona) se
+  declara `evidence: "external"` al planificar. Verify lo reporta `external`, con qué revisar, dónde y
+  cómo: queda como **pendiente externo**, no como falla. Nada que no se haya declarado así al
+  planificar puede reclasificarse después.
+- **Vínculos de decisiones derivados:** si un plan omite o equivoca qué decisión aplica a qué
+  entregable, MDD lo corrige solo en vez de rechazar el reporte. La cobertura de escenarios, las
+  dependencias y los IDs sí se siguen rechazando.
 - **Requisitos no cumplibles:** Plan, Design y Tasks deben declararlos (`unmet`). Un reporte que
   pasa y nombra un requisito no cumplido se rechaza (`UNMET_PASS`).
+- **`mdd_check_report` revisa también los vínculos:** cuando la ejecución (ruta fija) está en la
+  fase del reporte, el actor ve en su propia sesión los mismos errores de vínculos que vería el
+  runner al recibirlo (un vínculo inventado, un escenario sin cubrir), antes de devolverlo.
 
 ### Qué pasa cuando Verify falla (ruta fija)
 
-Un Verify fallido **detiene** la ejecución: nada sigue solo. El orquestador te presenta los
-destinos de retrabajo (`status.reworkTargets`), la recomendación de MDD (`status.reworkable` y
-`status.reworkReason`) y vos elegís.
+**En modo automático, MDD corrige solo, con un límite.** Cuando Verify encuentra fallas de la
+implementación, MDD manda la ruta a una única pasada de corrección de `mdd-apply` para todos los
+hallazgos. El Verify siguiente revisa **solo esos hallazgos**: conserva las filas que ya estaban
+verificadas y las vuelve a atar a los checks nuevos, que se corren igual completos para detectar
+regresiones. Un problema nuevo fuera de los hallazgos queda como seguimiento en los límites y no
+gana otra pasada. Hay una segunda pasada solo si la primera cerró hallazgos sin abrir otros.
+Después, o si la causa es de diseño o de requisitos, o en modo interactivo, la ejecución se detiene
+y decidís vos. El límite se configura con `verify.automaticCorrections` (de 0 a 2, por defecto 2).
+Con 0 se vuelve al comportamiento manual.
+
+Cuando la ejecución se detiene, el orquestador te presenta los destinos de retrabajo
+(`status.reworkTargets`), la recomendación de MDD (`status.reworkable` y `status.reworkReason`) y
+vos elegís. Una corrección que elegís vos también termina en un Verify que revisa solo sus hallazgos.
 
 ```mermaid
 flowchart TD
-  VF["mdd-verify falla"] --> STOP["La ejecución se detiene<br/>nada continúa solo"]
+  VF["mdd-verify falla"] --> AUTO{"¿Modo automático, causa de implementación<br/>y quedan pasadas?"}
+  AUTO -->|"sí"| FIX["Corrección automática<br/>una pasada de mdd-apply"] --> RECHECK["mdd-verify revisa<br/>solo esos hallazgos"]
+  RECHECK -->|"pasa"| DONE["Completa"]
+  RECHECK -->|"falla"| AUTO
+  AUTO -->|"no"| STOP["La ejecución se detiene"]
   STOP --> Q{"¿Qué querés hacer?"}
   Q -->|"Corregir la implementación"| RA["mdd_reset scope=rework<br/>una única pasada de mdd-apply"]
   Q -->|"Revisar diseño o requisitos"| RP["mdd_reset scope=rework + phase<br/>mdd-design · mdd-spec · mdd-plan"]
@@ -589,7 +620,12 @@ Reglas de la corrección:
   `.mdd/run-<hash>.continued.json`, y `mdd_pr_body({ runID })` lo sigue mostrando con `verified: false`.
 
 En la versión 3 el equivalente es una **reparación explícita** (`select` con `repairOf`) que apunta
-al último recibo de Apply, seguida de un nuevo Verify estructurado.
+al último recibo de Apply, seguida de un nuevo Verify estructurado. Cuando la evidencia falla sobre
+trabajo completo, `mdd_status` publica `correction` con las asignaciones reparables, cuántas
+reparaciones lleva cada una y una instrucción con el mismo límite: en modo automático el
+orquestador repara sin preguntar (hasta dos por asignación, la segunda solo si hubo progreso); si no,
+te presenta las brechas una vez y elegís entre reparar o cerrar sin verificar con cada brecha como
+límite.
 
 ---
 
@@ -877,7 +913,11 @@ nunca autoriza una fase ni una implementación.
 - **Revisión desde la CLI:**
   - `mdd-ai lessons report|list|mark|clear` revisa las mejoras (`.mdd/lessons.jsonl`).
   - `mdd-ai retro` arma un informe en español con las ejecuciones terminadas, los fallos y las
-    mejoras sin revisar.
+    mejoras sin revisar. Abre con **Finalización**: por ruta, qué parte de las ejecuciones terminó
+    completa y por qué causa se detuvieron las demás (por ejemplo, defectos de implementación que
+    encontró Verify o reportes ilegibles). También muestra cuántas pasaron por corrección, cuántas
+    quedaron con pendientes externos y, para la ruta adaptativa, cuántas cerraron verificadas o sin
+    verificar.
 
 ---
 
@@ -1043,6 +1083,7 @@ Un único archivo global: `$XDG_CONFIG_HOME/opencode/mdd/mdd.config.json` (o
 | `telemetry.enabled` | Booleano estricto | `true` |
 | `workers.enabled` | Booleano estricto (global, no por perfil) | `true` |
 | `knowledge.enabled` | Booleano estricto | `true` |
+| `verify.automaticCorrections` | Entero de 0 a 2: pasadas de corrección automática tras un Verify fallido (solo modo automático). 0 = siempre decidís vos | `2` |
 | `engram` | Omitido = memoria apagada. `{endpoint}` loopback o `{mode: "local", binary, dataDirectory}` | Omitido |
 
 **Roles de modelo configurables (14):** `orchestrator`, `mdd-explore`, `mdd-plan`, `mdd-propose`,
@@ -1377,6 +1418,7 @@ planificación y entrega, está en [`odd/tasks/`](odd/tasks).
 
 | Fecha | Funcionalidad | Qué agrega | Registro |
 |---|---|---|---|
+| 2026-10-27 | Verify que termina | Corrección automática acotada con re-verificación solo de los hallazgos; checks `environmental` y escenarios `external` que no bloquean; vínculos de decisiones derivados; `mdd_check_report` con los vínculos de la ejecución; tasa de finalización por causa en `mdd-ai retro`; una aprobación interactiva v3 ya no falla con "Start does not match the actual native caller message" en OpenCode 2 | [verify-completion.md](odd/tasks/verify-completion.md) |
 | 2026-10-27 | Entrada adaptativa sin bloqueos | La configuración global de OpenCode ya no frena toda admisión v3; `entry` solo necesita el contrato (vínculo del mensaje, listas vacías y huellas los pone el host); un pedido anterior se confirma con una pregunta nativa; `nextAction` y el coordinador llevan a v3 en vez de `mdd_start` | [adaptive-entry-unblock.md](odd/tasks/adaptive-entry-unblock.md) |
 | 2026-10-23 | Sesión de preguntas antes de la admisión | Skill `mdd-grill`: rondas de decisiones antes del `entry` de pedidos grandes, con documentación opcional (glosario/ADR); una ejecución v3 cerrada ya no impide preguntas del coordinador | Commit `97fc1b8` ([docs](docs/opencode-adapter.md#question-session-before-admission)) |
 | 2026-10-16 | Retrabajo Apply/Verify | Verify atribuye la causa, el retrabajo puede volver a Design, Spec o Plan, sondas de reproducción, corrección en una sola pasada con `closure` | [apply-verify-rework.md](odd/tasks/apply-verify-rework.md) |

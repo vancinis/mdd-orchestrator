@@ -102,6 +102,7 @@ no Engram setup, and telemetry/workers enabled. Reading never creates a settings
 | `engram` | Omitted means memory off. `{ endpoint }` opts into an explicit loopback service; `{ mode: 'local', binary, dataDirectory }` opts into a managed installed binary. Legacy `project` is deprecated and ignored with a runtime notice. No secrets or session IDs in settings. |
 | `telemetry` | Optional `{ "enabled": boolean }`, default enabled. No external destination. |
 | `workers` | Optional `{ "enabled": boolean }`, default enabled when the whole field is omitted. Global, not per profile. If present, `enabled` is required; strings, numbers, null, arrays, and unknown keys are rejected. |
+| `verify` | Optional `{ "automaticCorrections": 0 \| 1 \| 2 }`, default 2 when omitted. Automatic mode only: a failed Verify of the implementation goes back to one Apply correction pass for every finding, and the next Verify rechecks only those findings; a further pass runs only when that recheck closed findings and opened none. A design or requirements cause, interactive mode, no progress or a spent bound stops for the user. 0 keeps every failed Verify waiting for the user. Read at runtime startup; restart after changing it. |
 
 Capture active profile/model mappings and worker preference **once at runtime startup** with `freezeProfile`.
 Restart after changing them; never replace an in-flight workflow's answers. General
