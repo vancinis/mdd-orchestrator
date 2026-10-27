@@ -648,6 +648,20 @@ test('SA-2: new runs freeze the version before planning and refuse legacy report
   assert.match(rejected.rejected.reason, /check is unknown/);
 });
 
+test('regression: a plan with wrong decision links is repaired instead of restated', async t => {
+  const { runner, endpoint } = await fixture(t);
+  const started = await runner.start(request(endpoint), runtime);
+  const ready = await toPlan(runner, started);
+  const args = await runner.before(call, ready.task);
+  const trace = traceFixture();
+  // An unknown decision and no deliverable linking D1: both used to be restatement rounds.
+  trace.deliverables[0].decisions = ['D9'];
+  await runner.after(call, args, reportDocument({ evidenceSummary: SUMMARY_TEXT, artifact: ARTIFACT_TEXT, ...trace }));
+  const status = runner.status(runtime.sessionID);
+  assert.equal(status.rejected, undefined);
+  assert.deepEqual(status.planned[0].decisions, ['D1']);
+});
+
 for (const legacy of [false, true]) {
   test(`SA-2: restart keeps ${legacy ? 'legacy command' : 'structured execution'} semantics through Verify`, async t => {
     const root = await mkdtemp(join(tmpdir(), 'mdd-contract-replay-'));

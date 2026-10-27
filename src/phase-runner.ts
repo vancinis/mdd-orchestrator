@@ -17,7 +17,7 @@ import { emptyEvidence, invalidateEvidence, renderReport, renderClosure, phaseLa
 import type { Evidence, EvidenceFlag, PhaseReport } from './reporting.js';
 import type { FailureClass, TelemetryEvent, TelemetryResult, TelemetryUsage } from './telemetry.js';
 import { acceptance, assertNoTraceSection, closure, decisions, deepestCause, failingRequirements, OPEN_CLOSURE_PASS, phaseFields, PHASE_RESULT_FIELDS, tracedLinks,
-  UNMATCHED_PASS, unmet, UNMET_PASS, validatePlan, traceArtifact, verificationFindings } from './acceptance.js';
+  UNMATCHED_PASS, unmet, UNMET_PASS, linkDecisions, pendingExternal, validatePlan, traceArtifact, verificationFindings } from './acceptance.js';
 import type { Closure, Unmet } from './acceptance.js';
 import { MALFORMED_RESTATEMENTS, MalformedReport, narrativeOf, parsePhaseReport, parseRiskReport, reportFormatLines } from './phase-report.js';
 import { checkRiskReportForm } from './report-check.js';
@@ -3138,7 +3138,9 @@ export class PhaseRunner {
           }
           if (run.phase === 'mdd-plan' || run.phase === 'mdd-tasks') {
             if (!accepted) throw new Error('Planning has no held requirement map.');
-            planned = deliverables(result.deliverables, run.verificationVersion);
+            // Decision links are derived, never a reason to restate the plan; scenario coverage,
+            // dependencies and IDs still are, because they say what the work is.
+            planned = linkDecisions(accepted, choices, deliverables(result.deliverables, run.verificationVersion)).steps;
             validatePlan(accepted, choices, planned);
             nextEvidence.plan = 'confirmed';
           }
@@ -3807,7 +3809,7 @@ export class PhaseRunner {
         ...(prior.delivered ? { delivered: { ...prior.delivered } } : {}),
         verification: prior.verification?.changes ?? 'Verification failed.', changedFiles: prior.changedFiles,
         files: structuredClone(prior.changedList ?? []), checks: structuredClone(prior.executedChecks), verified: false, uncertain: false,
-        limits: [...(prior.verification?.limits ?? []), 'The user continued after failed verification; the failed result was not accepted as PASS.',
+        limits: [...pendingExternal(prior.verification), ...(prior.verification?.limits ?? []), 'The user continued after failed verification; the failed result was not accepted as PASS.',
           ...(!prior.verificationVersion ? ['Legacy command-based evidence; requiredness and execution identity were not recorded.'] : [])] };
     }
     if (!run) throw new Error('No recorded MDD run is available for this parent. A draft cannot claim implementation evidence.');
@@ -3819,7 +3821,7 @@ export class PhaseRunner {
       verification: run.verification?.changes ?? 'Implementation details remain unverified; inspect the recorded artifact.',
       changedFiles: run.changedFiles, files: run.changedList.map(file => ({ ...file })), checks: run.executedChecks.map(check => ({ ...check })),
       verified: run.state === 'complete' && run.verification?.matched === true && run.evidence.checks === 'confirmed',
-      uncertain: run.uncertain, limits: [...(run.verification?.limits ?? []),
+      uncertain: run.uncertain, limits: [...pendingExternal(run.verification), ...(run.verification?.limits ?? []),
         ...(!run.verificationVersion && run.verification ? ['Legacy command-based evidence; requiredness and execution identity were not recorded.'] : [])] };
   }
 
@@ -5024,7 +5026,7 @@ export class PhaseRunner {
       'mdd-design': 'Use held acceptance IDs to define only relevant decisions, boundaries and test seams. Anchor decisions to existing implementation seams and important constraints with concrete source references; explain compatibility, security and operational tradeoffs where relevant. Supply decisions; do not redefine requirements or invent extra process. Check each held requirement against your failure model: if no design within scope satisfies one, report outcome failed with unmet rather than a decision that accepts the residual.',
       'mdd-tasks': 'Supply ordered deliverables linked to held scenarios and decisions. Distinguish assigned completion checks from deferred integration verification in the artifact, including who runs each check and what remains unknown until singular Verify. A scoped worker cannot run commands; require source evidence and defer execution explicitly. Keep check commands applicable to acceptance; no extra unrelated checks. Preserve ID and dependency consistency.',
       'mdd-apply': 'Implement exactly the ONE assigned deliverable, not the full plan. Dependencies and prior results are context, not additional assignments. Supply completed=[assignedStepID] only when it is fully finished; partial, failed or interrupted work must report outcome failed, never fabricated completion. Supply changes as [{path,reason}], one entry per file you changed, where reason says why it had to change. A bare path is accepted when there is nothing to add. Use noChangeReason when nothing needed changing. Report only checks you ran using the dispatched checks schema; an empty list is honest when you ran none. Report integration assumptions and deferred integration checks in the artifact so later actors know what this batch has not established.',
-      'mdd-verify': 'Check requirements, design decisions AND the held plan against the implementation. Run applicable tests and build checks as appropriate, including planned checks when applicable; if a check is inapplicable or cannot run, explain why, its impact and what remains unknown. Supply checks using the dispatched execution schema for what you actually ran and verification for EVERY scenario-step pair, step and decision. Give source-based semantic assessments naming the check they rely on; use not-verified/deviation and outcome failed for gaps. Explain any deviation or failed/unrun check, its impact, and the next choices (improve, reject or request implementation rework) so the user can decide. An exit code is not semantic proof; never report a check you did not run.',
+      'mdd-verify': 'Check requirements, design decisions AND the held plan against the implementation. Run applicable tests and build checks as appropriate, including planned checks when applicable; if a check is inapplicable or cannot run, explain why, its impact and what remains unknown. Supply checks using the dispatched execution schema for what you actually ran and verification for EVERY scenario-step pair, step and decision. Give source-based semantic assessments naming the check they rely on; use not-verified/deviation and outcome failed for gaps. A gap is what this change causes and reproduces: a check failing for a reason outside the change is environmental (with its corroborating execution), a missing regression test is a limit when your own probe demonstrates the behavior, and a declared external scenario is external. Explain any deviation or failed/unrun check, its impact, and the next choices (improve, reject or request implementation rework) so the user can decide. An exit code is not semantic proof; never report a check you did not run.',
     };
     const hint = run.nativeUsed || scopedWorker || assignedID !== undefined ? undefined : skillHint(PHASE_SKILLS[phase]);
     const instructions = [
@@ -5143,13 +5145,16 @@ export class PhaseRunner {
 
   #closure(run: Run): string {
     const checked = run.verification;
-    const gap = checked ? [...checked.scenarios, ...checked.steps, ...checked.decisions].find(item => item.status !== 'verified') : undefined;
+    const gap = checked ? [...checked.scenarios, ...checked.steps, ...checked.decisions].find(item => item.status !== 'verified' && item.status !== 'external') : undefined;
     return renderClosure(run.workflow.snapshot().answers.summary, { goal: run.acceptance?.goal ?? 'Completar el cambio pedido.',
       changes: run.changedFiles ? checked?.changes ?? (run.delivered ? `${run.delivered.what}${run.delivered.implies ? ` ${run.delivered.implies}` : ''} La verificación de este resultado está pendiente.` : 'El resultado de la implementación no está verificado; se desconoce si cumple el objetivo.') : 'No se registró ningún cambio de implementación.',
       how: checked && run.phase === 'mdd-verify' ? run.report.how : [],
       ...(checked && run.phase === 'mdd-verify' && run.report.narrative ? { narrative: run.report.narrative } : {}),
       matched: run.state === 'complete' && checked?.matched === true,
-      checks: run.executedChecks, limits: [...(gap ? [`Brecha de criterios o de plan: ${gap.assessment}`] : []), ...(checked?.limits ?? []), ...(run.state === 'blocked' && !gap ? ['No se pudo confirmar que esté completo. Revisá la evidencia detallada antes de seguir.'] : [])],
+      checks: run.executedChecks, limits: [...(gap ? [`Brecha de criterios o de plan: ${gap.assessment}`] : []),
+        ...(checked?.scenarios ?? []).filter(row => row.status === 'external').map(row => `Pendiente externo (${row.scenarioID}): ${row.assessment}`),
+        ...(checked?.checkResults ?? []).filter(row => row.disposition === 'environmental').map(row => `Check ${row.checkID} falló por algo ajeno al cambio: ${row.reason ?? 'sin motivo registrado'}`),
+        ...(checked?.limits ?? []), ...(run.state === 'blocked' && !gap ? ['No se pudo confirmar que esté completo. Revisá la evidencia detallada antes de seguir.'] : [])],
       status: run.state === 'complete' ? 'passed' : run.report.status === 'failed' ? 'failed' : 'blocked', evidence: run.evidence });
   }
 

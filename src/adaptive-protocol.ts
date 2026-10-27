@@ -53,10 +53,22 @@ export function completeAdaptiveEntry(value: unknown, root: string): unknown {
   if (!plain(parsed) || parsed.kind !== 'entry' || !plain(parsed.args) || !plain(parsed.args.contract)) return value;
   const contract: Record<string, unknown> = { ...parsed.args.contract };
   for (const key of ['exclusions', 'decisions', 'productQuestions']) if (contract[key] === undefined) contract[key] = [];
+  // Omitted assignment decisions are derived: a decision applies to an assignment covering a
+  // scenario of a requirement it shapes. Supplied links are kept and validated as written.
+  const owner = new Map<string, string>();
+  const acceptance = contract.acceptance;
+  if (plain(acceptance) && Array.isArray(acceptance.requirements)) for (const requirement of acceptance.requirements)
+    if (plain(requirement) && typeof requirement.id === 'string' && Array.isArray(requirement.scenarios))
+      for (const scenario of requirement.scenarios) if (plain(scenario) && typeof scenario.id === 'string') owner.set(scenario.id, requirement.id);
+  const applicable = (scenarios: unknown) => !Array.isArray(scenarios) || !Array.isArray(contract.decisions) ? [] : contract.decisions
+    .filter((choice: unknown): choice is Record<string, unknown> => plain(choice) && typeof choice.id === 'string' && Array.isArray(choice.requirements) &&
+      (choice.requirements as unknown[]).some(requirement => scenarios.some(id => owner.get(String(id)) === requirement)))
+    .map(choice => choice.id as string);
   if (Array.isArray(contract.assignments)) contract.assignments = contract.assignments.map((item: unknown) => {
     if (!plain(item)) return item;
     const assignment: Record<string, unknown> = { ...item };
-    for (const key of ['decisions', 'dependsOn']) if (assignment[key] === undefined) assignment[key] = [];
+    if (assignment.decisions === undefined) assignment.decisions = applicable(assignment.scenarios);
+    if (assignment.dependsOn === undefined) assignment.dependsOn = [];
     if (plain(assignment.obligations)) {
       const obligations: Record<string, unknown> = { ...assignment.obligations };
       for (const key of ['source', 'checks']) if (obligations[key] === undefined) obligations[key] = [];
@@ -99,6 +111,7 @@ export const ENTRY_GUIDE = Object.freeze({
     'Every scenario is covered by at least one assignment; an assignment writes its own path and stays inside the contract scope.',
     'IDs are unique across requirements, scenarios, decisions, assignments and evidence obligations.',
     'Each assignment needs source or check obligations. complexity or impact medium/high freezes the medium/high stages.',
+    'Mark a scenario evidence:"external" only when it is observable solely outside this workspace (device, staging/production, live service, real worker or a person); evidence then reports it as external (pending), never as a gap.',
     'Ask productQuestions only for decisions the repository cannot answer. Read inputRef for complete definitions.',
   ],
 });
@@ -167,7 +180,7 @@ function inputContracts(contract?: AdaptiveContract, data?: AdaptiveData) {
     context: object({ technical: choice('understood', 'uncertain'), dependencies: choice('bounded', 'unknown'), reason: text,
       fingerprints: list(ref('fingerprint'), 128) }),
     assessment: object({ assessmentVersion: { const: 1 }, complexity: choice('low', 'medium', 'high'), impact: choice('low', 'medium', 'high') }),
-    scenario: object({ id: ref('id'), given: text, when: text, then: text }),
+    scenario: object({ id: ref('id'), given: text, when: text, then: text }, { evidence: { const: 'external', format: 'only observable outside this workspace: device, staging/production, live service, real worker or a person' } }),
     requirement: object({ id: ref('id'), description: text, scenarios: list(ref('scenario'), 64, 1) }),
     acceptance: object({ goal: text, requirements: list(ref('requirement'), 64, 1) }),
     decision: object({ id: ref('id'), description: text, requirements: { ...ids, minItems: 1 } }),
@@ -182,7 +195,7 @@ function inputContracts(contract?: AdaptiveContract, data?: AdaptiveData) {
     questionOption: object({ label: { type: 'string', minLength: 1 }, description: { type: 'string', minLength: 1 } }, { recommended: { type: 'boolean' } }),
     productQuestion: object({ question: { type: 'string', minLength: 1 }, why: { type: 'string', minLength: 1 } },
       { options: list(ref('questionOption'), 6), multiple: { type: 'boolean' }, deferrable: { type: 'boolean' } }),
-    evidenceStatus: choice('verified', 'not-verified', 'deviation'),
+    evidenceStatus: { ...choice('verified', 'not-verified', 'deviation', 'external'), format: 'external only on a scenario row the held acceptance declares external; it is pending, not verified' },
     readback: object({ acceptance: ref('acceptance'), scope: ref('scope'), exclusions: list(text, 16), decisions: list(ref('decision')) }),
     inventory: object({ path: ref('path'), disposition: choice('assignment', 'unrelated'), reason: text }),
     exclusionEvidence: object({ exclusion: text, status: ref('evidenceStatus'), assessment: text }),
@@ -381,7 +394,8 @@ export class AdaptiveProtocol {
         unfinishedAssignments: ids.filter(id => !data.completed.some(item => item.assignmentID === id)),
         sources: data.report?.sources.filter(item => item.status !== 'verified').map(item => item.id) ?? [],
         assignments: data.report?.assignments.filter(item => item.status !== 'verified').map(item => item.assignmentID) ?? [],
-        scenarios: data.report?.scenarios.filter(item => item.status !== 'verified').map(({ requirementID, scenarioID, assignmentID }) => ({ requirementID, scenarioID, assignmentID })) ?? [],
+        scenarios: data.report?.scenarios.filter(item => item.status !== 'verified' && item.status !== 'external').map(({ requirementID, scenarioID, assignmentID }) => ({ requirementID, scenarioID, assignmentID })) ?? [],
+        externalPending: data.report?.scenarios.filter(item => item.status === 'external').map(({ scenarioID, assignmentID, assessment }) => ({ scenarioID, assignmentID, check: statusText(assessment) })) ?? [],
         decisions: data.report?.decisions.filter(item => item.status !== 'verified').map(item => item.decisionID) ?? [],
         checks: data.report?.checkResults.filter(item => !['passed', 'replaced', 'not-applicable'].includes(item.disposition))
           .map(({ checkID, disposition }) => ({ checkID, disposition })) ?? [] },

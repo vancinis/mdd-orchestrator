@@ -11,9 +11,24 @@ For verificationVersion 1, give each actual execution its own ID, command and ex
 interrupted). Assessments reference execution IDs, not command names. Account once for each held
 check in checkResults, and account for all additional executions in supplementalChecks with
 explicit requiredness. Preserve failed attempts; explain retries and use the final result.
-Use passed/failed/ran/blocked/not-applicable/replaced consistently with actual execution evidence.
-Required applicable failed, interrupted, blocked or missing checks cannot support PASS. Optional
-failures remain visible and cannot support verified rows; semantic acceptance coverage is separate.
+Use passed/failed/ran/blocked/not-applicable/replaced/environmental consistently with actual
+execution evidence. Required applicable failed, interrupted, blocked or missing checks cannot
+support PASS, unless the failure is environmental. Optional failures remain visible and cannot
+support verified rows; semantic acceptance coverage is separate.
+
+Block only on what this change causes. A gap is a requirement the change leaves unmet, or a defect
+that reproduces with realistic input and did not already reproduce before the change. A held check
+that fails for a reason outside the change is environmental, not a gap: the failing part passes
+when rerun alone (a timeout or load failure), or the check fails the same way on the unchanged
+baseline (an already failing test, a missing environment variable or service). List the check's own
+failing attempt, then the corroborating execution as a different command (the narrower rerun, or
+the run against the baseline, for example in a scratch worktree outside the workspace), and name
+which in its reason. Environmental results never block and always appear in the report.
+A missing or weak regression test is not a gap by itself when your own executed probe or check
+demonstrates the behavior: verify the row and list the missing test under limits.
+A scenario the held acceptance declares evidence "external" can only be observed outside this
+workspace: report it external, with what to check, where and how, after verifying locally whatever
+can be. Never report any other row as external.
 Non-applicability needs the held condition and a source-based reason. An unconditional check
 cannot be waived. Replacement needs an actually executed successful check and an equivalence
 rationale, never a chain or a fabricated execution. Shared integration evidence keeps the same

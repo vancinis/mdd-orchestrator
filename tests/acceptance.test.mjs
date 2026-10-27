@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { acceptance, decisions, reportText, shortText, summaryText, validatePlan, verification, MAX_REPORTED_PROBLEMS } from '../dist/acceptance.js';
+import { acceptance, decisions, linkDecisions, pendingExternal, reportText, shortText, summaryText, validatePlan, verification, verificationFindings, MAX_REPORTED_PROBLEMS } from '../dist/acceptance.js';
 import { deliverables, executed, verifyReport } from '../dist/phase-evidence.js';
 import { traceFixture } from './adapter-fixture.mjs';
 
@@ -203,6 +203,70 @@ for (const [name, change] of Object.entries({
     assert.throws(() => { const accepted = acceptance(data.acceptance); validatePlan(accepted, decisions(data.decisions, accepted), deliverables(data.deliverables)); });
   });
 }
+test('regression: a held check failing for a reason outside the change is environmental, corroborated, visible and non-blocking', () => {
+  const f = structuredFixture();
+  f.checks.splice(0, 1, { id: 'E1', command: 'npm test', exit: 1 }, { id: 'E2', command: 'node --test tests/cli.test.mjs', exit: 0 });
+  for (const row of [...f.report.scenarios, ...f.report.steps, ...f.report.decisions]) row.checks = ['E2'];
+  f.report.checkResults = [{ checkID: 'C1', disposition: 'environmental', executions: ['E1', 'E2'],
+    reason: 'tests/cli.test.mjs timed out under full-suite load and passed when rerun alone (E2).' }];
+  const read = f.read();
+  assert.equal(read.verification.matched, true);
+  assert.deepEqual(verificationFindings(read.verification), []);
+  assert.match(pendingExternal(read.verification)[0], /^Check C1 failed for a reason outside this change: tests\/cli\.test\.mjs timed out/);
+  // It needs the corroboration, in order, and a real failure of its own command.
+  f.report.checkResults[0].executions = ['E1'];
+  assert.throws(f.read, /needs its failing execution and a later corroborating one/);
+  f.report.checkResults[0].executions = ['E1', 'E2'];
+  f.checks[0].exit = 0;
+  assert.throws(f.read, /only when its own command failed/);
+  f.checks[0].exit = 1;
+  f.checks.reverse(); f.checks.forEach((check, index) => { check.id = `E${index + 1}`; });
+  f.report.checkResults[0].executions = ['E1', 'E2'];
+  assert.throws(f.read, /own command attempts first/);
+});
+
+test('regression: a declared external scenario is pending, not a gap; undeclared or non-scenario external rows are refused', () => {
+  const f = fixture();
+  assert.throws(() => acceptance({ ...traceFixture().acceptance, requirements: [{ ...traceFixture().acceptance.requirements[0],
+    scenarios: [{ ...traceFixture().acceptance.requirements[0].scenarios[0], evidence: 'manual' }] }] }), /evidence must be omitted .* or "external"/);
+  const data = traceFixture();
+  data.acceptance.requirements[0].scenarios[1].evidence = 'external';
+  const accepted = acceptance(data.acceptance);
+  assert.deepEqual(accepted.requirements[0].scenarios.map(scenario => scenario.evidence), [undefined, 'external']);
+  const external = structuredClone(f.result);
+  external.scenarios[1] = { ...external.scenarios[1], status: 'external', checks: [], assessment: 'Confirm on a physical device that the error banner appears.' };
+  const checked = verification(external, accepted, f.choices, f.steps, f.reported);
+  assert.equal(checked.matched, true);
+  assert.deepEqual(verificationFindings(checked), []);
+  assert.deepEqual(pendingExternal(checked), ['External check pending for scenario S2 (cli-validation): Confirm on a physical device that the error banner appears.']);
+  // Not declared while planning: Verify cannot reclassify a gap as pending.
+  assert.throws(() => verification(external, f.accepted, f.choices, f.steps, f.reported), /does not declare scenario S2 external/);
+  const step = structuredClone(f.result);
+  step.steps[0] = { ...step.steps[0], status: 'external' };
+  assert.throws(() => verification(step, accepted, f.choices, f.steps, f.reported), /only a scenario can be pending/);
+});
+
+test('regression: decision links are derived instead of refused; scenario coverage still is', () => {
+  const data = traceFixture();
+  data.acceptance.requirements.push({ id: 'R2', description: 'Report usage.', scenarios: [{ id: 'S3', given: 'Use', when: 'Reported', then: 'Counted' }] });
+  data.decisions.push({ id: 'D2', description: 'Count at the boundary.', requirements: ['R2'] });
+  data.deliverables[0].decisions = ['D2', 'D9'];
+  data.deliverables.push({ ...data.deliverables[0], id: 'usage', scenarios: ['S3'], decisions: [], dependsOn: [] });
+  const accepted = acceptance(data.acceptance), choices = decisions(data.decisions, accepted);
+  const planned = deliverables(data.deliverables);
+  assert.throws(() => validatePlan(accepted, choices, planned), /not applicable|omits decision/);
+  const linked = linkDecisions(accepted, choices, planned);
+  assert.deepEqual(linked.steps.map(step => step.decisions), [['D1'], ['D2']]);
+  assert.match(linked.repaired.join(' | '), /cli-validation: removed D2, D9/);
+  assert.match(linked.repaired.join(' | '), /D1: linked to cli-validation/);
+  assert.match(linked.repaired.join(' | '), /D2: linked to usage/);
+  validatePlan(accepted, choices, linked.steps);
+  assert.deepEqual(planned[0].decisions, ['D2', 'D9'], 'the input plan is not mutated');
+  // What the work is stays the actor's to fix: an uncovered scenario is still refused.
+  const uncovered = linkDecisions(accepted, choices, planned.slice(0, 1)).steps;
+  assert.throws(() => validatePlan(accepted, choices, uncovered), /omits accepted scenario S3/);
+});
+
 test('a plan with one problem is rejected in exactly the words it always was', () => {
   const data = traceFixture();
   data.deliverables[0].decisions = [];

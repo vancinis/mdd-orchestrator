@@ -357,6 +357,64 @@ test('regression: entry needs only the contract; the host binds the current user
   assert.deepEqual(saved.data.contract.assignments[0].obligations.checks, []);
 });
 
+test('regression: a declared external scenario closes verified as pending, never as a gap, and survives restart', async t => {
+  const f = await fixture(t), draft = f.contract();
+  draft.acceptance.requirements[0].scenarios[0].evidence = 'external';
+  let status = await f.entry(draft);
+  const settled = await f.dispatch(await f.select(status), { completed: ['A1'], changes: ['own.txt'], checks: [] }, ['before', 'after']);
+  status = await f.send('prepare', { handle: settled.status.handle });
+  const evidence = f.evidence(draft, status.evidence.snapshotID);
+  evidence.scenarios[0] = { ...evidence.scenarios[0], status: 'external', sources: [], checks: [], assessment: 'Open the studio on staging and confirm the replaced text renders.' };
+  status = await f.send('submit', { handle: status.handle, evidence });
+  assert.equal(status.evidence.matched, true);
+  assert.deepEqual(status.evidence.gaps.scenarios, []);
+  assert.equal(status.evidence.gaps.externalPending[0].scenarioID, 'S1');
+  await f.restart();
+  status = await f.call('mdd_status');
+  assert.equal(status.evidence.matched, true, 'restore revalidates the external row');
+  status = await f.send('close', { handle: status.handle, outcome: 'verified' });
+  assert.equal(status.state, 'completed');
+  // A scenario the contract did not declare external cannot be reported as pending.
+  const g = await fixture(t), local = g.contract();
+  status = await g.entry(local);
+  const done = await g.dispatch(await g.select(status), { completed: ['A1'], changes: ['own.txt'], checks: [] }, ['before', 'after']);
+  status = await g.send('prepare', { handle: done.status.handle });
+  const forged = g.evidence(local, status.evidence.snapshotID);
+  forged.scenarios[0] = { ...forged.scenarios[0], status: 'external', sources: [], checks: [] };
+  await assert.rejects(g.send('submit', { handle: status.handle, evidence: forged }), /not declared external/);
+});
+
+test('regression: a parent check failing for a reason outside the change is environmental and still closes verified', async t => {
+  const f = await fixture(t), draft = f.contract();
+  draft.assignments[0].obligations.checks = [{ id: 'C1', command: 'npm test', requirement: 'required' }];
+  let status = await f.entry(draft);
+  const settled = await f.dispatch(await f.select(status), { completed: ['A1'], changes: ['own.txt'], checks: [] }, ['before', 'after']);
+  status = await f.send('prepare', { handle: settled.status.handle });
+  const evidence = f.evidence(draft, status.evidence.snapshotID);
+  evidence.checks = [{ id: 'X1', command: 'npm test', exit: 1 }, { id: 'X2', command: 'node --test tests/own.test.mjs', exit: 0 }];
+  evidence.checkResults = [{ checkID: 'C1', disposition: 'environmental', executions: ['X1', 'X2'],
+    reason: 'Only tests/pack.test.mjs failed (npm pack timeout under load); the suites covering own.txt passed alone in X2.' }];
+  for (const row of [...evidence.assignments, ...evidence.scenarios]) row.checks = ['X2'];
+  status = await f.send('submit', { handle: status.handle, evidence });
+  assert.equal(status.evidence.matched, true);
+  assert.equal((await f.send('close', { handle: status.handle, outcome: 'verified' })).state, 'completed');
+});
+
+test('regression: omitted assignment decisions are linked to every applicable decision at entry', async t => {
+  const f = await fixture(t), draft = f.contract(); f.user(draft.objective);
+  draft.decisions = [{ id: 'D1', description: 'Replace the whole source file.', requirements: ['R1'] }];
+  delete draft.assignments[0].decisions;
+  const status = await f.send('entry', { contract: draft });
+  assert.equal(status.state, 'await-selection', status.reason);
+  assert.deepEqual(f.store.read(f.sessionID).data.contract.assignments[0].decisions, ['D1']);
+  // A supplied link that does not apply is refused with how to avoid it.
+  const g = await fixture(t), wrong = g.contract(); g.user(wrong.objective);
+  wrong.acceptance.requirements.push({ id: 'R2', description: 'Other', scenarios: [{ id: 'S2', given: 'A', when: 'B', then: 'C' }] });
+  wrong.decisions = [{ id: 'D1', description: 'Replace the whole source file.', requirements: ['R1'] }, { id: 'D2', description: 'Other rule.', requirements: ['R2'] }];
+  wrong.assignments[0].decisions = ['D2'];
+  await assert.rejects(g.send('entry', { contract: wrong }), /Assignment A1 decision D2 is not applicable to its scenarios\. Omit assignment decisions/);
+});
+
 test('regression: a fresh status carries the entry guide and a refused entry says what to correct', async t => {
   const f = await fixture(t), draft = f.contract(); f.user(draft.objective);
   const status = await f.call('mdd_status');

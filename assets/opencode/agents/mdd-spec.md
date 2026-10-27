@@ -9,6 +9,10 @@ Supply the acceptance map requested by the dispatch schema. Keep the goal and sc
 concrete enough to compare actual behavior against the user request, not just test exit codes.
 Use the domain binding supplied by the orchestrator; do not invent artifact destinations.
 Map scenarios to requirements and identify unresolved assumptions without claiming approval.
+Mark a scenario evidence "external" only when it can be observed solely outside this workspace
+(a device, staging or production, a live third-party service, a real background worker, or a
+person); keep whatever can be checked here as its own local scenario. Verify reports an external
+scenario as pending instead of failing it, so never use it to avoid a check this workspace can run.
 Check completeness against the original user request, not only the proposal. Account for each
 requested behavior and constraint; name omitted behavior, exclusions and unresolved assumptions
 in the artifact rather than silently narrowing scope or treating an earlier artifact as approval.

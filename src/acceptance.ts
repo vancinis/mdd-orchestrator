@@ -2,7 +2,30 @@ import { objectWithKeys } from './validation.js';
 import type { Check, Deliverable, PlannedCheck, VerificationVersion } from './phase-evidence.js';
 import type { Phase } from './policy.js';
 
-export type Acceptance = { goal: string; requirements: { id: string; description: string; scenarios: { id: string; given: string; when: string; then: string }[] }[] };
+/**
+ * `evidence: "external"` marks a scenario that can only be observed outside this workspace: on a
+ * device, in staging or production, against a live third-party service, through a real background
+ * worker or by a person looking at it. Verify reports such a scenario as `external` (pending, with
+ * what to check and where) instead of failing it, and every report shows it as a pending external
+ * check. It is declared while planning, before implementation, so Verify cannot reclassify a gap.
+ */
+export type Scenario = { id: string; given: string; when: string; then: string; evidence?: 'external' };
+export type Acceptance = { goal: string; requirements: { id: string; description: string; scenarios: Scenario[] }[] };
+/** Scenario IDs declared external in a held acceptance map. */
+export function externalScenarios(accepted: Acceptance | undefined): string[] {
+  return accepted ? accepted.requirements.flatMap(requirement => requirement.scenarios.filter(scenario => scenario.evidence === 'external').map(scenario => scenario.id)) : [];
+}
+/**
+ * What a verification leaves pending without a gap, one readable line each, for closures and PR
+ * bodies: external scenarios still to be checked elsewhere, and held checks that failed for a
+ * reason outside the change. Neither blocks; both must stay visible.
+ */
+export function pendingExternal(checked: Verification | undefined): string[] {
+  return [...(checked?.scenarios ?? []).filter(row => row.status === 'external')
+    .map(row => `External check pending for scenario ${row.scenarioID} (${row.stepID}): ${row.assessment}`),
+  ...(checked?.checkResults ?? []).filter(row => row.disposition === 'environmental')
+    .map(row => `Check ${row.checkID} failed for a reason outside this change: ${row.reason ?? 'no reason recorded'}`)];
+}
 export type Decision = { id: string; description: string; requirements: string[] };
 /**
  * Where a gap Verify found has to be fixed. Without it every failure went back to Apply, including
@@ -11,7 +34,10 @@ export type Decision = { id: string; description: string; requirements: string[]
  */
 export const FINDING_CAUSES = ['implementation', 'design', 'requirements', 'verification'] as const;
 export type FindingCause = typeof FINDING_CAUSES[number];
-type Assessment = { status: 'verified' | 'not-verified' | 'deviation'; checks: string[]; assessment: string; cause?: FindingCause };
+/** `external` is a scenario-only status for a scenario the held acceptance declared external. */
+type Assessment = { status: 'verified' | 'not-verified' | 'deviation' | 'external'; checks: string[]; assessment: string; cause?: FindingCause };
+/** Statuses that do not leave a gap: verified, or pending outside this workspace by declaration. */
+const SETTLED = new Set(['verified', 'external']);
 /** A held requirement a planning phase states it cannot satisfy within its scope. */
 export type Unmet = { requirementID: string; reason: string };
 /** How a correction pass accounts for one finding of the failed Verify it answers. */
@@ -24,7 +50,16 @@ export type Verification = {
   checkResults?: CheckResult[];
   supplementalChecks?: SupplementalCheck[];
 };
-type Disposition = 'passed' | 'failed' | 'ran' | 'blocked' | 'not-applicable' | 'replaced';
+/**
+ * `environmental`: a held check failed for a reason outside this change, shown by a later
+ * corroborating execution: the failing part passed when rerun alone (load, timeouts), or the same
+ * failure reproduces on the unchanged baseline (missing environment, an already failing test). It
+ * does not block, and every report names it, because a failure the change did not cause is not a
+ * reason to stop the change, and hiding it would make the run look cleaner than it was.
+ */
+type Disposition = 'passed' | 'failed' | 'ran' | 'blocked' | 'not-applicable' | 'replaced' | 'environmental';
+/** Dispositions that leave no gap in a held check. */
+const CHECK_SETTLED = ['passed', 'replaced', 'not-applicable', 'environmental'];
 type CheckDisposition = { disposition: Disposition; executions: string[]; reason?: string; equivalence?: string };
 export type CheckResult = CheckDisposition & { checkID: string };
 export type SupplementalCheck = CheckDisposition & { id: string; requirement: 'required' | 'optional' };
@@ -46,13 +81,15 @@ export const PHASE_RESULT_FIELDS: Record<Phase, readonly string[]> = Object.free
   'mdd-apply': ['changes', 'noChangeReason', 'checks', 'delivered', 'completed'],
   'mdd-verify': ['checks', 'verification'],
 });
+const EXTERNAL_RULE = 'Set evidence:"external" only on a scenario observable solely outside this workspace (a device or simulator, staging or production, a live third-party service, a real background worker, or a person looking at it); keep whatever can be checked here as its own local scenario.';
+const EXTERNAL_STATUS = 'A scenario the held acceptance declares external may have status external: it is pending, not a gap; say in the assessment what to check, where and how, and verify locally everything that can be. No other row may be external.';
 const CAUSE_RULE = 'Any gap row may add cause: implementation (default), design (held decisions cannot satisfy it), requirements (acceptance infeasible) or verification (execution/evidence-only gaps, without an established semantic defect). Mixed precedence: requirements > design > implementation > verification. Only gap rows may name a cause; evidence gaps still block acceptance and require closure.';
 const DELIVERABLE_RULES = 'Keep IDs stable. Every scenario and relevant decision must map to an applicable step. Optional parallel metadata requires explicit dependsOn (including [] when independent) and complete exact root-relative file scopes, including shared outputs/tests/docs/lockfiles; include every task/code/data dependency, never guess independence. Use slash-separated portable ASCII paths without traversal, aliases, directories or globs. Apply eligibility needs nonempty writes; missing/incomplete scopes or omitted dependencies remain sequential. This records eligibility only; the runtime selects eligible worker batches under its capability and independence checks.';
 export const FIELD_SCHEMA: Record<string, string> = {
   completed: 'completed=[assignedStepID] lists exactly the one assigned deliverable actually finished; a correction pass lists every deliverable it owns, in plan order. A failed or partial batch earns no completion; report outcome failed, never guess or claim another step.',
   unmet: 'unmet=[{requirementID,reason}] names each held requirement no design within this scope can satisfy; omit it when there is none. Any entry requires outcome failed: never pass with a decision that accepts a residual gap against a held requirement. MDD then stops before implementation so the user can revise the requirement or the scope.',
   closure: 'closure=[{id,status:"closed"|"open",evidence}] only in a correction pass: one entry per finding ID the prompt lists. evidence names the reproduction or regression test and code fix for semantic defects, or actual execution/evidence recovery for evidence-only gaps, with command and exit. Use noChangeReason when no source change was needed. Any open entry requires outcome failed.',
-  acceptance: 'acceptance={goal,requirements:[{id,description,scenarios:[{id,given,when,then}]}]}. Keep IDs stable.',
+  acceptance: 'acceptance={goal,requirements:[{id,description,scenarios:[{id,given,when,then,evidence?}]}]}. Keep IDs stable. ' + EXTERNAL_RULE,
   decisions: 'decisions=[{id,description,requirements:[requirementID]}]; empty when the work needs no decision.',
   deliverables: 'deliverables=[{id,description,path,check,scenarios:[scenarioID],decisions:[decisionID],dependsOn:[earlierStepID],parallel?:{complete:true,reads:[filePath],writes:[filePath]}}]. ' + DELIVERABLE_RULES,
   domain: 'domain="project", the fixed storage namespace.',
@@ -60,14 +97,14 @@ export const FIELD_SCHEMA: Record<string, string> = {
   noChangeReason: 'noChangeReason=text instead of changes when nothing needed changing.',
   delivered: 'delivered={what,implies} summarises the finished change for whoever reviews the pull request: what is now possible or different (what), and what that enables or requires of them (implies). Describe the outcome, never the mechanics — the per-file reasons already say how.',
   checks: 'checks=[{command,exit}] reports only checks this phase actually ran, at most 32. command is the exact command on one line, of any length, with no line breaks, tabs or other control characters; exit is its integer exit code, or null when it did not finish.',
-  verification: 'verification={scenarios:[{requirementID,scenarioID,stepID,status,checks:[command],assessment}],steps:[{stepID,status,checks,assessment}],decisions:[{decisionID,status,checks,assessment}],changes,limits:[]}. Status is verified/not-verified/deviation. Each checks entry repeats a command exactly as reported in checks; a verified row names at least one, and every one it names exited 0. Assessment explains source evidence and limits, not just a pass label. limits lists each material limit as its own entry. Cover all held links exactly once. ' + CAUSE_RULE,
+  verification: 'verification={scenarios:[{requirementID,scenarioID,stepID,status,checks:[command],assessment}],steps:[{stepID,status,checks,assessment}],decisions:[{decisionID,status,checks,assessment}],changes,limits:[]}. Status is verified/not-verified/deviation. Each checks entry repeats a command exactly as reported in checks; a verified row names at least one, and every one it names exited 0. Assessment explains source evidence and limits, not just a pass label. limits lists each material limit as its own entry. Cover all held links exactly once. ' + EXTERNAL_STATUS + ' ' + CAUSE_RULE,
 };
 export const STRUCTURED_FIELD_SCHEMA: Record<string, string> = {
   verificationVersion: 'verificationVersion=1 identifies structured actor-reported verification. MDD checks consistency, not independent execution attestation.',
   deliverables: 'deliverables=[{id,description,path,checks:[{id,command,requirement:"required"|"optional",appliesWhen?:text}],scenarios:[scenarioID],decisions:[decisionID],dependsOn:[earlierStepID],parallel?:{complete:true,reads:[filePath],writes:[filePath]}}]. ' + DELIVERABLE_RULES +
     ' Check IDs are globally unique across the held plan (at most 64); declare requiredness and any conditional applicability before execution. Each deliverable has 1–32 checks. No legacy check string is accepted.',
   checks: 'checks=[{id,command,exit}] reports every actual execution in chronological order, at most 32. IDs are unique even for repeated commands; command is exact one-line text and exit is an integer or null for interrupted execution. Never invent IDs for unrun commands or omit failed attempts.',
-  verification: 'verification={scenarios:[{requirementID,scenarioID,stepID,status,checks:[executionID],assessment}],steps:[{stepID,status,checks,assessment}],decisions:[{decisionID,status,checks,assessment}],changes,limits:[],checkResults:[{checkID,disposition,executions:[executionID],reason?,equivalence?}],supplementalChecks:[{id,requirement:"required"|"optional",disposition,executions:[executionID],reason?}]}. Cover every held check exactly once and account for every execution in checkResults or supplementalChecks. Held checks may share an actual integration execution only with the same complete ordered attempt history; supplemental entries cannot overlap any other entry. Disposition: passed/failed/ran (interrupted, null exit)/blocked (no execution)/not-applicable/replaced. Final execution determines the result; keep earlier attempts in order and explain retries. Passed and replaced need final exit 0. Replaced requires reason and equivalence rationale for the actually executed replacement, never a replacement chain. Not-applicable requires a held appliesWhen condition and source-based reason; unconditional checks cannot be waived. Every disposition except passed requires a reason. Supplemental executions must be passed/failed/ran with explicit requiredness and cannot downgrade held checks. Required applicable failed/ran/blocked checks prevent PASS; optional failures remain visible. Semantic acceptance coverage remains independent: cover all scenario-step links, steps and decisions once, status verified/not-verified/deviation, verified rows cite successful final execution IDs. limits lists each material limit as its own entry. Source evidence explains behavior; exit codes alone do not prove it. ' + CAUSE_RULE,
+  verification: 'verification={scenarios:[{requirementID,scenarioID,stepID,status,checks:[executionID],assessment}],steps:[{stepID,status,checks,assessment}],decisions:[{decisionID,status,checks,assessment}],changes,limits:[],checkResults:[{checkID,disposition,executions:[executionID],reason?,equivalence?}],supplementalChecks:[{id,requirement:"required"|"optional",disposition,executions:[executionID],reason?}]}. Cover every held check exactly once and account for every execution in checkResults or supplementalChecks. Held checks may share an actual integration execution only with the same complete ordered attempt history; supplemental entries cannot overlap any other entry. Disposition: passed/failed/ran (interrupted, null exit)/blocked (no execution)/not-applicable/replaced/environmental. Environmental means the held command failed for a reason outside this change: list its own attempts, then a corroborating execution with a different command (the failing part rerun alone that passed, or the check run against the unchanged baseline that fails the same way), and name in reason which corroboration and which failing tests; it does not block and is always reported. Final execution determines the result; keep earlier attempts in order and explain retries. Passed and replaced need final exit 0. Replaced requires reason and equivalence rationale for the actually executed replacement, never a replacement chain. Not-applicable requires a held appliesWhen condition and source-based reason; unconditional checks cannot be waived. Every disposition except passed requires a reason. Supplemental executions must be passed/failed/ran with explicit requiredness and cannot downgrade held checks. Required applicable failed/ran/blocked checks prevent PASS; optional failures remain visible. Semantic acceptance coverage remains independent: cover all scenario-step links, steps and decisions once, status verified/not-verified/deviation, verified rows cite successful final execution IDs. limits lists each material limit as its own entry. Source evidence explains behavior; exit codes alone do not prove it. ' + EXTERNAL_STATUS + ' ' + CAUSE_RULE,
 };
 /**
  * Fields a phase reported that belong to no phase. They are dropped rather than fatal: a finished
@@ -176,9 +213,12 @@ export function acceptance(value: unknown): Acceptance {
     const requirement = objectWithKeys(value, 'requirement', ['id', 'description', 'scenarios']);
     const requirementID = unique(requirement.id, 'requirement ID');
     return { id: requirementID, description: reportText(requirement.description, `requirement ${requirementID} description`), scenarios: items(requirement.scenarios, `scenarios of requirement ${requirementID}`).map(value => {
-      const scenario = objectWithKeys(value, 'scenario', ['id', 'given', 'when', 'then']);
+      const scenario = objectWithKeys(value, 'scenario', ['id', 'given', 'when', 'then', 'evidence']);
       const scenarioID = unique(scenario.id, `scenario ID of requirement ${requirementID}`);
-      return { id: scenarioID, given: reportText(scenario.given, `given of scenario ${scenarioID}`), when: reportText(scenario.when, `when of scenario ${scenarioID}`), then: reportText(scenario.then, `then of scenario ${scenarioID}`) };
+      if (scenario.evidence !== undefined && scenario.evidence !== 'external')
+        throw new Error(`Scenario ${scenarioID} evidence must be omitted (checked in this workspace) or "external" (only observable on a device, staging or production, a live service, a real background worker or by a person).`);
+      return { id: scenarioID, given: reportText(scenario.given, `given of scenario ${scenarioID}`), when: reportText(scenario.when, `when of scenario ${scenarioID}`), then: reportText(scenario.then, `then of scenario ${scenarioID}`),
+        ...(scenario.evidence === 'external' ? { evidence: 'external' as const } : {}) };
     }) };
   });
   if (requirements.flatMap(item => item.scenarios).length > 64) throw new Error('Acceptance map exceeds 64 scenarios.');
@@ -248,10 +288,10 @@ export const OPEN_CLOSURE_PASS = 'A correction pass that leaves a Verify finding
 export function verificationFindings(checked: Verification | undefined): string[] {
   if (!checked) return [];
   const ids = [
-    ...checked.scenarios.filter(row => row.status !== 'verified').map(row => row.scenarioID),
-    ...checked.steps.filter(row => row.status !== 'verified').map(row => row.stepID),
-    ...checked.decisions.filter(row => row.status !== 'verified').map(row => row.decisionID),
-    ...(checked.checkResults ?? []).filter(row => !['passed', 'replaced', 'not-applicable'].includes(row.disposition)).map(row => row.checkID),
+    ...checked.scenarios.filter(row => !SETTLED.has(row.status)).map(row => row.scenarioID),
+    ...checked.steps.filter(row => !SETTLED.has(row.status)).map(row => row.stepID),
+    ...checked.decisions.filter(row => !SETTLED.has(row.status)).map(row => row.decisionID),
+    ...(checked.checkResults ?? []).filter(row => !CHECK_SETTLED.includes(row.disposition)).map(row => row.checkID),
     ...(checked.supplementalChecks ?? []).filter(row => row.requirement === 'required' && row.disposition !== 'passed').map(row => row.id),
   ];
   return [...new Set(ids)].slice(0, 64);
@@ -262,13 +302,13 @@ export function failingRequirements(checked: unknown): string[] {
   const rows = checked && typeof checked === 'object' && Array.isArray((checked as { scenarios?: unknown }).scenarios) ? (checked as { scenarios: unknown[] }).scenarios : [];
   return [...new Set(rows.flatMap(row => {
     const item = row && typeof row === 'object' ? row as Record<string, unknown> : {};
-    return item.status !== 'verified' && item.cause !== 'verification' && typeof item.requirementID === 'string' ? [item.requirementID] : [];
+    return !SETTLED.has(String(item.status)) && item.cause !== 'verification' && typeof item.requirementID === 'string' ? [item.requirementID] : [];
   }))];
 }
 /** Semantic causes outrank evidence gaps; omitted causes retain the historical code default. */
 export function deepestCause(checked: Verification | undefined): FindingCause {
   const causes = new Set([...(checked?.scenarios ?? []), ...(checked?.steps ?? []), ...(checked?.decisions ?? [])]
-    .filter(row => row.status !== 'verified').map(row => row.cause ?? 'implementation'));
+    .filter(row => !SETTLED.has(row.status)).map(row => row.cause ?? 'implementation'));
   return causes.has('requirements') ? 'requirements' : causes.has('design') ? 'design'
     : causes.has('implementation') ? 'implementation' : 'verification';
 }
@@ -311,6 +351,37 @@ export function raise(problems: readonly string[], subject: string): void {
   const more = problems.length - shown.length;
   throw new Error(`${subject} has ${problems.length} problem(s), and they are all in the report rather than in the work. Fix them together and restate the report once: ${shown.map((problem, index) => `(${index + 1}) ${problem}`).join(' ')}${more ? ` ...and ${more} more of the same kind.` : ''}`);
 }
+/**
+ * Decision links are derivable from the plan itself, so they are repaired rather than refused.
+ *
+ * A decision applies to a deliverable when it shapes a requirement whose scenario that deliverable
+ * covers. Refusing a plan over these links was the most frequent malformed report on record (a
+ * Tasks or Plan report restated for "D8 is not applicable to its scenarios" or "the plan omits D4
+ * on R2"), and every one of those rounds re-sent the whole document over bookkeeping the adapter
+ * can compute. This keeps every applicable link the actor wrote, drops unknown or inapplicable
+ * ones, and links each decision to the deliverables covering a requirement it shapes when no
+ * deliverable did. Scenario coverage, dependencies and IDs are not touched: `validatePlan` still
+ * refuses those, because they say what the work is.
+ */
+export function linkDecisions(accepted: Acceptance, choices: Decision[], steps: Deliverable[]): { steps: Deliverable[]; repaired: string[] } {
+  const owner = new Map(accepted.requirements.flatMap(requirement => requirement.scenarios.map(scenario => [scenario.id, requirement.id] as const)));
+  const repaired: string[] = [];
+  const linked = steps.map(step => {
+    const covered = new Set(step.scenarios.flatMap(id => owner.has(id) ? [owner.get(id)!] : []));
+    const kept = step.decisions.filter(id => choices.some(choice => choice.id === id && choice.requirements.some(requirement => covered.has(requirement))));
+    const dropped = step.decisions.filter(id => !kept.includes(id));
+    if (dropped.length) repaired.push(`${step.id}: removed ${dropped.join(', ')}, not applicable to its scenarios`);
+    return { ...step, decisions: kept };
+  });
+  for (const decision of choices) for (const requirement of decision.requirements) {
+    const covering = linked.filter(step => step.scenarios.some(id => owner.get(id) === requirement));
+    if (!covering.length || covering.some(step => step.decisions.includes(decision.id))) continue;
+    for (const step of covering) step.decisions = [...step.decisions, decision.id];
+    repaired.push(`${decision.id}: linked to ${covering.map(step => step.id).join(', ')}, which cover requirement ${requirement}`);
+  }
+  return { steps: linked, repaired };
+}
+
 export function validatePlan(accepted: Acceptance, choices: Decision[], steps: Deliverable[]): void {
   const scenarios = accepted.requirements.flatMap(requirement => requirement.scenarios.map(scenario => ({ id: scenario.id, requirement: requirement.id })));
   const previous = new Set<string>();
@@ -369,8 +440,9 @@ export function checkAccounting(input: Record<string, unknown>, held: { planned:
     if (supplemental && plan) throw new Error(`Supplemental check ${key} cannot downgrade a held check.`);
     if (supplemental && entry.requirement !== 'required' && entry.requirement !== 'optional') throw new Error(`Supplemental check ${key} needs requirement required or optional.`);
     const disposition = entry.disposition as Disposition;
-    if (!['passed', 'failed', 'ran', 'blocked', 'not-applicable', 'replaced'].includes(disposition)) throw new Error(`Check ${key} needs an explicit disposition.`);
+    if (!['passed', 'failed', 'ran', 'blocked', 'not-applicable', 'replaced', 'environmental'].includes(disposition)) throw new Error(`Check ${key} needs an explicit disposition.`);
     if (supplemental && !['passed', 'failed', 'ran'].includes(disposition)) throw new Error(`Supplemental check ${key} must describe actual executions.`);
+    const environmental = disposition === 'environmental';
     const executions = references(entry.executions, `executions of ${key}`, true);
     const reason = entry.reason === undefined ? undefined : reportText(entry.reason, `reason for ${key}`);
     const equivalence = entry.equivalence === undefined ? undefined : reportText(entry.equivalence, `equivalence for ${key}`);
@@ -380,6 +452,8 @@ export function checkAccounting(input: Record<string, unknown>, held: { planned:
     if (disposition === 'not-applicable' && plan && !plan.appliesWhen) throw new Error(`Check ${key} is unconditional and cannot be marked not-applicable.`);
     const unrun = disposition === 'blocked' || disposition === 'not-applicable';
     if (unrun ? executions.length !== 0 : executions.length === 0) throw new Error(`Check ${key} has contradictory ${disposition} execution references.`);
+    if (environmental && executions.length < 2)
+      throw new Error(`Environmental check ${key} needs its failing execution and a later corroborating one: an isolated rerun that passed, or the same failure on the unchanged baseline.`);
     let previous = -1;
     const attempts: Check[] = [];
     for (const execution of executions) {
@@ -398,7 +472,19 @@ export function checkAccounting(input: Record<string, unknown>, held: { planned:
       previous = index;
       attempts.push(ran[index]!);
     }
-    if (ran && !unrun) {
+    if (ran && !unrun && environmental) {
+      // The held command's own attempts come first and its last one failed; whatever follows is
+      // the corroboration (a narrower rerun or a baseline run), which may use another command.
+      const command = plan?.command ?? attempts[0]!.command;
+      const firstOther = attempts.findIndex(check => check.command !== command);
+      const own = attempts.slice(0, firstOther < 0 ? attempts.length : firstOther);
+      if (!own.length || attempts.slice(own.length).some(check => check.command === command))
+        throw new Error(`Environmental check ${key} lists its own command attempts first, then the corroborating executions.`);
+      if (own.at(-1)!.exit === 0) throw new Error(`Check ${key} is environmental only when its own command failed; it passed, so report passed.`);
+      if (own.length === attempts.length) throw new Error(`Environmental check ${key} needs a corroborating execution after its failing one.`);
+      // A narrower rerun that passed is real evidence of the behavior it exercised.
+      for (const check of attempts.slice(own.length)) if (check.exit === 0) usable.push(check.id!);
+    } else if (ran && !unrun) {
       const final = attempts.at(-1)!;
       const successful = disposition === 'passed' || disposition === 'replaced';
       if (successful ? final.exit !== 0 : disposition === 'ran' ? final.exit !== null : final.exit === null || final.exit === 0)
@@ -410,7 +496,7 @@ export function checkAccounting(input: Record<string, unknown>, held: { planned:
       if (successful) usable.push(final.id!);
     }
     const requirement = supplemental ? entry.requirement : plan?.requirement;
-    if (requirement === 'required' && !['passed', 'replaced', 'not-applicable'].includes(disposition)) complete = false;
+    if (requirement === 'required' && !CHECK_SETTLED.includes(disposition)) complete = false;
     const common = { disposition, executions, ...(reason ? { reason } : {}), ...(equivalence ? { equivalence } : {}) };
     return supplemental ? { id: key, requirement: entry.requirement as PlannedCheck['requirement'], ...common } : { checkID: key, ...common };
   };
@@ -450,10 +536,15 @@ export function readVerification(value: unknown, held: HeldPlan | undefined, rep
   if (!input) return { problems };
   const accounting = version ? attempt(problems, () => checkAccounting(input, held, ran)) : undefined;
   if (accounting && ran) passed = accounting.usable;
-  const assess = (entry: Record<string, unknown>, label: string): Assessment | undefined => {
+  const declaredExternal = externalScenarios(held?.accepted);
+  const assess = (entry: Record<string, unknown>, label: string, scenarioID?: string): Assessment | undefined => {
     const own: string[] = [];
-    const status = ['verified', 'not-verified', 'deviation'].includes(String(entry.status)) ? entry.status as Assessment['status'] : undefined;
-    if (!status) own.push(`The assessment of ${label} has unknown status ${preview(entry.status)}. Use verified, not-verified or deviation.`);
+    const status = ['verified', 'not-verified', 'deviation', 'external'].includes(String(entry.status)) ? entry.status as Assessment['status'] : undefined;
+    if (!status) own.push(`The assessment of ${label} has unknown status ${preview(entry.status)}. Use verified, not-verified or deviation${scenarioID ? ', or external for a scenario the held acceptance declares external' : ''}.`);
+    // External is declared while planning, so a gap cannot be reclassified as pending afterwards.
+    else if (status === 'external' && scenarioID === undefined) own.push(`The assessment of ${label} cannot be external: only a scenario can be pending outside this workspace.`);
+    else if (status === 'external' && held && !declaredExternal.includes(scenarioID!))
+      own.push(`The assessment of ${label} cannot be external: the held acceptance does not declare scenario ${scenarioID} external. Verify it here, or report not-verified.`);
     const checks = attempt(own, () => items(entry.checks, `assessment checks of ${label}`, true).map((value, index) => shortText(value, `check reference ${index + 1} of ${label}`, Infinity)));
     if (checks) {
       const duplicate = checks.find((command, index) => checks.indexOf(command) !== index);
@@ -469,7 +560,7 @@ export function readVerification(value: unknown, held: HeldPlan | undefined, rep
     const assessment = attempt(own, () => reportText(entry.assessment, `source-based assessment of ${label}`));
     if (entry.cause !== undefined && !FINDING_CAUSES.includes(entry.cause as FindingCause))
       own.push(`The assessment of ${label} has unknown cause ${preview(entry.cause)}. Use ${FINDING_CAUSES.join(', ')}.`);
-    else if (entry.cause !== undefined && status === 'verified') own.push(`The verified assessment of ${label} cannot name a cause; only a gap has one.`);
+    else if (entry.cause !== undefined && status !== undefined && SETTLED.has(status)) own.push(`The ${status} assessment of ${label} cannot name a cause; only a gap has one.`);
     problems.push(...own);
     return own.length ? undefined : { status: status!, checks: checks!, assessment: assessment!, ...(entry.cause !== undefined ? { cause: entry.cause as FindingCause } : {}) };
   };
@@ -491,7 +582,7 @@ export function readVerification(value: unknown, held: HeldPlan | undefined, rep
       if (!link) continue;
     }
     coveredLinks.push(link);
-    const checked = assess(entry, `scenario ${link.scenarioID} on deliverable ${link.stepID}`);
+    const checked = assess(entry, `scenario ${link.scenarioID} on deliverable ${link.stepID}`, link.scenarioID);
     if (checked) scenarios.push({ ...link, ...checked });
   }
   const missingLinks = expected.filter(item => !coveredLinks.some(covered => covered.scenarioID === item.scenarioID && covered.stepID === item.step.id));
@@ -540,7 +631,7 @@ export function readVerification(value: unknown, held: HeldPlan | undefined, rep
   if (problems.length) return { problems };
   return { problems, verification: { scenarios, steps, decisions, changes: changes!, limits: limits as string[],
     ...(accounting ? { checkResults: accounting.checkResults, supplementalChecks: accounting.supplementalChecks } : {}),
-    matched: (accounting?.complete ?? true) && [...scenarios, ...steps, ...decisions].every(item => item.status === 'verified') } };
+    matched: (accounting?.complete ?? true) && [...scenarios, ...steps, ...decisions].every(item => SETTLED.has(item.status)) } };
 }
 export function verification(value: unknown, accepted: Acceptance, choices: Decision[], planned: Deliverable[], reported: string[] = [], passed: string[] = reported): Verification {
   const read = readVerification(value, { accepted, choices, planned }, reported, passed);

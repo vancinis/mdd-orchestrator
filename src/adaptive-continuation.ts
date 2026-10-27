@@ -125,8 +125,10 @@ export class AdaptiveContinuation {
       const original = remaining.find(item => item.id === step.id)!;
       // Business links and source obligations remain held. Only technical ordering, explanation,
       // and additional real check obligations can change without invalidating semantic authority.
+      // Decision links are held from admission and derivable, so the report's own list is not
+      // compared: the held links are kept whatever it says, and restating a plan over them is gone.
       if (step.path !== original.path || !isDeepStrictEqual(step.scenarios, original.scenarios) ||
-          !isDeepStrictEqual(step.decisions, original.decisions) || !isDeepStrictEqual(step.parallel, original.scope))
+          !isDeepStrictEqual(step.parallel, original.scope))
         throw new Error('Remaining plan changes a held semantic or source binding; explicit invalidation/reinspection or native user decision is required.');
       if (original.dependsOn.some(id => !step.dependsOn.includes(id)) || original.obligations.checks.some(check =>
         !step.checks?.some(actual => isDeepStrictEqual(check, actual)))) throw new Error('Remaining plan cannot remove held dependencies or evidence obligations.');

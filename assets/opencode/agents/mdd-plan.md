@@ -7,6 +7,9 @@ Read relevant project files and produce one compact, readable plan, not extra de
 State the A-to-B goal, stable requirements and concrete acceptance scenarios, relevant decisions,
 and ordered implementation steps linked to those scenarios and existing planned checks.
 Include happy/error cases where applicable; explain non-applicability rather than inventing work.
+Mark a scenario evidence "external" only when it can be observed solely outside this workspace
+(a device, staging or production, a live service, a real background worker, or a person); keep
+whatever can be checked here as its own local scenario. Verify reports it as pending, not a gap.
 Supply the dispatch schema's acceptance, decisions and deliverables alongside the single artifact.
 For verificationVersion 1, give each planned check a globally unique ID, exact command,
 required/optional requirement and an appliesWhen condition only when genuinely conditional.

@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { lstatSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
-import { acceptance, decisions, evidenceID, references, reportText, shortText, summaryText, assertNoTraceSection, checkAccounting } from './acceptance.js';
+import { acceptance, decisions, evidenceID, externalScenarios, references, reportText, shortText, summaryText, assertNoTraceSection, checkAccounting } from './acceptance.js';
 import type { Acceptance, Decision } from './acceptance.js';
 import { applyPlan, taskIDs } from './apply-batches.js';
 import { changed, plannedChecks, executed } from './phase-evidence.js';
@@ -42,7 +42,8 @@ const CONTRACT_BYTES = 24000;
 const ASSURANCE = 'Structured parent-reported consistency, not independent execution attestation. Local declared source bytes are bound; whole-worktree diff inventory is a reported observation, not comprehensive attestation.';
 type Snapshot = { id: string; sources: { path: string; digest: string | null; content: string | null }[] };
 type SourceAssessment = { id: string; paths: string[]; status: 'verified' | 'not-verified' | 'deviation'; assessment: string };
-type SemanticAssessment = { status: SourceAssessment['status']; sources: string[]; checks: string[]; assessment: string };
+/** `external` appears only on scenario rows the held acceptance declares external. */
+type SemanticAssessment = { status: SourceAssessment['status'] | 'external'; sources: string[]; checks: string[]; assessment: string };
 type EvidenceReport = { snapshotID: string; readback: { acceptance: Acceptance; scope: Scope; exclusions: string[]; decisions: Decision[] };
   inventory: { path: string; disposition: 'assignment' | 'unrelated'; reason: string }[];
   exclusions: { exclusion: string; status: SourceAssessment['status']; assessment: string }[];
@@ -182,7 +183,7 @@ export function adaptiveContract(value: unknown): AdaptiveContract {
     for (const id of linked) {
       const choice = choices.find(choice => choice.id === id)!;
       if (!accepted.requirements.some(requirement => choice.requirements.includes(requirement.id) && requirement.scenarios.some(scenario => scenarios.includes(scenario.id))))
-        throw new Error('Assignment decision is not applicable to its scenarios.');
+        throw new Error(`Assignment ${String(item.id)} decision ${choice.id} is not applicable to its scenarios. Omit assignment decisions and MDD links every applicable decision.`);
     }
     const evidence = objectWithKeys(item.obligations, 'evidence obligations', ['source', 'checks']);
     if (!Array.isArray(evidence.source) || evidence.source.length > 32 || !Array.isArray(evidence.checks)) throw new Error('Invalid evidence obligations.');
@@ -204,7 +205,7 @@ export function adaptiveContract(value: unknown): AdaptiveContract {
   if (scenarioIDs.some(id => !assignments.some(item => item.scenarios.includes(id))) || choices.some(choice =>
     choice.requirements.some(id => !assignments.some(item => item.decisions.includes(choice.id) &&
       accepted.requirements.find(requirement => requirement.id === id)!.scenarios.some(scenario => item.scenarios.includes(scenario.id))))))
-    throw new Error('Adaptive contract omits acceptance or applicable decision coverage.');
+    throw new Error('Adaptive contract omits acceptance or applicable decision coverage: every scenario needs an assignment, and every decision an assignment covering a requirement it shapes. Omit assignment decisions and MDD links every applicable decision.');
   for (const id of obligations) if (ids.has(id)) throw new Error('Adaptive IDs must be globally unique.');
   const result: AdaptiveContract = { contractVersion: 1, objective: objective(input.objective),
     acceptance: accepted, exclusions: texts(input.exclusions, 'exclusions'), decisions: choices,
@@ -703,7 +704,10 @@ export class AdaptiveLow {
       const result = accounting.checkResults.find(item => item.checkID === held.id)!;
       const replacement = result.disposition === 'replaced' ? checks.find(item => item.id === result.executions.at(-1))!.command : held.command;
       const attempts = checks.filter(item => item.command === held.command || item.command === replacement).map(item => item.id!);
-      if (result.executions.length && !isDeepStrictEqual(result.executions, attempts))
+      // An environmental result also cites its corroborating executions, which use other commands.
+      const own = result.disposition === 'environmental'
+        ? result.executions.filter(id => checks.find(item => item.id === id)?.command === held.command) : result.executions;
+      if (own.length && !isDeepStrictEqual(own, attempts))
         throw new Error(`Held check ${held.id} must retain every reported command attempt; supplemental evidence cannot hide or downgrade a retry.`);
     }
     const inventory = entries(input.inventory, 'final diff inventory').map(value => {
@@ -753,12 +757,21 @@ export class AdaptiveLow {
       return { assignmentID: assignment.id, ...assess(item, [assignment]) };
     });
     exactCoverage(assignments.map(item => item.assignmentID), this.#assignments().map(item => item.id), 'Assignment coverage');
+    const declaredExternal = externalScenarios(this.#contract.acceptance);
     const scenarios = entries(input.scenarios, 'scenario coverage').map(value => {
       const item = objectWithKeys(value, 'scenario coverage', ['requirementID', 'scenarioID', 'assignmentID', 'status', 'sources', 'checks', 'assessment']);
       const assignment = this.#assignments().find(assignment => assignment.id === item.assignmentID);
       const requirement = this.#contract.acceptance.requirements.find(requirement => requirement.id === item.requirementID && requirement.scenarios.some(scenario => scenario.id === item.scenarioID));
       if (!assignment || !requirement || !assignment.scenarios.includes(String(item.scenarioID))) throw new Error('Scenario assessment invents a held link.');
-      return { requirementID: requirement.id, scenarioID: String(item.scenarioID), assignmentID: assignment.id, ...assess(item, [assignment]) };
+      const link = { requirementID: requirement.id, scenarioID: String(item.scenarioID), assignmentID: assignment.id };
+      // Declared external at admission: pending outside this workspace, never a reclassified gap.
+      if (item.status === 'external') {
+        if (!declaredExternal.includes(link.scenarioID))
+          throw new Error(`Scenario ${link.scenarioID} is not declared external in the held acceptance: verify it here, or report not-verified.`);
+        return { ...link, status: 'external' as const, sources: references(item.sources, 'source evidence references', true),
+          checks: references(item.checks, 'execution references', true), assessment: reportText(item.assessment, 'external check: what, where and how') };
+      }
+      return { ...link, ...assess(item, [assignment]) };
     });
     exactCoverage(scenarios.map(item => `${item.assignmentID}/${item.scenarioID}`), this.#assignments().flatMap(item => item.scenarios.map(id => `${item.id}/${id}`)), 'Scenario coverage');
     const choices = entries(input.decisions, 'decision coverage').map(value => {
@@ -773,7 +786,7 @@ export class AdaptiveLow {
       assignments, scenarios, decisions: choices, checks, checkResults: accounting.checkResults, supplementalChecks: accounting.supplementalChecks, limits };
     if (Buffer.byteLength(JSON.stringify(report)) > 48000) throw new Error('Adaptive evidence exceeds its 48000-byte budget.');
     this.assertEvidenceCurrent(); this.#report = report; this.#checkHistory = structuredClone(checks);
-    this.#matched = accounting.complete && [...sources, ...assignments, ...scenarios, ...choices, ...exclusions].every(item => item.status === 'verified');
+    this.#matched = accounting.complete && [...sources, ...assignments, ...scenarios, ...choices, ...exclusions].every(item => item.status === 'verified' || item.status === 'external');
     this.#handle = randomUUID();
   }
   close(handle: string, outcome: unknown, limits: unknown): void {
