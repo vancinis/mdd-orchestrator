@@ -125,6 +125,8 @@ async function fixture(t, completeProfile = true, workersEnabled = true, version
   settings.profiles.default.models['mdd-plan'] = 'openai/test-model#high';
   if (securityModel) settings.profiles.default.models['mdd-security'] = securityModel;
   settings.profiles.default.models['mdd-jd-judge-a'] = 'openai/judge-model#high';
+  // These tests pin the manual stop after a failed Verify; automatic correction has its own tests.
+  settings.verify = { automaticCorrections: 0 };
   saveGlobalSettings(settings);
   const sessionID = 'ses_parent';
   const sessions = new Map([[sessionID, { id: sessionID, agent: 'mdd-orchestrator', projectID: 'project', location: { directory: root }, time: { created: 1, updated: 1 } }]]);
