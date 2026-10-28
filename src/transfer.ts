@@ -29,7 +29,7 @@ export function assessTransfer(input: { sourceSessionID: string; runID: string; 
   target: Runtime, checkpoint: CheckpointStore, progress: ProgressGuard, questions: QuestionCheckpointStore): TransferAssessment {
   const tokens = typeof input.userText === 'string' ? input.userText.trim().split(/\s+/) : [];
   if (!identifier(input.sourceSessionID) || !identifier(input.runID) ||
-      typeof input.userText !== 'string' || !input.userText.trim() || Buffer.byteLength(input.userText) > 12000 ||
+      typeof input.userText !== 'string' || !input.userText.trim() ||
       input.sourceSessionID === target.sessionID || !tokens.includes(`sourceSessionID=${input.sourceSessionID}`) ||
       !tokens.includes(`runID=${input.runID}`)) {
     throw new ValidationError('The native request must explicitly name a different sourceSessionID and runID. Nothing was transferred.');
@@ -90,7 +90,7 @@ export function projectTargetTransfer(source: StableCheckpoint, marker: ReturnTy
   const text = canonicalNativeText(proof.userText);
   const tokens = text.split(/\s+/);
   if (proof.sessionID !== target.sessionID || proof.latest !== true || proof.authored !== true ||
-      !identifier(proof.userMessageID) || !text || Buffer.byteLength(text) > 12000 ||
+      !identifier(proof.userMessageID) || !text ||
       !tokens.includes(`sourceSessionID=${source.parent}`) || !tokens.includes(`runID=${source.runID}`))
     throw new ValidationError('A fresh, exact target-authored resume request must name the source and run.');
   const workflow = Workflow.replay(source.request, source.events);

@@ -4,14 +4,14 @@ export type ApplyStep = { id: string; dependsOn: string[] };
 export type ApplyProgress = { epoch: number; planned: ApplyStep[]; completed: string[] };
 
 export function taskIDs(value: unknown): string[] {
-  if (!Array.isArray(value) || value.length > 32 || Array.from(value).some(id => typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,64}$/.test(id)) ||
-      new Set(value).size !== value.length) throw new ValidationError('Completed task IDs must be unique planned identifiers (at most 32).');
+  if (!Array.isArray(value) || Array.from(value).some(id => typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,64}$/.test(id)) ||
+      new Set(value).size !== value.length) throw new ValidationError('Completed task IDs must be unique planned identifiers.');
   return [...value] as string[];
 }
 
 /** Plans are already dependency-ordered; selection never guesses or reorders a broken plan. */
 export function applyPlan(value: unknown): ApplyStep[] {
-  if (!Array.isArray(value) || !value.length || value.length > 32) throw new ValidationError('Apply requires 1–32 planned deliverables.');
+  if (!Array.isArray(value) || !value.length) throw new ValidationError('Apply requires at least one planned deliverable.');
   const seen = new Set<string>();
   return Array.from(value).map(value => {
     const item = objectWithKeys(value, 'Apply step', ['id', 'dependsOn']);

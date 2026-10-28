@@ -29,7 +29,7 @@ export function explorationItems(value: unknown): ExplorationWorkItem[] {
         const target = objectWithKeys(value, 'local read target', ['root', 'files']);
         if (typeof target.root !== 'string' || !isAbsolute(target.root) || target.root.length > 2048 ||
             /^[\\/]{2}|[\x00-\x1f]|:\/\//.test(target.root) || !Array.isArray(target.files) ||
-            !target.files.length || target.files.length > 64) throw new Error('Read targets require a local absolute root and exact file paths.');
+            !target.files.length) throw new Error('Read targets require a local absolute root and exact file paths.');
         return { root: target.root, files: target.files.map(scopePath) };
       });
     }
@@ -86,7 +86,7 @@ export function parseParallelScope(value: unknown): ParallelScope {
   for (const key of ['reads', 'writes'] as const) {
     if (!Object.hasOwn(entry, key)) continue;
     const paths = entry[key];
-    if (!Array.isArray(paths) || paths.length > 64) throw new Error(`Parallel scope ${key} requires 0–64 file paths.`);
+    if (!Array.isArray(paths)) throw new Error(`Parallel scope ${key} requires a list of file paths.`);
     const parsed = Array.from(paths, scopePath);
     if (new Set(parsed.map(path => path.toLowerCase())).size !== parsed.length) throw new Error(`Parallel scope ${key} repeats a path or case alias.`);
     result[key] = parsed;
@@ -342,7 +342,7 @@ export function applyScopeFiles(root: string, scope: ParallelScope | undefined):
  * here because persisted data can be damaged. Completed IDs must include their prerequisites.
  */
 export function selectWorkerBatch(root: string, planned: readonly Deliverable[], completed: readonly string[]): Deliverable[] {
-  if (!Array.isArray(planned) || !planned.length || planned.length > 32 || !Array.isArray(completed)) return [];
+  if (!Array.isArray(planned) || !planned.length || !Array.isArray(completed)) return [];
   const previous = new Set<string>();
   for (const item of planned) {
     if (!item || typeof item.id !== 'string' || !/^[a-zA-Z0-9_-]{1,64}$/.test(item.id) || previous.has(item.id) ||

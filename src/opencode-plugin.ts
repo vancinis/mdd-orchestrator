@@ -359,7 +359,7 @@ export function createInspector(input: PluginInput, timeout = 5000, now: () => n
             (user !== latestUser && prior?.requirements !== start.requirements) ||
             !text.length || text.some(item => item.synthetic === true || item.ignored === true || item.sessionID !== runtime.sessionID || item.messageID !== userInfo.id || typeof item.text !== 'string') ||
             text.map(item => item.text).join('\n') !== start.requirements || !isDeepStrictEqual(state.input, start)) throw new Error('Original objective lacks correlated setup-only proof.');
-        const requirements = boundedText(start.requirements, 'original requirements', 12000);
+        const requirements = nonemptyText(start.requirements, 'original requirements');
         candidates.set(String(userInfo.id), { requirements, userMessageID: String(userInfo.id) });
       }
     }
@@ -1097,7 +1097,7 @@ const plugin: Plugin = async input => {
     },
     tool: {
       mdd_adapt: tool({
-        description: 'Native version-3 implementation entry and guarded adaptive operations: the default for every new implementation, including precise edits. Supply only a bounded JSON payload {routingVersion:3,kind,args}. Read status, its entryGuide and its exact operation/input/detail references. Entry needs only the contract: the host binds the user message whose exact text is contract.objective (messageID is an optional assertion) and fills omitted empty lists and source fingerprints. Transfer messageID must identify the current native USER request. No runtime, profile, approval or stopped claims. A refusal names what to correct; fix it and retry instead of switching routes. Low selects actors by need; medium/high require genuine structured stages and Verify. Fixed mdd_start is compatibility-only, on explicit request.',
+        description: 'Native version-3 implementation entry and guarded adaptive operations: the default for every new implementation, including precise edits. Supply only a JSON payload {routingVersion:3,kind,args}; write the text the user reads in full Spanish sentences, never compressed. Read status, its entryGuide and its exact operation/input/detail references. Entry needs only the contract: the host binds the user message whose exact text is contract.objective (messageID is an optional assertion) and fills omitted empty lists and source fingerprints. Transfer messageID must identify the current native USER request. No runtime, profile, approval or stopped claims. A refusal names what to correct; fix it and retry instead of switching routes. Low selects actors by need; medium/high require genuine structured stages and Verify. Fixed mdd_start is compatibility-only, on explicit request.',
         args: { payload: tool.schema.string().min(1).max(160000) },
         async execute(args, context) {
           enter(context, 'mdd_adapt');
@@ -1138,7 +1138,7 @@ const plugin: Plugin = async input => {
         async execute(args, context) {
           enter(context, 'mdd_transfer');
           if (context.abort.aborted) throw new Error('Transfer preflight was aborted.');
-          const request = boundedText(args.userText, 'actual native transfer request', 12000);
+          const request = nonemptyText(args.userText, 'actual native transfer request');
           const userMessageID = await inspector.intake(context, request, context.messageID);
           if (typeof userMessageID !== 'string') throw new Error('Transfer needs the exact native target user message ID.');
           const assessment = assessTransfer(args, context, checkpoint, new ProgressGuard(dataRoot), new QuestionCheckpointStore(dataRoot));
@@ -1200,7 +1200,7 @@ const plugin: Plugin = async input => {
         },
         async execute(args, context) {
           enter(context, 'mdd_transfer_recover');
-          const text = boundedText(args.userText, 'native recovery request', 12000);
+          const text = nonemptyText(args.userText, 'native recovery request');
           const tokens = canonicalNativeText(text).split(/\s+/);
           if (!tokens.includes(`sourceSessionID=${args.sourceSessionID}`) || !tokens.includes(`runID=${args.runID}`) ||
               !tokens.includes(`operationID=${args.operationID}`) || !/\b(stopped|interrupted)\b/i.test(text))
@@ -1301,7 +1301,7 @@ const plugin: Plugin = async input => {
           enter(context, 'mdd_pr_body');
           if (context.abort.aborted) throw new Error('The PR body draft was aborted.');
           const current = runner.recordedPRFacts(context.sessionID, args.runID);
-          await inspector.intake(context, boundedText(args.userText, 'actual user request', 12000), context.messageID);
+          await inspector.intake(context, nonemptyText(args.userText, 'actual user request'), context.messageID);
           runner.owner(context.sessionID);
           const facts = runner.recordedPRFacts(context.sessionID, args.runID);
           if (facts?.runID !== current?.runID) throw new Error('The current run changed while drafting; no draft was produced.');
@@ -1352,7 +1352,7 @@ const plugin: Plugin = async input => {
       mdd_knowledge_record: tool({
         description: 'Record a bounded candidate project observation learned in the current native request context when knowledge is enabled. Supply your structured finding and the exact latest userText; the user need not author metadata or a recording command. Provenance identifies a coordinator observation, never a user assertion, approved policy or permission. Unknown writes must never be retried blindly.',
         args: {
-          userText: tool.schema.string().min(1).max(12000).describe('Exact latest native user request, unchanged. This grounds task context, not user authorship or approval of the observation.'),
+          userText: tool.schema.string().min(1).describe('Exact latest native user request, unchanged. This grounds task context, not user authorship or approval of the observation.'),
           observation: tool.schema.object({
             summary: tool.schema.string().min(1).max(320).describe('Concise single-line candidate finding; synthesis is allowed.'),
             body: tool.schema.string().min(1).max(4096),
@@ -1382,7 +1382,7 @@ const plugin: Plugin = async input => {
           if (context.abort.aborted) throw new Error('Recording the improvement was aborted.');
           // The same proof mdd_pr_body requires: an improvement attributed to the user has to be
           // one the user actually asked for, not one the model decided to write down for them.
-          await inspector.intake(context, boundedText(args.userText, 'actual user request', 12000), context.messageID);
+          await inspector.intake(context, nonemptyText(args.userText, 'actual user request'), context.messageID);
           runner.owner(context.sessionID);
           return reply(await intake.improve({
             title: boundedText(args.title, 'improvement title', 200),
@@ -1618,7 +1618,7 @@ const plugin: Plugin = async input => {
             // abort a child, release a question, or take over a crashed operation on this path.
             runner.authorizeReset(context.sessionID, false);
             return runner.withReset(context.sessionID, async () => {
-              const userMessageID = await inspector.intake(context, boundedText(args.userText, 'continuation request', 12000), context.messageID);
+              const userMessageID = await inspector.intake(context, nonemptyText(args.userText, 'continuation request'), context.messageID);
               if (context.abort.aborted || !userMessageID) throw new Error('The continuation request could not be confirmed.');
               await runner.restore(context, project => intake.boundRunMemory(context, project));
               return reply(intake.reset(context, 'continue', { runID: args.runID!, userMessageID, userText: args.userText!, kind: 'continue' }));
@@ -1647,7 +1647,7 @@ const plugin: Plugin = async input => {
             // The same proof mdd_improve and change requests require: the user's word releases a
             // subagent, or sends a run back to Apply, only when it is the user's actual latest
             // message, never the model's summary.
-            try { await inspector.intake(context, boundedText(args.userText, 'user confirmation', 12000), context.messageID); }
+            try { await inspector.intake(context, nonemptyText(args.userText, 'user confirmation'), context.messageID); }
             catch { throw new Error('userText must be the user\'s exact latest message in this conversation, unchanged. Nothing was released.'); }
             // A request to correct the implementation says nothing about a subagent having stopped.
             attested = args.scope !== 'rework';

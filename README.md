@@ -225,7 +225,16 @@ Reglas clave de la versión 3:
   reemplazarlas en la misma conversación, después de archivar de forma inmutable el registro
   anterior y de hacer un CAS exacto de propiedad.
 - **Modo:** el modo configurado se congela. Si no hay modo configurado, se pregunta solo el modo.
-  En modo interactivo cada operación necesita una aprobación nativa real, de un solo uso.
+  En modo interactivo cada operación necesita una aprobación nativa real, de un solo uso. La
+  pregunta (`Aprobación de operación`) está en español y resume qué hace la operación: en una
+  entrada, el pedido, el resultado buscado y los archivos que puede escribir; al lanzar un agente,
+  cuál, para qué tarea y con qué propósito. Solo `Aprobar operación` la autoriza; `Pausar`,
+  `Rechazar`, el texto libre o descartarla no autorizan nada. Los recibos guardados antes de este
+  cambio con `Approve operation` se siguen aceptando.
+- **Sin topes de tamaño propios:** el contrato, la evidencia, el pedido del usuario y las listas de
+  exclusiones y límites no tienen un tamaño máximo propio; solo aplica el límite total de 160000
+  bytes por pedido. El prompt de cada agente adaptativo no se compacta ni se rechaza por tamaño, y
+  Verify recibe los archivos de la instantánea por ruta y digest en lugar de su contenido.
 - **Entrada mínima:** `entry` solo necesita el contrato. El host vincula solo el mensaje del
   usuario cuyo texto exacto es `contract.objective`; `messageID` es opcional y, si se pasa, tiene
   que coincidir. Las listas vacías (`exclusions`, `decisions`, `productQuestions`, dependencias de
@@ -234,7 +243,7 @@ Reglas clave de la versión 3:
 - **Pedido anterior:** si tu último mensaje solo confirma un pedido previo ("sí, confirmo"), el
   objetivo es el texto exacto de ese pedido. Como el modo automático no pide aprobación por
   operación, MDD hace **una** pregunta nativa (`Pedido anterior`) antes de admitirlo. Solo
-  `Approve operation` lo admite; `Pause`, `Decline` o descartarla no admiten nada.
+  `Aprobar operación` lo admite; `Pausar`, `Rechazar` o descartarla no admiten nada.
 - **Guía de entrada:** el estado que ofrece `entry` trae `entryGuide`, con un contrato mínimo
   válido y las reglas que más rechazos causan. Un rechazo nombra qué corregir (campo, ruta o clave
   de configuración); el coordinador lo corrige y reintenta, nunca cambia a `mdd_start`.
@@ -636,7 +645,7 @@ hay un límite artificial de líneas cambiadas.
 
 ```mermaid
 flowchart LR
-  PL["Plan / Tasks<br/>1–32 entregables"] --> SEL{"selectWorkerBatch"}
+  PL["Plan / Tasks<br/>entregables"] --> SEL{"selectWorkerBatch"}
   SEL -- "alcances completos,<br/>sin solapes ni dependencias" --> PAR["Hasta 2 workers Apply<br/>en paralelo con mdd_worker_edit"]
   SEL -- "alcance desconocido,<br/>conflicto o dependencia" --> SEQ["Lote secuencial<br/>un actor nuevo por entregable"]
   PAR --> AGG["Un resultado agregado<br/>cuando todos se asientan"]
@@ -1387,19 +1396,20 @@ SDK simulado y transporte HTTP real por loopback; no ejecutan modelos.
 |---|---|
 | Respuesta de estado (`mdd_status` y respuestas de herramientas) | ≤ 46.000 bytes |
 | Contexto aportado por entrada / prompt de fase compuesto | ≤ 96.000 bytes |
-| Objetivo de despacho (los artefactos viejos se compactan, del más viejo al más nuevo) | 38.000 bytes |
-| Payload de `mdd_adapt` / contrato compacto / evidencia | 160.000 / 24.000 / 48.000 bytes |
+| Objetivo de despacho de la ruta fija (los artefactos viejos se compactan, del más viejo al más nuevo) | 38.000 bytes |
+| Payload de `mdd_adapt` | 160.000 bytes; el contrato y la evidencia no tienen tope propio |
+| Pedido del usuario | Sin tope; si no entra en el recibo de Engram, ahí se guarda su tamaño y SHA-256 y el texto completo queda en el checkpoint local |
+| Listas del contrato, del plan y de los reportes (requisitos, escenarios, tareas, rutas, archivos cambiados, comandos ejecutados) | Sin tope |
 | Página de `detail` | ≤ 6.000 unidades UTF-16 |
-| Entregables por plan | 1–32 |
 | Workers concurrentes | ≤ 2 (exploración: exactamente 2 work items) |
-| `mdd_worker_edit` | ≤ 16 operaciones, ≤ 256 KiB |
+| `mdd_worker_edit` | ≤ 16 operaciones por llamada; sin tope de tamaño de archivo |
 | Intentos de delegación por fase / reescrituras de reportes malformados | 3 / 3 |
-| Reparaciones v3 / recibos de actor | ≤ 4 / ≤ 64 |
+| Reparaciones v3 / recibos de actor, llamadas y aprobaciones por ejecución | ≤ 4 / sin tope |
 | Preguntas: `header` / opciones / preguntas por fase | ≤ 30 caracteres / 0–6 / ≤ 8 |
 | Auditoría de seguridad: snapshot / prompt | 24.000 / 38.000 bytes |
 | Judgment Day: por comando Git / rondas de corrección | 128 KiB y 5 s / ≤ 2 |
 | HTTP de Engram | Solo loopback, 5 s por pedido, ≤ 128 KiB por respuesta, sin reintentos |
-| Requisitos en recibos de Engram / `save()` | 12.000 / 40.000 bytes |
+| Recibo de Engram (`save()`) | 40.000 bytes, por debajo de los 50.000 caracteres en los que Engram trunca |
 | Checkpoint / snapshot de tarea local | 16 MiB / 64 MiB (se detiene en lugar de recortar) |
 | Conocimiento por despacho / caché | 3 entradas y 8 KiB / 100 entradas y 512 KiB |
 | Telemetría | 30 días, 5.000 filas, 1 MiB |

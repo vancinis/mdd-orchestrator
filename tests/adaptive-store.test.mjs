@@ -274,9 +274,30 @@ test('AL-04a store: source-bound failed command history survives drift as histor
   assert.equal((await cold.restore(f.runtime)).restored, true);
   const data = f.store.read('parent').data;
   assert.equal(data.matched, false); assert.equal(data.historicalChecks[0].checks[0].exit, 1);
-  assert.equal(data.historicalChecks[0].snapshot.sources.find(item => item.path === 'support.txt').content, 'original support.txt');
+  assert.deepEqual(data.historicalChecks[0].snapshot.sources.find(item => item.path === 'support.txt'),
+    { path: 'support.txt', digest: hash('original support.txt'), bytes: Buffer.byteLength('original support.txt') });
   await assert.rejects(f.close(cold), /snapshot|evidence|verified/);
   f.mutate(record => { record.data.priorEvidence.report.checks[0].exit = 0; });
+  assert.equal((await f.cold().restore(f.runtime)).restored, false);
+});
+
+// A lane records every native call it made; a cap of 64 refused the record of a long run.
+test('regression: a lane record with more than 64 native calls still reads', async t => {
+  const f = fixture(t); await f.admit();
+  f.mutate(record => { record.calls = Array.from({ length: 70 }, (_, index) => `native-call-${index}`); });
+  assert.equal(f.store.read('parent').calls.length, 70);
+});
+
+// Snapshots used to keep each file's text. A record written then must still restore, and a text
+// that contradicts its digest must still be refused.
+test('regression: a snapshot recorded with file text before this change restores, and a forged text is refused', async t => {
+  const f = fixture(t); await f.admit(); await f.apply(); await f.prepare();
+  const legacy = source => ({ path: source.path, digest: source.digest, content: readFileSync(join(f.root, source.path), 'utf8') });
+  f.mutate(record => { record.data.snapshot.sources = record.data.snapshot.sources.map(legacy); });
+  assert.equal(typeof f.store.read('parent').data.snapshot.sources[0].content, 'string');
+  const restored = await f.cold().restore(f.runtime);
+  assert.equal(restored.restored, true, restored.reason);
+  f.mutate(record => { record.data.snapshot.sources[0].content = 'forged text'; });
   assert.equal((await f.cold().restore(f.runtime)).restored, false);
 });
 

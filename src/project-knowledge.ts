@@ -138,7 +138,7 @@ function observationDigest(value: KnowledgeDraft, dependencies?: KnowledgeDepend
 /** The native request grounds context, not authorship or approval of the coordinator's finding. */
 export function parseKnowledgeRequest(value: unknown): { draft: KnowledgeDraft; userText: string; requestDigest: string; observationDigest: string } {
   const input = objectWithKeys(value, 'knowledge recording', ['userText', 'observation']);
-  const userText = text(input.userText, 'native request', 12000);
+  const userText = text(input.userText, 'native request', Infinity);
   const observation = draft(input.observation);
   return { draft: observation, userText, requestDigest: createHash('sha256').update(canonicalNativeText(userText)).digest('hex'),
     observationDigest: observationDigest(observation) };

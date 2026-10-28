@@ -46,6 +46,21 @@ export type QuestionEnvelope = { questions: {
   header: string; question: string; options: { label: string; description: string }[]; multiple: boolean;
 }[] };
 
+/**
+ * The choices of an adaptive operation approval and of the earlier-request confirmation. Like the
+ * preflight labels above, each label is also the native answer token, so it is written once here.
+ */
+export const OPERATION_LABELS = Object.freeze({ approve: 'Aprobar operación', pause: 'Pausar', decline: 'Rechazar' });
+/**
+ * The approval token recorded before approvals were written in Spanish. Settled receipts that a
+ * transfer or an ownership check reads back still carry it, so it keeps approving exactly what it
+ * approved then; no other label does.
+ */
+export const LEGACY_APPROVE_LABEL = 'Approve operation';
+export function approvesOperation(label: unknown): boolean {
+  return label === OPERATION_LABELS.approve || label === LEGACY_APPROVE_LABEL;
+}
+
 export function parsePartialAnswers(value: unknown): Partial<Answers> {
   const input = objectWithKeys(value, 'answers', [...ANSWER_FIELDS, ...LEGACY_FIELDS]);
   const result: Record<string, string> = {};

@@ -66,11 +66,11 @@ mattpocock/skills `grilling` and `domain-modeling` skills under MIT; see `NOTICE
 
 ## Output Contract
 
-Draft the ordinary `mdd_adapt` entry from the confirmed summary, within its 24000-byte budget and
-without a transcript:
+Draft the ordinary `mdd_adapt` entry from the confirmed summary, in complete Spanish sentences the
+user will read, and without a transcript:
 
 - each decision → `decisions[]`, linked to the requirements it shapes;
-- out of scope → `exclusions[]`, at most 16;
+- out of scope → `exclusions[]`, one entry per exclusion;
 - behaviour → `acceptance.requirements[].scenarios` as given/when/then;
 - `productQuestions` → only what stays genuinely open.
 

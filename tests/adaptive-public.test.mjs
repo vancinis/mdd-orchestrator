@@ -86,7 +86,7 @@ async function fixture(t, mode = 'automatic') {
     current.content.push({ type: 'tool', id, name: tool, time: { created: count }, state: { status: 'running', input: structuredClone(input), metadata: {} } });
     return { sessionID, agent: 'mdd-orchestrator', messageID: current.id, id, tool, input: structuredClone(input) };
   };
-  const answer = async (status, labels = [['Approve operation']]) => {
+  const answer = async (status, labels = [['Aprobar operación']]) => {
     const call = begin('question', status.question);
     await hooks.get('execute.before')(call);
     const content = `User has answered your questions: ${status.question.questions.map((q, i) => `"${q.question}"="${labels[i].join(', ')}"`).join(', ')}. You can now continue with the user's answers in mind.`;
@@ -311,7 +311,7 @@ for (const mode of ['interactive', undefined]) test(`AL05c public: native-only $
     assert.equal(status.mode, mode);
     const selected = await f.select(status);
     assert.ok(selected.question);
-    status = await f.answer(selected, [['Pause']]);
+    status = await f.answer(selected, [['Pausar']]);
     assert.equal(status.task, undefined);
     assert.equal(f.store.read(f.sessionID).data.receipts.length, 0);
   }
@@ -324,7 +324,7 @@ for (const mode of ['interactive', undefined]) test(`AL05c public: native-only $
 test('regression: an entry approved in a later model step of the same turn is admitted', async t => {
   const f = await fixture(t, 'interactive'), draft = f.contract();
   let status = await f.entry(draft);
-  assert.match(status.question.questions[0].question, /Authorize only this exact adaptive operation/);
+  assert.match(status.question.questions[0].question, /¿Autorizás esta operación de MDD\?/);
   f.step();
   status = await f.answer(status);
   assert.equal(status.state, 'await-selection', status.reason);
@@ -356,7 +356,7 @@ test('AL05c public: current user identity is distinct from the assistant tool me
 });
 
 test('AL05c public: an earlier objective is never admitted on an unrelated current turn without fresh native confirmation', async t => {
-  for (const [label, admitted] of [['Decline', false], ['Pause', false], ['Approve operation', true]]) {
+  for (const [label, admitted] of [['Rechazar', false], ['Pausar', false], ['Aprobar operación', true]]) {
     const f = await fixture(t), draft = f.contract(), oldID = f.user(draft.objective);
     const currentID = f.user('A different current objective.');
     // A supplied identity is only an assertion: the current turn is not the message carrying the objective.
@@ -762,7 +762,7 @@ test('AL05c public: prior archive indexes survive transfer and terminal replacem
 test('AL05c public: native Decline authorizes no actor and never overrides interactive mode', async t => {
   const f = await fixture(t, 'interactive');
   let status = await f.answer(await f.entry(f.contract()));
-  status = await f.answer(await f.select(status), [['Decline']]);
+  status = await f.answer(await f.select(status), [['Rechazar']]);
   assert.equal(status.task, undefined); assert.equal(status.mode, 'interactive');
   assert.equal(f.store.read(f.sessionID).data.receipts.length, 0);
 });
@@ -857,7 +857,7 @@ test('grill: interactive and unset modes still ask MDD mode and operation approv
     for (const labels of [offer, round, confirm]) await ownQuestion(f, labels);
     let status = await f.send('entry', { contract: draft, messageID: userID });
     assert.ok(status.question, 'a session never stands in for MDD consent');
-    if (mode) { assert.match(status.question.questions[0].question, /Authorize only this exact adaptive operation/); status = await f.answer(status); }
+    if (mode) { assert.match(status.question.questions[0].question, /¿Autorizás esta operación de MDD\?/); status = await f.answer(status); }
     else {
       assert.equal(status.question.questions[0].header, 'Modo');
       status = await f.answer(status, [[status.question.questions[0].options.find(option => /utom.tico/.test(option.label)).label]]);
@@ -896,7 +896,7 @@ test('grill: a chat reply during the session keeps the request; it is confirmed 
   assert.equal(status.state, 'question-ready');
   assert.equal(status.question.questions[0].header, 'Pedido anterior');
   assert.equal(f.store.read(f.sessionID), undefined, 'nothing is admitted before the native confirmation');
-  status = await f.answer(status, [['Approve operation']]);
+  status = await f.answer(status, [['Aprobar operación']]);
   assert.equal(status.state, 'await-selection'); assert.equal(status.route, 'high');
   assert.equal(f.store.read(f.sessionID).userMessageID, first);
 });

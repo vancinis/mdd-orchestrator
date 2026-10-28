@@ -166,7 +166,8 @@ const JD_ROLES = ['mdd-jd-judge-a', 'mdd-jd-judge-b', 'mdd-jd-fix'];
 for (const role of ['plan', 'tasks']) {
   test(`assets: ${role} sizes dependency-ordered deliverables for fresh Apply actors`, () => {
     const text = fs.readFileSync(`assets/opencode/agents/mdd-${role}.md`, 'utf8');
-    assert.match(text, /1–32 dependency-ordered, bounded coherent deliverables/);
+    assert.match(text, /into dependency-ordered, bounded coherent deliverables/);
+    assert.doesNotMatch(text, /1–32/, 'the plan has no deliverable count of its own');
     assert.match(text, /fresh Apply actor/);
     assert.match(text, /own checks and handoff/);
     assert.match(text, /line count is not a hard stop or arbitrary cap/);
@@ -793,7 +794,7 @@ test('assets: mdd-grill offers a pre-admission question session with optional do
     /`Sesión de preguntas`, `Sesión con documentación` .* `Seguir sin sesión`/, / \(Recomendada\)/,
     /design tree/, /frontier is empty/, /`Confirmar y seguir`, `Corregir algo` or `Cancelar`/,
     /only after confirmation/, /`decisions\[\]`/, /`exclusions\[\]`/, /`acceptance\.requirements\[\]\.scenarios`/,
-    /24000-byte budget/, /hard to reverse, surprising without context and the result of a real trade-off/,
+    /in complete Spanish sentences the\s+user will read/, /hard to reverse, surprising without context and the result of a real trade-off/,
     /Apply writes, Verify checks/, /When nothing qualifies, create nothing/,
     /no active MDD run in this conversation; a closed one is fine/, /MDD refuses questions it did not issue while a run is active/,
     /A session question is refused \| Stop without retrying or rephrasing; continue with the ordinary entry/,

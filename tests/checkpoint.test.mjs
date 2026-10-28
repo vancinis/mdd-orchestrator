@@ -14,6 +14,26 @@ import { memoryServer, request as nativeRequest, result as nativeResult, reportD
 
 const parent = 'session-1';
 
+// The user's request has no size limit: a fixed run started from a long one reaches its phase whole,
+// is checkpointed whole and restores after a restart.
+test('regression: a fixed run from a request past the old 12000-byte cap is checkpointed whole and restores', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'mdd-long-request-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const here = { ...runtime, directory: root, worktree: root };
+  const options = { checkpoint: new CheckpointStore(root), progress: new ProgressGuard(root) };
+  const inspect = { parent: async () => {}, result: async (_r, _c, _p, text) => text };
+  const requirements = 'Necesito este cambio con todo el detalle que escribí. '.repeat(400);
+  assert.ok(Buffer.byteLength(requirements) > 12000);
+  const runner = new PhaseRunner(inspect, options);
+  await runner.start({ preflight: { answers }, requirements }, here, { requirementsConfirmed: true, userMessageID: 'long-user' });
+  const first = { sessionID: here.sessionID, callID: 'long-request-explore' };
+  const sent = await runner.before(first, runner.status(here.sessionID).task);
+  assert.ok(sent.prompt.includes(requirements.trim()), 'the phase receives the whole request');
+  await runner.after(first, sent, reportDocument({ evidenceSummary: 'Explored the long request.', artifact: 'Read the whole request.' }));
+  assert.equal(options.checkpoint.read(here.sessionID).checkpoint.data.requirements, requirements);
+  assert.deepEqual(await new PhaseRunner(inspect, options).restore(here), { restored: true });
+});
+
 for (const fault of ['checkpoint', 'progress']) test(`R04: contextual ${fault} uncertainty cannot replay or dispatch`, async t => {
   const root = mkdtempSync(join(tmpdir(), 'mdd-context-uncertain-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));

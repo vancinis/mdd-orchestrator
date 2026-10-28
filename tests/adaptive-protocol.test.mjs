@@ -47,7 +47,7 @@ function fixture(t, mode = 'automatic') {
   const select = (extra = {}) => send('select', { handle: handle(), actor: 'mdd-apply', assignmentID: 'A1', purpose: 'Perform the held replacement.', ...extra });
   const entry = () => send('entry', { contract, messageID: 'native-message' });
   let ordinal = 0;
-  const answer = async (status, labels = [['Approve operation']], here = runtime, answeringGate = gate) => {
+  const answer = async (status, labels = [['Aprobar operación']], here = runtime, answeringGate = gate) => {
     const args = status.question ?? await detail(status.questionRef, here);
     const call = { sessionID: here.sessionID, callID: `native-question-${++ordinal}` };
     await answeringGate.beforeQuestion(call, args);
@@ -131,7 +131,7 @@ test('AL05b protocol: prepared snapshot, complete evidence, explicit repair and 
   const f = fixture(t); await f.entry(); await f.apply();
   const prepared = await f.send('prepare', { handle: f.handle() });
   const snapshot = await f.detail(prepared.details.snapshot);
-  assert.equal(snapshot.sources[0].content, 'after');
+  assert.deepEqual(snapshot.sources, [{ path: 'own.txt', digest: hash('after'), bytes: 5 }]);
   const staleRef = prepared.details.snapshot, failed = f.evidence(snapshot.id);
   failed.sources[0].status = 'not-verified'; failed.assignments[0].status = 'not-verified'; failed.scenarios[0].status = 'not-verified';
   const submitted = await f.send('submit', { handle: f.handle(), evidence: failed });
@@ -190,13 +190,13 @@ for (const action of ['finish', 'abort']) test(`AL05b protocol: interrupted tran
   assert.deepEqual(await f.detail(proposed.proposedOperation, target), { kind: 'transfer', args });
   const begin = f.ownership.beginAdaptiveTransfer.bind(f.ownership); let fail = true;
   t.mock.method(f.ownership, 'beginAdaptiveTransfer', (...values) => { if (fail) { fail = false; throw new Error('Injected transfer interruption.'); } return begin(...values); });
-  await assert.rejects(f.answer(proposed, [['Approve operation']], target), /interruption/);
+  await assert.rejects(f.answer(proposed, [['Aprobar operación']], target), /interruption/);
   const status = await f.send('status', {}, target);
   const recovery = status.operations.find(item => item.kind === 'transfer-recovery');
   assert.deepEqual(recovery.required, ['sourceSessionID', 'runID', 'operationID', 'messageID', 'action']);
   assert.equal(recovery.ids.operationID, args.operationID);
   const pending = await f.send('transfer-recovery', { ...args, action, messageID: 'fresh-recovery' }, target);
-  await f.answer(pending, [['Approve operation']], target);
+  await f.answer(pending, [['Aprobar operación']], target);
   assert.equal(f.ownership.read(source.runID).ownerSessionID, action === 'finish' ? 'target' : 'parent');
   if (action === 'finish') {
     const moved = await f.send('status', {}, target);
@@ -214,13 +214,15 @@ test('AL05b protocol: automatic transfer preserves policy without fabricated nat
   assert.equal(f.runner.adaptiveNativeGenerationInternal('parent').handle, undefined, 'a former owner has no current selection capability');
 });
 
-test('AL05b protocol: large exact source readback is paged, bounded and snapshot-scoped', async t => {
+// A snapshot names each file by digest and size; the file itself stays on disk for any reader.
+test('AL05b protocol: a large prepared file is named by digest and size, bounded and snapshot-scoped', async t => {
   const f = fixture(t); const content = '🙂\\"'.repeat(20000);
   await f.entry(); await f.apply(content);
   const status = await f.send('prepare', { handle: f.handle() });
   assert.ok(Buffer.byteLength(JSON.stringify(status)) <= 46000);
   const snapshot = await f.detail(status.details.snapshot);
-  assert.equal(snapshot.sources[0].content, content);
+  assert.deepEqual(snapshot.sources, [{ path: 'own.txt', digest: hash(content), bytes: Buffer.byteLength(content) }]);
+  assert.equal(JSON.stringify(f.store.read('parent').data).includes(content), false, 'the lane record holds no file text');
   assert.equal(readFileSync(join(f.root, 'own.txt'), 'utf8'), content);
   const old = status.details.snapshot;
   await f.send('prepare', { handle: f.handle() });
@@ -393,7 +395,7 @@ for (const mode of ['automatic', 'interactive']) for (const action of ['finish',
     const finish = f.ownership.finishAdaptiveTransfer.bind(f.ownership); let fail = true;
     t.mock.method(f.ownership, 'finishAdaptiveTransfer', (...values) => { if (fail) { fail = false; throw new Error('Injected published-target interruption.'); } return finish(...values); });
     if (mode === 'automatic') await assert.rejects(f.send('transfer', args, target), /published-target/);
-    else await assert.rejects(f.answer(await f.send('transfer', args, target), [['Approve operation']], target), /published-target/);
+    else await assert.rejects(f.answer(await f.send('transfer', args, target), [['Aprobar operación']], target), /published-target/);
     assert.ok(f.store.read('target'));
     assert.equal(f.ownership.read(source.runID).state, 'transferring');
     const settings = defaultSettings(); settings.profiles.default.answers.mode = mode;
@@ -403,7 +405,7 @@ for (const mode of ['automatic', 'interactive']) for (const action of ['finish',
     const recovery = status.operations.find(item => item.kind === 'transfer-recovery');
     assert.equal(recovery.ids.sourceSessionID, 'parent'); assert.equal(recovery.ids.operationID, args.operationID);
     const pending = await gate.adaptiveInternal(wire('transfer-recovery', { ...args, action, messageID: 'fresh-target-recovery' }), target);
-    if (mode === 'interactive') await f.answer(pending, [['Approve operation']], target, gate);
+    if (mode === 'interactive') await f.answer(pending, [['Aprobar operación']], target, gate);
     assert.equal(f.ownership.read(source.runID).ownerSessionID, action === 'finish' ? 'target' : 'parent');
     assert.equal(f.store.read('target') === undefined, action === 'abort');
   });
@@ -418,21 +420,69 @@ test('AL05b protocol: unloaded source generation has stable declared-byte proof 
   assert.deepEqual(first.sources, [{ path: 'own.txt', digest: hash('before') }]);
 });
 
-test('AL05b protocol: raw contract byte ceiling is enforced before normalization and interactive questions', async t => {
+// The 24000-byte contract, 12000-byte objective and 16-entry prose lists made coordinators abbreviate
+// what the user reads in the approval. None of them protected anything the request bound does not.
+test('regression: a long objective, many exclusions and full prose are admitted without a byte budget', async t => {
   const f = fixture(t, 'interactive');
-  f.contract.assignments[0].obligations.checks = [{ id: 'C1', command: ' '.repeat(25000) + 'node --check own.txt', requirement: 'required' }];
-  await assert.rejects(f.entry(), /24000|contract.*budget|contract.*bytes/i);
-  assert.equal(f.questions.read('parent'), undefined); assert.equal(f.store.read('parent'), undefined);
+  f.contract.objective = 'Reemplazá el texto del archivo indicado y conservá todo lo demás tal como está. '.repeat(200);
+  f.contract.exclusions = Array.from({ length: 20 }, (_, index) => `No se modifica la sección ${index + 1} del documento.`);
+  f.contract.assignments[0].description = 'Reemplaza el texto del archivo asignado, explicado en oraciones completas. '.repeat(400);
+  assert.ok(Buffer.byteLength(f.contract.objective) > 12000, 'the objective is past the old 12000-byte cap');
+  assert.ok(Buffer.byteLength(JSON.stringify(f.contract)) > 24000, 'the contract is past the old 24000-byte budget');
+  await f.answer(await f.entry(), [['Aprobar operación']]);
+  const held = f.store.read('parent').data.contract;
+  assert.equal(held.objective, f.contract.objective);
+  assert.equal(held.exclusions.length, 20);
+  assert.equal(held.assignments[0].description, f.contract.assignments[0].description.trim());
 });
 
-test('AL05b protocol: raw evidence byte ceiling cannot be evaded by trimmed command text', async t => {
+test('regression: evidence past the old 48000-byte budget is accepted whole', async t => {
   const f = fixture(t); await f.entry(); await f.apply();
   const prepared = await f.send('prepare', { handle: f.handle() }), evidence = f.evidence(prepared.evidence.snapshotID);
-  evidence.checks = [{ id: 'X1', command: ' '.repeat(48000) + 'node --check own.txt', exit: 0 }];
-  evidence.supplementalChecks = [{ id: 'extra', requirement: 'optional', disposition: 'passed', executions: ['X1'] }];
-  const before = f.store.read('parent');
-  await assert.rejects(f.send('submit', { handle: f.handle(), evidence }), /48000|evidence.*budget|evidence.*bytes/i);
-  assert.deepEqual(f.store.read('parent'), before);
+  evidence.sources[0].assessment = 'Leí el archivo final y confirmé el reemplazo pedido, línea por línea. '.repeat(1000);
+  evidence.limits = Array.from({ length: 20 }, (_, index) => `Límite ${index + 1}: no se revisó en un dispositivo real.`);
+  assert.ok(Buffer.byteLength(JSON.stringify(evidence)) > 48000);
+  await f.send('submit', { handle: f.handle(), evidence });
+  const report = f.store.read('parent').data.report;
+  assert.equal(report.sources[0].assessment, evidence.sources[0].assessment.trim());
+  assert.equal(report.limits.length, 20);
+});
+
+// Contract lists have no entry count: 70 scenarios, 40 assignments and 140 declared files are admitted,
+// an interactive selection binds every declared file, and status still fits its budget.
+test('regression: a contract past the old 64-scenario, 32-assignment and 64-path counts is admitted', async t => {
+  const f = fixture(t, 'interactive');
+  const reads = Array.from({ length: 100 }, (_, i) => `r${i + 1}.txt`), writes = Array.from({ length: 40 }, (_, i) => `w${i + 1}.txt`);
+  for (const path of reads) writeFileSync(join(f.root, path), `read ${path}`);
+  const scenarios = Array.from({ length: 70 }, (_, i) => ({ id: `S${i + 1}`, given: `Estado ${i + 1}`, when: 'Se aplica el cambio', then: `Resultado ${i + 1}` }));
+  f.contract.acceptance = { goal: 'Un cambio grande', requirements: [{ id: 'R1', description: 'Un cambio grande', scenarios }] };
+  f.contract.scope = { complete: true, reads, writes };
+  f.contract.context.fingerprints = [...reads.map(path => ({ path, digest: hash(`read ${path}`) })), ...writes.map(path => ({ path, digest: null }))];
+  f.contract.assignments = writes.map((path, i) => ({ id: `A${i + 1}`, path, description: `Escribe ${path}`,
+    scenarios: [`S${i + 1}`, ...(i + 41 <= 70 ? [`S${i + 41}`] : [])], decisions: [], dependsOn: [],
+    scope: { complete: true, reads: ['r1.txt'], writes: [path] },
+    obligations: { source: [{ id: `E${i + 1}`, description: 'Lee el archivo final', paths: [path] }], checks: [] } }));
+  const proposed = await f.entry();
+  assert.ok(Buffer.byteLength(JSON.stringify(proposed)) <= 46000);
+  await f.answer(proposed, [['Aprobar operación']]);
+  const held = f.store.read('parent').data.contract;
+  assert.equal(held.assignments.length, 40);
+  assert.equal(held.acceptance.requirements[0].scenarios.length, 70);
+  const selected = await f.send('select', { handle: f.handle(), actor: 'mdd-apply', assignmentID: 'A1', purpose: 'Escribir el primer archivo.' });
+  assert.ok(Buffer.byteLength(JSON.stringify(selected)) <= 46000);
+  assert.equal(f.questions.read('parent').adaptive.generation.sources.length, 140);
+  await f.answer(selected, [['Aprobar operación']]);
+  assert.ok(f.runner.status('parent').task, 'the approved selection is ready to dispatch');
+});
+
+test('regression: a source file past the old 256 KiB inspection cap is fingerprinted and admitted', async t => {
+  const f = fixture(t);
+  const large = 'línea de código\n'.repeat(20000);
+  assert.ok(Buffer.byteLength(large) > 256 * 1024);
+  writeFileSync(join(f.root, 'own.txt'), large);
+  f.contract.context.fingerprints = [{ path: 'own.txt', digest: hash(large) }];
+  await f.entry();
+  assert.equal(f.store.read('parent').data.contract.context.fingerprints[0].digest, hash(large));
 });
 
 test('AL05b protocol: incorrect actual actor-question IDs do not replace the held intake state', async t => {
@@ -457,14 +507,14 @@ for (const mode of ['automatic', 'interactive']) for (const cold of [false, true
     const finish = f.ownership.finishAdaptiveTransfer.bind(f.ownership); let fail = true;
     t.mock.method(f.ownership, 'finishAdaptiveTransfer', (...values) => { const result = finish(...values); if (fail) { fail = false; throw new Error('Injected after ownership commit.'); } return result; });
     if (mode === 'automatic') await assert.rejects(f.send('transfer', args, target), /ownership commit/);
-    else await assert.rejects(f.answer(await f.send('transfer', args, target), [['Approve operation']], target), /ownership commit/);
+    else await assert.rejects(f.answer(await f.send('transfer', args, target), [['Aprobar operación']], target), /ownership commit/);
     const settings = defaultSettings(); settings.profiles.default.answers.mode = mode;
     const gate = cold ? new NativeIntake(new PhaseRunner(f.inspect, f.options), f.inspect, settings, { questions: f.questions, ownership: f.ownership }) : f.gate;
     const status = await gate.adaptiveInternal(wire('status'), target);
     assert.equal(status.task, undefined); assert.equal(status.handle, undefined);
     assert.deepEqual(status.operations.find(item => item.kind === 'transfer-recovery').ids.action, ['finish']);
     const pending = await gate.adaptiveInternal(wire('transfer-recovery', { ...args, action: 'finish', messageID: 'fresh-finish-message' }), target);
-    if (mode === 'interactive') await f.answer(pending, [['Approve operation']], target, gate);
+    if (mode === 'interactive') await f.answer(pending, [['Aprobar operación']], target, gate);
     const ready = await gate.adaptiveInternal(wire('status'), target);
     assert.equal(ready.state, 'await-selection'); assert.ok(ready.handle);
     assert.equal(f.ownership.read(source.runID).ownerSessionID, 'target');
@@ -480,7 +530,7 @@ for (const mode of ['automatic', 'interactive']) for (const action of ['finish',
     const method = boundary === 'claim' ? 'beginAdaptiveTransfer' : 'publishAdaptiveTransfer', original = f.ownership[method].bind(f.ownership); let fail = true;
     t.mock.method(f.ownership, method, (...values) => { if (fail) { fail = false; throw new Error('Injected before target publication.'); } return original(...values); });
     if (mode === 'automatic') await assert.rejects(f.send('transfer', args, target), /before target publication/);
-    else await assert.rejects(f.answer(await f.send('transfer', args, target), [['Approve operation']], target), /before target publication/);
+    else await assert.rejects(f.answer(await f.send('transfer', args, target), [['Aprobar operación']], target), /before target publication/);
     assert.equal(f.store.read('target'), undefined);
     const settings = defaultSettings(); settings.profiles.default.answers.mode = mode;
     const gate = new NativeIntake(new PhaseRunner(f.inspect, f.options), f.inspect, settings, { questions: f.questions, ownership: f.ownership });
@@ -489,7 +539,7 @@ for (const mode of ['automatic', 'interactive']) for (const action of ['finish',
     const recovery = status.operations.find(item => item.kind === 'transfer-recovery');
     assert.equal(recovery.ids.operationID, args.operationID); assert.equal(recovery.ids.sourceSessionID, 'parent');
     const pending = await gate.adaptiveInternal(wire('transfer-recovery', { ...args, action, messageID: 'fresh-recovery' }), target);
-    if (mode === 'interactive') await f.answer(pending, [['Approve operation']], target, gate);
+    if (mode === 'interactive') await f.answer(pending, [['Aprobar operación']], target, gate);
     assert.equal(f.ownership.read(source.runID).ownerSessionID, action === 'finish' ? 'target' : 'parent');
   });
 }
@@ -502,7 +552,7 @@ for (const mode of ['automatic', 'interactive']) for (const boundary of ['before
     const finish = f.ownership.finishAdaptiveTransfer.bind(f.ownership); let failTransfer = true;
     t.mock.method(f.ownership, 'finishAdaptiveTransfer', (...values) => { if (failTransfer) { failTransfer = false; throw new Error('Injected publication stop.'); } return finish(...values); });
     if (mode === 'automatic') await assert.rejects(f.send('transfer', args, target), /publication stop/);
-    else await assert.rejects(f.answer(await f.send('transfer', args, target), [['Approve operation']], target), /publication stop/);
+    else await assert.rejects(f.answer(await f.send('transfer', args, target), [['Aprobar operación']], target), /publication stop/);
     const method = boundary === 'before-retirement' ? 'retireIf' : 'commit', original = f.store[method].bind(f.store); let failAbort = true;
     t.mock.method(f.store, method, (...values) => {
       if (failAbort && (method === 'retireIf' || values[0] === 'parent')) {
@@ -514,7 +564,7 @@ for (const mode of ['automatic', 'interactive']) for (const boundary of ['before
     });
     const abort = { ...args, action: 'abort', messageID: 'native-abort' };
     if (mode === 'automatic') await assert.rejects(f.send('transfer-recovery', abort, target), /abort cleanup/);
-    else await assert.rejects(f.answer(await f.send('transfer-recovery', abort, target), [['Approve operation']], target), /abort cleanup/);
+    else await assert.rejects(f.answer(await f.send('transfer-recovery', abort, target), [['Aprobar operación']], target), /abort cleanup/);
     assert.ok(f.ownership.read(source.runID).recoveringTransfer);
     const interruptedQuestion = f.questions.read('target');
     const settings = defaultSettings(); settings.profiles.default.answers.mode = mode;
@@ -533,7 +583,7 @@ for (const mode of ['automatic', 'interactive']) for (const boundary of ['before
       await assert.rejects(gate.beforeQuestion({ sessionID: 'target', callID: 'stale-new-proposal' }, pending.question), /generation|changed/);
       stale.mock.restore();
       assert.deepEqual(f.questions.read('target'), freshQuestion, 'stale proposal cannot publish a pending question');
-      await f.answer(pending, [['Approve operation']], target, gate);
+      await f.answer(pending, [['Aprobar operación']], target, gate);
     }
     assert.equal(f.ownership.read(source.runID).state, 'idle');
     assert.equal(f.ownership.read(source.runID).ownerSessionID, 'parent');

@@ -185,7 +185,7 @@ test('AL-04c: high permits only the frozen real Propose Spec Design Tasks sequen
   assert.throws(() => adaptiveSelection({ handle: 'unused', actor: 'mdd-design', assignmentID: 'A2', purpose: 'Not ordinary low authority.' }, f.contract), /only/);
 });
 
-test('regression: high continuation reports of any size reach the next actor, the oldest compacted first', async t => {
+test('regression: high continuation reports of any size reach every next actor whole, with no dispatch budget', async t => {
   const f = fixture(t); await f.admit(); await f.retain(); await f.start('high');
   const finding = actor => `${actor} finding: ${'Each stage records what it found in the declared sources and why. '.repeat(200)}`;
   assert.ok(Buffer.byteLength(finding('mdd-propose')) > 12000, 'every artifact is past the old 12000-byte cap');
@@ -200,19 +200,32 @@ test('regression: high continuation reports of any size reach the next actor, th
   const held = f.options.adaptiveStore.read('parent').data;
   assert.deepEqual(held.receipts.filter(item => item.actor !== 'mdd-apply').map(item => item.artifact),
     ['mdd-propose', 'mdd-spec', 'mdd-design', 'mdd-tasks'].map(finding), 'every receipt keeps its artifact whole');
-  for (const prompt of prompts) assert.ok(Buffer.byteLength(prompt) <= 38000, 'every prompt fits the dispatch budget');
-  // Tasks follows three reports that cannot all be inlined: the oldest gives way first, and says so.
-  assert.ok(prompts[1].includes(JSON.stringify(finding('mdd-propose'))), 'a report that fits reaches the next actor whole');
-  assert.equal(prompts[1].includes('"omitted":'), false);
-  const tasks = prompts[3], propose = JSON.stringify(held.continuation.reports[0].fields);
-  assert.match(tasks, /earlier predecessor report\(s\) appear above as their summary plus the byte count and sha256 of the rest/);
-  assert.ok(tasks.includes(createHash('sha256').update(propose).digest('hex')), 'the compacted report is named by the digest of what it left out');
-  assert.equal(tasks.includes(finding('mdd-propose')), false);
-  assert.ok(tasks.includes(JSON.stringify(finding('mdd-design'))), 'the newest report still reaches Tasks whole');
+  // Tasks follows three reports past the old 38000-byte dispatch budget: none is compacted or refused.
+  const tasks = prompts[3];
+  assert.ok(Buffer.byteLength(tasks) > 38000, 'the prompt really exceeds the old dispatch budget');
+  for (const actor of ['mdd-propose', 'mdd-spec', 'mdd-design'])
+    assert.ok(tasks.includes(JSON.stringify(finding(actor))), `${actor} reaches Tasks whole`);
+  assert.equal(tasks.includes('"omitted":'), false);
+  assert.doesNotMatch(tasks, /appear above as their summary/);
   await f.select('mdd-apply'); await f.dispatch(f.report({ completed: ['A2'], changes: ['two.txt'], checks: [] }));
   assert.equal(f.status().continuation.next, 'mdd-verify');
   const cold = new PhaseRunner(f.inspect, f.options), restored = await cold.restore(f.runtime);
   assert.equal(restored.restored, true, restored.reason);
+});
+
+// Verify's prompt used to inline every snapshot file whole, so any real source footprint outgrew the
+// old dispatch budget. It names each file instead; the read-only actor reads them from the workspace.
+test('regression: the Verify prompt names snapshot files by digest and size instead of inlining their text', async t => {
+  const f = fixture(t); await f.admit(); await f.retain(); await f.start('medium'); await plan(f); await applyRemaining(f);
+  const report = await evidence(f); await f.select('mdd-verify');
+  const { args } = await f.dispatch(verify(f, report.checks));
+  const line = args.prompt.split('\n').find(item => item.startsWith('Actual parent evidence for independent readback'));
+  assert.ok(line, 'Verify receives the parent evidence');
+  assert.match(line, /Snapshot files are named by path, sha256 digest and byte size instead of being inlined/);
+  assert.doesNotMatch(line, /"content":/);
+  for (const path of ['one.txt', 'two.txt'])
+    assert.ok(line.includes(JSON.stringify({ path, digest: hash('before'), bytes: 6 })), `${path} is named by digest and size`);
+  assert.equal(f.status().lastReceipt.outcome, 'passed', f.status().lastReceipt.failure);
 });
 
 for (const mutation of [

@@ -38,9 +38,15 @@ type Receipt = { id: string; actor: AdaptiveActor; assignmentID: string; purpose
   accepted?: { fields: Record<string, unknown>; verifyContext?: VerifyContext }; questions?: OpenQuestion[] };
 type VerifyContext = { snapshotID: string; checks: ReturnType<typeof executed> };
 const ACTORS: readonly AdaptiveActor[] = ['mdd-explore', 'mdd-risk', 'mdd-plan', 'mdd-apply', 'mdd-verify'];
-const CONTRACT_BYTES = 24000;
 const ASSURANCE = 'Structured parent-reported consistency, not independent execution attestation. Local declared source bytes are bound; whole-worktree diff inventory is a reported observation, not comprehensive attestation.';
-type Snapshot = { id: string; sources: { path: string; digest: string | null; content: string | null }[] };
+/**
+ * A prepared footprint: each file by path, SHA-256 digest and byte size. The files stay on disk and
+ * the digest is what proves they did not change; actors and the coordinator read them with their
+ * own tools. Records prepared before this kept each file's text in `content` instead of `bytes`;
+ * they restore unchanged.
+ */
+type SnapshotSource = { path: string; digest: string | null; bytes?: number | null; content?: string | null };
+type Snapshot = { id: string; sources: SnapshotSource[] };
 type SourceAssessment = { id: string; paths: string[]; status: 'verified' | 'not-verified' | 'deviation'; assessment: string };
 /** `external` appears only on scenario rows the held acceptance declares external. */
 type SemanticAssessment = { status: SourceAssessment['status'] | 'external'; sources: string[]; checks: string[]; assessment: string };
@@ -69,24 +75,35 @@ export type AdaptiveData = {
   questionAnswers?: { receiptID: string; native: QuestionRecord }[];
 };
 
+/**
+ * The fixed text around a product question, which the user reads. The legacy frame is what records
+ * written before it was Spanish carry; a restore compares against either, never a mix.
+ */
+const PRODUCT_FRAME = { header: 'Decisión de producto', why: 'Por qué importa: ',
+  pause: { label: 'Pausar', description: 'Dejar esta decisión de producto sin resolver.' } };
+const LEGACY_PRODUCT_FRAME = { header: 'Product decision', why: 'Why: ',
+  pause: { label: 'Pause', description: 'Leave this product decision unresolved.' } };
+/** A product answer that leaves the decision open, in either language: it authorizes nothing. */
+export const UNRESOLVED_PRODUCT_ANSWER = /^(?:pause|decline|stop|pausar|rechazar|detener)$/i;
+
 /** Exact display mapping: every native option retains its original label and description. */
-export function adaptiveQuestionsEnvelope(questions: OpenQuestion[], nonce: string): QuestionEnvelope {
-  return { questions: questions.map((question, index) => ({ header: 'Product decision',
-    question: `${question.question}\nWhy: ${question.why}${index === 0 ? ` [MDD adaptive ${nonce}]` : ''}`,
+export function adaptiveQuestionsEnvelope(questions: OpenQuestion[], nonce: string, legacy = false): QuestionEnvelope {
+  const frame = legacy ? LEGACY_PRODUCT_FRAME : PRODUCT_FRAME;
+  return { questions: questions.map((question, index) => ({ header: frame.header,
+    question: `${question.question}\n${frame.why}${question.why}${index === 0 ? ` [MDD adaptive ${nonce}]` : ''}`,
     multiple: question.multiple === true,
     options: question.options.length ? question.options.map(({ label, description }) => ({ label, description }))
-      : [{ label: 'Pause', description: 'Leave this product decision unresolved.' }] })) };
+      : [{ ...frame.pause }] })) };
 }
 const RESTORE = Symbol('validated adaptive data');
 
 function entries(value: unknown, label: string): unknown[] {
-  if (!Array.isArray(value) || value.length > 64) throw new Error(`${label} requires at most 64 entries.`);
+  if (!Array.isArray(value)) throw new Error(`${label} must be a list.`);
   return Array.from(value);
 }
 function verifyContext(value: unknown): VerifyContext {
   const input = objectWithKeys(value, 'frozen native Verify context', ['snapshotID', 'checks']);
   const checks = executed(input.checks, 1);
-  if (Buffer.byteLength(JSON.stringify(checks)) > 48000) throw new Error('Frozen Verify command history exceeds its evidence budget.');
   return { snapshotID: shortText(input.snapshotID, 'native Verify snapshot', 100), checks };
 }
 function status(value: unknown): SourceAssessment['status'] {
@@ -98,8 +115,6 @@ function exactCoverage(actual: string[], expected: string[], label: string): voi
     throw new Error(`${label} must cover exactly the held links, without omissions or invented IDs.`);
 }
 
-/** How many entries a list of prose holds: exclusions, product questions, evidence or closure limits. */
-const TEXTS_MAX = 16;
 /** The most of one prose field a status shows: the old per-field cap, so nothing it accepted is cut. */
 const STATUS_TEXT_MAX = 500;
 /**
@@ -109,8 +124,13 @@ const STATUS_TEXT_MAX = 500;
 export function statusText(text: string): string {
   return text.length > STATUS_TEXT_MAX ? `${text.slice(0, STATUS_TEXT_MAX - 1)}…` : text;
 }
+/**
+ * A list of prose: exclusions, product questions, evidence or closure limits. It has no entry count
+ * of its own. A cap of 16 here made a coordinator merge or drop real exclusions and limits to fit;
+ * the request and the lane record are the bounds that protect something, and they still apply.
+ */
 function texts(value: unknown, label: string): string[] {
-  if (!Array.isArray(value) || value.length > TEXTS_MAX) throw new Error(`${label} requires at most ${TEXTS_MAX} entries.`);
+  if (!Array.isArray(value)) throw new Error(`${label} must be a list of text entries.`);
   return Array.from(value, item => reportText(item, label));
 }
 /**
@@ -122,9 +142,13 @@ function artifactText(value: unknown): string {
   if (typeof value !== 'string' || !value.trim()) throw new Error('Receipt requires an actual nonempty artifact.');
   return assertNoTraceSection(value);
 }
+/**
+ * The user's own request, exactly as written. It has no length limit: a 12000-byte cap refused long
+ * requests the user had already sent, and nothing downstream needs it shorter.
+ */
 function objective(value: unknown): string {
-  if (typeof value !== 'string' || !value.trim() || Buffer.byteLength(value) > 12000 || /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(value))
-    throw new Error('Native objective requires exact nonempty text of at most 12000 bytes without terminal controls.');
+  if (typeof value !== 'string' || !value.trim() || /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(value))
+    throw new Error('Native objective requires exact nonempty text without terminal controls.');
   return value;
 }
 function scope(value: unknown): Scope {
@@ -133,7 +157,7 @@ function scope(value: unknown): Scope {
   return parsed as Scope;
 }
 function paths(value: unknown): string[] {
-  if (!Array.isArray(value) || !value.length || value.length > 64) throw new Error('Source evidence requires 1–64 exact paths.');
+  if (!Array.isArray(value) || !value.length) throw new Error('Source evidence requires at least one exact path.');
   const result = Array.from(value, scopePath);
   if (new Set(result.map(path => path.toLowerCase())).size !== result.length) throw new Error('Source evidence repeats paths.');
   return result;
@@ -163,7 +187,7 @@ export function adaptiveContract(value: unknown): AdaptiveContract {
   if (input.contractVersion !== 1) throw new Error('Adaptive contractVersion must be integer 1.');
   const accepted = acceptance(input.acceptance), choices = decisions(input.decisions, accepted), footprint = scope(input.scope);
   if (!footprint.writes.length) throw new Error('Adaptive contract requires a declared bounded assignment write scope.');
-  if (!Array.isArray(input.assignments) || !input.assignments.length || input.assignments.length > 32) throw new Error('Adaptive contract requires 1–32 assignments.');
+  if (!Array.isArray(input.assignments) || !input.assignments.length) throw new Error('Adaptive contract requires at least one assignment.');
   const ids = new Set<string>(), obligations = new Set<string>();
   for (const item of accepted.requirements) { ids.add(item.id); item.scenarios.forEach(scenario => ids.add(scenario.id)); }
   for (const choice of choices) {
@@ -186,14 +210,14 @@ export function adaptiveContract(value: unknown): AdaptiveContract {
         throw new Error(`Assignment ${String(item.id)} decision ${choice.id} is not applicable to its scenarios. Omit assignment decisions and MDD links every applicable decision.`);
     }
     const evidence = objectWithKeys(item.obligations, 'evidence obligations', ['source', 'checks']);
-    if (!Array.isArray(evidence.source) || evidence.source.length > 32 || !Array.isArray(evidence.checks)) throw new Error('Invalid evidence obligations.');
+    if (!Array.isArray(evidence.source) || !Array.isArray(evidence.checks)) throw new Error('Invalid evidence obligations.');
     const checks = evidence.checks.length ? plannedChecks(evidence.checks, obligations) : [];
     const source = Array.from(evidence.source, value => {
       const entry = objectWithKeys(value, 'source obligation', ['id', 'description', 'paths']);
       const id = evidenceID(entry.id, 'source obligation ID'), targets = paths(entry.paths);
       if (obligations.has(id)) throw new Error('Evidence obligation ID is used more than once.');
       obligations.add(id);
-      if (obligations.size > 64 || targets.some(path => ![...own.reads, ...own.writes].includes(path))) throw new Error('Source obligation exceeds its assignment scope or evidence budget.');
+      if (targets.some(path => ![...own.reads, ...own.writes].includes(path))) throw new Error('Source obligation exceeds its assignment scope.');
       return { id, description: reportText(entry.description, 'source obligation'), paths: targets };
     });
     if (!source.length && !checks.length) throw new Error('Each assignment requires source or real command evidence obligations.');
@@ -201,7 +225,6 @@ export function adaptiveContract(value: unknown): AdaptiveContract {
       dependsOn: taskIDs(item.dependsOn), scope: own, obligations: { source, checks } };
   });
   applyPlan(assignments.map(({ id, dependsOn }) => ({ id, dependsOn })));
-  if (assignments.reduce((count, item) => count + item.scenarios.length, 0) > 64) throw new Error('Adaptive contract exceeds 64 scenario-to-assignment links.');
   if (scenarioIDs.some(id => !assignments.some(item => item.scenarios.includes(id))) || choices.some(choice =>
     choice.requirements.some(id => !assignments.some(item => item.decisions.includes(choice.id) &&
       accepted.requirements.find(requirement => requirement.id === id)!.scenarios.some(scenario => item.scenarios.includes(scenario.id))))))
@@ -211,7 +234,6 @@ export function adaptiveContract(value: unknown): AdaptiveContract {
     acceptance: accepted, exclusions: texts(input.exclusions, 'exclusions'), decisions: choices,
     productQuestions: texts(input.productQuestions, 'product questions'), scope: footprint,
     context: context(input.context, footprint), assessment: parseFutureAssessment(input.assessment), assignments };
-  if (Buffer.byteLength(JSON.stringify(result)) > CONTRACT_BYTES) throw new Error('Adaptive contract exceeds its compact 24000-byte budget.');
   return result;
 }
 
@@ -231,7 +253,7 @@ function fingerprint(root: string, path: string): string | null {
   const absolute = resolve(root, path), stat = lstatSync(absolute, { throwIfNoEntry: false });
   if (!stat) return null;
   explorationFiles([{ root, files: [path] }]);
-  if (stat.size > 256 * 1024) throw new Error('Source fingerprint exceeds the bounded file inspection budget.');
+  // No file size limit: a 256 KiB cap refused contracts that only touched an ordinary large source file.
   const bytes = readFileSync(absolute), after = lstatSync(absolute);
   if (stat.ino !== after.ino || stat.dev !== after.dev || stat.size !== after.size || bytes.length !== stat.size ||
       stat.mtimeMs !== after.mtimeMs || stat.ctimeMs !== after.ctimeMs || !after.isFile() || after.isSymbolicLink() || after.nlink !== 1)
@@ -333,7 +355,7 @@ export class AdaptiveLow {
       if (item.failure !== undefined) receipt.failure = shortText(item.failure, 'receipt failure', 500);
       if (receipt.outcome === 'passed' && (!receipt.artifact || receipt.failure)) throw new Error('Passed receipt contradicts actual failure or lacks an artifact.');
       if (item.changes !== undefined) {
-        if (!Array.isArray(item.changes) || item.changes.length > 64) throw new Error('Invalid receipt changes.');
+        if (!Array.isArray(item.changes)) throw new Error('Invalid receipt changes.');
         receipt.changes = Array.from(item.changes, scopePath);
         if (receipt.actor !== 'mdd-apply' || receipt.changes.some(path => !assignment.scope.writes.includes(path))) throw new Error('Receipt changes exceed its assignment.');
       }
@@ -400,17 +422,24 @@ export class AdaptiveLow {
     low.#retainedProof = retained;
     const snapshot = (value: unknown): Snapshot => {
       const item = objectWithKeys(value, 'source snapshot', ['id', 'sources']);
-      const sources = entries(item.sources, 'snapshot sources').map(value => {
-        const file = objectWithKeys(value, 'snapshot source', ['path', 'digest', 'content']);
-        if (file.content !== null && typeof file.content !== 'string' || file.digest !== (file.content === null ? null : createHash('sha256').update(file.content as string).digest('hex')))
-          throw new Error('Snapshot source bytes contradict their digest.');
-        return { path: scopePath(file.path), digest: file.digest as string | null, content: file.content as string | null };
+      const sources = entries(item.sources, 'snapshot sources').map((value): SnapshotSource => {
+        const file = objectWithKeys(value, 'snapshot source', ['path', 'digest', 'bytes', 'content']);
+        if (file.digest !== null && (typeof file.digest !== 'string' || !/^[a-f0-9]{64}$/.test(file.digest)))
+          throw new Error('Snapshot source digest is invalid.');
+        if (Object.hasOwn(file, 'content')) {
+          if (Object.hasOwn(file, 'bytes') || file.content !== null && typeof file.content !== 'string' ||
+              file.digest !== (file.content === null ? null : createHash('sha256').update(file.content as string).digest('hex')))
+            throw new Error('Snapshot source bytes contradict their digest.');
+          return { path: scopePath(file.path), digest: file.digest as string | null, content: file.content as string | null };
+        }
+        if (file.digest === null ? file.bytes !== null : !Number.isSafeInteger(file.bytes) || (file.bytes as number) < 0)
+          throw new Error('Snapshot source size contradicts its digest.');
+        return { path: scopePath(file.path), digest: file.digest as string | null, bytes: file.bytes as number | null };
       });
       exactCoverage(sources.map(item => item.path), [...new Set([...contract.scope.reads, ...contract.scope.writes])], 'Snapshot source paths');
-      if (sources.reduce((bytes, item) => bytes + Buffer.byteLength(item.content ?? ''), 0) > 1024 * 1024) throw new Error('Snapshot exceeds the 1 MiB budget.');
       return { id: shortText(item.id, 'snapshot identity', 100), sources };
     };
-    const history = (value: unknown) => { const result = executed(value, 1); if (Buffer.byteLength(JSON.stringify(result)) > 48000) throw new Error('Execution history exceeds budget.'); return result; };
+    const history = (value: unknown) => executed(value, 1);
     low.#historicalChecks = entries(data.historicalChecks, 'historical checks').map(value => {
       const item = objectWithKeys(value, 'historical command evidence', ['snapshot', 'checks']);
       return { snapshot: snapshot(item.snapshot), checks: history(item.checks) };
@@ -480,7 +509,7 @@ export class AdaptiveLow {
       });
       exactCoverage(low.#dispatchPrerequisites.map(item => item.assignmentID),
         low.#selection.actor === 'mdd-apply' ? low.#prerequisiteIDs(own) : [], 'Pending dispatch prerequisites');
-      if (contract.productQuestions.length || low.pendingQuestions() || receipts.length >= 64 || low.#context.technical === 'uncertain' && low.#selection.actor !== 'mdd-explore')
+      if (contract.productQuestions.length || low.pendingQuestions() || low.#context.technical === 'uncertain' && low.#selection.actor !== 'mdd-explore')
         throw new Error('Pending actor contradicts selection eligibility.');
       if (low.#selection.actor === 'mdd-apply' && (!low.#continuation && low.#assessment.impact !== 'low' || low.#context.dependencies !== 'bounded' ||
           low.#completed.has(own.id) ||
@@ -489,9 +518,8 @@ export class AdaptiveLow {
     } else if (data.pending !== undefined) throw new Error('Unstarted or settled state cannot retain a pending actor.');
     if (data.completion !== undefined) {
       const completion = objectWithKeys(data.completion, 'adaptive closure', ['outcome', 'limits']);
-      const limits = entries(completion.limits, 'closure limits').map(item => reportText(item, 'closure limit'));
-      // Evidence limits followed by the manual ones close added, each list bounded on its own.
-      if (limits.length > 2 * TEXTS_MAX) throw new Error('Closure exceeds its bounded limits.');
+      // Evidence limits followed by the manual ones close added; neither list has an entry count.
+      const limits = texts(completion.limits, 'closure limits');
       if (completion.outcome === 'verified' ? low.#state !== 'completed' || !low.#matched || completed.length !== low.#assignments().length || !low.#snapshot || !isDeepStrictEqual(limits, low.#report?.limits) || !!low.#continuation?.next(completed.map(item => item.assignmentID), low.#snapshot?.id, low.#checkHistory)
         : completion.outcome !== 'unverified' || low.#state !== 'closed-unverified' || !limits.length || low.#matched)
         throw new Error('Adaptive closure contradicts completion or evidence.');
@@ -503,7 +531,6 @@ export class AdaptiveLow {
   }
   #archiveChecks(): void {
     if (this.#snapshot && this.#checkHistory.length && !this.#historicalChecks.some(item => item.snapshot.id === this.#snapshot!.id && isDeepStrictEqual(item.checks, this.#checkHistory))) {
-      if (this.#historicalChecks.length >= 64) throw new Error('Historical command evidence budget is exhausted.');
       this.#historicalChecks.push({ snapshot: structuredClone(this.#snapshot), checks: structuredClone(this.#checkHistory) });
     }
   }
@@ -638,9 +665,9 @@ export class AdaptiveLow {
     if (!pending || pending.receiptID !== receiptID || native.version !== 2 || native.state !== 'answered' ||
         native.adaptive?.purpose !== 'product' || native.adaptive.operation.kind !== 'questions' ||
         native.adaptive.operation.args.receiptID !== receiptID || native.adaptive.operation.args.callID !== pending.callID ||
-        !isDeepStrictEqual(native.slot.args, adaptiveQuestionsEnvelope(pending.questions, native.adaptive.nonce)) ||
+        ![false, true].some(legacy => isDeepStrictEqual(native.slot.args, adaptiveQuestionsEnvelope(pending.questions, native.adaptive!.nonce, legacy))) ||
         !native.answer || native.answer.some((answers, index) => !answers.length ||
-          answers.some(answer => /^(pause|decline|stop)$/i.test(answer.trim()) || !pending.questions[index]!.options.some(option => option.label === answer))))
+          answers.some(answer => UNRESOLVED_PRODUCT_ANSWER.test(answer.trim()) || !pending.questions[index]!.options.some(option => option.label === answer))))
       throw new Error('Product answers require the exact actual actor receipt and complete native selections; free text or pause leaves questions unresolved.');
     this.#questionAnswers.push({ receiptID, native: structuredClone(native) });
     this.#handle = randomUUID();
@@ -673,16 +700,15 @@ export class AdaptiveLow {
   prepareEvidence(handle: string): void {
     this.assertBoundary(handle); this.assertPreparationCurrent();
     if (this.#continuation) this.#archiveChecks();
-    let bytes = 0;
-    const sources = [...new Set([...this.#contract.scope.reads, ...this.#contract.scope.writes])].map(path => {
+    // Each file is recorded by digest and size, not by its text. Keeping the text put one copy of the
+    // whole footprint in the lane record per snapshot (current, prior and every archived one), so a
+    // few large files could fill the record's bound, and every call re-read and re-hashed all of it.
+    const sources = [...new Set([...this.#contract.scope.reads, ...this.#contract.scope.writes])].map((path): SnapshotSource => {
       const digest = fingerprint(this.root, path);
       const data = digest === null ? null : readFileSync(resolve(this.root, path));
-      bytes += data?.length ?? 0;
-      if (bytes > 1024 * 1024) throw new Error('Final source snapshot exceeds the 1 MiB inspection budget.');
       if (data && createHash('sha256').update(data).digest('hex') !== digest || fingerprint(this.root, path) !== digest)
         throw new Error('Final source snapshot changed during inspection.');
-      if (data && !Buffer.from(data.toString('utf8'), 'utf8').equals(data)) throw new Error('Final source readback requires UTF-8 source, not lossy binary decoding.');
-      return { path, digest, content: data?.toString('utf8') ?? null };
+      return { path, digest, bytes: data?.length ?? null };
     });
     const drift = this.#snapshot?.sources.filter(previous => sources.find(item => item.path === previous.path)!.digest !== previous.digest).map(item => item.path) ?? [];
     if (this.#report) this.#priorEvidence = { snapshot: structuredClone(this.#snapshot!), report: structuredClone(this.#report), invalidatedAssignments: drift.length ? this.#assignments().map(item => item.id) : [], assignments: this.#assignments() };
@@ -701,7 +727,6 @@ export class AdaptiveLow {
     const checks = executed(input.checks, 1);
     if (checks.length < this.#checkHistory.length || !isDeepStrictEqual(checks.slice(0, this.#checkHistory.length), this.#checkHistory))
       throw new Error('Evidence must preserve the chronological reported execution history, including failed attempts and retries.');
-    if (Buffer.byteLength(JSON.stringify(checks)) > 48000) throw new Error('Adaptive reported executions exceed the bounded evidence budget.');
     // A malformed disposition cannot erase an otherwise readable reported failed attempt.
     this.#checkHistory = structuredClone(checks);
     const accounting = checkAccounting(input, { planned: this.#assignments().map(item => ({ checks: item.obligations.checks })) }, checks);
@@ -789,7 +814,6 @@ export class AdaptiveLow {
     const limits = texts(input.limits, 'evidence limits');
     const report: EvidenceReport = { snapshotID: this.#snapshot!.id, readback: structuredClone(expected), inventory, exclusions, sources,
       assignments, scenarios, decisions: choices, checks, checkResults: accounting.checkResults, supplementalChecks: accounting.supplementalChecks, limits };
-    if (Buffer.byteLength(JSON.stringify(report)) > 48000) throw new Error('Adaptive evidence exceeds its 48000-byte budget.');
     this.assertEvidenceCurrent(); this.#report = report; this.#checkHistory = structuredClone(checks);
     this.#matched = accounting.complete && [...sources, ...assignments, ...scenarios, ...choices, ...exclusions].every(item => item.status === 'verified' || item.status === 'external');
     this.#handle = randomUUID();
@@ -814,7 +838,6 @@ export class AdaptiveLow {
   select(value: AdaptiveSelection): void {
     if (value.handle !== this.#handle) throw new Error('Selection handle is stale or was consumed.');
     if (this.#state !== 'await-selection') throw new Error('Selection requires an actorless boundary; a task is already authorized or in flight.');
-    if (this.#receipts.length >= 64) throw new Error('Volatile receipt budget is exhausted; no automatic closure or escalation.');
     if (this.#contract.productQuestions.length) throw new Error('Unresolved product ambiguity pauses actor selection.');
     if (this.pendingQuestions()) throw new Error('Actual actor questions pause selection until a native answer is linked.');
     if (this.#continuation) {

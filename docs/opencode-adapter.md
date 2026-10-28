@@ -316,7 +316,7 @@ within the approved Apply phase need no additional approval. Native edit/shell c
   Inspect partial changes and request explicit recovery; never automatically retry substantive work.
   Malformed completed reports may still be restated without starting a writer.
 
-Plan and Tasks split large requests into **1–32 bounded coherent deliverables**, ordered by
+Plan and Tasks split large requests into **bounded coherent deliverables**, as many as the work needs, ordered by
 dependencies. Each must fit a fresh Apply actor with scoped files, its own checks and a handoff;
 keep tests/docs with the behavior, not separate file-type slices. Size by implementation and
 context risk, not an arbitrary line cap. If one deliverable still cannot be bounded, report that
@@ -651,9 +651,20 @@ The objective normally is the current turn. When the latest message only confirm
 request ("sí, confirmo las recomendaciones"), the coordinator uses that request's exact text: it is
 still the user's own words, and the fixed route has always accepted it. Because automatic mode
 asks no operation approval, admitting an earlier request needs one fresh native question in the
-current turn (`Pedido anterior`, the exact objective quoted). Only `Approve operation` admits it;
-`Pause`, `Decline` or a dismissal admit nothing. Interactive mode already asks its operation
-approval, which shows the objective. Identical texts in several messages are refused rather than
+current turn (`Pedido anterior`, the exact objective quoted). Only `Aprobar operación` admits it;
+`Pausar`, `Rechazar` or a dismissal admit nothing. Interactive mode already asks its operation
+approval, which shows the objective.
+
+The interactive operation approval (`Aprobación de operación`) is Spanish and shows a summary of
+the operation instead of its JSON: for an entry, the exact objective, the goal, the requirement,
+scenario and assignment counts, the assessment, the writable files and the exclusions; for a
+selection, the actor, assignment, purpose, repair reference, the files an Apply may change and the
+fresh context reason; for every other operation, what it does with its deciding data. The record
+still binds the exact operation, generation and nonce. Only `Aprobar operación` authorizes it.
+Receipts settled before the change carry `Approve operation`, which ownership and transfer checks
+still accept; no other label approves. Product questions use the `Decisión de producto` header,
+the `Por qué importa: ` prefix and a `Pausar` default choice; restore accepts records written with
+the earlier English frame. Identical texts in several messages are refused rather than
 chosen between, and a request consumed by preserved run history is still refused.
 
 The adapter fills only what is empty by definition or observable by the host: omitted
@@ -1110,8 +1121,11 @@ With optional memory enabled, each phase writes two project-scoped Engram observ
 
 Both observations also carry their Engram title, project, and actual parent
 session ID. Returned observation ID and all submitted fields must match the
-readback. Requirements are limited to 12,000 bytes; the evidence summary, how, artifact
-content and the phase result have no size limit. A result receipt whose summary would exceed
+readback. Requirements, the evidence summary, how, artifact content and the phase result
+have no size limit. An intent receipt whose requirements would exceed Engram's 40,000-byte
+receipt limit, after its context has already degraded, carries the requirements' byte count and
+SHA-256 instead of their text (`requirementsOmitted: true`); the complete text stays in the local
+checkpoint and run record. A result receipt whose summary would exceed
 Engram's 40,000-byte receipt limit carries the summary's byte count and SHA-256 instead of its
 text; the complete summary stays in the workflow record. Full artifact text is not copied into general
 receipts. One ArtifactStore per run handles `none`, `engram`, `openspec`, or `both`;

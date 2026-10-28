@@ -36,6 +36,16 @@ test('bound Apply child can create, exact-edit, replace and delete without helpe
   assert.deepEqual(fs.readdirSync(f.root).sort(), ['a.txt', 'b.txt', 'nested']);
 });
 
+// A 256 KiB cap made ordinary large source files impossible to edit through the scoped editor.
+test('regression: a file past the old 256 KiB cap is edited exactly', async t => {
+  const f = fixture(t);
+  const large = `${'const value = 1;\n'.repeat(20000)}before\n`;
+  assert.ok(Buffer.byteLength(large) > 256 * 1024);
+  fs.writeFileSync(join(f.root, 'a.txt'), large);
+  await f.fence.edit(f.child, { operations: [edit('a.txt', 'before\n', 'after\n')] });
+  assert.equal(f.read('a.txt'), `${'const value = 1;\n'.repeat(20000)}after\n`);
+});
+
 for (const kind of ['outside', 'absolute', 'traversal', 'case', 'duplicate', 'extra-authority', 'unknown', 'late-precondition'])
   test(`whole-request ${kind} refusal precedes every mutation`, async t => {
     const f = fixture(t);

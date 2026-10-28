@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { NativeIntake, ROUTE_LABELS, routeEnvelope, RISK_RECOVERY_LABELS, riskRecoveryEnvelope } from '../dist/native-intake.js';
-import { QuestionCheckpointStore, validateQuestionRecord } from '../dist/question-checkpoint.js';
+import { QuestionCheckpointStore, validateQuestionRecord, QUESTION_CHECKPOINT_BYTES } from '../dist/question-checkpoint.js';
 import { Workflow } from '../dist/workflow.js';
 import { defaultSettings } from '../dist/settings.js';
 import { answers, runtime } from './adapter-fixture.mjs';
@@ -145,7 +145,9 @@ test('regression: clarification durable prepare answer settle retains long multi
   for (const value of ['', '  ', 42, null]) {
     assert.throws(() => validateQuestionRecord({ ...answered, answer: [[value]] }));
   }
-  assert.throws(() => validateQuestionRecord({ ...answered, answer: [['á'.repeat(80000)]] }), /Invalid native question record/);
+  // The whole-record file bound still applies; no single field has a ceiling of its own.
+  assert.doesNotThrow(() => validateQuestionRecord({ ...answered, answer: [['á'.repeat(80000)]] }));
+  assert.throws(() => validateQuestionRecord({ ...answered, answer: [['á'.repeat(QUESTION_CHECKPOINT_BYTES / 2 + 1)]] }), /Invalid native question record/);
 });
 
 test('prepared and pending native questions survive a restart as blocked, never reissued', async t => {

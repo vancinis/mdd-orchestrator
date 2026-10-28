@@ -21,7 +21,7 @@ Include tests/docs and every actual read; different main filenames do not prove 
 Include implicit instruction/bootstrap reads and shared effects. Runtime/config/instruction changes
 stay serial; bounded Apply uses only MDD's formatter-free mdd_worker_edit, with checks in singular Verify.
 Missing scope knowledge or uncertainty keeps execution serial; never invent declarations to force a split.
-Split large requests into 1–32 dependency-ordered, bounded coherent deliverables, not file-type slices.
+Split large requests into dependency-ordered, bounded coherent deliverables, not file-type slices.
 Each must be feasible in one fresh Apply actor with its own checks and handoff: scoped files,
 expected changes, dependencies and completion evidence. Keep tests/docs with their behavior.
 Distinguish assigned completion checks from deferred integration verification in the artifact.

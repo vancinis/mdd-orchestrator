@@ -96,14 +96,14 @@ export const FIELD_SCHEMA: Record<string, string> = {
   changes: 'changes=[{path,reason}] lists the files this phase actually changed and why each one had to change. A bare path string is accepted where there is nothing to add.',
   noChangeReason: 'noChangeReason=text instead of changes when nothing needed changing.',
   delivered: 'delivered={what,implies} summarises the finished change for whoever reviews the pull request: what is now possible or different (what), and what that enables or requires of them (implies). Describe the outcome, never the mechanics — the per-file reasons already say how.',
-  checks: 'checks=[{command,exit}] reports only checks this phase actually ran, at most 32. command is the exact command on one line, of any length, with no line breaks, tabs or other control characters; exit is its integer exit code, or null when it did not finish.',
+  checks: 'checks=[{command,exit}] reports only checks this phase actually ran. command is the exact command on one line, of any length, with no line breaks, tabs or other control characters; exit is its integer exit code, or null when it did not finish.',
   verification: 'verification={scenarios:[{requirementID,scenarioID,stepID,status,checks:[command],assessment}],steps:[{stepID,status,checks,assessment}],decisions:[{decisionID,status,checks,assessment}],changes,limits:[]}. Status is verified/not-verified/deviation. Each checks entry repeats a command exactly as reported in checks; a verified row names at least one, and every one it names exited 0. Assessment explains source evidence and limits, not just a pass label. limits lists each material limit as its own entry. Cover all held links exactly once. ' + EXTERNAL_STATUS + ' ' + CAUSE_RULE,
 };
 export const STRUCTURED_FIELD_SCHEMA: Record<string, string> = {
   verificationVersion: 'verificationVersion=1 identifies structured actor-reported verification. MDD checks consistency, not independent execution attestation.',
   deliverables: 'deliverables=[{id,description,path,checks:[{id,command,requirement:"required"|"optional",appliesWhen?:text}],scenarios:[scenarioID],decisions:[decisionID],dependsOn:[earlierStepID],parallel?:{complete:true,reads:[filePath],writes:[filePath]}}]. ' + DELIVERABLE_RULES +
-    ' Check IDs are globally unique across the held plan (at most 64); declare requiredness and any conditional applicability before execution. Each deliverable has 1–32 checks. No legacy check string is accepted.',
-  checks: 'checks=[{id,command,exit}] reports every actual execution in chronological order, at most 32. IDs are unique even for repeated commands; command is exact one-line text and exit is an integer or null for interrupted execution. Never invent IDs for unrun commands or omit failed attempts.',
+    ' Check IDs are globally unique across the held plan; declare requiredness and any conditional applicability before execution. Each deliverable has at least one check. No legacy check string is accepted.',
+  checks: 'checks=[{id,command,exit}] reports every actual execution in chronological order. IDs are unique even for repeated commands; command is exact one-line text and exit is an integer or null for interrupted execution. Never invent IDs for unrun commands or omit failed attempts.',
   verification: 'verification={scenarios:[{requirementID,scenarioID,stepID,status,checks:[executionID],assessment}],steps:[{stepID,status,checks,assessment}],decisions:[{decisionID,status,checks,assessment}],changes,limits:[],checkResults:[{checkID,disposition,executions:[executionID],reason?,equivalence?}],supplementalChecks:[{id,requirement:"required"|"optional",disposition,executions:[executionID],reason?}]}. Cover every held check exactly once and account for every execution in checkResults or supplementalChecks. Held checks may share an actual integration execution only with the same complete ordered attempt history; supplemental entries cannot overlap any other entry. Disposition: passed/failed/ran (interrupted, null exit)/blocked (no execution)/not-applicable/replaced/environmental. Environmental means the held command failed for a reason outside this change: list its own attempts, then a corroborating execution with a different command (the failing part rerun alone that passed, or the check run against the unchanged baseline that fails the same way), and name in reason which corroboration and which failing tests; it does not block and is always reported. Final execution determines the result; keep earlier attempts in order and explain retries. Passed and replaced need final exit 0. Replaced requires reason and equivalence rationale for the actually executed replacement, never a replacement chain. Not-applicable requires a held appliesWhen condition and source-based reason; unconditional checks cannot be waived. Every disposition except passed requires a reason. Supplemental executions must be passed/failed/ran with explicit requiredness and cannot downgrade held checks. Required applicable failed/ran/blocked checks prevent PASS; optional failures remain visible. Semantic acceptance coverage remains independent: cover all scenario-step links, steps and decisions once, status verified/not-verified/deviation, verified rows cite successful final execution IDs. limits lists each material limit as its own entry. Source evidence explains behavior; exit codes alone do not prove it. ' + EXTERNAL_STATUS + ' ' + CAUSE_RULE,
 };
 /**
@@ -196,7 +196,8 @@ function id(value: unknown, label = 'Traceability ID'): string {
 }
 export const evidenceID = id;
 function items(value: unknown, label: string, empty = false): unknown[] {
-  if (!Array.isArray(value) || value.length > 64 || (!empty && !value.length)) throw new Error(`${label} requires ${empty ? '0' : '1'}–64 entries.`);
+  // No entry count: the size of an acceptance map, a plan or a report follows the work it describes.
+  if (!Array.isArray(value) || (!empty && !value.length)) throw new Error(`${label} requires ${empty ? 'a list of' : 'at least one'} entries.`);
   return value;
 }
 export function references(value: unknown, label: string, empty = false): string[] {
@@ -221,7 +222,6 @@ export function acceptance(value: unknown): Acceptance {
         ...(scenario.evidence === 'external' ? { evidence: 'external' as const } : {}) };
     }) };
   });
-  if (requirements.flatMap(item => item.scenarios).length > 64) throw new Error('Acceptance map exceeds 64 scenarios.');
   return { goal: reportText(map.goal, 'requested outcome'), requirements };
 }
 export function decisions(value: unknown, accepted: Acceptance): Decision[] {

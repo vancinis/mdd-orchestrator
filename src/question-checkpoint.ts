@@ -8,7 +8,13 @@ import { parsePartialAnswers } from './preflight.js';
 import type { Answers } from './policy.js';
 
 export const QUESTION_CHECKPOINT_VERSION = 1;
-export const QUESTION_CHECKPOINT_BYTES = 160000;
+/**
+ * The whole record's file bound, not a limit on anything it holds. An adaptive record carries the
+ * user's request up to three times (objective, proposed operation and the approval that quotes it),
+ * each up to the 160000-byte request bound, so the file bound sits well above that sum: at 160000 it
+ * refused long requests that every other check had already accepted.
+ */
+export const QUESTION_CHECKPOINT_BYTES = 1024 * 1024;
 /** Clarifications pending at once: new ones plus deferrals re-offered at the same boundary. */
 export const CLARIFICATIONS_MAX = 16;
 /** Answer history kept with the record; older answers already travelled to the run as context. */
@@ -118,7 +124,7 @@ export function validateQuestionRecord(value: unknown): QuestionRecord {
       Buffer.byteLength(JSON.stringify(value) ?? '') > QUESTION_CHECKPOINT_BYTES ||
       !['prepared', 'pending', 'answered', 'cancelled', 'settled', 'withdrawn'].includes(String(item.state))) throw new ValidationError('Invalid native question record.');
   const slot = objectWithKeys(item.slot, 'native question slot', ['kind', 'phase', 'requirements', 'fields', 'args']);
-  if (!text(item.requirements, 12000) || (item.userMessageID !== undefined && !text(item.userMessageID, 256)) ||
+  if (!text(item.requirements) || (item.userMessageID !== undefined && !text(item.userMessageID, 256)) ||
       !isDeepStrictEqual(parsePartialAnswers(item.known), item.known)) throw new ValidationError('Invalid native question objective.');
   if (item.context !== undefined) {
     const context = objectWithKeys(item.context, 'native question context', ['label', 'content']);
@@ -144,7 +150,7 @@ export function validateQuestionRecord(value: unknown): QuestionRecord {
           typeof generation.digest !== 'string' || !/^[a-f0-9]{64}$/.test(generation.digest) ||
           generation.handle !== undefined && !text(generation.handle, 256)) throw new ValidationError('Invalid adaptive question generation.');
       if (generation.sources !== undefined) {
-        const sources = array(generation.sources, 128);
+        const sources = array(generation.sources, Infinity);
         for (const raw of sources) {
           const source = objectWithKeys(raw, 'adaptive policy source', ['path', 'digest']);
           if (!text(source.path, 2048) || source.digest !== null && (typeof source.digest !== 'string' || !/^[a-f0-9]{64}$/.test(source.digest)))
@@ -161,7 +167,7 @@ export function validateQuestionRecord(value: unknown): QuestionRecord {
   if (slot.phase !== undefined && !PHASES.includes(String(slot.phase))) throw new ValidationError('Invalid question phase.');
   if ((slot.kind === 'approval' || slot.kind === 'clarification' || slot.kind === 'route') !== (slot.phase !== undefined) ||
       (slot.kind === 'change') !== (slot.requirements !== undefined) ||
-      (slot.requirements !== undefined && !text(slot.requirements, 12000))) throw new ValidationError('Question slot does not match its kind.');
+      (slot.requirements !== undefined && !text(slot.requirements))) throw new ValidationError('Question slot does not match its kind.');
   if ((item.version === 1 && (slot.kind === 'preflight') !== (item.runID === undefined)) ||
       (item.runID !== undefined && !text(item.runID, 256))) throw new ValidationError('Question run binding is missing.');
   if (item.reservation !== undefined) {
@@ -184,7 +190,7 @@ export function validateQuestionRecord(value: unknown): QuestionRecord {
       // A clarification may be left unanswered, answered in the user's own words, or (when it
       // allows it) answered with several choices; a token question takes exactly one listed label.
       if (index >= openFrom) return selection.length > (question.multiple ? SELECTIONS_MAX : 1) || selection.some(entry => !text(entry));
-      return selection.length !== 1 || !text(selection[0], 12000) || !question.options.some(option => option.label === selection[0]);
+      return selection.length !== 1 || !text(selection[0]) || !question.options.some(option => option.label === selection[0]);
     })) throw new ValidationError('Invalid native answer.');
   } else if (item.answer !== undefined) throw new ValidationError('Historical answer cannot authorize another question.');
   if (item.nativeReceipt !== undefined) {
@@ -193,7 +199,7 @@ export function validateQuestionRecord(value: unknown): QuestionRecord {
     validateQuestionRecord({ ...item, state: 'answered', answer: receipt.answers, nativeReceipt: undefined });
   }
   if (item.retiredCalls !== undefined) {
-    const retired = array(item.retiredCalls, 64);
+    const retired = array(item.retiredCalls, Infinity);
     if (retired.some(call => !text(call, 256)) || new Set(retired).size !== retired.length || retired.includes(item.callID)) throw new ValidationError('Invalid retired native call IDs.');
   }
   for (const raw of [...array(item.clarifications, CLARIFICATIONS_MAX), ...array(item.deferred, CLARIFICATIONS_MAX)]) clarification(raw);

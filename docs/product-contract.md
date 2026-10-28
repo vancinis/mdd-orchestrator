@@ -176,8 +176,8 @@ business rules. A malformed protocol request cannot revoke a previous match or e
 accepted failed evidence remains visible and blocks verified closure as before. No preference is
 inferred: unset mode still asks only the existing native mode question. Interactive authorization and
 product answers still pass through the actual `beforeQuestion`/`afterQuestion` hooks, never this JSON API.
-The raw compact contract and evidence ceilings are 24,000 and 48,000 bytes respectively, checked
-before normalization. Every evidence field, including an empty `checks` array, must be supplied.
+The contract and the evidence have no byte ceiling of their own; the 160,000-byte request bound
+applies to both. Every evidence field, including an empty `checks` array, must be supplied.
 
 Public projection uses `routingVersion:3`, `registration:"active"`, actual `low`/`medium`/`high` continuation
 depth, frozen mode when known, current handle/generation, permitted-operation descriptors, evidence
@@ -239,13 +239,13 @@ epoch), absence of pending intake/child admission, and native parent inspection 
 
 | Evidence boundary | Guarantee and limitation |
 |---|---|
-| Preparation | Locally inspect the complete declared read/write footprint before checks. Exact-file alias checks, credential exclusions, fingerprints, UTF-8 readback, 256 KiB per-file and 1 MiB total byte budgets apply. Completed assignment inputs/outputs must still match. Preparation returns bounded source bodies; ordinary status retains only compact metadata. |
+| Preparation | Locally inspect the complete declared read/write footprint before checks. Exact-file alias checks, credential exclusions and fingerprints apply; no per-file or total byte budget does. The snapshot names each file by path, SHA-256 digest and byte size and keeps no file text: the files stay on disk, the digest proves they did not change, and the coordinator and actors read them with their own tools. Snapshots recorded earlier with file text still restore. Completed assignment inputs/outputs must still match. Ordinary status retains only compact metadata. |
 | Parent readback | Repeat exact held acceptance criteria, scope, exclusions and decisions. Supply final diff inventory with assignment/unrelated dispositions and reasons, one finding per exclusion, every source obligation with its exact paths, and every scenario-assignment, assignment and decision assessment. Apply summaries do not supply this readback. Locally changed declared bytes cannot be omitted; whole-worktree inventory remains a reported observation, not comprehensive diff attestation. |
 | Commands | Reuse structured chronological execution and held-check accounting. Required applicable failed, interrupted or blocked checks prevent verified closure; missing dispositions are rejected. Optional failures remain visible. Unconditional checks cannot be waived, command mismatches require an explicit supported replacement, and retries retain complete attempts and reasons. Supplemental entries cannot hide a held command retry. Re-preparing unchanged source cannot erase execution history; a malformed disposition does not erase an otherwise readable reported attempt. |
 | Source-only proof | Separate obligation readback and linked source assessments can support verified semantic rows without invented command IDs. Command-backed rows cite actual reported successful final execution IDs. All held source and semantic links must be covered exactly; exit codes alone do not prove acceptance. |
 | Freshness and assurance | Submission and verified closure independently recheck the prepared local fingerprints and completed prerequisites. This is structured parent-reported consistency, **not independent execution or applicability attestation**. Any malformed resubmission removes the current match until corrected. |
 | Closure | All effective assignments must have actual accepted Apply completion and all required evidence/semantic links must match. Un-escalated low requires neither Plan nor Verify; structured continuation additionally requires its actual planning sequence and current structured Verify. `completed` records snapshot-bound reported verification; `closed-unverified` requires explicit remaining limits and never earns verified completion. Terminal status grants no new work or review authority. |
-| Explicit repair | A completed writer can be selected again only for failed or stale evidence, referencing its latest actual Apply receipt. Reinspect only its existing footprint, invalidate overlap/dependency-sensitive completion and proof, and retain unrelated completed fingerprints and prior evidence. Old command proof is invalidated conservatively; checks must follow a fresh final snapshot. There are at most four completed-assignment repairs and 64 actor receipts, with no automatic retry or new scope. Overlapping prerequisites must be explicitly repaired first. |
+| Explicit repair | A completed writer can be selected again only for failed or stale evidence, referencing its latest actual Apply receipt. Reinspect only its existing footprint, invalidate overlap/dependency-sensitive completion and proof, and retain unrelated completed fingerprints and prior evidence. Old command proof is invalidated conservatively; checks must follow a fresh final snapshot. There are at most four completed-assignment repairs, with no automatic retry or new scope; the number of actor receipts in a run is not capped. Overlapping prerequisites must be explicitly repaired first. |
 
 #### Durable same-parent recovery
 
@@ -314,10 +314,10 @@ Closed runs cannot reopen, and ordinary low selection retains its five-actor all
 
 This internal controller is not a second Workflow, graph scheduler, public tool, command executor,
 permission expansion, Security/Judgment Day entry point or live-model assurance claim. A receipt's
-artifact and a continuation report have no size limit of their own. When predecessor reports do
-not fit the next actor's dispatch budget, the oldest are carried as their summary plus the byte count
-and SHA-256 of the rest, and the prompt says how many. A prompt that still cannot fit is refused
-without being dispatched. A report that would take the lane's durable record past its 8 MiB bound
+artifact and a continuation report have no size limit of their own, and neither has the next
+actor's prompt: it travels only as a single-use handle, so every predecessor report reaches the
+next actor whole, and Verify receives snapshot files by path, digest and size instead of their
+text. A report that would take the lane's durable record past its 8 MiB bound
 is recorded as a failed receipt, not written partially.
 
 Each successful structured native receipt separately retains the accepted parsed report payload.

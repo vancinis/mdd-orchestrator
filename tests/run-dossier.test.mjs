@@ -125,6 +125,23 @@ test('an oversized record sheds artifact bodies rather than losing the plan', t 
   assert.equal(store.read('parent').artifacts.length, 40);
 });
 
+// The user's request has no size limit. A preserved run keeps it whole on disk; its view in status
+// shows the opening with the size and digest once nothing else is left to shed.
+test('regression: a long request is kept whole in the record and clipped with its digest only in the view', t => {
+  const path = root(t); const store = new RunDossierStore(path);
+  const requirements = 'Necesito este cambio con todo el detalle que escribí. '.repeat(1000);
+  store.write('parent', dossier({ requirements }));
+  const held = store.read('parent');
+  assert.equal(held.requirements, requirements);
+  const view = priorRunView(held, 'record');
+  assert.ok(Buffer.byteLength(JSON.stringify(view)) <= 30000);
+  assert.equal(view.requirementsClipped, true);
+  assert.ok(requirements.startsWith(view.requirements.slice(0, -1)));
+  assert.equal(view.requirementsBytes, Buffer.byteLength(requirements));
+  assert.equal(view.requirementsSha256, createHash('sha256').update(requirements).digest('hex'));
+  assert.equal(priorRunView(dossier(), 'record').requirementsClipped, undefined, 'an ordinary request is shown whole');
+});
+
 test('a stale lock from a dead process does not seal the record forever', t => {
   const path = root(t); const store = new RunDossierStore(path);
   store.write('parent', dossier());

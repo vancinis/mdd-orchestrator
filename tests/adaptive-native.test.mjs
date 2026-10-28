@@ -13,8 +13,11 @@ import { ProgressGuard } from '../dist/progress.js';
 import { RunOwnershipStore } from '../dist/run-ownership.js';
 import { defaultSettings } from '../dist/settings.js';
 import { createInspector } from '../dist/opencode-plugin.js';
-import { consumeNativeOperation } from '../dist/adaptive-native.js';
+import { consumeNativeOperation, validateNativePolicy } from '../dist/adaptive-native.js';
 import { validateQuestionRecord } from '../dist/question-checkpoint.js';
+import { approvesOperation } from '../dist/preflight.js';
+import { adaptiveQuestionsEnvelope, UNRESOLVED_PRODUCT_ANSWER } from '../dist/adaptive-low.js';
+import { LocalFiles } from '../dist/local-files.js';
 
 function fixture(t, mode) {
   const root = mkdtempSync(join(tmpdir(), 'mdd-native-policy-'));
@@ -127,8 +130,62 @@ test('AL05b: large native approval is complete through guarded paged detail and 
   await f.gate.adaptiveInternal(wire('status'), f.runtime);
   assert.deepEqual(f.questions.read('parent'), before, 'status cannot answer or consume consent');
   await f.gate.beforeQuestion({ sessionID: 'parent', callID: 'wire-approval' }, args);
-  await f.gate.afterQuestion({ sessionID: 'parent', callID: 'wire-approval' }, args, output(args, [['Approve operation']]));
+  await f.gate.afterQuestion({ sessionID: 'parent', callID: 'wire-approval' }, args, output(args, [['Aprobar operación']]));
   assert.equal(f.store.read('parent').nativePolicy.questions[0].callID, 'wire-approval');
+});
+
+// The approval used to read "Authorize only this exact adaptive operation?" followed by the raw
+// operation JSON. It is Spanish now and says what the operation does; the binding is unchanged.
+test('regression: the interactive entry approval is Spanish and summarizes the entry instead of its JSON', async t => {
+  const f = fixture(t, 'interactive'); f.contract.exclusions = ['No se toca ningún otro archivo.'];
+  await f.admit();
+  const [question] = f.gate.status('parent').question.questions;
+  assert.equal(question.header, 'Aprobación de operación');
+  assert.deepEqual(question.options.map(option => option.label), ['Aprobar operación', 'Pausar', 'Rechazar']);
+  assert.match(question.question, /^¿Autorizás esta operación de MDD\?/);
+  assert.ok(question.question.includes(`Pedido: «${f.contract.objective}»`));
+  assert.ok(question.question.includes(`Resultado buscado: ${f.contract.acceptance.goal}`));
+  assert.match(question.question, /Requisitos: 1, con 1 escenario\(s\)\. Tareas: 1\./);
+  assert.match(question.question, /Evaluación: complejidad baja, impacto bajo\./);
+  assert.match(question.question, /Archivos que puede escribir:\n- own\.txt/);
+  assert.match(question.question, /Queda fuera:\n- No se toca ningún otro archivo\./);
+  assert.doesNotMatch(question.question, /"kind"|"args"|"contract"|Authorize/);
+  assert.match(question.question, / \[MDD adaptive [0-9a-f-]{36}\]$/);
+  const bound = f.questions.read('parent').adaptive.operation;
+  assert.equal(bound.kind, 'entry');
+  assert.equal(bound.args.contract.objective, f.contract.objective, 'the record still binds the exact proposed operation');
+});
+
+test('regression: a select approval names the actor, assignment, purpose and the files Apply may change', async t => {
+  const f = fixture(t, 'interactive'); await f.admit(); await f.answer([['Aprobar operación']]);
+  await f.gate.adaptiveInternal(f.operation(), f.runtime);
+  const [question] = f.gate.status('parent').question.questions;
+  assert.match(question.question, /Lanzar el agente mdd-apply para la tarea A1\./);
+  assert.match(question.question, /Propósito: Perform bounded replacement\./);
+  assert.match(question.question, /Archivos que puede modificar:\n- own\.txt/);
+  assert.doesNotMatch(question.question, /"handle"|"assignmentID"/);
+  await f.answer([['Aprobar operación']]);
+  assert.deepEqual(f.store.read('parent').nativePolicy.questions.at(-1).answer, [['Aprobar operación']]);
+  assert.ok(f.runner.status('parent').task, 'the approved selection is ready to dispatch');
+});
+
+// Every interactive approval is kept with the run, and every re-asked question retires its call. A
+// cap of 64 on either broke a long interactive run at its 65th approval.
+test('regression: a long interactive run keeps more than 64 approvals and retired calls', async t => {
+  const f = fixture(t, 'interactive'); await f.admit(); await f.answer([['Aprobar operación']]);
+  const saved = f.store.read('parent'), approval = saved.nativePolicy.questions.at(-1);
+  const many = Array.from({ length: 70 }, (_, index) => ({ ...structuredClone(approval), callID: `approval-${index}` }));
+  assert.equal(validateNativePolicy({ ...saved.nativePolicy, questions: many }).questions.length, 70);
+  const settled = f.questions.read('parent');
+  const retired = { ...settled, retiredCalls: Array.from({ length: 70 }, (_, index) => `retired-${index}`) };
+  assert.equal(validateQuestionRecord(retired).retiredCalls.length, 70);
+});
+
+test('regression: only the Spanish approval or the legacy receipt token approves an operation', () => {
+  assert.equal(approvesOperation('Aprobar operación'), true);
+  assert.equal(approvesOperation('Approve operation'), true, 'receipts settled before the change keep their meaning');
+  for (const label of ['Pausar', 'Rechazar', 'Pause', 'Decline', 'Aprobar', 'aprobar operación', 'Aprobar operación ', undefined])
+    assert.equal(approvesOperation(label), false, String(label));
 });
 
 async function readDetail(f, ref, runtime = f.runtime) {
@@ -177,7 +234,7 @@ test('AL05a: configured interactive entry asks exact operation approval before a
   const f = fixture(t, 'interactive'); const result = await f.admit();
   assert.equal(result.state, 'question-ready'); assert.equal(f.store.read('parent'), undefined);
   assert.equal(result.question.questions.length, 1);
-  await f.answer([['Approve operation']]);
+  await f.answer([['Aprobar operación']]);
   assert.equal(f.runner.status('parent').state, 'await-selection');
   assert.equal(f.store.read('parent').nativePolicy.answers.mode, 'interactive');
   assert.equal(f.inspected.length, 2);
@@ -202,7 +259,7 @@ test('AL05a: unset mode asks only existing mode question and never infers automa
 });
 
 test('AL05a: interactive selection uses inspected native call/result once and binds the complete operation', async t => {
-  const f = fixture(t, 'interactive'); await f.admit(); await f.answer([['Approve operation']]);
+  const f = fixture(t, 'interactive'); await f.admit(); await f.answer([['Aprobar operación']]);
   const operation = f.operation();
   await assert.rejects(f.runner.selectAdaptiveInternal(operation.args, f.runtime), /native operation authority/);
   const status = await f.gate.adaptiveInternal(operation, f.runtime);
@@ -211,15 +268,15 @@ test('AL05a: interactive selection uses inspected native call/result once and bi
   await assert.rejects(f.gate.adaptiveInternal({ ...operation, approved: true }, f.runtime), /unknown/);
   const args = status.question, call = { sessionID: 'parent', callID: 'actual-selection-answer' };
   await f.gate.beforeQuestion(call, args);
-  await assert.rejects(f.gate.afterQuestion({ ...call, callID: 'forged' }, args, output(args, [['Approve operation']])));
+  await assert.rejects(f.gate.afterQuestion({ ...call, callID: 'forged' }, args, output(args, [['Aprobar operación']])));
   assert.equal(f.questions.read('parent').state, 'pending');
-  await assert.rejects(f.gate.afterQuestion({ ...call, sessionID: 'foreign' }, args, output(args, [['Approve operation']])), /another parent/);
-  await f.gate.afterQuestion(call, args, output(args, [['Approve operation']]));
+  await assert.rejects(f.gate.afterQuestion({ ...call, sessionID: 'foreign' }, args, output(args, [['Aprobar operación']])), /another parent/);
+  await f.gate.afterQuestion(call, args, output(args, [['Aprobar operación']]));
   assert.equal(f.runner.status('parent').state, 'authorized-actor');
   const saved = f.store.read('parent');
   assert.equal(saved.nativePolicy.questions.at(-1).callID, call.callID);
-  assert.deepEqual(saved.nativePolicy.questions.at(-1).answer, [['Approve operation']]);
-  await assert.rejects(f.gate.afterQuestion(call, args, output(args, [['Approve operation']])));
+  assert.deepEqual(saved.nativePolicy.questions.at(-1).answer, [['Aprobar operación']]);
+  await assert.rejects(f.gate.afterQuestion(call, args, output(args, [['Aprobar operación']])));
   await assert.rejects(f.runner.executeAdaptiveNativeInternal({ approved: true }, f.runtime), /single-use/);
   const taskCall = { sessionID: 'parent', callID: 'actual-child' };
   const sent = await f.runner.before(taskCall, f.runner.status('parent').task);
@@ -227,7 +284,7 @@ test('AL05a: interactive selection uses inspected native call/result once and bi
   await assert.rejects(f.runner.selectAdaptiveInternal(f.operation().args, f.runtime), /native operation authority/);
 });
 
-for (const label of ['Pause', 'Decline', 'Please do something else']) test(`AL05a: ${label} never authorizes an interactive operation`, async t => {
+for (const label of ['Pausar', 'Rechazar', 'Please do something else']) test(`AL05a: ${label} never authorizes an interactive operation`, async t => {
   const f = fixture(t, 'interactive'); await f.admit();
   await f.answer([[label]]);
   assert.equal(f.gate.status('parent').state, 'blocked');
@@ -239,17 +296,17 @@ test('AL05a: malformed result and forged question leave no admission', async t =
   const changed = structuredClone(args); changed.questions[0].options.pop();
   await assert.rejects(f.gate.beforeQuestion({ sessionID: 'parent', callID: 'forged' }, changed), /envelope/);
   const call = { sessionID: 'parent', callID: 'actual' }; await f.gate.beforeQuestion(call, args);
-  const result = output(args, [['Approve operation']]); result.output = 'Caller claims user approved';
+  const result = output(args, [['Aprobar operación']]); result.output = 'Caller claims user approved';
   await assert.rejects(f.gate.afterQuestion(call, args, result), /output/);
   assert.equal(f.store.read('parent'), undefined);
 });
 
 test('AL05a: generation drift rejects reply without consuming another parent question', async t => {
-  const f = fixture(t, 'interactive'); await f.admit(); await f.answer([['Approve operation']]);
+  const f = fixture(t, 'interactive'); await f.admit(); await f.answer([['Aprobar operación']]);
   const status = await f.gate.adaptiveInternal(f.operation(), f.runtime), args = status.question;
   const call = { sessionID: 'parent', callID: 'before-restore' }; await f.gate.beforeQuestion(call, args);
   const cold = new PhaseRunner(f.inspect, f.options); await cold.restore(f.runtime);
-  await assert.rejects(f.gate.afterQuestion(call, args, output(args, [['Approve operation']])), /generation/);
+  await assert.rejects(f.gate.afterQuestion(call, args, output(args, [['Aprobar operación']])), /generation/);
   assert.equal(f.questions.read('parent').state, 'pending');
   assert.equal(cold.status('parent').task, undefined);
 });
@@ -260,7 +317,7 @@ for (const phase of ['prepared', 'pending']) test(`AL05a: restart ${phase} quest
   if (phase === 'pending') await f.gate.beforeQuestion(call, status.question);
   const gate = f.makeGate(new PhaseRunner(f.inspect, f.options));
   assert.equal(gate.status('parent').state, 'blocked');
-  await assert.rejects(gate.afterQuestion(call, status.question, output(status.question, [['Approve operation']])), /Interrupted/);
+  await assert.rejects(gate.afterQuestion(call, status.question, output(status.question, [['Aprobar operación']])), /Interrupted/);
   await assert.rejects(gate.adaptiveInternal({ kind: 'entry', args: { contract: f.contract, messageID: 'native-message' } }, f.runtime), /unresolved/);
   assert.equal(f.store.read('parent'), undefined);
 });
@@ -277,7 +334,7 @@ test('AL05a: existing native intake cannot overlap asynchronous adaptive objecti
 
 test('AL05a: configured policy survives settings changes and cold restore without reusing approval', async t => {
   const f = fixture(t, 'interactive'); f.settings.profiles.default.answers.summary = 'low';
-  await f.admit(); await f.answer([['Approve operation']]);
+  await f.admit(); await f.answer([['Aprobar operación']]);
   f.settings.profiles.default.answers.mode = 'automatic';
   const proposed = f.operation();
   const cold = new PhaseRunner(f.inspect, f.options); assert.equal((await cold.restore(f.runtime)).restored, true);
@@ -330,9 +387,37 @@ test('AL05a: actual actor question answers are linked durably without changing h
   assert.equal(cold.status('parent').productQuestions, undefined);
 });
 
+test('regression: product questions are framed in Spanish and records with the earlier English frame still restore', async t => {
+  const f = fixture(t, 'automatic'); await f.admit();
+  const operation = f.operation(); operation.args.actor = 'mdd-explore'; await f.gate.adaptiveInternal(operation, f.runtime);
+  const call = { sessionID: 'parent', callID: 'frame-question-child' }, sent = await f.runner.before(call, f.runner.status('parent').task);
+  const questions = [{ question: 'Keep the bounded format?', why: 'A user decision is needed.', options: [{ label: 'Keep', description: 'Keep the original bounded format.' }] }];
+  await f.runner.after(call, sent, JSON.stringify({ outcome: 'passed', evidenceSummary: 'Found a decision.', artifact: 'Source investigation only.', questions }));
+  const pending = f.runner.status('parent').productQuestions;
+  const status = await f.gate.adaptiveInternal({ kind: 'questions', args: { receiptID: pending.receiptID, callID: pending.callID } }, f.runtime);
+  const [asked] = status.question.questions;
+  assert.equal(asked.header, 'Decisión de producto');
+  assert.match(asked.question, /^Keep the bounded format\?\nPor qué importa: A user decision is needed\. \[MDD adaptive /);
+  await f.answer([['Keep']]);
+  // A record answered before the frame was Spanish carries the English one; it must still restore.
+  const saved = f.store.read('parent'), native = saved.data.questionAnswers[0].native;
+  const legacy = adaptiveQuestionsEnvelope(pending.questions, native.adaptive.nonce, true);
+  assert.equal(legacy.questions[0].header, 'Product decision');
+  for (const record of [native, saved.nativePolicy.questions.find(item => item.callID === native.callID)]) record.slot.args = structuredClone(legacy);
+  const { digest: _digest, ...body } = saved; saved.digest = createHash('sha256').update(JSON.stringify(body)).digest('hex');
+  new LocalFiles(f.root).updateStrict(`.mdd/adaptive-${createHash('sha256').update('parent').digest('hex')}.json`, () => JSON.stringify(saved), 8 * 1024 * 1024);
+  assert.match(f.store.read('parent').data.questionAnswers[0].native.slot.args.questions[0].question, /\nWhy: /);
+  const cold = new PhaseRunner(f.inspect, f.options), restored = await cold.restore(f.runtime);
+  assert.equal(restored.restored, true, restored.reason);
+  // An open-ended product question offers Pausar, which leaves it unresolved in either language.
+  const open = adaptiveQuestionsEnvelope([{ question: '¿Qué formato usamos?', why: 'Cambia la salida.', options: [] }], 'nonce');
+  assert.deepEqual(open.questions[0].options, [{ label: 'Pausar', description: 'Dejar esta decisión de producto sin resolver.' }]);
+  for (const label of ['Pausar', 'Rechazar', 'Detener', 'Pause', 'Decline', 'Stop']) assert.ok(UNRESOLVED_PRODUCT_ANSWER.test(label), label);
+});
+
 test('AL05a: an open policy question excludes an already selected native actor', async t => {
-  const f = fixture(t, 'interactive'); await f.admit(); await f.answer([['Approve operation']]);
-  await f.gate.adaptiveInternal(f.operation(), f.runtime); await f.answer([['Approve operation']]);
+  const f = fixture(t, 'interactive'); await f.admit(); await f.answer([['Aprobar operación']]);
+  await f.gate.adaptiveInternal(f.operation(), f.runtime); await f.answer([['Aprobar operación']]);
   const task = f.runner.status('parent').task;
   await assert.rejects(f.gate.adaptiveInternal({ kind: 'prepare', args: { handle: 'obsolete' } }, f.runtime), /actorless/);
   assert.equal(f.gate.status('parent').question, undefined);
@@ -347,7 +432,7 @@ for (const boundary of ['pending', 'answered', 'settled']) test(`AL05a: failed $
   if (boundary === 'pending') await assert.rejects(f.gate.beforeQuestion(call, status.question), /publication/);
   else {
     await f.gate.beforeQuestion(call, status.question);
-    await assert.rejects(f.gate.afterQuestion(call, status.question, output(status.question, [['Approve operation']])), /publication/);
+    await assert.rejects(f.gate.afterQuestion(call, status.question, output(status.question, [['Aprobar operación']])), /publication/);
   }
   assert.equal(f.store.read('parent'), undefined);
   const gate = f.makeGate(new PhaseRunner(f.inspect, f.options));
@@ -358,7 +443,7 @@ test('AL05a: interrupted approved bootstrap restores policy but never restores t
   const f = fixture(t, 'interactive'); await f.admit();
   const claim = f.ownership.claim.bind(f.ownership); let fail = true;
   t.mock.method(f.ownership, 'claim', (...args) => { if (fail) { fail = false; throw new Error('Injected bootstrap interruption.'); } return claim(...args); });
-  await assert.rejects(f.answer([['Approve operation']]), /bootstrap/);
+  await assert.rejects(f.answer([['Aprobar operación']]), /bootstrap/);
   assert.equal(f.store.read('parent').stage, 'bootstrap');
   assert.equal(f.store.read('parent').nativePolicy.answers.mode, 'interactive');
   const cold = new PhaseRunner(f.inspect, f.options); assert.equal((await cold.restore(f.runtime)).restored, true);
@@ -368,7 +453,7 @@ test('AL05a: interrupted approved bootstrap restores policy but never restores t
 });
 
 for (const alteration of ['epoch', 'workspace', 'scope', 'purpose']) test(`AL05a: ${alteration} cannot rebind an issued native approval`, async t => {
-  const f = fixture(t, 'interactive'); await f.admit(); await f.answer([['Approve operation']]);
+  const f = fixture(t, 'interactive'); await f.admit(); await f.answer([['Aprobar operación']]);
   const operation = f.operation(), status = await f.gate.adaptiveInternal(operation, f.runtime);
   const call = { sessionID: 'parent', callID: 'bound-exactly' }; await f.gate.beforeQuestion(call, status.question);
   if (alteration === 'epoch') {
@@ -385,7 +470,7 @@ for (const alteration of ['epoch', 'workspace', 'scope', 'purpose']) test(`AL05a
     assert.deepEqual(f.questions.read('parent'), record);
     return;
   }
-  await assert.rejects(f.gate.afterQuestion(call, status.question, output(status.question, [['Approve operation']])), /generation/);
+  await assert.rejects(f.gate.afterQuestion(call, status.question, output(status.question, [['Aprobar operación']])), /generation/);
   assert.equal(f.questions.read('parent').state, 'pending');
 });
 
@@ -399,9 +484,9 @@ test('AL05a: explicit adaptive question version never weakens fixed phase bindin
 });
 
 for (const field of ['result', 'operation binding']) test(`AL05a: settled native ${field} cannot be rewritten by a later journal update`, async t => {
-  const f = fixture(t, 'interactive'); await f.admit(); await f.answer([['Approve operation']]);
+  const f = fixture(t, 'interactive'); await f.admit(); await f.answer([['Aprobar operación']]);
   const settled = f.questions.read('parent'), changed = structuredClone(settled); changed.sequence++;
-  if (field === 'result') changed.nativeReceipt.answers = [['Pause']];
+  if (field === 'result') changed.nativeReceipt.answers = [['Pausar']];
   else changed.adaptive.operation.args.contract.acceptance.goal = 'Changed business authorization';
   assert.throws(() => f.questions.write('parent', changed), /durability/);
   assert.deepEqual(f.questions.read('parent'), settled);
@@ -424,12 +509,12 @@ for (const change of ['legitimate', 'foreign input']) test(`AL05a: real native i
     assert.equal(f.store.read('parent'), undefined); return;
   }
   await f.gate.beforeQuestion(call, status.question);
-  await f.gate.afterQuestion(call, status.question, output(status.question, [['Approve operation']]));
+  await f.gate.afterQuestion(call, status.question, output(status.question, [['Aprobar operación']]));
   assert.equal(f.store.read('parent').nativePolicy.questions[0].callID, call.callID);
 });
 
 test('AL05a: transferred policy retains frozen interactive preferences and needs fresh operation approval', async t => {
-  const f = fixture(t, 'interactive'); await f.admit(); await f.answer([['Approve operation']]);
+  const f = fixture(t, 'interactive'); await f.admit(); await f.answer([['Aprobar operación']]);
   const source = f.store.read('parent'), target = { ...f.runtime, sessionID: 'target' };
   f.inspect.intake = async (here, text, _messageID, scope) => {
     assert.deepEqual(here, target); assert.equal(scope, 'latest'); assert.match(text, /^Transfer sourceSessionID=parent/); return 'target-native-user';
@@ -439,7 +524,7 @@ test('AL05a: transferred policy retains frozen interactive preferences and needs
   assert.equal(result.state, 'question-ready');
   const call = { sessionID: 'target', callID: 'target-transfer-question' };
   await f.gate.beforeQuestion(call, result.question);
-  await f.gate.afterQuestion(call, result.question, output(result.question, [['Approve operation']]));
+  await f.gate.afterQuestion(call, result.question, output(result.question, [['Aprobar operación']]));
   const saved = f.store.read('target');
   assert.equal(saved.nativePolicy.answers.mode, 'interactive');
   assert.equal(saved.nativePolicy.questions.at(-1).callID, call.callID);
@@ -449,7 +534,7 @@ test('AL05a: transferred policy retains frozen interactive preferences and needs
 });
 
 async function proposedTransfer(t) {
-  const f = fixture(t, 'interactive'); await f.admit(); await f.answer([['Approve operation']]);
+  const f = fixture(t, 'interactive'); await f.admit(); await f.answer([['Aprobar operación']]);
   const target = { ...f.runtime, sessionID: 'target' }, source = f.store.read('parent');
   f.inspect.intake = async () => 'target-native-user';
   f.inspect.adaptiveTransferIdle = async () => {}; f.inspect.confirmAdaptiveTransfer = async () => {};
@@ -465,7 +550,7 @@ test('AL05a transfer fence: target approval excludes a source-side policy propos
   assert.equal(f.questions.read('target').state, 'prepared');
 });
 
-for (const label of ['Pause', 'Decline']) test(`AL05a transfer fence: ${label} retains the receipt and releases only its own source fence`, async t => {
+for (const label of ['Pausar', 'Rechazar']) test(`AL05a transfer fence: ${label} retains the receipt and releases only its own source fence`, async t => {
   const f = await proposedTransfer(t), call = { sessionID: 'target', callID: `native-${label}` };
   await f.gate.beforeQuestion(call, f.question);
   await f.gate.afterQuestion(call, f.question, output(f.question, [[label]]));
@@ -481,7 +566,7 @@ test('AL05a transfer fence: source byte drift invalidates the displayed proposal
   const f = await proposedTransfer(t), call = { sessionID: 'target', callID: 'drifted-native-answer' };
   await f.gate.beforeQuestion(call, f.question);
   writeFileSync(join(f.root, 'own.txt'), 'external source drift');
-  await assert.rejects(f.gate.afterQuestion(call, f.question, output(f.question, [['Approve operation']])), /generation|source.*changed|drift/i);
+  await assert.rejects(f.gate.afterQuestion(call, f.question, output(f.question, [['Aprobar operación']])), /generation|source.*changed|drift/i);
   assert.equal(f.store.read('target'), undefined);
   assert.equal(f.questions.read('target').state, 'pending');
 });
@@ -492,9 +577,9 @@ test('AL05a transfer fence: changed source operation during asynchronous native 
   f.inspect.adaptiveTransferIdle = async (_here, role) => {
     if (role === 'target') writeFileSync(join(f.root, 'own.txt'), 'raced during proof');
   };
-  await assert.rejects(f.gate.afterQuestion(call, f.question, output(f.question, [['Approve operation']])), /source|generation|drift/i);
+  await assert.rejects(f.gate.afterQuestion(call, f.question, output(f.question, [['Aprobar operación']])), /source|generation|drift/i);
   assert.equal(f.store.read('target'), undefined);
-  assert.deepEqual(f.questions.read('target').nativeReceipt.answers, [['Approve operation']]);
+  assert.deepEqual(f.questions.read('target').nativeReceipt.answers, [['Aprobar operación']]);
 });
 
 for (const action of ['finish', 'abort']) test(`AL05a transfer fence: interrupted claim requires a fresh native ${action} decision`, async t => {
@@ -502,21 +587,21 @@ for (const action of ['finish', 'abort']) test(`AL05a transfer fence: interrupte
   const begin = f.ownership.beginAdaptiveTransfer.bind(f.ownership); let fail = true;
   t.mock.method(f.ownership, 'beginAdaptiveTransfer', (...args) => { if (fail) { fail = false; throw new Error('Injected claimed-transfer interruption.'); } return begin(...args); });
   await f.gate.beforeQuestion(call, f.question);
-  await assert.rejects(f.gate.afterQuestion(call, f.question, output(f.question, [['Approve operation']])), /interruption/);
+  await assert.rejects(f.gate.afterQuestion(call, f.question, output(f.question, [['Aprobar operación']])), /interruption/);
   const recovery = { kind: 'transfer-recovery', args: { ...f.transferOperation.args, action, messageID: 'fresh-recovery-message' } };
   const status = await f.gate.adaptiveInternal(recovery, f.target);
   assert.equal(status.state, 'question-ready');
   const fresh = { sessionID: 'target', callID: `fresh-native-${action}` };
-  await assert.rejects(f.gate.afterQuestion(call, status.question, output(status.question, [['Approve operation']])));
+  await assert.rejects(f.gate.afterQuestion(call, status.question, output(status.question, [['Aprobar operación']])));
   await f.gate.beforeQuestion(fresh, status.question);
-  await f.gate.afterQuestion(fresh, status.question, output(status.question, [['Approve operation']]));
+  await f.gate.afterQuestion(fresh, status.question, output(status.question, [['Aprobar operación']]));
   assert.equal(f.ownership.read(f.source.runID).policyQuestion, undefined);
   assert.equal(f.ownership.read(f.source.runID).ownerSessionID, action === 'finish' ? 'target' : 'parent');
   assert.equal(f.questions.read('target').nativeReceipt.callID, fresh.callID);
 });
 
 for (const occupancy of ['fixed question', 'native intake']) test(`AL05a transfer fence: ${occupancy} is protected before a target policy question is prepared`, async t => {
-  const f = fixture(t, 'interactive'); await f.admit(); await f.answer([['Approve operation']]);
+  const f = fixture(t, 'interactive'); await f.admit(); await f.answer([['Aprobar operación']]);
   const target = { ...f.runtime, sessionID: 'target' }, source = f.store.read('parent');
   let fixed;
   if (occupancy === 'fixed question') {
@@ -534,8 +619,8 @@ for (const occupancy of ['fixed question', 'native intake']) test(`AL05a transfe
 });
 
 test('AL05a transfer fence: a selected source actor prevents even preparing a target approval', async t => {
-  const f = fixture(t, 'interactive'); await f.admit(); await f.answer([['Approve operation']]);
-  await f.gate.adaptiveInternal(f.operation(), f.runtime); await f.answer([['Approve operation']]);
+  const f = fixture(t, 'interactive'); await f.admit(); await f.answer([['Aprobar operación']]);
+  await f.gate.adaptiveInternal(f.operation(), f.runtime); await f.answer([['Aprobar operación']]);
   f.inspect.adaptiveTransferIdle = async () => {}; f.inspect.confirmAdaptiveTransfer = async () => {};
   await assert.rejects(f.gate.adaptiveInternal({ kind: 'transfer', args: { sourceSessionID: 'parent', runID: f.store.read('parent').runID, operationID: 'selected-source', messageID: 'target-message' } }, { ...f.runtime, sessionID: 'target' }), /actorless/);
   assert.equal(f.questions.read('target'), undefined);
@@ -545,14 +630,14 @@ test('AL05a transfer fence: an unclaimed failed proposal releases only on a fres
   const f = await proposedTransfer(t), call = { sessionID: 'target', callID: 'unclaimed-transfer-answer' };
   f.inspect.adaptiveTransferIdle = async (_here, role) => { if (role === 'target') writeFileSync(join(f.root, 'own.txt'), 'external drift'); };
   await f.gate.beforeQuestion(call, f.question);
-  await assert.rejects(f.gate.afterQuestion(call, f.question, output(f.question, [['Approve operation']])), /source.*changed/i);
+  await assert.rejects(f.gate.afterQuestion(call, f.question, output(f.question, [['Aprobar operación']])), /source.*changed/i);
   assert.equal(f.ownership.parentClaim('target'), undefined);
   f.inspect.adaptiveTransferIdle = async () => {};
   const recovery = { kind: 'transfer-recovery', args: { ...f.transferOperation.args, action: 'abort', messageID: 'explicit-abort-message' } };
   const status = await f.gate.adaptiveInternal(recovery, f.target);
   const fresh = { sessionID: 'target', callID: 'explicit-unclaimed-abort' };
   await f.gate.beforeQuestion(fresh, status.question);
-  await f.gate.afterQuestion(fresh, status.question, output(status.question, [['Approve operation']]));
+  await f.gate.afterQuestion(fresh, status.question, output(status.question, [['Aprobar operación']]));
   const owner = f.ownership.read(f.source.runID);
   assert.equal(owner.state, 'idle'); assert.equal(owner.policyQuestion, undefined); assert.equal(owner.epoch, 1);
   assert.equal(f.store.read('target'), undefined);
@@ -572,8 +657,8 @@ for (const mode of ['Automático', 'Interactivo']) test(`AL05a transfer fence: l
   if (mode === 'Interactivo') {
     assert.equal(f.store.read('target'), undefined);
     const approval = gate.status('target').question, approve = { sessionID: 'target', callID: 'actual-transfer-approval' };
-    assert.equal(approval.questions[0].header, 'Operation approval');
-    await gate.beforeQuestion(approve, approval); await gate.afterQuestion(approve, approval, output(approval, [['Approve operation']]));
+    assert.equal(approval.questions[0].header, 'Aprobación de operación');
+    await gate.beforeQuestion(approve, approval); await gate.afterQuestion(approve, approval, output(approval, [['Aprobar operación']]));
   }
   const policy = f.store.read('target').nativePolicy;
   assert.equal(policy.answers.mode, mode === 'Automático' ? 'automatic' : 'interactive');
@@ -664,7 +749,7 @@ for (const change of ['generation', 'epoch', 'unknown-child', 'busy-child']) tes
 });
 
 test('AL05a P1 control: current interactive approval still rejects drift after native target idle inspection', async t => {
-  const f = fixture(t, 'interactive'), native = inspectedTransfer(f); await f.admit(); await f.answer([['Approve operation']]);
+  const f = fixture(t, 'interactive'), native = inspectedTransfer(f); await f.admit(); await f.answer([['Aprobar operación']]);
   const source = f.store.read('parent'), status = await f.gate.adaptiveInternal(native.operation(), native.target);
   const call = { sessionID: 'target', callID: 'current-interactive-transfer' };
   await f.gate.beforeQuestion(call, status.question);
@@ -672,11 +757,11 @@ test('AL05a P1 control: current interactive approval still rejects drift after n
     await native.inspector.adaptiveTransferIdle(here, role);
     if (role === 'target') writeFileSync(join(f.root, 'own.txt'), 'preserved interactive drift');
   };
-  await assert.rejects(f.gate.afterQuestion(call, status.question, output(status.question, [['Approve operation']])), /source.*changed|generation/i);
+  await assert.rejects(f.gate.afterQuestion(call, status.question, output(status.question, [['Aprobar operación']])), /source.*changed|generation/i);
   assert.equal(f.store.read('target'), undefined); assert.equal(f.ownership.parentClaim('target'), undefined);
   assert.equal(f.ownership.read(source.runID).ownerSessionID, 'parent');
   assert.equal(readFileSync(join(f.root, 'own.txt'), 'utf8'), 'preserved interactive drift');
-  assert.deepEqual(f.questions.read('target').nativeReceipt.answers, [['Approve operation']]);
+  assert.deepEqual(f.questions.read('target').nativeReceipt.answers, [['Aprobar operación']]);
 });
 
 // Admission stuck after a pre-bootstrap rejection (ADM-01..ADM-07).
@@ -733,7 +818,7 @@ test('ADM-03: bootstrap interruption keeps durable data and the fence; reset ref
   const f = fixture(t, 'interactive'); await f.admit();
   const claim = f.ownership.claim.bind(f.ownership); let fail = true;
   t.mock.method(f.ownership, 'claim', (...args) => { if (fail) { fail = false; throw new Error('Injected bootstrap interruption.'); } return claim(...args); });
-  await assert.rejects(f.answer([['Approve operation']]), /bootstrap/);
+  await assert.rejects(f.answer([['Aprobar operación']]), /bootstrap/);
   const before = f.store.read('parent');
   assert.throws(() => f.gate.reset(f.runtime, 'run'), /Adaptive records cannot enter fixed reset/);
   assert.deepEqual(f.store.read('parent'), before); assert.equal(f.gate.status('parent').state, 'blocked');
@@ -865,7 +950,7 @@ test('ADM-05-S01: an old reply replayed after safe reset cannot authorize the fr
   assert.equal(f.store.read('parent'), undefined);
 });
 
-for (const choice of ['Pause', 'Decline']) test(`ADM-04-S03: ${choice} then reset supplies no retry authority`, async t => {
+for (const choice of ['Pausar', 'Rechazar']) test(`ADM-04-S03: ${choice} then reset supplies no retry authority`, async t => {
   const f = fixture(t, 'interactive'); await f.admit(); await f.answer([[choice]]);
   const reset = f.gate.reset(f.runtime, 'run');
   assert.equal(reset.reset.nativeEntry.released, false);
@@ -1017,12 +1102,12 @@ test('ADM-03-S01: N10 interrupted claim then restart keeps durable data; a fresh
   const f = fixture(t, 'interactive'); await f.admit();
   const claim = f.ownership.claim.bind(f.ownership); let fail = true;
   t.mock.method(f.ownership, 'claim', (...args) => { if (fail) { fail = false; throw new Error('Injected bootstrap interruption.'); } return claim(...args); });
-  await assert.rejects(f.answer([['Approve operation']]), /bootstrap/);
+  await assert.rejects(f.answer([['Aprobar operación']]), /bootstrap/);
   const gate = restart(f), stored = structuredClone(f.store.read('parent')), owner = f.ownership.parent('parent');
   assert.throws(() => gate.reset(f.runtime, 'run'), /Adaptive records cannot enter fixed reset/);
   const status = await gate.adaptiveInternal(entryOp(f), f.runtime);
-  assert.equal(status.question.questions[0].header, 'Operation approval');
-  await assert.rejects(f.answer([['Approve operation']], gate), /existing or unfinished native run occupies this parent/);
+  assert.equal(status.question.questions[0].header, 'Aprobación de operación');
+  await assert.rejects(f.answer([['Aprobar operación']], gate), /existing or unfinished native run occupies this parent/);
   assert.deepEqual(f.store.read('parent'), stored); assert.equal(f.ownership.parent('parent'), owner);
 });
 
@@ -1067,13 +1152,13 @@ test('ADM-04-S03: N13 an automatic product question answered Pause supplies no r
 
 test('ADM-05-S01: N14 interactive consent is asked again after reset; the old reply cannot authorize it', async t => {
   const f = fixture(t, 'interactive'); blockPlugins(f); const first = await f.admit();
-  await assert.rejects(f.answer([['Approve operation']]), SERIAL);
+  await assert.rejects(f.answer([['Aprobar operación']]), SERIAL);
   assert.deepEqual(f.gate.reset(f.runtime, 'run').reset.nativeEntry, { released: true }); unblockPlugins(f);
-  const fresh = await f.admit(); assert.equal(fresh.question.questions[0].header, 'Operation approval');
+  const fresh = await f.admit(); assert.equal(fresh.question.questions[0].header, 'Aprobación de operación');
   assert.notDeepEqual(fresh.question, first.question);
-  await assert.rejects(f.gate.afterQuestion({ sessionID: 'parent', callID: 'question-1' }, first.question, output(first.question, [['Approve operation']])), { message: 'Question differs from the exact proposed native envelope.' });
+  await assert.rejects(f.gate.afterQuestion({ sessionID: 'parent', callID: 'question-1' }, first.question, output(first.question, [['Aprobar operación']])), { message: 'Question differs from the exact proposed native envelope.' });
   assert.equal(f.store.read('parent'), undefined);
-  await f.answer([['Approve operation']]);
+  await f.answer([['Aprobar operación']]);
   assert.ok(f.store.read('parent')); assert.equal(f.store.read('parent').nativePolicy.questions.at(-1).callID, 'question-2');
 });
 
@@ -1145,7 +1230,7 @@ test('regression: an earlier request answered from the current turn is admitted 
   assert.equal(status.question.questions[0].header, 'Pedido anterior');
   assert.match(status.question.questions[0].question, /Replace bounded text\./);
   noRun(f);
-  await f.answer([['Approve operation']]);
+  await f.answer([['Aprobar operación']]);
   assert.equal(f.store.read('parent').userMessageID, 'request-user', 'the run binds the message that carries the objective');
   assert.equal(f.runner.status('parent').state, 'await-selection');
 });
@@ -1162,7 +1247,7 @@ test('ADM-05-S02: N18 a consumed request identity and a drifted question generat
   await g.gate.beforeQuestion(call, status.question);
   const record = g.questions.read('parent');
   const read = t.mock.method(g.questions, 'read', () => ({ ...record, adaptive: { ...record.adaptive, directory: record.adaptive.directory + '-foreign' } }));
-  await assert.rejects(g.gate.afterQuestion(call, status.question, output(status.question, [['Approve operation']])), { message: 'Native question or proposed operation generation changed; no authority was consumed.' });
+  await assert.rejects(g.gate.afterQuestion(call, status.question, output(status.question, [['Aprobar operación']])), { message: 'Native question or proposed operation generation changed; no authority was consumed.' });
   read.mock.restore();
   assert.equal(g.questions.read('parent').state, 'pending'); assert.equal(g.store.read('parent'), undefined);
 });

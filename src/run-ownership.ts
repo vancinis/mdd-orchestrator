@@ -14,7 +14,7 @@ import { validateAdaptivePublication } from './adaptive-transfer.js';
 import type { AdaptiveReceipt } from './adaptive-transfer.js';
 import { AdaptiveLow } from './adaptive-low.js';
 import { AdaptiveRetirement } from './adaptive-retirement.js';
-import { questionEnvelope, answerFromLabel } from './preflight.js';
+import { questionEnvelope, answerFromLabel, LEGACY_APPROVE_LABEL, OPERATION_LABELS } from './preflight.js';
 
 export const RUN_OWNER_VERSION = 1;
 const LIMIT = 4096;
@@ -23,8 +23,10 @@ type PolicyQuestion = { parent: string; nonce: string; sequence: number; digest:
   operationDigest: string; generationDigest: string; state: 'prepared' | 'consumed'; receiptDigest?: string; callID?: string };
 const policyDigest = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 function nativePolicyDecision(question: QuestionRecord): boolean {
+  // The legacy token approves receipts settled before the approval was written in Spanish.
   if (question.adaptive?.purpose === 'operation')
-    return isDeepStrictEqual(question.nativeReceipt, { callID: question.callID, answers: [['Approve operation']] });
+    return [OPERATION_LABELS.approve, LEGACY_APPROVE_LABEL].some(label =>
+      isDeepStrictEqual(question.nativeReceipt, { callID: question.callID, answers: [[label]] }));
   if (question.adaptive?.purpose !== 'mode') return false;
   const mode = questionEnvelope().questions.find(question => question.header === 'Modo')!;
   mode.question += ` [MDD adaptive ${question.adaptive.nonce}]`;

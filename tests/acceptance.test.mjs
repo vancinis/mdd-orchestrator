@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { acceptance, decisions, linkDecisions, mergeRecheck, pendingExternal, reportText, shortText, summaryText, validatePlan, verification, verificationFindings, MAX_REPORTED_PROBLEMS } from '../dist/acceptance.js';
-import { deliverables, executed, retainedVerification, verifyReport } from '../dist/phase-evidence.js';
+import { changed, deliverables, executed, retainedVerification, verifyReport } from '../dist/phase-evidence.js';
+import { applyPlan } from '../dist/apply-batches.js';
+import { parseParallelScope } from '../dist/worker-batch.js';
 import { traceFixture } from './adapter-fixture.mjs';
 
 function fixture() {
@@ -506,7 +508,8 @@ test('executed checks name every malformed entry by its position', () => {
     assert.match(error.message, /checks\[2\]\.command is empty/);
     return true;
   });
-  assert.throws(() => executed(Array(33).fill({ command: 'npm test', exit: 0 })), /at most 32 entries; this report lists 33/);
+  // No entry count: a Verify that ran more than 32 commands, retries included, is still read.
+  assert.equal(executed(Array.from({ length: 40 }, (_, index) => ({ command: `npm test -- part-${index}`, exit: 0 }))).length, 40);
 });
 
 test('a Verify report is refused once, for its checks and its verification together', () => {
@@ -532,7 +535,7 @@ test('a Verify report is refused once, for its checks and its verification toget
 test('a malformed checks list is reported once, not again for every assessment citing it', () => {
   const f = fixture();
   assert.throws(() => verifyReport('npm test', f.result, { accepted: f.accepted, choices: f.choices, planned: f.steps }), error => {
-    assert.equal(error.message, 'Report executed checks as a list of at most 32 entries.');
+    assert.equal(error.message, 'Report executed checks as a list.');
     return true;
   });
 });
@@ -596,7 +599,7 @@ for (const parallel of [{}, { complete: false }, { complete: true, reads: [] }, 
 }
 
 for (const parallel of [null, [], true, { complete: 'true' }, { extra: true }, { reads: null },
-  { writes: [42] }, { reads: new Array(1) }, { writes: Array.from({ length: 65 }, (_, index) => `src/${index}.ts`) },
+  { writes: [42] }, { reads: new Array(1) },
   { reads: ['src/a.ts', 'src/a.ts'] }, { writes: ['src/A.ts', 'src/a.ts'] }]) {
   test(`malformed parallel metadata is rejected: ${JSON.stringify(parallel)}`, () => {
     const f = fixture(); f.data.deliverables[0].parallel = parallel;
@@ -614,3 +617,20 @@ for (const path of ['../outside', 'src/../a.ts', '/absolute', 'C:/absolute', 'sr
     assert.throws(() => deliverables(f.data.deliverables), /scope/);
   });
 }
+
+// Acceptance maps, plans and reports have no entry count of their own: their size follows the work.
+// Each count below used to refuse work that was already done or a request that was already valid.
+test('regression: acceptance maps, plans, scopes and reports past the old 64 and 32 counts are read whole', () => {
+  const scenarios = Array.from({ length: 70 }, (_, index) => ({ id: `S${index}`, given: 'Un estado', when: 'Se aplica', then: 'Un resultado' }));
+  assert.equal(acceptance({ goal: 'Un cambio grande', requirements: [{ id: 'R1', description: 'Un cambio grande', scenarios }] }).requirements[0].scenarios.length, 70);
+  const files = Array.from({ length: 70 }, (_, index) => `src/file-${index}.ts`);
+  assert.equal(changed(files).paths.length, 70, 'an Apply that changed 70 files is not refused');
+  assert.equal(parseParallelScope({ complete: true, reads: files, writes: [] }).reads.length, 70);
+  const base = structuredFixture().planned[0];
+  const steps = Array.from({ length: 40 }, (_, index) => ({ ...structuredClone(base), id: `step-${index}`, dependsOn: [],
+    checks: Array.from({ length: index === 0 ? 40 : 1 }, (_, check) => ({ id: `C${index}-${check}`, command: 'npm test', requirement: 'required' })) }));
+  for (const step of steps) delete step.parallel;
+  const planned = deliverables(steps, 1);
+  assert.equal(planned.length, 40); assert.equal(planned[0].checks.length, 40);
+  assert.equal(applyPlan(steps.map(({ id }) => ({ id, dependsOn: [] }))).length, 40);
+});

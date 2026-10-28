@@ -38,7 +38,7 @@ async function applied(t, checks = [], durable = false) {
 
 test('AL-03: source-only Apply closes with parent readback and no mandatory Verify or fake commands', async t => {
   const f = await applied(t), prepared = await f.prepare();
-  assert.equal(prepared.evidence.snapshot.sources[0].content, 'after');
+  assert.deepEqual(prepared.evidence.snapshot.sources, [{ path: 'own.txt', digest: createHash('sha256').update('after').digest('hex'), bytes: 5 }]);
   await f.submit(f.evidence(prepared.evidence.snapshot));
   const closed = await f.close();
   assert.equal(closed.state, 'completed'); assert.equal(closed.completion.outcome, 'verified');
@@ -290,14 +290,15 @@ test('AL-03: pending native intake and idle ownership epoch races refuse parent 
   await assert.rejects(g.prepare(), /ownership changed/);
 });
 
-test('AL-03: compact status does not repeat final source bodies, while internal preparation returns readback', async t => {
+test('AL-03: compact status does not repeat final sources, and preparation names each file by digest and size', async t => {
   const f = await applied(t), text = 'Final source line.\n'.repeat(10000);
   // Explicitly re-settle a genuine writer after stale proof rather than broaden source authority.
   writeFileSync(join(f.root, 'own.txt'), text);
   await f.select('mdd-apply', { repairOf: f.runner.status(f.runtime.sessionID).lastReceipt.id });
   const call = { ...f.call, callID: 'large-source-repair' };
   await f.runner.after(call, await f.runner.before(call, f.runner.status(f.runtime.sessionID).task), f.report());
-  const p = await f.prepare(); assert.equal(p.evidence.snapshot.sources[0].content, text);
+  const p = await f.prepare();
+  assert.deepEqual(p.evidence.snapshot.sources, [{ path: 'own.txt', digest: createHash('sha256').update(text).digest('hex'), bytes: Buffer.byteLength(text) }]);
   const s = f.runner.status(f.runtime.sessionID);
   assert.equal(s.evidence.snapshot.sources, undefined); assert.ok(Buffer.byteLength(JSON.stringify(s)) < 46000);
 });

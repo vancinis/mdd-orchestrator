@@ -4,23 +4,24 @@ import { randomUUID } from 'node:crypto';
 import { applyScopeFiles, scopePath, type ParallelScope } from './worker-batch.js';
 import { objectWithKeys } from './validation.js';
 
-const MAX_BYTES = 256 * 1024;
+// Neither the edited file nor an operation has a byte size of its own. A 256 KiB cap here made
+// ordinary large source files impossible to edit through the scoped editor at all.
 type Snapshot = { bytes: Buffer; stat: fs.Stats; text: string };
 type Operation = { path: string; kind: 'create' | 'replace' | 'edit' | 'delete'; expected?: string;
   content?: string; oldString?: string; newString?: string };
 const queues = new Map<string, Promise<unknown>>();
 
 function text(value: unknown): string {
-  if (typeof value !== 'string' || Buffer.byteLength(value) > MAX_BYTES || value.includes('\0') ||
-      Buffer.from(value).toString('utf8') !== value) throw new Error('Scoped edits require bounded exact UTF-8 text.');
+  if (typeof value !== 'string' || value.includes('\0') ||
+      Buffer.from(value).toString('utf8') !== value) throw new Error('Scoped edits require exact UTF-8 text.');
   return value;
 }
 
 /** Pure schema/scope validation for the entire request, before creating even a parent or temporary. */
 export function workerEdits(root: string, scope: ParallelScope, value: unknown): Operation[] {
   const args = objectWithKeys(value, 'worker edit', ['operations']);
-  if (!Array.isArray(args.operations) || !args.operations.length || args.operations.length > 16 ||
-      Buffer.byteLength(JSON.stringify(value)) > MAX_BYTES) throw new Error('Scoped editor requires 1–16 bounded operations.');
+  if (!Array.isArray(args.operations) || !args.operations.length || args.operations.length > 16)
+    throw new Error('Scoped editor requires 1–16 operations.');
   const files = applyScopeFiles(root, scope);
   const operations = args.operations.map(value => {
     const op = objectWithKeys(value, 'worker edit operation', ['path', 'kind', 'expected', 'content', 'oldString', 'newString']);
@@ -42,12 +43,12 @@ export function workerEdits(root: string, scope: ParallelScope, value: unknown):
 function snapshot(path: string): Snapshot | undefined {
   const before = fs.lstatSync(path, { throwIfNoEntry: false });
   if (!before) return;
-  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || before.size > MAX_BYTES || before.mode & 0o7000)
-    throw new Error('Scoped edit refuses nonregular, linked, special-mode or oversized files.');
+  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || before.mode & 0o7000)
+    throw new Error('Scoped edit refuses nonregular, linked or special-mode files.');
   const fd = fs.openSync(path, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
   try {
     const stat = fs.fstatSync(fd);
-    if (stat.ino !== before.ino || stat.dev !== before.dev || stat.nlink !== 1 || stat.size > MAX_BYTES)
+    if (stat.ino !== before.ino || stat.dev !== before.dev || stat.nlink !== 1)
       throw new Error('Scoped edit target changed while opening.');
     const bytes = Buffer.alloc(stat.size + 1);
     let size = 0;

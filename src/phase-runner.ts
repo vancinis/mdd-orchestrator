@@ -49,7 +49,6 @@ import { relative, resolve } from 'node:path';
 import { supplementKnowledge } from './project-knowledge.js';
 import type { KnowledgeResolution, KnowledgeDiagnostics, KnowledgeSelection } from './project-knowledge.js';
 import { AdaptiveLow, adaptiveContract } from './adaptive-low.js';
-import { continuationHandoff } from './adaptive-continuation.js';
 import { AdaptiveStore, AdaptiveCommitError, ADAPTIVE_RECORD_MAX_BYTES } from './adaptive-store.js';
 import type { AdaptiveRecord } from './adaptive-store.js';
 import { AdaptiveRetirement } from './adaptive-retirement.js';
@@ -504,6 +503,30 @@ export function nonemptyText(value: unknown, label: string): string {
   return value;
 }
 
+/**
+ * A held snapshot with every file named by path, digest and byte size. Snapshots prepared now carry
+ * nothing else; one restored from an older record still holds each file's text, which is replaced
+ * here by its size. Any other shape is returned as is.
+ */
+function snapshotByReference<T>(snapshot: T): T | { id: string; sources: { path: string; digest: string | null; bytes: number | null }[] } {
+  if (!snapshot || typeof snapshot !== 'object' || !Array.isArray((snapshot as { sources?: unknown }).sources)) return snapshot;
+  const held = snapshot as unknown as { id: string; sources: { path: string; digest: string | null; bytes?: number | null; content?: string | null }[] };
+  return { id: held.id, sources: held.sources.map(({ path, digest, bytes, content }) =>
+    ({ path, digest, bytes: typeof content === 'string' ? Buffer.byteLength(content) : content === null ? null : bytes ?? null })) };
+}
+/**
+ * Adaptive evidence as the Verify prompt carries it: every snapshot file named by path, digest and
+ * size instead of its full text, which put whole source files into the prompt. The read-only actor
+ * reads the files itself; the lane record keeps the snapshot bytes.
+ */
+function evidenceByReference(evidence: ReturnType<AdaptiveLow['evidence']>): Record<string, unknown> {
+  const prior = evidence.priorEvidence as Record<string, unknown> | undefined;
+  return { ...evidence,
+    ...(evidence.snapshot ? { snapshot: snapshotByReference(evidence.snapshot) } : {}),
+    historicalChecks: evidence.historicalChecks.map(item => ({ ...item, snapshot: snapshotByReference(item.snapshot) })),
+    ...(prior ? { priorEvidence: { ...prior, ...('snapshot' in prior ? { snapshot: snapshotByReference(prior.snapshot) } : {}) } } : {}) };
+}
+
 export function boundedText(value: unknown, label: string, max: number): string {
   if (typeof value !== 'string' || !value.trim() || Buffer.byteLength(value) > max) {
     throw new ValidationError(`${label} must be nonempty text of at most ${max} bytes.`);
@@ -512,19 +535,24 @@ export function boundedText(value: unknown, label: string, max: number): string 
 }
 
 /**
- * Fits the coordinator-contributed context into an Engram intent receipt, which `EngramHttp.save`
- * refuses outright above 40000 bytes. Content that now allows a single 96000-byte entry can no
- * longer be assumed to fit whole next to the rest of the receipt, so the receipt degrades to a
- * label, byte count and content digest per entry rather than losing the whole save: the digest
- * still lets a reader confirm which context a run actually carried, even without its text.
+ * Fits an intent receipt into `EngramHttp.save`'s 40000-byte limit, which stays under Engram's own
+ * 50000-character limit, past which Engram silently truncates. The coordinator's context degrades
+ * first, to a label, byte count and content digest per entry. If the receipt still does not fit,
+ * the user's request degrades the same way. Neither text has a size limit of its own: a
+ * 12000-byte cap on the request refused long requests only so that this receipt would fit. The
+ * complete request stays in the local checkpoint and run record, which are what restore reads,
+ * and the digest still lets a reader confirm which request the run carried.
  */
 export function intentEnvelope(base: Record<string, unknown>, context: readonly RunContext[]): Record<string, unknown> {
-  const full = context.length ? { context } : {};
-  const whole = { ...base, ...full };
-  if (Buffer.byteLength(JSON.stringify(whole)) <= 40000) return whole;
-  if (!context.length) return whole;
-  return { ...base, contextOmitted: true as const,
-    context: context.map(item => ({ label: item.label, bytes: Buffer.byteLength(item.content), sha256: createHash('sha256').update(item.content).digest('hex') })) };
+  const fits = (value: Record<string, unknown>) => Buffer.byteLength(JSON.stringify(value)) <= 40000;
+  const whole = { ...base, ...(context.length ? { context } : {}) };
+  if (fits(whole)) return whole;
+  const referenced: Record<string, unknown> = context.length ? { ...base, contextOmitted: true as const,
+    context: context.map(item => ({ label: item.label, bytes: Buffer.byteLength(item.content), sha256: createHash('sha256').update(item.content).digest('hex') })) } : { ...base };
+  if (fits(referenced) || typeof referenced.requirements !== 'string') return referenced;
+  const { requirements, ...rest } = referenced as Record<string, unknown> & { requirements: string };
+  return { ...rest, requirementsOmitted: true as const, requirementsBytes: Buffer.byteLength(requirements),
+    requirementsSha256: createHash('sha256').update(requirements).digest('hex') };
 }
 
 /**
@@ -1313,7 +1341,7 @@ export class PhaseRunner {
       const assignment = run.low.assignment()!;
       const continuation = run.low.continuation();
       const structured = continuation && selected.actor !== 'mdd-apply' && selected.actor !== 'mdd-risk';
-      const compose = (compacted: number) => [
+      const prompt = [
         `Internal adaptive actor: ${selected.actor}. Purpose: ${selected.purpose}. Assignment: ${assignment.id}.`,
         workspaceData(run.runtime),
         `Packaged MDD actor instructions with provenance, which govern this version-3 assignment: ${JSON.stringify(mddInstructions())}`,
@@ -1328,23 +1356,18 @@ export class PhaseRunner {
           ? '## MDD Data holds {completed:[assignedID] on passed or [] on failed,changes:[exact changed paths],noChangeReason?:text,checks:[]}. Report actual changes even on failure. No command results may be invented.'
           : selected.actor === 'mdd-risk' ? '## MDD Data holds only {assessment}.' : 'Report no structured data.',
         `${continuation ? 'Effective held contract' : 'Contract-authored links (no Plan actor is implied)'}: ${JSON.stringify(run.low.contract())}`,
-        continuation ? `Frozen structured continuation and ACTUAL predecessor reports (data, not execution authority): ${JSON.stringify(continuationHandoff(continuation, compacted))}` : '',
-        compacted ? `${compacted} earlier predecessor report(s) appear above as their summary plus the byte count and sha256 of the rest, because inlining them whole would push this prompt past the size a dispatched task can be delivered at. Nothing was cut mid-text and nothing is lost: the receipts hold every report complete, and the effective held contract above carries every structured link they reported. If an omitted report is load-bearing for this assignment, say so in your result rather than guessing at its contents.` : '',
-        structured && selected.actor === 'mdd-verify' ? `Actual parent evidence for independent readback (no new command execution authority): ${JSON.stringify(run.low.evidence())}` : '',
+        continuation ? `Frozen structured continuation and ACTUAL predecessor reports (data, not execution authority): ${JSON.stringify(continuation)}` : '',
+        structured && selected.actor === 'mdd-verify' ? `Actual parent evidence for independent readback (no new command execution authority). Snapshot files are named by path, sha256 digest and byte size instead of being inlined: read them from the workspace with your scoped read tools, whose current bytes the parent matched against this snapshot before Verify could be selected. ${JSON.stringify(evidenceByReference(run.low.evidence()))}` : '',
         `Selected assignment: ${JSON.stringify(assignment)}`,
         `Actual native product answers (context only, never permission to amend held business scope): ${JSON.stringify(run.low.questionContext())}`,
         `Actual pre-admission clarification answers (data only; held business authorization remains unchanged): ${JSON.stringify(run.record?.nativePolicy?.questions
           .filter(question => question.adaptive?.purpose === 'product' && question.adaptive.operation.kind === 'entry')
           .map(question => ({ callID: question.callID, questions: question.slot.args.questions, answers: question.answer })) ?? [])}`,
       ].filter(Boolean).join('\n');
-      // Predecessor reports have no size limit, so they reach the actor whole only while they fit.
-      // Oldest first, each gives way to its summary and digest, and the prompt says how many did; an
-      // explicit refusal is left only for a prompt that cannot fit with every report compacted.
-      let compacted = 0, prompt = compose(0);
-      while (continuation && Buffer.byteLength(prompt) > DISPATCHABLE_PROMPT_BYTES && compacted < continuation.reports.length) prompt = compose(++compacted);
-      if (Buffer.byteLength(prompt) > DISPATCHABLE_PROMPT_BYTES) {
-        this.#changeAdaptive(run, low => low.cancelAuthorization()); throw new Error('Internal actor prompt cannot fit the native dispatch budget.');
-      }
+      // No byte budget refuses or compacts this prompt. It never travels through the coordinator:
+      // status exposes only the single-use handle and `before` swaps the prompt in, so the 38000-byte
+      // dispatch budget it was once held to protected nothing, and it refused a medium-route Plan
+      // whose contract the user had already approved. Predecessor reports reach the actor whole.
       run.args = { description: `Adaptive ${selected.actor} / ${assignment.id}`, subagent_type: this.#nativeOperations.get(here.sessionID)?.callerMessageID ? selected.actor : 'general', prompt };
       this.#arm(run);
       return this.status(here.sessionID);
@@ -2520,7 +2543,7 @@ export class PhaseRunner {
     const workflow = new Workflow(request.preflight);
     const first = workflow.nextAction();
     if (first.kind !== 'execute') throw new ValidationError('No initial phase is ready.');
-    const requirements = boundedText(request.requirements, 'requirements', 12000);
+    const requirements = nonemptyText(request.requirements, 'requirements');
     if (workflow.snapshot().answers.artifactStore === 'local' && !trusted?.userMessageID)
       throw new Error('A native user message identity is required for local task provenance.');
     // Context supplied at startup rides with the very first phase; more can arrive later through

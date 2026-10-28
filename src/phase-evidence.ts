@@ -17,13 +17,12 @@ export type Deliverable = { id: string; description: string; path: string; scena
 export type Check = { id?: string; command: string; exit: number | null };
 
 export function plannedChecks(value: unknown, seen: Set<string>): PlannedCheck[] {
-  if (!Array.isArray(value) || !value.length || value.length > 32) throw new Error('Planned checks requires 1–32 entries per deliverable.');
+  if (!Array.isArray(value) || !value.length) throw new Error('Planned checks requires at least one entry per deliverable.');
   return value.map(value => {
     const item = objectWithKeys(value, 'planned check', ['id', 'command', 'requirement', 'appliesWhen']);
     const id = evidenceID(item.id, 'planned check ID');
     if (seen.has(id)) throw new Error(`planned check ID ${id} is used more than once.`);
     seen.add(id);
-    if (seen.size > 64) throw new Error('Plan exceeds 64 checks.');
     if (item.requirement !== 'required' && item.requirement !== 'optional') throw new Error(`Check ${id} needs requirement required or optional.`);
     return { id, command: shortText(item.command, `command of ${id}`, Infinity), requirement: item.requirement,
       ...(item.appliesWhen !== undefined ? { appliesWhen: reportText(item.appliesWhen, `applicability of ${id}`) } : {}) };
@@ -32,7 +31,7 @@ export function plannedChecks(value: unknown, seen: Set<string>): PlannedCheck[]
 
 export function deliverables(value: unknown, version?: VerificationVersion): Deliverable[] {
   verificationVersion(version);
-  if (!Array.isArray(value) || !value.length || value.length > 32) throw new Error('Planning requires 1–32 explicit deliverables.');
+  if (!Array.isArray(value) || !value.length) throw new Error('Planning requires at least one explicit deliverable.');
   const ids = new Set<string>();
   const checkIDs = new Set<string>();
   return value.map(item => {
@@ -66,8 +65,8 @@ export function deliverables(value: unknown, version?: VerificationVersion): Del
 function readExecuted(value: unknown, version?: VerificationVersion): { checks: Check[]; problems: string[]; reported?: string[]; passed?: string[] } {
   verificationVersion(version);
   if (value === undefined) return { checks: [], problems: [], reported: [], passed: [] };
-  if (!Array.isArray(value) || value.length > 32) {
-    return { checks: [], problems: [`Report executed checks as a list of at most 32 entries${Array.isArray(value) ? `; this report lists ${value.length}` : ''}.`] };
+  if (!Array.isArray(value)) {
+    return { checks: [], problems: ['Report executed checks as a list.'] };
   }
   const checks: Check[] = [];
   const problems: string[] = [];
@@ -174,7 +173,6 @@ export function changed(value: unknown, noChangeReason: unknown): { paths: strin
     if (entry.reason !== undefined) file.reason = reportText(entry.reason, 'reason a file changed');
     return file;
   }) : [];
-  if (files.length > 64) throw new Error('Report at most 64 changed paths.');
   if (files.length) return { paths: files.map(file => file.path), files };
   return { paths: [], files: [], reason: reportText(noChangeReason, 'no-change reason') };
 }

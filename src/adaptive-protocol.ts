@@ -129,6 +129,7 @@ export const ENTRY_GUIDE = Object.freeze({
     'Each assignment needs source or check obligations. complexity or impact medium/high freezes the medium/high stages.',
     'Mark a scenario evidence:"external" only when it is observable solely outside this workspace (device, staging/production, live service, real worker or a person); evidence then reports it as external (pending), never as a gap.',
     'Ask productQuestions only for decisions the repository cannot answer. Read inputRef for complete definitions.',
+    'The user reads acceptance.goal, exclusions and productQuestions, and a select purpose, escalate rationale and close limits, in the native approval and questions: write them in Spanish, in complete sentences with ordinary spacing and no abbreviations. No field has a size budget of its own, so never compress one to fit.',
   ],
 });
 
@@ -147,7 +148,8 @@ export function decodeAdaptiveRequest(value: unknown): Request {
     if (objectFields.has(key)) {
       if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${key} must be an object.`);
     } else if (arrayFields.has(key)) {
-      if (!Array.isArray(value) || value.length > 64) throw new Error(`${key} must be a bounded array.`);
+      // Product questions are counted by their own validator; closure limits have no entry count.
+      if (!Array.isArray(value)) throw new Error(`${key} must be an array.`);
     } else if (PROSE_FIELDS.has(key)) {
       // Read in full by its own validator, which folds line breaks and tabs and names any other control.
       if (typeof value !== 'string' || !value.trim()) throw new Error(`${key} must be nonempty text.`);
@@ -155,13 +157,14 @@ export function decodeAdaptiveRequest(value: unknown): Request {
       throw new Error(`${key} must be bounded nonempty text without controls.`);
     }
   }
+  // The contract and the evidence have no byte budget of their own. A 24000-byte contract and a
+  // 48000-byte evidence ceiling made coordinators abbreviate what the user later reads, and the
+  // request bound above still applies to both.
   if (kind === 'entry') {
-    if (Buffer.byteLength(JSON.stringify(args.contract)) > 24000) throw new Error('Native contract exceeds its raw 24000-byte budget.');
     adaptiveContract(args.contract);
     if (args.questions !== undefined) openQuestions(args.questions);
   }
   if (kind === 'submit') {
-    if (Buffer.byteLength(JSON.stringify(args.evidence)) > 48000) throw new Error('Native evidence exceeds its raw 48000-byte budget.');
     const evidence = objectWithKeys(args.evidence, 'native evidence', ADAPTIVE_EVIDENCE_FIELDS);
     for (const key of ADAPTIVE_EVIDENCE_FIELDS) if (!Object.hasOwn(evidence, key)) throw new Error(`Native evidence requires ${key}.`);
   }
@@ -180,7 +183,10 @@ function inputContracts(contract?: AdaptiveContract, data?: AdaptiveData) {
   const text = { type: 'string', minLength: 1, controls: 'line breaks and tabs fold into spaces' };
   const identity = { type: 'string', minLength: 1, controls: false };
   const ref = (name: string) => ({ definition: name });
-  const list = (items: unknown, maxItems = 64, minItems = 0) => ({ type: 'array', items, minItems, maxItems });
+  // Lists have no entry count of their own, except what one native question form can show: at most
+  // eight product questions of at most six options each.
+  const list = (items: unknown, minItems = 0, maxItems?: number) => ({ type: 'array', items, minItems, ...(maxItems === undefined ? {} : { maxItems }) });
+  const prose = list(text);
   const object = (required: Record<string, unknown>, optional: Record<string, unknown> = {}) => ({ type: 'object',
     required: Object.keys(required), optional: Object.keys(optional), additionalProperties: false, properties: { ...required, ...optional } });
   const choice = (...values: unknown[]) => ({ enum: values });
@@ -194,28 +200,28 @@ function inputContracts(contract?: AdaptiveContract, data?: AdaptiveData) {
     scope: object({ complete: { const: true }, reads: list(ref('path')), writes: list(ref('path')) }),
     fingerprint: object({ path: ref('path'), digest: { type: ['string', 'null'], pattern: '^[a-f0-9]{64}$' } }),
     context: object({ technical: choice('understood', 'uncertain'), dependencies: choice('bounded', 'unknown'), reason: text,
-      fingerprints: list(ref('fingerprint'), 128) }),
+      fingerprints: list(ref('fingerprint')) }),
     assessment: object({ assessmentVersion: { const: 1 }, complexity: choice('low', 'medium', 'high'), impact: choice('low', 'medium', 'high') }),
     scenario: object({ id: ref('id'), given: text, when: text, then: text }, { evidence: { const: 'external', format: 'only observable outside this workspace: device, staging/production, live service, real worker or a person' } }),
-    requirement: object({ id: ref('id'), description: text, scenarios: list(ref('scenario'), 64, 1) }),
-    acceptance: object({ goal: text, requirements: list(ref('requirement'), 64, 1) }),
+    requirement: object({ id: ref('id'), description: text, scenarios: list(ref('scenario'), 1) }),
+    acceptance: object({ goal: text, requirements: list(ref('requirement'), 1) }),
     decision: object({ id: ref('id'), description: text, requirements: { ...ids, minItems: 1 } }),
     plannedCheck: object({ id: ref('id'), command: { ...identity, maxLength: 'request byte budget' }, requirement: choice('required', 'optional') }, { appliesWhen: text }),
-    sourceObligation: object({ id: ref('id'), description: text, paths: list(ref('path'), 64, 1) }),
-    obligations: object({ source: list(ref('sourceObligation'), 32), checks: list(ref('plannedCheck'), 32) }),
+    sourceObligation: object({ id: ref('id'), description: text, paths: list(ref('path'), 1) }),
+    obligations: object({ source: list(ref('sourceObligation')), checks: list(ref('plannedCheck')) }),
     assignment: object({ id: ref('id'), description: text, path: ref('path'), scenarios: { ...ids, minItems: 1 }, decisions: ids,
       dependsOn: ids, scope: ref('scope'), obligations: ref('obligations') }),
-    contract: { ...object({ contractVersion: { const: 1 }, objective: { type: 'string', minLength: 1, maxBytes: 12000, format: 'exact native objective' },
-      acceptance: ref('acceptance'), exclusions: list(text, 16), decisions: list(ref('decision')), productQuestions: list(text, 16),
-      scope: ref('scope'), context: ref('context'), assessment: ref('assessment'), assignments: list(ref('assignment'), 32, 1) }), maxBytes: 24000 },
+    contract: object({ contractVersion: { const: 1 }, objective: { type: 'string', minLength: 1, format: 'exact native objective' },
+      acceptance: ref('acceptance'), exclusions: prose, decisions: list(ref('decision')), productQuestions: list(text, 0, 8),
+      scope: ref('scope'), context: ref('context'), assessment: ref('assessment'), assignments: list(ref('assignment'), 1) }),
     questionOption: object({ label: { type: 'string', minLength: 1 }, description: { type: 'string', minLength: 1 } }, { recommended: { type: 'boolean' } }),
     productQuestion: object({ question: { type: 'string', minLength: 1 }, why: { type: 'string', minLength: 1 } },
-      { options: list(ref('questionOption'), 6), multiple: { type: 'boolean' }, deferrable: { type: 'boolean' } }),
+      { options: list(ref('questionOption'), 0, 6), multiple: { type: 'boolean' }, deferrable: { type: 'boolean' } }),
     evidenceStatus: { ...choice('verified', 'not-verified', 'deviation', 'external'), format: 'external only on a scenario row the held acceptance declares external; it is pending, not verified' },
-    readback: object({ acceptance: ref('acceptance'), scope: ref('scope'), exclusions: list(text, 16), decisions: list(ref('decision')) }),
+    readback: object({ acceptance: ref('acceptance'), scope: ref('scope'), exclusions: prose, decisions: list(ref('decision')) }),
     inventory: object({ path: ref('path'), disposition: choice('assignment', 'unrelated'), reason: text }),
     exclusionEvidence: object({ exclusion: text, status: ref('evidenceStatus'), assessment: text }),
-    sourceEvidence: object({ id: ref('id'), paths: list(ref('path'), 64, 1), status: ref('evidenceStatus'), assessment: text }),
+    sourceEvidence: object({ id: ref('id'), paths: list(ref('path'), 1), status: ref('evidenceStatus'), assessment: text }),
     assignmentEvidence: object({ assignmentID: ref('id'), ...semantic }),
     scenarioEvidence: object({ requirementID: ref('id'), scenarioID: ref('id'), assignmentID: ref('id'), ...semantic }),
     decisionEvidence: object({ decisionID: ref('id'), ...semantic }),
@@ -223,14 +229,14 @@ function inputContracts(contract?: AdaptiveContract, data?: AdaptiveData) {
     checkResult: object({ checkID: ref('id'), ...dispositions }, { reason: text, equivalence: text }),
     supplementalCheck: object({ id: ref('id'), requirement: choice('required', 'optional'), ...dispositions,
       disposition: choice('passed', 'failed', 'ran') }, { reason: text, equivalence: text }),
-    evidence: { ...object({ snapshotID: ref('receiptID'), readback: ref('readback'), inventory: list(ref('inventory')), exclusions: list(ref('exclusionEvidence')),
+    evidence: object({ snapshotID: ref('receiptID'), readback: ref('readback'), inventory: list(ref('inventory')), exclusions: list(ref('exclusionEvidence')),
       sources: list(ref('sourceEvidence')), assignments: list(ref('assignmentEvidence')), scenarios: list(ref('scenarioEvidence')), decisions: list(ref('decisionEvidence')),
-      checks: list(ref('execution'), 32), checkResults: list(ref('checkResult')), supplementalChecks: list(ref('supplementalCheck')), limits: list(text, 16) }), maxBytes: 48000 },
+      checks: list(ref('execution')), checkResults: list(ref('checkResult')), supplementalChecks: list(ref('supplementalCheck')), limits: prose }),
   };
-  const fields: Record<string, unknown> = { contract: ref('contract'), messageID: ref('nativeID'), questions: list(ref('productQuestion'), 8),
+  const fields: Record<string, unknown> = { contract: ref('contract'), messageID: ref('nativeID'), questions: list(ref('productQuestion'), 0, 8),
     handle: ref('handle'), actor: choice('mdd-explore', 'mdd-risk', 'mdd-plan', 'mdd-apply', 'mdd-verify', 'mdd-propose', 'mdd-spec', 'mdd-design', 'mdd-tasks'),
     assignmentID: ref('id'), purpose: text, context: ref('context'), repairOf: ref('receiptID'), evidence: ref('evidence'),
-    outcome: choice('verified', 'unverified'), limits: list(text, 16), depth: choice('medium', 'high'), rationale: text, assessment: ref('assessment'),
+    outcome: choice('verified', 'unverified'), limits: prose, depth: choice('medium', 'high'), rationale: text, assessment: ref('assessment'),
     sourceSessionID: ref('nativeID'), runID: ref('nativeID'), operationID: ref('nativeID'), action: choice('finish', 'abort'),
     receiptID: ref('receiptID'), callID: ref('nativeID'), cursor: { ...identity, maxLength: 256, format: 'issued document ID plus validated page offset' } };
   const operations = Object.fromEntries(Object.entries(specs).map(([kind, spec]) => [kind,
@@ -445,6 +451,12 @@ export class AdaptiveProtocol {
       if (Buffer.byteLength(JSON.stringify(projection)) > budget && projection.evidence) {
         projection.evidenceRef = this.#reference(held, 'evidence', projection.evidence);
         projection.evidence = { matched, snapshotID: data?.snapshot?.id, snapshotCurrent, completeReadback: projection.evidenceRef };
+      }
+      // Closure limits have no entry count, so a closure with many of them travels like evidence:
+      // its outcome inline, every limit whole behind a paged reference.
+      if (Buffer.byteLength(JSON.stringify(projection)) > budget && data?.completion) {
+        projection.completion = { outcome: data.completion.outcome, limits: data.completion.limits.length,
+          limitsRef: this.#reference(held, 'completion', data.completion) };
       }
       if (Buffer.byteLength(JSON.stringify(projection)) > budget) throw new Error('Native protocol descriptor exceeds its bounded status budget.');
     }

@@ -23,7 +23,6 @@ export type TypedAnswer = { labels: string[]; quote?: string };
 export type TypedEvidence = { text: string; own: boolean };
 
 const RECOMMENDED = / \(Recomendada\)$/;
-const ANSWER_MAX = 12000;
 
 /** The comparable form of what someone wrote: no case, accents or punctuation, single spaces. */
 export function answerWords(value: string): string {
@@ -62,7 +61,7 @@ export function typedSelections(args: QuestionEnvelope, openFrom: number, value:
     if (!Array.isArray(item.labels) || item.labels.some(label => typeof label !== 'string' || !label.trim())) {
       throw new ValidationError(`${at}: labels must be a list of the offered option labels.`);
     }
-    if (item.quote !== undefined && (typeof item.quote !== 'string' || Buffer.byteLength(item.quote) > ANSWER_MAX)) {
+    if (item.quote !== undefined && typeof item.quote !== 'string') {
       throw new ValidationError(`${at}: quote must be the part of the user's text that answers it.`);
     }
     const labels = [...new Set(item.labels as string[])];

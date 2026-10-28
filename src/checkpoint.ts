@@ -253,7 +253,7 @@ function validateData(value: unknown, workflow: Workflow, runID: string): Resume
     'changedFiles', 'calls', 'usedMessages', 'proposed', 'rework', 'workerPolicy', 'workerState', 'risk', 'verificationVersion', 'task', 'taskArtifacts']);
   const version = verificationVersion(data.verificationVersion);
   if (![data.directory, data.worktree].every(item => bounded(item, 4096)) || !identifier(data.userMessageID) ||
-      !bounded(data.requirements, 12000)) throw new ValidationError('Invalid checkpoint identity or requirements.');
+      !bounded(data.requirements, Infinity)) throw new ValidationError('Invalid checkpoint identity or requirements.');
   if (data.memoryProject !== undefined && (typeof data.memoryProject !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(data.memoryProject))) throw new ValidationError('Invalid checkpoint memory project.');
   if (['engram', 'both'].includes(workflow.snapshot().answers.artifactStore) && data.memoryProject === undefined) throw new ValidationError('Engram artifact backend needs a bound memory project.');
   for (const entry of list(data.context, CONTEXT_ENTRIES_MAX, 'context')) {
@@ -275,9 +275,9 @@ function validateData(value: unknown, workflow: Workflow, runID: string): Resume
     body({ content: item.content, digest: item.digest });
   }
   const accepted = data.acceptance === undefined ? undefined : acceptance(data.acceptance);
-  if (!accepted && (list(data.decisions, 32, 'decisions').length || list(data.planned, 32, 'plan').length || data.verification !== undefined)) throw new ValidationError('Checkpoint plan has no acceptance.');
+  if (!accepted && (list(data.decisions, Infinity, 'decisions').length || list(data.planned, Infinity, 'plan').length || data.verification !== undefined)) throw new ValidationError('Checkpoint plan has no acceptance.');
   const choices = accepted ? decisions(data.decisions, accepted) : [];
-  const planned = list(data.planned, 32, 'plan').length ? deliverables(data.planned, version) : [];
+  const planned = list(data.planned, Infinity, 'plan').length ? deliverables(data.planned, version) : [];
   if (planned.length) validatePlan(accepted!, choices, planned);
   const progress = workflow.applyProgress();
   if (progress && !isDeepStrictEqual(progress.planned, planned.map(({ id, dependsOn }) => ({ id, dependsOn })))) {

@@ -1,9 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import { adaptiveContract, adaptiveQuestionsEnvelope } from './adaptive-low.js';
+import { adaptiveContract, adaptiveQuestionsEnvelope, UNRESOLVED_PRODUCT_ANSWER } from './adaptive-low.js';
 import type { AdaptiveContract } from './adaptive-low.js';
 import { openQuestions } from './open-questions.js';
-import { answerFromLabel, parsePartialAnswers, questionEnvelope } from './preflight.js';
+import { answerFromLabel, approvesOperation, OPERATION_LABELS, parsePartialAnswers, questionEnvelope } from './preflight.js';
 import type { QuestionEnvelope } from './preflight.js';
 import { validateQuestionRecord } from './question-checkpoint.js';
 import type { AdaptiveQuestionBinding, QuestionCheckpointStore, QuestionRecord } from './question-checkpoint.js';
@@ -46,7 +46,7 @@ export function validateNativePolicy(value: unknown): NativePolicy {
   const item = objectWithKeys(value, 'frozen native policy', ['profile', 'configured', 'answers', 'questions']);
   const configured = parsePartialAnswers(item.configured), answers = parsePartialAnswers(item.answers);
   if (typeof item.profile !== 'string' || !item.profile.trim() || item.profile.length > 64 || !answers.mode ||
-      !Array.isArray(item.questions) || item.questions.length > 64 ||
+      !Array.isArray(item.questions) ||
       !isDeepStrictEqual(configured, item.configured) || !isDeepStrictEqual(answers, item.answers)) throw new Error('Invalid frozen native policy.');
   const questions = item.questions.map(validateQuestionRecord);
   if (questions.some(question => question.version !== 2 || question.state !== 'answered') ||
@@ -85,8 +85,85 @@ export type Entry = {
 function earlierObjectiveEnvelope(objective: string): QuestionEnvelope {
   return { questions: [{ header: 'Pedido anterior',
     question: `Tu último mensaje no repite el pedido. ¿Autorizás implementar este pedido anterior, tal como lo escribiste?\n«${objective}»`,
-    multiple: false, options: [{ label: 'Approve operation', description: 'Autorizar la implementación de ese pedido con el contrato presentado.' },
-      { label: 'Pause', description: 'Conservar el borrador sin autorizar nada.' }, { label: 'Decline', description: 'No implementar ese pedido.' }] }] };
+    multiple: false, options: [{ label: OPERATION_LABELS.approve, description: 'Autorizar la implementación de ese pedido con el contrato presentado.' },
+      { label: OPERATION_LABELS.pause, description: 'Conservar el borrador sin autorizar nada.' }, { label: OPERATION_LABELS.decline, description: 'No implementar ese pedido.' }] }] };
+}
+
+const COMPLEXITY: Record<string, string> = { low: 'baja', medium: 'media', high: 'alta' };
+const IMPACT: Record<string, string> = { low: 'bajo', medium: 'medio', high: 'alto' };
+const bullets = (items: readonly string[]): string => items.map(item => `- ${item}`).join('\n');
+const assessed = (value: unknown): string => {
+  const item = value as { complexity?: string; impact?: string } | undefined;
+  return `Evaluación: complejidad ${COMPLEXITY[String(item?.complexity)] ?? String(item?.complexity)}, impacto ${IMPACT[String(item?.impact)] ?? String(item?.impact)}.`;
+};
+
+/**
+ * What an operation approval shows: what the operation does, in Spanish, with the data that decides
+ * it. It replaces the operation's JSON, which the user had to read raw and in English. Authority is
+ * unchanged: the record still binds the exact operation, generation and nonce the user approves.
+ */
+export function operationSummary(operation: NativeOperation, contract?: AdaptiveContract): string {
+  const args = operation.args;
+  const text = (key: string): string => String(args[key]);
+  switch (operation.kind) {
+    case 'entry': {
+      if (!contract) return 'Admitir este pedido para implementarlo con MDD.';
+      const scenarios = contract.acceptance.requirements.reduce((count, item) => count + item.scenarios.length, 0);
+      return ['Admitir este pedido para implementarlo con MDD.',
+        `Pedido: «${contract.objective}»`,
+        `Resultado buscado: ${contract.acceptance.goal}`,
+        `Requisitos: ${contract.acceptance.requirements.length}, con ${scenarios} escenario(s). Tareas: ${contract.assignments.length}.`,
+        assessed(contract.assessment),
+        `Archivos que puede escribir:\n${bullets(contract.scope.writes)}`,
+        ...(contract.exclusions.length ? [`Queda fuera:\n${bullets(contract.exclusions)}`] : [])].join('\n');
+    }
+    case 'select': {
+      const assignment = contract?.assignments.find(item => item.id === args.assignmentID);
+      const context = args.context as { reason?: unknown } | undefined;
+      return [`Lanzar el agente ${text('actor')} para la tarea ${text('assignmentID')}.`,
+        `Propósito: ${text('purpose')}`,
+        ...(args.repairOf !== undefined ? [`Es un reintento que corrige el resultado ${text('repairOf')}.`] : []),
+        ...(args.actor === 'mdd-apply' && assignment ? [`Archivos que puede modificar:\n${bullets(assignment.scope.writes)}`] : []),
+        ...(typeof context?.reason === 'string' ? [`Contexto actualizado: ${context.reason}`] : [])].join('\n');
+    }
+    case 'prepare':
+      return 'Tomar una instantánea de los archivos del alcance para preparar la evidencia de verificación. No modifica archivos.';
+    case 'submit': {
+      const evidence = args.evidence as { snapshotID?: unknown; limits?: unknown } | undefined;
+      const limits = Array.isArray(evidence?.limits) ? evidence.limits.map(String) : [];
+      return [`Registrar la evidencia de verificación de la instantánea ${String(evidence?.snapshotID)}.`,
+        ...(limits.length ? [`Límites que declara:\n${bullets(limits)}`] : [])].join('\n');
+    }
+    case 'close': {
+      const limits = Array.isArray(args.limits) ? args.limits.map(String) : [];
+      return [args.outcome === 'verified' ? 'Cerrar el trabajo como verificado.' : 'Cerrar el trabajo sin verificar.',
+        ...(limits.length ? [`Límites pendientes:\n${bullets(limits)}`] : [])].join('\n');
+    }
+    case 'escalate':
+      return [args.depth === 'high'
+        ? 'Pasar el trabajo a la ruta alta: propuesta, especificación, diseño, tareas, implementación y verificación.'
+        : 'Pasar el trabajo a la ruta media: plan, implementación y verificación.',
+        `Motivo: ${text('rationale')}`, assessed(args.assessment)].join('\n');
+    case 'recover':
+      return 'Recuperar el agente que quedó detenido y volver a elegir el siguiente paso.';
+    case 'transfer':
+      return `Traer a esta conversación la ejecución ${text('runID')}, que hoy pertenece a la conversación ${text('sourceSessionID')}.`;
+    case 'transfer-recovery':
+      return args.action === 'abort'
+        ? `Cancelar el traspaso interrumpido de la ejecución ${text('runID')} y dejarla en la conversación ${text('sourceSessionID')}.`
+        : `Terminar el traspaso interrumpido de la ejecución ${text('runID')} desde la conversación ${text('sourceSessionID')}.`;
+    default:
+      return `Ejecutar la operación ${operation.kind}.`;
+  }
+}
+
+/** The interactive approval of one exact operation, in Spanish, with the operation summarized. */
+export function operationApprovalEnvelope(operation: NativeOperation, contract?: AdaptiveContract): QuestionEnvelope {
+  return { questions: [{ header: 'Aprobación de operación',
+    question: `¿Autorizás esta operación de MDD? Autoriza solo lo que se describe acá; los permisos nativos de las herramientas siguen aplicando.\n\n${operationSummary(operation, contract)}`,
+    multiple: false, options: [{ label: OPERATION_LABELS.approve, description: 'Autorizar solo la operación descrita arriba.' },
+      { label: OPERATION_LABELS.pause, description: 'Conservar el trabajo sin autorizar esta operación.' },
+      { label: OPERATION_LABELS.decline, description: 'No autorizar esta operación.' }] }] };
 }
 
 /** Native policy bridge. It selects guarded runner operations; it never executes commands. */
@@ -227,14 +304,17 @@ export class AdaptiveNative {
       if (entry.operation.args.receiptID !== pending.receiptID || entry.operation.args.callID !== pending.callID) throw new Error('Question receipt or actual native actor call differs.');
       return this.#ask(entry, 'product', adaptiveQuestionsEnvelope(pending.questions, 'pending'));
     }
-    if (entry.policy.answers.mode === 'interactive') return this.#ask(entry, 'operation', { questions: [{ header: 'Operation approval',
-      question: `Authorize only this exact adaptive operation? Native tool permissions still apply.\n${JSON.stringify(entry.operation)}`,
-      multiple: false, options: [{ label: 'Approve operation', description: 'Authorize only the operation shown above.' },
-        { label: 'Pause', description: 'Keep the work without authorizing this operation.' }, { label: 'Decline', description: 'Do not authorize this operation.' }] }] });
+    if (entry.policy.answers.mode === 'interactive')
+      return this.#ask(entry, 'operation', operationApprovalEnvelope(entry.operation, entry.draft ?? this.#heldContract(entry)));
     // Automatic mode skips operation approval, so an earlier request is never admitted on the
     // strength of an unrelated latest turn: the user confirms it natively, once, in this turn.
     if (entry.operation.kind === 'entry' && entry.earlierObjective && entry.draft) return this.#ask(entry, 'operation', earlierObjectiveEnvelope(entry.draft.objective));
     return this.#execute(entry);
+  }
+  /** The held contract an approval summary reads its assignment from; display data only, never authority. */
+  #heldContract(entry: Entry): AdaptiveContract | undefined {
+    const source = ['transfer', 'transfer-recovery'].includes(entry.operation.kind) ? String(entry.operation.args.sourceSessionID) : entry.runtime.sessionID;
+    try { return this.store.read(source)?.data.contract; } catch { return undefined; }
   }
   #ask(entry: Entry, purpose: AdaptiveQuestionBinding['purpose'], envelope: QuestionEnvelope): unknown {
     const parent = entry.runtime.sessionID, old = this.questions.read(parent), nonce = randomUUID();
@@ -307,11 +387,11 @@ export class AdaptiveNative {
     const { answer: _answer, ...settled } = answered;
     const record = { ...settled, sequence: answered.sequence + 1, state: 'settled' as const, nativeReceipt: { callID: call.callID, answers: answer } };
     this.questions.write(call.sessionID, record); entry.record = record;
-    if (purpose === 'operation' && answer[0]![0] !== 'Approve operation') {
+    if (purpose === 'operation' && !approvesOperation(answer[0]![0])) {
       if (['transfer', 'transfer-recovery'].includes(entry.operation.kind)) this.runner.options.ownership!.releaseAdaptivePolicyQuestion(record);
       entry.state = 'blocked'; entry.reason = 'The native answer did not authorize this operation.'; return true;
     }
-    if (purpose === 'product' && answer.some(selections => !selections.length || selections.some(label => /^(pause|decline|stop)$/i.test(label.trim())))) {
+    if (purpose === 'product' && answer.some(selections => !selections.length || selections.some(label => UNRESOLVED_PRODUCT_ANSWER.test(label.trim())))) {
       entry.state = 'blocked'; entry.reason = 'The native product question remains unresolved; no operation was authorized.'; return true;
     }
     if (purpose === 'product' && entry.operation.kind === 'entry') {

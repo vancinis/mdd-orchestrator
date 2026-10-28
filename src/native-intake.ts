@@ -541,7 +541,7 @@ export class NativeIntake {
     const input = objectWithKeys(value, 'start', ['requirements', 'context', 'exploration', 'questions']);
     const exploration = input.exploration === undefined ? undefined : objectWithKeys(input.exploration, 'exploration', ['workItems']);
     if (exploration && (!Array.isArray(exploration.workItems) || exploration.workItems.length > 2)) throw new Error('Invalid exploration work items.');
-    const requirements = boundedText(input.requirements, 'requirements', 12000);
+    const requirements = nonemptyText(input.requirements, 'requirements');
     // Doubts about the request itself, asked together with preflight rather than after it.
     const startup = input.questions === undefined ? [] : parseClarifications(input.questions);
     // Validated at intake so bad context fails here, not later when the first phase is prepared.
@@ -614,9 +614,9 @@ export class NativeIntake {
         (entry.state === 'question-ready' && !['approval', 'clarification'].includes(entry.slot?.kind ?? '')) ||
         (entry.state === 'blocked' && entry.slot?.callID && !entry.receipts.some(item => item.callID === entry.slot!.callID))) throw new Error('Finish or dismiss the current native interaction before requesting a change.');
     if (this.runner.status(runtime.sessionID).state !== 'not-started') this.runner.assertChangeable?.(runtime.sessionID);
-    const userText = boundedText(input.userText, 'actual user request', 12000);
+    const userText = nonemptyText(input.userText, 'actual user request');
     const advisory = concerns(input.concerns);
-    const requirements = input.kind === 'rerun' ? entry.requirements : boundedText(input.requirements, 'proposed requirements', 12000);
+    const requirements = input.kind === 'rerun' ? entry.requirements : nonemptyText(input.requirements, 'proposed requirements');
     if (input.kind === 'rerun' && (input.requirements !== undefined || advisory.length)) throw new Error('A preflight rerun retains requirements; use material change for a new objective.');
     if (input.kind === 'material' && requirements.trim() === entry.requirements.trim()) throw new Error('A material change needs requirements that differ from the current ones. Ordinary plan choices do not require this path.');
     const saved = { state: entry.state, requirements: entry.requirements, known: entry.known, clarifications: [...entry.clarifications], deferred: [...entry.deferred], clarificationAnswers: [...entry.clarificationAnswers], ...(entry.context ? { context: entry.context } : {}), ...(entry.slot ? { slot: entry.slot } : {}), ...(entry.userMessageID ? { userMessageID: entry.userMessageID } : {}) };
@@ -747,7 +747,7 @@ export class NativeIntake {
     let evidence: (index: number) => TypedEvidence;
     let userText: string | undefined;
     if (input.userText !== undefined) {
-      userText = boundedText(input.userText, 'the user\'s written answer', 12000);
+      userText = nonemptyText(input.userText, 'the user\'s written answer');
       evidence = () => ({ text: userText!, own: false });
     } else {
       const typed = entry.typed;

@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { acceptance, decisions, phaseFields, reportText, shortText, summaryText, validatePlan, readVerification, raise, assertNoTraceSection, unmet, UNMET_PASS } from './acceptance.js';
 import { deliverables, executed } from './phase-evidence.js';
@@ -16,21 +15,6 @@ export type ContinuationData = {
   bindings: Assignment[]; reports: Report[]; revision: number;
 };
 const STAGES = { medium: ['mdd-plan'], high: ['mdd-propose', 'mdd-spec', 'mdd-design', 'mdd-tasks'] } as const;
-
-/**
- * The continuation as the next actor's prompt carries it, with its `compacted` oldest reports
- * reduced to their summary plus the size and digest of the rest. Reports have no size limit, so a
- * prompt that inlined every one whole could stop fitting the dispatch budget; the receipts keep each
- * report complete, and the effective contract the prompt also carries holds every structured link.
- */
-export function continuationHandoff(data: ContinuationData, compacted: number): Omit<ContinuationData, 'reports'> & { reports: unknown[] } {
-  return { ...data, reports: data.reports.map((report, index) => {
-    if (index >= compacted) return report;
-    const rest = JSON.stringify(report.fields);
-    return { receiptID: report.receiptID, actor: report.actor, ...(report.snapshotID ? { snapshotID: report.snapshotID } : {}),
-      summary: report.fields.evidenceSummary, omitted: { bytes: Buffer.byteLength(rest), sha256: createHash('sha256').update(rest).digest('hex') } };
-  }) };
-}
 
 export function continuationRequest(value: unknown, contract: AdaptiveContract): Omit<ContinuationData, 'retained' | 'bindings' | 'reports' | 'revision'> {
   const input = objectWithKeys(value, 'structured continuation', ['depth', 'rationale', 'assessment', 'context']);
@@ -69,7 +53,7 @@ export class AdaptiveContinuation {
   static restore(value: unknown, contract: AdaptiveContract, receipts: AdaptiveData['receipts']): AdaptiveContinuation {
     const input = objectWithKeys(value, 'durable continuation', ['depth', 'rationale', 'assessment', 'context', 'retained', 'bindings', 'reports', 'revision']);
     const request = continuationRequest({ depth: input.depth, rationale: input.rationale, assessment: input.assessment, context: input.context }, contract);
-    if (!Array.isArray(input.retained) || !Array.isArray(input.bindings) || !Array.isArray(input.reports) || input.reports.length > 64)
+    if (!Array.isArray(input.retained) || !Array.isArray(input.bindings) || !Array.isArray(input.reports))
       throw new Error('Continuation requires bounded actual reports and retained bindings.');
     const result = new AdaptiveContinuation(request, contract, input.retained as AdaptiveData['completed'], input.bindings as Assignment[]);
     for (const held of result.#data.retained) {
@@ -142,7 +126,6 @@ export class AdaptiveContinuation {
     return combined;
   }
   accept(actor: ContinuationActor, fields: Record<string, unknown>, receiptID: string, snapshotID?: string): void {
-    if (this.#data.reports.length >= 64) throw new Error('Continuation actual report budget is exhausted.');
     if (actor !== (this.planningNext() ?? 'mdd-verify')) throw new Error('Only the frozen next continuation stage may advance.');
     if (fields.verificationVersion !== 1 || fields.outcome !== 'passed') throw new Error('Continuation requires the actual structured phase contract version 1 and passed outcome.');
     // A report has no size limit of its own. The journal that holds it is bounded as a whole when it

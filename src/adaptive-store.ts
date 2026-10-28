@@ -29,7 +29,7 @@ export function parseAdaptiveRecord(source: string, sessionID: string): Adaptive
   const item = objectWithKeys(JSON.parse(source), 'adaptive record', ['version', 'sequence', 'digest', 'admissionDigest', 'runID', 'sessionID',
     'directory', 'worktree', 'agent', 'userMessageID', 'stage', 'data', 'attempt', 'calls', 'transfer', 'nativePolicy', 'history']);
   if (item.history !== undefined) {
-    if (!Array.isArray(item.history) || item.history.length > 256) throw new Error('Adaptive history index exceeds its bound.');
+    if (!Array.isArray(item.history)) throw new Error('Adaptive history index must be a list.');
     const identities = new Set<string>();
     for (const entry of item.history) {
       const ref = objectWithKeys(entry, 'adaptive archive reference', ['runID', 'sessionID', 'userMessageID', 'digest']);
@@ -41,7 +41,7 @@ export function parseAdaptiveRecord(source: string, sessionID: string): Adaptive
   if (item.version !== 1 || !Number.isSafeInteger(item.sequence) || (item.sequence as number) < 0 || item.sessionID !== sessionID ||
       !text(item.runID) || !item.runID.startsWith('adaptive-internal-') || !text(item.userMessageID) ||
       !text(item.directory, 2048) || !text(item.worktree, 2048) || item.agent !== 'mdd-orchestrator' ||
-      !['bootstrap', 'active'].includes(String(item.stage)) || !Array.isArray(item.calls) || item.calls.length > 64 ||
+      !['bootstrap', 'active'].includes(String(item.stage)) || !Array.isArray(item.calls) ||
       item.calls.some(call => !text(call)) || new Set(item.calls).size !== item.calls.length)
     throw new Error('Unsupported or invalid adaptive record.');
   const data = item.data as AdaptiveData;

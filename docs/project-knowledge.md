@@ -230,7 +230,7 @@ it still creates observations and never rewrites or self-approves project policy
 | Field | Limit |
 |---|---|
 | Body / summary | 4,096 / 320 UTF-8 bytes |
-| Serialized stored envelope / native request | 16,384 / 12,000 UTF-8 bytes |
+| Serialized stored envelope / native request | 16,384 UTF-8 bytes / no limit (only its digest is stored) |
 | Applicability | 1–8 distinct workflow phases; 1–16 distinct relative path scopes |
 | Sources | 1–16 distinct declared relative file references; accepted contents at most 256 KiB/file and 1 MiB total per observation (bounded reads include a one-byte growth probe) |
 | Path | 256 UTF-8 bytes; portable `/` separators; no whitespace, traversal, absolute paths, backslashes, wildcards, device names or alternate streams |

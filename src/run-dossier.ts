@@ -127,7 +127,7 @@ function parse(value: unknown): RunDossier {
     const last = (item.results as PhaseResult[]).at(-1);
     if (!['continue', 'new-task'].includes(String(consent.kind)) ||
         typeof consent.userMessageID !== 'string' || !consent.userMessageID.trim() || consent.userMessageID.length > 256 ||
-        typeof consent.userText !== 'string' || !consent.userText.trim() || consent.userText.length > 12000 ||
+        typeof consent.userText !== 'string' || !consent.userText.trim() ||
         !Number.isSafeInteger(consent.checkpointSequence) || (consent.checkpointSequence as number) < 0 ||
         typeof consent.checkpointDigest !== 'string' || !/^[a-f0-9]{64}$/.test(consent.checkpointDigest) ||
         typeof consent.timestamp !== 'number' || !Number.isFinite(consent.timestamp) ||
@@ -209,7 +209,12 @@ export function priorRunView(dossier: RunDossier, file: string): Record<string, 
   if (Buffer.byteLength(JSON.stringify(reduced) ?? '') <= DOSSIER_STATUS_BYTES) return reduced;
   // Still over budget: the larger context entries this view now allows are the remaining cost, so
   // they are reduced to a label and byte count rather than dropped from the view silently.
-  return { ...reduced, providedContext: reduced.providedContext.map(item => ({ label: item.label, bytes: Buffer.byteLength(item.content) })) };
+  const labelled = { ...reduced, providedContext: reduced.providedContext.map(item => ({ label: item.label, bytes: Buffer.byteLength(item.content) })) };
+  if (Buffer.byteLength(JSON.stringify(labelled) ?? '') <= DOSSIER_STATUS_BYTES) return labelled;
+  // The user's request has no size limit either. The view shows its opening with its size and
+  // digest; the file behind it keeps the whole request.
+  return { ...labelled, requirements: `${dossier.requirements.slice(0, 2000)}…`, requirementsClipped: true as const,
+    requirementsBytes: Buffer.byteLength(dossier.requirements), requirementsSha256: createHash('sha256').update(dossier.requirements).digest('hex') };
 }
 
 export class RunDossierStore {
