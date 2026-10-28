@@ -310,9 +310,12 @@ test('clarifications carry a header and why, allow several choices or none, and 
     { question: '¿Cuál es la URL base de la API?', header: 'URL de la API', options: [] },
     { question: '¿Qué texto usamos en el botón?', options: [{ label: 'Guardar', description: 'Texto corto.' }] },
   ] }, runtime);
-  const grouped = f.gate.status(runtime.sessionID).question;
+  const asked = f.gate.status(runtime.sessionID), grouped = asked.question;
   assert.deepEqual(grouped.questions.map(question => question.header), ['Navegadores', 'URL de la API', 'Detalle']);
-  assert.match(grouped.questions[0].question, /^¿Qué navegadores soportamos\?\nPor qué importa: Define qué APIs puede usar la implementación\. \[MDD clarification /);
+  // The form cannot scroll: it asks the question alone, and why it matters goes to the chat.
+  assert.match(grouped.questions[0].question, /^¿Qué navegadores soportamos\? \[MDD clarification [0-9a-f-]{36}\]$/);
+  assert.equal(asked.questionBrief, '**Navegadores:** ¿Qué navegadores soportamos?\n\nPor qué importa: Define qué APIs puede usar la implementación.',
+    'only the questions that say why they matter appear in the brief');
   assert.deepEqual(grouped.questions.map(question => question.multiple), [true, false, false]);
   // An open-ended question still offers delegation; the user types the answer.
   assert.deepEqual(grouped.questions[1].options.map(option => option.label), [CLARIFICATION_LABELS.delegate]);
@@ -946,6 +949,9 @@ for (const route of ['low', 'high']) {
     const reason = `The change is ${route === 'high' ? 'cross-cutting' : 'contained'}.`;
     assert.deepEqual(pending, routeEnvelope('run-route', first, { route, complexity: route, reason }));
     assert.equal(pending.questions[0].header, 'Ruta');
+    // The reason can be several sentences, so it is in the brief, not in the form.
+    assert.ok(!pending.questions[0].question.includes(reason));
+    assert.equal(f.gate.status(runtime.sessionID).questionBrief, `**Evaluación de riesgo:** complejidad ${route}.\n\n**Razón:** ${reason}`);
     assert.deepEqual(pending.questions[0].options.map(option => option.label), [ROUTE_LABELS.continue, ROUTE_LABELS.force, ROUTE_LABELS.stop]);
     await f.answer([[ROUTE_LABELS.continue]]);
     assert.deepEqual(f.workflow().nextAction(), { kind: 'execute', phase: first });
@@ -1112,10 +1118,12 @@ test('risk recovery (A1): the recovery question is armed only after blocked-risk
   await f.start();
   assert.equal(f.gate.status(runtime.sessionID).question, undefined);
   f.failRisk();
-  const pending = f.gate.status(runtime.sessionID).question;
-  assert.deepEqual(pending, riskRecoveryEnvelope('run-recovery', 'mdd-risk reported that the request cannot be substantiated on this evidence.'));
+  const status = f.gate.status(runtime.sessionID), pending = status.question;
+  assert.deepEqual(pending, riskRecoveryEnvelope('run-recovery'));
   assert.deepEqual(pending.questions[0].options.map(option => option.label),
     [RISK_RECOVERY_LABELS.retry, RISK_RECOVERY_LABELS.low, RISK_RECOVERY_LABELS.high, RISK_RECOVERY_LABELS.stop]);
+  assert.match(status.questionBrief, /^\*\*Por qué no pudo elegir una ruta:\*\* /);
+  assert.ok(!pending.questions[0].question.includes(status.reason ?? '\u0000'), 'the diagnostic is in the brief, not in the form');
 });
 
 // A2: Reintentar calls PhaseRunner.retryRisk() exactly once and settles this exact native call.

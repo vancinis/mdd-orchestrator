@@ -17,6 +17,8 @@ import { freezeProfile, parseSettings } from './settings.js';
 import { ManagedMemory } from './managed-memory.js';
 import { objectWithKeys } from './validation.js';
 import { concerns } from './concerns.js';
+import type { Concern } from './concerns.js';
+import { bullets, quoted, section, WHY_PREFIX, whyBrief } from './question-brief.js';
 import { STABLE_CHECKPOINT_VERSION } from './checkpoint.js';
 import type { CheckpointStore } from './checkpoint.js';
 import { CLARIFICATION_ANSWERS_MAX, CLARIFICATIONS_MAX } from './question-checkpoint.js';
@@ -59,7 +61,8 @@ type Runner = Pick<PhaseRunner, 'start' | 'status' | 'approveNative' | 'block'> 
 /** The run and settled state a native question reserved the durable writer against. */
 type Reservation = NonNullable<QuestionRecord['reservation']>;
 /** `fields` counts a preflight envelope's leading field questions; the rest are its clarifications. */
-type Slot = { kind: 'preflight' | 'approval' | 'change' | 'clarification' | 'route' | 'risk-recovery'; args: QuestionEnvelope; phase?: Phase; callID?: string; requirements?: string; fields?: number };
+/** `brief` is the context the short form leaves out; the coordinator writes it in the chat first. */
+type Slot = { kind: 'preflight' | 'approval' | 'change' | 'clarification' | 'route' | 'risk-recovery'; args: QuestionEnvelope; phase?: Phase; callID?: string; requirements?: string; fields?: number; brief?: string };
 /** An answer the user gave in their own words: typed inside the form, or in a chat message. */
 type Written = { source: 'form' | 'chat'; userMessageID?: string };
 type Intake = {
@@ -93,8 +96,8 @@ export const APPROVAL_LABELS = Object.freeze({ proceed: 'Continuar', pause: 'Pau
 export const CHANGE_LABELS = Object.freeze({ confirm: 'Confirmar el cambio', keep: 'Mantener el plan actual' });
 export const CLARIFICATION_LABELS = Object.freeze({ defer: 'Dejar para más adelante', delegate: 'Que decida el agente', nothing: 'Nada que agregar' });
 const CONFIGURED_STORAGE_BLOCK = 'Configured Engram persistence is unconfirmed. No local fallback, automatic retry or advancement is permitted; inspect retained records and request explicit recovery.';
-/** Shown under a clarification so the user sees what depends on the answer before giving it. */
-export const CLARIFICATION_WHY_PREFIX = 'Por qué importa: ';
+/** Shown in the brief before a clarification, so the user sees what depends on the answer before giving it. */
+export const CLARIFICATION_WHY_PREFIX = WHY_PREFIX;
 /** A clarification header is the short topic the native question shows above it. */
 const CLARIFICATION_HEADER_MAX = 30;
 /**
@@ -128,15 +131,21 @@ export function approvalEnvelope(runID: string, phase: Phase, detail = false): Q
  * The one native question offered instead of the generic approval, at the exact boundary where
  * `Workflow.overrideRoute()` itself is still legal: the suggested route's first tail phase awaits
  * approval and no other tail phase has run yet. `other` is the tail the verdict did not suggest.
+ * The verdict and its reason are the brief: a reason of a few sentences hid the choices.
  */
 export function routeEnvelope(runID: string, phase: Phase, risk: { route: 'low' | 'high'; complexity: 'low' | 'high'; reason: string }): QuestionEnvelope {
   const other = risk.route === 'low' ? 'high' : 'low';
-  return { questions: [{ header: 'Ruta', question: `La evaluación de riesgo del run MDD ${runID} encontró complejidad ${risk.complexity} y sugiere la ruta ${risk.route} (empieza con ${phase}). Razón: ${risk.reason}`, multiple: false,
+  // The run ID stays in the question: ownership tells envelopes of different conversations apart by value.
+  return { questions: [{ header: 'Ruta', question: `La evaluación de riesgo del run MDD ${runID} sugiere la ruta ${risk.route}, que empieza con ${phase}. ¿Cómo seguimos?`, multiple: false,
     options: [
       { label: ROUTE_LABELS.continue, description: `Autorizar únicamente ${phase}, el inicio de la ruta ${risk.route} sugerida.` },
       { label: ROUTE_LABELS.force, description: `Forzar la ruta ${other} en su lugar, conservando esta evaluación de riesgo tal como fue informada.` },
       { label: ROUTE_LABELS.stop, description: 'Pausar sin autorizar ni descartar ninguna ruta.' },
     ] }] };
+}
+
+export function routeBrief(risk: { complexity: 'low' | 'high'; reason: string }): string {
+  return [`**Evaluación de riesgo:** complejidad ${risk.complexity}.`, `**Razón:** ${risk.reason}`].join('\n\n');
 }
 
 /**
@@ -150,8 +159,8 @@ export const RISK_RECOVERY_LABELS = Object.freeze({
   retry: 'Reintentar evaluación de riesgo', low: 'Ruta low', high: 'Ruta high', stop: 'Detener',
 });
 
-export function riskRecoveryEnvelope(runID: string, reason: string): QuestionEnvelope {
-  return { questions: [{ header: 'Recuperación', question: `La evaluación de riesgo del run MDD ${runID} no pudo seleccionar una ruta: ${reason}`, multiple: false,
+export function riskRecoveryEnvelope(runID: string): QuestionEnvelope {
+  return { questions: [{ header: 'Recuperación', question: `La evaluación de riesgo del run MDD ${runID} no pudo seleccionar una ruta. ¿Cómo seguimos?`, multiple: false,
     options: [
       { label: RISK_RECOVERY_LABELS.retry, description: 'Descartar este resultado y volver a intentar la evaluación de riesgo desde cero, sin un veredicto previo.' },
       { label: RISK_RECOVERY_LABELS.low, description: 'Elegir manualmente la ruta low (plan, apply, verify) sin una nueva evaluación de riesgo.' },
@@ -160,8 +169,14 @@ export function riskRecoveryEnvelope(runID: string, reason: string): QuestionEnv
     ] }] };
 }
 
+/** Why the assessment could not choose, which can be a whole diagnostic: the chat shows it whole. */
+export function riskRecoveryBrief(reason: string): string | undefined {
+  return reason.trim() ? `**Por qué no pudo elegir una ruta:** ${reason}` : undefined;
+}
+
+/** The form asks the question alone; why it matters is in the brief, which the form cannot hold. */
 function clarificationPrompt(item: Clarification): QuestionEnvelope['questions'][number] {
-  return { header: item.header ?? 'Detalle', question: item.why ? `${item.question}\n${CLARIFICATION_WHY_PREFIX}${item.why}` : item.question,
+  return { header: item.header ?? 'Detalle', question: item.question,
     multiple: item.multiple === true,
     options: [...item.options.map(option => ({ label: clarificationOptionLabel(option), description: option.description })),
       // The note asks for the user's own words; delegating or deferring it would mean nothing.
@@ -177,6 +192,23 @@ function clarificationPrompt(item: Clarification): QuestionEnvelope['questions']
  */
 function clarificationEnvelope(items: readonly Clarification[]): QuestionEnvelope {
   return { questions: items.map(clarificationPrompt) };
+}
+
+const CONCERN_CATEGORIES: Record<Concern['category'], string> = { objective: 'Objetivo', integrations: 'Integraciones', 'sensitive-data': 'Datos sensibles', permissions: 'Permisos' };
+
+/**
+ * What a change confirmation is about: the requirements it would start from and the evidence that
+ * backs it. The requirements are the user's own words and may be long, so they go in the chat.
+ */
+function changeBrief(requirements: string, advisory: readonly Concern[]): string {
+  return ['Los artefactos y la memoria actuales se conservan.', section('Requisitos propuestos:', quoted(requirements)),
+    ...(advisory.length ? [section('Evidencia advertida:', bullets(advisory.map(item =>
+      `**${CONCERN_CATEGORIES[item.category]}** (\`${item.category}\`): ${item.evidence} Impacto: ${item.impact}`)))] : [])].join('\n\n');
+}
+
+/** Why each clarification matters, named by its header, for the chat before the form. */
+function clarificationBrief(items: readonly Clarification[]): string | undefined {
+  return whyBrief(items.map(item => ({ label: item.header ?? 'Detalle', question: item.question, why: item.why })));
 }
 
 /**
@@ -499,9 +531,9 @@ export class NativeIntake {
         // Never rehydrate from recorded.slot/answer: mint a brand new envelope every time, exactly
         // as the first `blocked-risk` arming would, so a stale answered record cannot look like a
         // fresh decision. Any unresolved prior record is retired by `#slot`'s own `prepared` write.
-        const args = riskRecoveryEnvelope(status.runID, status.reason ?? '');
+        const args = riskRecoveryEnvelope(status.runID), brief = riskRecoveryBrief(status.reason ?? '');
         args.questions[0]!.question += ` [MDD re-present ${randomUUID()}]`;
-        this.#slot(entry, { kind: 'risk-recovery', args }, true);
+        this.#slot(entry, { kind: 'risk-recovery', args, ...(brief ? { brief } : {}) }, true);
         entry.notice = 'The earlier native question is not consent. Ask this newly issued question and use only its fresh native answer.';
         if (recorded && ['prepared', 'pending', 'answered', 'cancelled'].includes(recorded.state)) this.#reissued.add(runtime.sessionID);
       } else if (recorded && ['prepared', 'pending', 'answered'].includes(recorded.state)) {
@@ -637,8 +669,9 @@ export class NativeIntake {
       if (entry.state !== 'accepting') throw new Error('Change validation was interrupted.');
       entry.proposed.add(proposal); entry.usedMessages.add(userID); entry.userMessageID = userID; entry.restore = saved;
       this.#recordConsent(entry);
-      const question = `${input.kind === 'rerun' ? '¿Volver a hacer las preguntas de preflight para un run planificado nuevo?' : '¿Confirmás este cambio material de alcance y un run planificado nuevo?'} Los artefactos y la memoria actuales se conservan. Requisitos propuestos: ${requirements}${advisory.length ? ` Evidencia advertida: ${JSON.stringify(advisory)}` : ''} [MDD change ${randomUUID()}]`;
-      this.#slot(entry, { kind: 'change', requirements, args: { questions: [{ header: 'Cambio', question, multiple: false, options: [{ label: CHANGE_LABELS.confirm, description: 'Responder el preflight una vez y arrancar un run planificado nuevo.' }, { label: CHANGE_LABELS.keep, description: 'No cambiar el run actual, sus respuestas ni su aprobación.' }] }] } });
+      const question = `${input.kind === 'rerun' ? '¿Volver a hacer las preguntas de preflight para un run planificado nuevo?' : '¿Confirmás este cambio material de alcance, con los requisitos que se muestran arriba, y un run planificado nuevo?'} [MDD change ${randomUUID()}]`;
+      this.#slot(entry, { kind: 'change', requirements, brief: changeBrief(requirements, advisory),
+        args: { questions: [{ header: 'Cambio', question, multiple: false, options: [{ label: CHANGE_LABELS.confirm, description: 'Responder el preflight una vez y arrancar un run planificado nuevo.' }, { label: CHANGE_LABELS.keep, description: 'No cambiar el run actual, sus respuestas ni su aprobación.' }] }] } });
       return this.status(runtime.sessionID);
     } catch (error) { entry.state = saved.state; throw error; }
   }
@@ -820,11 +853,13 @@ export class NativeIntake {
     // already been forced — the same boundary `Workflow.overrideRoute()` itself still accepts.
     // Pending clarifications still take precedence, exactly as they do for an ordinary approval.
     const risking = !pending && 'risk' in status && status.risk && status.workflow.routeOrigin === 'suggested' && status.workflow.results.length === 1;
+    const risk = risking ? status.risk as { route: 'low' | 'high'; complexity: 'low' | 'high'; reason: string } : undefined;
     const args = pending ? clarificationEnvelope(entry.clarifications)
-      : risking ? routeEnvelope(status.runID, phase, status.risk as { route: 'low' | 'high'; complexity: 'low' | 'high'; reason: string })
+      : risk ? routeEnvelope(status.runID, phase, risk)
       : approvalEnvelope(status.runID, phase, status.reportDetail !== 'detailed');
+    const brief = pending ? clarificationBrief(entry.clarifications) : risk ? routeBrief(risk) : undefined;
     if (this.#reissued.delete(entry.runtime.sessionID)) args.questions[0]!.question += ` [MDD re-present ${randomUUID()}]`;
-    this.#slot(entry, { kind: pending ? 'clarification' : risking ? 'route' : 'approval', phase, args });
+    this.#slot(entry, { kind: pending ? 'clarification' : risking ? 'route' : 'approval', phase, args, ...(brief ? { brief } : {}) });
   }
 
   /** The coordinator reports a phase it carried out itself instead of delegating it. */
@@ -1064,6 +1099,7 @@ export class NativeIntake {
       task: (entry.state === 'active' || side) && 'task' in status ? status.task : undefined,
       ...(entry.state !== 'active' && !side ? { next: { kind: entry.state === 'question-ready' ? 'question' : entry.state === 'review-ready' ? 'review' : 'wait', ...(entry.slot?.phase ? { phase: entry.slot.phase } : {}) } } : {}),
       question: entry.state === 'question-ready' && !side ? structuredClone(entry.slot!.args) : undefined,
+      questionBrief: entry.state === 'question-ready' && !side ? entry.slot!.brief : undefined,
       clarificationAnswers: structuredClone(entry.clarificationAnswers),
       pendingClarifications: structuredClone([...entry.deferred, ...entry.clarifications.filter(item => entry.clarificationAnswers.some(answer => answer.question === item.question && answer.disposition === 'deferred'))]),
       notice: entry.notice,
@@ -1335,7 +1371,8 @@ export class NativeIntake {
       // Only a settled blocked-risk offers recovery here; an in-flight assessment never reaches
       // this state, and an unrelated blocked phase keeps its ordinary mdd_reset recovery instead.
       if (next.kind !== 'blocked-risk') return;
-      this.#slot(entry, { kind: 'risk-recovery', args: riskRecoveryEnvelope(status.runID, status.reason ?? '') });
+      const brief = riskRecoveryBrief(status.reason ?? '');
+      this.#slot(entry, { kind: 'risk-recovery', args: riskRecoveryEnvelope(status.runID), ...(brief ? { brief } : {}) });
       return;
     }
     // Automatic mode asks no approval, but a decision the phase could not make on the user's
@@ -1594,9 +1631,9 @@ export class NativeIntake {
     entry.clarifications = [...startup, ...(fields.questions.length ? [structuredClone(PREFLIGHT_NOTE)] : [])];
     if (!fields.questions.length && !entry.clarifications.length) return undefined;
     const args: QuestionEnvelope = { questions: [...fields.questions, ...clarificationEnvelope(entry.clarifications).questions] };
-    const id = randomUUID();
+    const id = randomUUID(), brief = clarificationBrief(entry.clarifications);
     for (const question of args.questions) question.question += tag === 'intake' ? ` [MDD intake ${id}]` : ` [MDD re-preflight ${randomUUID()}]`;
-    return { kind: 'preflight', fields: fields.questions.length, args };
+    return { kind: 'preflight', fields: fields.questions.length, args, ...(brief ? { brief } : {}) };
   }
 
   /** The phase the pending interaction belongs to: the one awaiting approval or dispatch. */

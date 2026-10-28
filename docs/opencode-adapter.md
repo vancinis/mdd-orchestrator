@@ -651,21 +651,51 @@ The objective normally is the current turn. When the latest message only confirm
 request ("sí, confirmo las recomendaciones"), the coordinator uses that request's exact text: it is
 still the user's own words, and the fixed route has always accepted it. Because automatic mode
 asks no operation approval, admitting an earlier request needs one fresh native question in the
-current turn (`Pedido anterior`, the exact objective quoted). Only `Aprobar operación` admits it;
-`Pausar`, `Rechazar` or a dismissal admit nothing. Interactive mode already asks its operation
-approval, which shows the objective.
+current turn (`Pedido anterior`, with the exact objective quoted in its brief). Only
+`Aprobar operación` admits it; `Pausar`, `Rechazar` or a dismissal admit nothing. Interactive mode
+already asks its operation approval, which shows the objective.
 
-The interactive operation approval (`Aprobación de operación`) is Spanish and shows a summary of
-the operation instead of its JSON: for an entry, the exact objective, the goal, the requirement,
-scenario and assignment counts, the assessment, the writable files and the exclusions; for a
-selection, the actor, assignment, purpose, repair reference, the files an Apply may change and the
-fresh context reason; for every other operation, what it does with its deciding data. The record
-still binds the exact operation, generation and nonce. Only `Aprobar operación` authorizes it.
-Receipts settled before the change carry `Approve operation`, which ownership and transfer checks
-still accept; no other label approves. Product questions use the `Decisión de producto` header,
-the `Por qué importa: ` prefix and a `Pausar` default choice; restore accepts records written with
-the earlier English frame. Identical texts in several messages are refused rather than
-chosen between, and a request consumed by preserved run history is still refused.
+The interactive operation approval (`Aprobación de operación`) is Spanish. Its form asks one short
+question that names the operation ("¿Autorizás esta operación de MDD? Lanzar el agente mdd-apply
+para la tarea A1."); its brief summarizes the operation instead of its JSON: for an entry, the
+exact objective, the goal, the requirement, scenario and assignment counts, the assessment, the
+writable files and the exclusions; for a selection, the actor, assignment, purpose, repair
+reference, the files an Apply may change and the fresh context reason; for every other operation,
+what it does with its deciding data. The record still binds the exact operation, generation and
+nonce. Only `Aprobar operación` authorizes it. Receipts settled before the change carry
+`Approve operation`, which ownership and transfer checks still accept; no other label approves.
+Product questions use the `Decisión de producto` header and a `Pausar` default choice, with each
+`Por qué importa: ` in the brief; restore accepts records written with the earlier frame, which
+put it inside the question, and with the English one. Identical texts in several messages are
+refused rather than chosen between, and a request consumed by preserved run history is still
+refused.
+
+### Short questions and the chat brief
+
+OpenCode's question form cannot scroll. In the TUI a question that does not fit is cut; in the
+desktop and web app the options get only the height the question leaves. So every MDD question
+keeps its form short, and the context it needs travels separately, as Spanish Markdown in
+`questionBrief`. The coordinator writes that text in the chat, as it is, right before it calls
+the native question tool, in the same turn.
+
+| Question | Form | Brief |
+|---|---|---|
+| `Aprobación de operación` | The operation in one sentence | Everything that decides it, and that native permissions still apply |
+| `Pedido anterior` | Whether to implement the earlier request | The request, quoted |
+| `Decisión de producto` | Each question | `Por qué importa` of each question |
+| Clarifications and preflight doubts | Each question | `Por qué importa` of each question |
+| `Ruta` | The suggested route and its first phase | The complexity and the reason |
+| `Recuperación` | That no route was chosen | Why the assessment could not choose |
+| `Cambio` | Whether to confirm the change | The proposed requirements and the advisory evidence |
+
+Mode, preflight fields, the preflight note and the phase approval have no brief. The brief is
+stored with the question record (`slot.brief`), so a restored or re-presented question keeps it.
+Version 3 ships it inline up to 12000 bytes and otherwise as `questionBriefRef`, a paged detail
+reference; `next.present` names which. `nextAction.why` says to write it first. Both fields are
+protected from the status budget. The brief is display text: what the question authorizes is
+still its exact envelope, labels and nonce, and MDD does not check that the coordinator wrote it.
+Records issued before this change have no brief and keep their long question, which is asked
+exactly as it was issued.
 
 The adapter fills only what is empty by definition or observable by the host: omitted
 `exclusions`, `decisions`, `productQuestions`, assignment `decisions`/`dependsOn` and obligation
@@ -707,8 +737,9 @@ than one question per round trip. Each question may carry:
 | Field | Shown as |
 |---|---|
 | `header` | Short topic above the question, at most 30 characters; `Detalle` when omitted. |
-| `why` | A `Por qué importa: …` line under the question: what depends on the answer. |
-| `options` | Zero to six choices; none makes it an open-ended question the user types. |
+| `question` | One direct sentence; the form cannot scroll, so its context belongs in `why`. |
+| `why` | A `Por qué importa: …` paragraph in the chat brief (`questionBrief`), under the question it belongs to: what depends on the answer. |
+| `options` | Zero to six choices, each with a one-sentence description; none makes it an open-ended question the user types. |
 | `multiple` | The user may pick several choices together. |
 | `deferrable` | Adds `Dejar para más adelante`; a later boundary asks it again. |
 

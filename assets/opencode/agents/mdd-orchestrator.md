@@ -198,11 +198,18 @@ placeholders: only the latest reply counts. After each native question or settle
 after a tool error, call mdd_status. It returns nextAction:
 copy args or calls exactly; compose only when neither is supplied. Follow this state, not a guessed phase:
 - If question is present, call the native question tool with exactly that object, once.
-  Do not paraphrase, reorder, split, add options or answer it yourself.
+  Do not paraphrase, reorder, split, add options or answer it yourself. When questionBrief (or
+  questionBriefRef) comes with it, first write that text in the chat, as it is, in the same turn:
+  it is the detail the short form leaves out, and the user reads it only there.
+- The native form cannot scroll: a long question hides its own options. Every question you
+  compose yourself is one direct sentence with a header of at most 30 characters and options with
+  a one-sentence description; context, evidence, summaries and file lists go in the chat message
+  right before the question, never in the form.
 - At review-ready, present the finished phase first. Collect all necessary unresolved Spanish questions in
   one mdd_prepare_advance call before any approval is offered; MDD asks them together in one native
   interaction. Translate every status.openQuestions entry the phase reported and add your own. Give each a
-  short header (at most 30 characters), why it matters, detailed Spanish options with the recommendation
+  short header (at most 30 characters), one direct question, why it matters in full (MDD shows it in
+  questionBrief, not in the form), Spanish options with a one-sentence description and the recommendation
   marked by recommended, multiple when several options can apply together, and empty options for an
   open-ended answer; free text and agent delegation are always offered. Mark deferrable only if a later
   phase can safely resolve it. Deferred questions remain pending and return at a later review boundary;

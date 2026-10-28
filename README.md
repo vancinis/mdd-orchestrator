@@ -226,11 +226,16 @@ Reglas clave de la versión 3:
   anterior y de hacer un CAS exacto de propiedad.
 - **Modo:** el modo configurado se congela. Si no hay modo configurado, se pregunta solo el modo.
   En modo interactivo cada operación necesita una aprobación nativa real, de un solo uso. La
-  pregunta (`Aprobación de operación`) está en español y resume qué hace la operación: en una
-  entrada, el pedido, el resultado buscado y los archivos que puede escribir; al lanzar un agente,
-  cuál, para qué tarea y con qué propósito. Solo `Aprobar operación` la autoriza; `Pausar`,
-  `Rechazar`, el texto libre o descartarla no autorizan nada. Los recibos guardados antes de este
-  cambio con `Approve operation` se siguen aceptando.
+  pregunta (`Aprobación de operación`) está en español y nombra la operación en una frase; el
+  detalle va en el chat, justo antes del formulario: en una entrada, el pedido, el resultado
+  buscado y los archivos que puede escribir; al lanzar un agente, cuál, para qué tarea y con qué
+  propósito. Solo `Aprobar operación` la autoriza; `Pausar`, `Rechazar`, el texto libre o
+  descartarla no autorizan nada. Los recibos guardados antes de este cambio con
+  `Approve operation` se siguen aceptando.
+- **Preguntas cortas:** el formulario nativo de OpenCode no tiene scroll, así que cada pregunta de
+  MDD es corta y su contexto (el pedido, los archivos, el "por qué importa", la razón de una ruta)
+  viaja aparte, en `questionBrief`. El coordinador lo escribe en el chat tal cual y después hace
+  la pregunta.
 - **Sin topes de tamaño propios:** el contrato, la evidencia, el pedido del usuario y las listas de
   exclusiones y límites no tienen un tamaño máximo propio; solo aplica el límite total de 160000
   bytes por pedido. El prompt de cada agente adaptativo no se compacta ni se rechaza por tamaño, y
@@ -1428,6 +1433,7 @@ planificación y entrega, está en [`odd/tasks/`](odd/tasks).
 
 | Fecha | Funcionalidad | Qué agrega | Registro |
 |---|---|---|---|
+| 2026-10-28 | Preguntas cortas | Cada pregunta nativa de MDD es corta y su contexto va en el chat (`questionBrief`): aprobación de operación, pedido anterior, decisiones de producto, aclaraciones, ruta, recuperación y cambio; el coordinador y `mdd-grill` hacen lo mismo con sus propias preguntas | [short-native-questions.md](odd/tasks/short-native-questions.md) |
 | 2026-10-27 | Verify que termina | Corrección automática acotada con re-verificación solo de los hallazgos; checks `environmental` y escenarios `external` que no bloquean; vínculos de decisiones derivados; `mdd_check_report` con los vínculos de la ejecución; tasa de finalización por causa en `mdd-ai retro`; una aprobación interactiva v3 ya no falla con "Start does not match the actual native caller message" en OpenCode 2 | [verify-completion.md](odd/tasks/verify-completion.md) |
 | 2026-10-27 | Entrada adaptativa sin bloqueos | La configuración global de OpenCode ya no frena toda admisión v3; `entry` solo necesita el contrato (vínculo del mensaje, listas vacías y huellas los pone el host); un pedido anterior se confirma con una pregunta nativa; `nextAction` y el coordinador llevan a v3 en vez de `mdd_start` | [adaptive-entry-unblock.md](odd/tasks/adaptive-entry-unblock.md) |
 | 2026-10-23 | Sesión de preguntas antes de la admisión | Skill `mdd-grill`: rondas de decisiones antes del `entry` de pedidos grandes, con documentación opcional (glosario/ADR); una ejecución v3 cerrada ya no impide preguntas del coordinador | Commit `97fc1b8` ([docs](docs/opencode-adapter.md#question-session-before-admission)) |

@@ -10,6 +10,24 @@ import { Workflow } from '../dist/workflow.js';
 import { defaultSettings } from '../dist/settings.js';
 import { answers, runtime } from './adapter-fixture.mjs';
 
+// The brief is the detail the short form leaves out. It is kept with the record, so a restored
+// question still has it, and an issued question keeps it exactly like its envelope.
+test('a question brief is kept with its record and bound like the envelope once issued', t => {
+  const root = mkdtempSync(join(tmpdir(), 'mdd-question-brief-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const store = new QuestionCheckpointStore(root);
+  const args = { questions: [{ header: 'Cambio', question: '¿Confirmás el cambio? [MDD change x]', multiple: false, options: [{ label: 'Sí', description: 'Confirmar.' }] }] };
+  const prepared = { version: 1, parent: runtime.sessionID, sequence: 0, runID: 'run-brief', requirements: 'Objective.', known: {}, state: 'prepared',
+    slot: { kind: 'change', requirements: 'New objective.', args, brief: '**Requisitos propuestos:**\n> New objective.' }, clarifications: [], deferred: [], clarificationAnswers: [] };
+  store.write(runtime.sessionID, prepared);
+  assert.equal(store.read(runtime.sessionID).slot.brief, prepared.slot.brief);
+  for (const brief of ['', '   ', 42]) assert.throws(() => validateQuestionRecord({ ...prepared, slot: { ...prepared.slot, brief } }), /brief/);
+  const pending = { ...prepared, sequence: 1, state: 'pending', callID: 'call-brief' };
+  store.write(runtime.sessionID, pending);
+  assert.throws(() => store.write(runtime.sessionID, { ...pending, sequence: 2, state: 'cancelled', slot: { ...pending.slot, brief: 'Otro detalle.' } }), /durability/,
+    'an issued question cannot change the detail it was shown with');
+});
+
 for (const state of ['pending', 'answered']) test(`PF-3: historical storage-containing ${state} preflight stays frozen across restart until explicit discard`, async t => {
   const f = fixture(t);
   const labels = [['Muy seguro'], ['Ninguno'], ['Interactivo'], ['Bajo']];

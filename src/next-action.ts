@@ -22,6 +22,12 @@
  * Said wherever an MDD question is waiting, closed or not, so that answer is recorded, not asked again.
  */
 const WRITTEN = 'If the user already answered it in their own words, typed inside the form or written in a message after it was shown, record that with mdd_answer instead of asking again.';
+/**
+ * The native form cannot scroll, so MDD keeps its questions short and publishes their context as
+ * questionBrief. The user reads it only if the coordinator writes it in the chat before the form.
+ */
+const BRIEF_FIRST = 'First write questionBrief in the chat, in this same turn and exactly as it is (it is Spanish Markdown): it is the detail the short form leaves out, and the user reads it there.';
+const BRIEF_REF_FIRST = 'First read questionBriefRef with the detail operation, reassemble its JSON-text pages into the brief text, and write that text in the chat, in this same turn and exactly as it is: it is the detail the short form leaves out.';
 /** The read-only version-3 status call, exact as a coordinator dispatches it. */
 export const ADAPTIVE_STATUS = JSON.stringify({ routingVersion: 3, kind: 'status', args: {} });
 
@@ -74,13 +80,14 @@ export function nextAction(status: unknown): NextAction | undefined {
 
   const question = object(value.question);
   if (question) {
+    const present = typeof value.questionBrief === 'string' ? `${BRIEF_FIRST} ` : object(value.questionBriefRef) ? `${BRIEF_REF_FIRST} ` : '';
     return { tool: 'question', args: question,
-      why: nativeProtocol ? 'Ask this exact native envelope once. Only the actual native before/after question hooks can supply its answer; payload approval flags or raw text cannot authorize an operation.'
-        : `A native question is pending. Ask it once, exactly as it is here, and answer nothing on the user's behalf. While it is pending it is the only question the user should see. ${WRITTEN}` };
+      why: nativeProtocol ? `${present}Ask this exact native envelope once. Only the actual native before/after question hooks can supply its answer; payload approval flags or raw text cannot authorize an operation.`
+        : `A native question is pending. ${present}Ask it once, exactly as it is here, and answer nothing on the user's behalf. While it is pending it is the only question the user should see. ${WRITTEN}` };
   }
 
   if (state === 'review-ready') return { tool: 'mdd_prepare_advance',
-    why: `Present the finished phase and identify all necessary uncertainties before asking to advance.${Array.isArray(object(value.openQuestions)?.questions) ? ' Include every openQuestions entry the phase reported, translated into Spanish.' : ''} Submit them all in one call; MDD asks them together. Give each a short header, why it matters, detailed choices with a recommendation, multiple when several can apply, and deferral only when safe; free text and agent delegation are always offered. Pass [] only once none remain. This call approves nothing.` };
+    why: `Present the finished phase and identify all necessary uncertainties before asking to advance.${Array.isArray(object(value.openQuestions)?.questions) ? ' Include every openQuestions entry the phase reported, translated into Spanish.' : ''} Submit them all in one call; MDD asks them together. Give each a short header, one direct question, why it matters (MDD shows it in the chat, not in the form), choices with a one-sentence description and a recommendation, multiple when several can apply, and deferral only when safe; free text and agent delegation are always offered. Pass [] only once none remain. This call approves nothing.` };
   if (state === 'paused') return { tool: 'mdd_prepare_advance',
     why: `The user paused without rejecting the phase. Wait for their request to resume, then prepare remaining clarifications (or []); interactive mode then asks for a fresh native approval. Never advance automatically. When the question was closed without an answer: ${WRITTEN}` };
 

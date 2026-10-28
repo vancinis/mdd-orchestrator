@@ -18,6 +18,7 @@ import { validateQuestionRecord } from '../dist/question-checkpoint.js';
 import { approvesOperation } from '../dist/preflight.js';
 import { adaptiveQuestionsEnvelope, UNRESOLVED_PRODUCT_ANSWER } from '../dist/adaptive-low.js';
 import { LocalFiles } from '../dist/local-files.js';
+import { nextAction } from '../dist/next-action.js';
 
 function fixture(t, mode) {
   const root = mkdtempSync(join(tmpdir(), 'mdd-native-policy-'));
@@ -134,36 +135,60 @@ test('AL05b: large native approval is complete through guarded paged detail and 
   assert.equal(f.store.read('parent').nativePolicy.questions[0].callID, 'wire-approval');
 });
 
+// A long request makes a long brief. Past its inline share it travels whole behind a paged
+// reference, and the form the user answers stays one short question.
+test('regression: a brief past its inline share is paged whole while the approval form stays short', async t => {
+  const f = fixture(t, 'interactive');
+  f.contract.objective = 'Long user request line.\n'.repeat(700).trim();
+  const status = await f.gate.adaptiveInternal(wire('entry', { contract: f.contract, messageID: 'native-message' }), f.runtime);
+  assert.ok(Buffer.byteLength(JSON.stringify(status)) <= 46000);
+  assert.equal(status.questionBrief, undefined);
+  assert.equal(status.next.present, 'questionBriefRef');
+  assert.ok(Buffer.byteLength(status.question.questions[0].question) < 200, 'the form stays short');
+  const brief = await readDetail(f, status.questionBriefRef);
+  assert.equal(brief, f.gate.status('parent').questionBrief);
+  assert.ok(brief.includes(f.contract.objective.split('\n').map(line => `> ${line}`).join('\n')), 'the request is quoted line for line');
+  assert.match(nextAction(status).why, /^First read questionBriefRef with the detail operation/);
+});
+
 // The approval used to read "Authorize only this exact adaptive operation?" followed by the raw
 // operation JSON. It is Spanish now and says what the operation does; the binding is unchanged.
-test('regression: the interactive entry approval is Spanish and summarizes the entry instead of its JSON', async t => {
+// Its detail then filled the form, which cannot scroll, so the user could not see the choices: the
+// form keeps one sentence and the detail travels as questionBrief, for the chat.
+test('regression: the interactive entry approval asks one short question and briefs the entry for the chat', async t => {
   const f = fixture(t, 'interactive'); f.contract.exclusions = ['No se toca ningún otro archivo.'];
   await f.admit();
-  const [question] = f.gate.status('parent').question.questions;
+  const status = f.gate.status('parent'), [question] = status.question.questions, brief = status.questionBrief;
   assert.equal(question.header, 'Aprobación de operación');
   assert.deepEqual(question.options.map(option => option.label), ['Aprobar operación', 'Pausar', 'Rechazar']);
-  assert.match(question.question, /^¿Autorizás esta operación de MDD\?/);
-  assert.ok(question.question.includes(`Pedido: «${f.contract.objective}»`));
-  assert.ok(question.question.includes(`Resultado buscado: ${f.contract.acceptance.goal}`));
-  assert.match(question.question, /Requisitos: 1, con 1 escenario\(s\)\. Tareas: 1\./);
-  assert.match(question.question, /Evaluación: complejidad baja, impacto bajo\./);
-  assert.match(question.question, /Archivos que puede escribir:\n- own\.txt/);
-  assert.match(question.question, /Queda fuera:\n- No se toca ningún otro archivo\./);
-  assert.doesNotMatch(question.question, /"kind"|"args"|"contract"|Authorize/);
-  assert.match(question.question, / \[MDD adaptive [0-9a-f-]{36}\]$/);
-  const bound = f.questions.read('parent').adaptive.operation;
-  assert.equal(bound.kind, 'entry');
-  assert.equal(bound.args.contract.objective, f.contract.objective, 'the record still binds the exact proposed operation');
+  assert.match(question.question, /^¿Autorizás esta operación de MDD\? Admitir este pedido para implementarlo con MDD\. \[MDD adaptive [0-9a-f-]{36}\]$/);
+  assert.ok(!question.question.includes(f.contract.objective), 'the request is not in the form');
+  assert.ok(brief.includes(`**Pedido:**\n> ${f.contract.objective}`));
+  assert.ok(brief.includes(`**Resultado buscado:** ${f.contract.acceptance.goal}`));
+  assert.match(brief, /\*\*Requisitos:\*\* 1, con 1 escenario\(s\)\. \*\*Tareas:\*\* 1\./);
+  assert.match(brief, /\*\*Evaluación:\*\* complejidad baja, impacto bajo\./);
+  assert.match(brief, /\*\*Archivos que puede escribir:\*\*\n- `own\.txt`/);
+  assert.match(brief, /\*\*Queda fuera:\*\*\n- No se toca ningún otro archivo\./);
+  assert.match(brief, /los permisos nativos de las herramientas siguen aplicando\.$/);
+  assert.doesNotMatch(brief, /"kind"|"args"|"contract"|Authorize/);
+  const bound = f.questions.read('parent');
+  assert.equal(bound.slot.brief, brief, 'the brief is kept with the question record');
+  assert.equal(bound.adaptive.operation.kind, 'entry');
+  assert.equal(bound.adaptive.operation.args.contract.objective, f.contract.objective, 'the record still binds the exact proposed operation');
+  const action = nextAction(status);
+  assert.equal(action.tool, 'question');
+  assert.match(action.why, /^A native question is pending\. First write questionBrief in the chat/);
 });
 
 test('regression: a select approval names the actor, assignment, purpose and the files Apply may change', async t => {
   const f = fixture(t, 'interactive'); await f.admit(); await f.answer([['Aprobar operación']]);
   await f.gate.adaptiveInternal(f.operation(), f.runtime);
-  const [question] = f.gate.status('parent').question.questions;
-  assert.match(question.question, /Lanzar el agente mdd-apply para la tarea A1\./);
-  assert.match(question.question, /Propósito: Perform bounded replacement\./);
-  assert.match(question.question, /Archivos que puede modificar:\n- own\.txt/);
-  assert.doesNotMatch(question.question, /"handle"|"assignmentID"/);
+  const status = f.gate.status('parent'), [question] = status.question.questions, brief = status.questionBrief;
+  assert.match(question.question, /^¿Autorizás esta operación de MDD\? Lanzar el agente mdd-apply para la tarea A1\. \[MDD adaptive /);
+  assert.match(brief, /^\*\*Aprobación de operación:\*\* Lanzar el agente mdd-apply para la tarea A1\./);
+  assert.match(brief, /\*\*Propósito:\*\* Perform bounded replacement\./);
+  assert.match(brief, /\*\*Archivos que puede modificar:\*\*\n- `own\.txt`/);
+  assert.doesNotMatch(brief, /"handle"|"assignmentID"/);
   await f.answer([['Aprobar operación']]);
   assert.deepEqual(f.store.read('parent').nativePolicy.questions.at(-1).answer, [['Aprobar operación']]);
   assert.ok(f.runner.status('parent').task, 'the approved selection is ready to dispatch');
@@ -263,7 +288,7 @@ test('AL05a: interactive selection uses inspected native call/result once and bi
   const operation = f.operation();
   await assert.rejects(f.runner.selectAdaptiveInternal(operation.args, f.runtime), /native operation authority/);
   const status = await f.gate.adaptiveInternal(operation, f.runtime);
-  assert.match(status.question.questions[0].question, /Perform bounded replacement/);
+  assert.match(status.questionBrief, /Perform bounded replacement/);
   assert.deepEqual(f.questions.read('parent').adaptive.operation, operation);
   await assert.rejects(f.gate.adaptiveInternal({ ...operation, approved: true }, f.runtime), /unknown/);
   const args = status.question, call = { sessionID: 'parent', callID: 'actual-selection-answer' };
@@ -387,7 +412,7 @@ test('AL05a: actual actor question answers are linked durably without changing h
   assert.equal(cold.status('parent').productQuestions, undefined);
 });
 
-test('regression: product questions are framed in Spanish and records with the earlier English frame still restore', async t => {
+test('regression: product questions ask only the question and brief why it matters; records with the earlier frames still restore', async t => {
   const f = fixture(t, 'automatic'); await f.admit();
   const operation = f.operation(); operation.args.actor = 'mdd-explore'; await f.gate.adaptiveInternal(operation, f.runtime);
   const call = { sessionID: 'parent', callID: 'frame-question-child' }, sent = await f.runner.before(call, f.runner.status('parent').task);
@@ -397,18 +422,24 @@ test('regression: product questions are framed in Spanish and records with the e
   const status = await f.gate.adaptiveInternal({ kind: 'questions', args: { receiptID: pending.receiptID, callID: pending.callID } }, f.runtime);
   const [asked] = status.question.questions;
   assert.equal(asked.header, 'Decisión de producto');
-  assert.match(asked.question, /^Keep the bounded format\?\nPor qué importa: A user decision is needed\. \[MDD adaptive /);
+  assert.match(asked.question, /^Keep the bounded format\? \[MDD adaptive [0-9a-f-]{36}\]$/);
+  assert.equal(status.questionBrief, '**Decisión de producto:** Keep the bounded format?\n\nPor qué importa: A user decision is needed.');
   await f.answer([['Keep']]);
-  // A record answered before the frame was Spanish carries the English one; it must still restore.
-  const saved = f.store.read('parent'), native = saved.data.questionAnswers[0].native;
-  const legacy = adaptiveQuestionsEnvelope(pending.questions, native.adaptive.nonce, true);
-  assert.equal(legacy.questions[0].header, 'Product decision');
-  for (const record of [native, saved.nativePolicy.questions.find(item => item.callID === native.callID)]) record.slot.args = structuredClone(legacy);
-  const { digest: _digest, ...body } = saved; saved.digest = createHash('sha256').update(JSON.stringify(body)).digest('hex');
-  new LocalFiles(f.root).updateStrict(`.mdd/adaptive-${createHash('sha256').update('parent').digest('hex')}.json`, () => JSON.stringify(saved), 8 * 1024 * 1024);
-  assert.match(f.store.read('parent').data.questionAnswers[0].native.slot.args.questions[0].question, /\nWhy: /);
-  const cold = new PhaseRunner(f.inspect, f.options), restored = await cold.restore(f.runtime);
-  assert.equal(restored.restored, true, restored.reason);
+  // Records answered earlier carry the frame they were asked with: Spanish with the why inside the
+  // question, or English. Both must still restore, and neither ever had a brief.
+  for (const [frame, why] of [['inline', /\nPor qué importa: /], ['legacy', /\nWhy: /]]) {
+    const saved = f.store.read('parent'), native = saved.data.questionAnswers[0].native;
+    const earlier = adaptiveQuestionsEnvelope(pending.questions, native.adaptive.nonce, frame);
+    assert.equal(earlier.questions[0].header, frame === 'legacy' ? 'Product decision' : 'Decisión de producto');
+    for (const record of [native, saved.nativePolicy.questions.find(item => item.callID === native.callID)]) {
+      record.slot.args = structuredClone(earlier); delete record.slot.brief;
+    }
+    const { digest: _digest, ...body } = saved; saved.digest = createHash('sha256').update(JSON.stringify(body)).digest('hex');
+    new LocalFiles(f.root).updateStrict(`.mdd/adaptive-${createHash('sha256').update('parent').digest('hex')}.json`, () => JSON.stringify(saved), 8 * 1024 * 1024);
+    assert.match(f.store.read('parent').data.questionAnswers[0].native.slot.args.questions[0].question, why);
+    const cold = new PhaseRunner(f.inspect, f.options), restored = await cold.restore(f.runtime);
+    assert.equal(restored.restored, true, `${frame}: ${restored.reason}`);
+  }
   // An open-ended product question offers Pausar, which leaves it unresolved in either language.
   const open = adaptiveQuestionsEnvelope([{ question: '¿Qué formato usamos?', why: 'Cambia la salida.', options: [] }], 'nonce');
   assert.deepEqual(open.questions[0].options, [{ label: 'Pausar', description: 'Dejar esta decisión de producto sin resolver.' }]);
@@ -1228,7 +1259,8 @@ test('regression: an earlier request answered from the current turn is admitted 
   const status = await f.gate.adaptiveInternal(wire('entry', { contract: f.contract }), f.runtime, 'native-message');
   assert.equal(status.state, 'question-ready');
   assert.equal(status.question.questions[0].header, 'Pedido anterior');
-  assert.match(status.question.questions[0].question, /Replace bounded text\./);
+  assert.doesNotMatch(status.question.questions[0].question, /Replace bounded text\./, 'the form asks; the request is quoted in the brief');
+  assert.equal(status.questionBrief, '**Pedido anterior, tal como lo escribiste:**\n> Replace bounded text.');
   noRun(f);
   await f.answer([['Aprobar operación']]);
   assert.equal(f.store.read('parent').userMessageID, 'request-user', 'the run binds the message that carries the objective');

@@ -54,15 +54,16 @@ mattpocock/skills `grilling` and `domain-modeling` skills under MIT; see `NOTICE
    `GLOSSARY.md`, `GLOSSARY-MAP.md` or ADRs, otherwise to `Sesión de preguntas`.
 2. Map the request as a design tree: each decision branches into the decisions that depend on it.
    The frontier is every open decision whose prerequisites are settled.
-3. Ask the whole frontier in one native question call, at most eight questions: a header of at
-   most 30 characters, the question with its context, two to six described options, the
+3. Ask the whole frontier in one native question call, at most eight questions. The form cannot
+   scroll, so first write each question's context in the chat, then ask: a header of at most 30
+   characters, one direct question, two to six options with a one-sentence description, the
    recommended one first with ` (Recomendada)`, and `multiple` only when choices combine. Word it
    so choosing the recommendation accepts it. A question that depends on another open one waits.
 4. Recompute the frontier from the answers, including branches a free-text answer opens, and ask
    the next round. Stop when the frontier is empty: no branch unvisited, nothing silently assumed.
-5. Show a Spanish summary of the decisions, exclusions, acceptance scenarios and any
-   documentation, then ask `Confirmar y seguir`, `Corregir algo` or `Cancelar`. Draft the contract
-   only after confirmation.
+5. Write a Spanish summary of the decisions, exclusions, acceptance scenarios and any
+   documentation in the chat, then ask briefly: `Confirmar y seguir`, `Corregir algo` or
+   `Cancelar`. Draft the contract only after confirmation.
 
 ## Output Contract
 

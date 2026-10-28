@@ -912,11 +912,11 @@ function explorationWorkItemSchema() {
  */
 function clarificationsSchema() {
   return tool.schema.array(tool.schema.object({
-    question: tool.schema.string().min(1).describe('The complete question, in Spanish.'),
+    question: tool.schema.string().min(1).describe('One direct question, in Spanish. The native form cannot scroll: put the context in why, not here.'),
     header: tool.schema.string().min(1).max(30).optional().describe('Short topic shown above the question, at most 30 characters (for example "Formato de fecha"). Defaults to "Detalle".'),
-    why: tool.schema.string().min(1).optional().describe('Why it matters: what depends on the answer, or what the phase found that raised it. Shown under the question.'),
+    why: tool.schema.string().min(1).optional().describe('Why it matters: what depends on the answer, or what the phase found that raised it. Write it in full: MDD shows it in the chat brief (questionBrief) before the form, not in the form.'),
     options: tool.schema.array(tool.schema.object({ label: tool.schema.string().min(1), description: tool.schema.string().min(1), recommended: tool.schema.boolean().optional() })).max(6)
-      .describe('Zero to six concrete choices; leave empty for an open-ended answer the user types. Free text and "Que decida el agente" are always available.'),
+      .describe('Zero to six concrete choices, each with a one-sentence description; leave empty for an open-ended answer the user types. Free text and "Que decida el agente" are always available.'),
     multiple: tool.schema.boolean().optional().describe('True when several options can apply together.'),
     deferrable: tool.schema.boolean().optional().describe('True only when a later phase can safely decide it.'),
   })).max(8);
@@ -1562,7 +1562,7 @@ const plugin: Plugin = async input => {
         },
       }),
       mdd_prepare_advance: tool({
-        description: 'After presenting the phase result, submit all necessary clarification questions before offering phase approval; MDD asks them all together in one native interaction. Include every entry of status.openQuestions, translated, plus your own. Write question text, option labels and descriptions in Spanish, and header and why too: these tool arguments are shown to the user, unlike English protocol keys and technical artifacts. Preserve complete prose; do not shorten or re-ask to fit individual text limits. Pass [] only when none remain. Each question offers agent delegation, optional deferral, recommended choices and free text. Also resumes a paused review without approving it, and may stop a ready phase before you dispatch it (automatic mode, or right after preflight) when a decision only the user can make is missing.',
+        description: 'After presenting the phase result, submit all necessary clarification questions before offering phase approval; MDD asks them all together in one native interaction. Include every entry of status.openQuestions, translated, plus your own. Write question text, option labels and descriptions in Spanish, and header and why too: these tool arguments are shown to the user, unlike English protocol keys and technical artifacts. The native form cannot scroll: keep each question one direct sentence and put its context in why, which MDD shows whole in the chat brief (questionBrief). Preserve complete prose there; do not abbreviate or re-ask to fit. Pass [] only when none remain. Each question offers agent delegation, optional deferral, recommended choices and free text. Also resumes a paused review without approving it, and may stop a ready phase before you dispatch it (automatic mode, or right after preflight) when a decision only the user can make is missing.',
         args: { questions: clarificationsSchema() },
         async execute(args, context) {
           enter(context, 'mdd_prepare_advance');

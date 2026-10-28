@@ -27,6 +27,9 @@ export const STATUS_PROTECTED_FIELDS: readonly string[] = Object.freeze([
   'nextAction', 'dispatch', 'lane', 'selection', 'lastReceipt',
   'routingVersion', 'registration', 'protocol', 'route', 'generation', 'handle', 'operations', 'operationsRef', 'details',
   'questionRef', 'taskRef', 'proposedOperation', 'evidenceRef', 'completion', 'assurance', 'continuation',
+  // What the short question form leaves out. The user can only read it in the chat, so shedding it
+  // would put them back to approving what they cannot see.
+  'questionBrief', 'questionBriefRef',
   // A run restated for a conversation the host just rewrote. It is a few hundred bytes and it is
   // the only description of the run that survives losing the transcript, so it is never shed.
   'runCard', 'compacted',

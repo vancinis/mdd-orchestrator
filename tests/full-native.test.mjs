@@ -2215,8 +2215,8 @@ test('PF-1 P1: fresh-start preference publication failure keeps the new objectiv
   await rm(lock);
   f.user('Please redo the preflight for the export objective.');
   const confirmation = await f.change();
-  assert.match(confirmation.question.questions[0].question, /Implement a separate export objective\./);
-  assert.ok(!confirmation.question.questions[0].question.includes(f.requirements), 'redo cannot propose the completed predecessor objective');
+  assert.match(confirmation.questionBrief, /Implement a separate export objective\./);
+  assert.ok(!confirmation.questionBrief.includes(f.requirements), 'redo cannot propose the completed predecessor objective');
   await f.answer();
   assert.deepEqual((await f.status()).question.questions.map(q => q.header), ['Certeza', 'Modo', 'Resumen', 'Notas']);
 });
@@ -2827,21 +2827,23 @@ test('mdd_change_request accepts concerns the host tool bridge serialized as a J
   const args = { kind: 'material', userText: f.parent[0].parts[0].text, requirements: 'Implement a different integration.', concerns: JSON.stringify([concern]) };
   const status = JSON.parse(await f.hooks.tool.mdd_change_request.execute(args, f.context));
   assert.equal(status.question.questions[0].header, 'Cambio');
-  assert.match(status.question.questions[0].question, /integrations/);
+  assert.match(status.questionBrief, /\*\*Integraciones\*\* \(`integrations`\): The host serialized this concern as a JSON string\. Impacto: The bridge must still validate it strictly\./);
+  assert.doesNotMatch(status.question.questions[0].question, /integrations|Requisitos propuestos/, 'the form asks; the requirements and evidence are in the brief');
 });
 test('a fresh user message is enough for a material change: concerns are optional', async t => {
   const f = await fixture(t); await f.phase();
   f.user('Change the scope: also remove the obsolete context cap.');
   const status = JSON.parse(await f.hooks.tool.mdd_change_request.execute({ kind: 'material', userText: f.parent[0].parts[0].text, requirements: 'Also remove the obsolete context cap.' }, f.context));
   assert.equal(status.question.questions[0].header, 'Cambio');
-  assert.doesNotMatch(status.question.questions[0].question, /Evidencia advertida/);
+  assert.doesNotMatch(status.questionBrief, /Evidencia advertida/);
+  assert.match(status.questionBrief, /\*\*Requisitos propuestos:\*\*\n> Also remove the obsolete context cap\./);
 });
 test('mdd_change_request accepts a single bare concern object and an empty concerns string', async t => {
   const f = await fixture(t); await f.phase();
   const concern = { category: 'objective', evidence: 'The user widened the scope.', impact: 'The plan must be redone.' };
   f.user('Widen the scope to include the recovery path.');
   const single = JSON.parse(await f.hooks.tool.mdd_change_request.execute({ kind: 'material', userText: f.parent[0].parts[0].text, requirements: 'Include the recovery path.', concerns: concern }, f.context));
-  assert.match(single.question.questions[0].question, /objective/);
+  assert.match(single.questionBrief, /\*\*Objetivo\*\* \(`objective`\): The user widened the scope\./);
   await f.answer('Mantener el plan actual');
   f.user('Widen it again, differently.');
   const empty = JSON.parse(await f.hooks.tool.mdd_change_request.execute({ kind: 'material', userText: f.parent[0].parts[0].text, requirements: 'Include a different recovery path.', concerns: '  ' }, f.context));

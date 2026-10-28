@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import { adaptiveContract, adaptiveQuestionsEnvelope, UNRESOLVED_PRODUCT_ANSWER } from './adaptive-low.js';
+import { adaptiveContract, adaptiveQuestionsBrief, adaptiveQuestionsEnvelope, UNRESOLVED_PRODUCT_ANSWER } from './adaptive-low.js';
+import { bullets, quoted, section } from './question-brief.js';
 import type { AdaptiveContract } from './adaptive-low.js';
 import { openQuestions } from './open-questions.js';
 import { answerFromLabel, approvesOperation, OPERATION_LABELS, parsePartialAnswers, questionEnvelope } from './preflight.js';
@@ -78,92 +79,111 @@ export type Entry = {
   earlierObjective?: boolean;
 };
 
+/** A short native question and the context the coordinator writes in the chat before asking it. */
+export type BriefedEnvelope = { args: QuestionEnvelope; brief?: string };
+
+/** Why a draft product question that came as bare text matters; the user reads it in the brief. */
+const DEFAULT_PRODUCT_WHY = 'Hay que decidirlo antes de admitir el pedido.';
+const productEnvelope = (questions: Parameters<typeof adaptiveQuestionsEnvelope>[0]): BriefedEnvelope => {
+  const brief = adaptiveQuestionsBrief(questions);
+  return { args: adaptiveQuestionsEnvelope(questions, 'pending'), ...(brief ? { brief } : {}) };
+};
+
 /**
  * Fresh native confirmation for an earlier request. The labels are the existing operation consent
- * tokens; the question shows the exact objective the user wrote, in Spanish.
+ * tokens; the brief quotes the exact objective the user wrote, which the form cannot show whole.
  */
-function earlierObjectiveEnvelope(objective: string): QuestionEnvelope {
-  return { questions: [{ header: 'Pedido anterior',
-    question: `Tu último mensaje no repite el pedido. ¿Autorizás implementar este pedido anterior, tal como lo escribiste?\n«${objective}»`,
+function earlierObjectiveEnvelope(objective: string): BriefedEnvelope {
+  return { args: { questions: [{ header: 'Pedido anterior',
+    question: 'Tu último mensaje no repite el pedido. ¿Autorizás implementar el pedido anterior que se muestra arriba, tal como lo escribiste?',
     multiple: false, options: [{ label: OPERATION_LABELS.approve, description: 'Autorizar la implementación de ese pedido con el contrato presentado.' },
-      { label: OPERATION_LABELS.pause, description: 'Conservar el borrador sin autorizar nada.' }, { label: OPERATION_LABELS.decline, description: 'No implementar ese pedido.' }] }] };
+      { label: OPERATION_LABELS.pause, description: 'Conservar el borrador sin autorizar nada.' }, { label: OPERATION_LABELS.decline, description: 'No implementar ese pedido.' }] }] },
+    brief: section('Pedido anterior, tal como lo escribiste:', quoted(objective)) };
 }
 
 const COMPLEXITY: Record<string, string> = { low: 'baja', medium: 'media', high: 'alta' };
 const IMPACT: Record<string, string> = { low: 'bajo', medium: 'medio', high: 'alto' };
-const bullets = (items: readonly string[]): string => items.map(item => `- ${item}`).join('\n');
 const assessed = (value: unknown): string => {
   const item = value as { complexity?: string; impact?: string } | undefined;
-  return `Evaluación: complejidad ${COMPLEXITY[String(item?.complexity)] ?? String(item?.complexity)}, impacto ${IMPACT[String(item?.impact)] ?? String(item?.impact)}.`;
+  return `**Evaluación:** complejidad ${COMPLEXITY[String(item?.complexity)] ?? String(item?.complexity)}, impacto ${IMPACT[String(item?.impact)] ?? String(item?.impact)}.`;
 };
+const files = (paths: readonly string[]): string => bullets(paths.map(path => `\`${path}\``));
 
 /**
  * What an operation approval shows: what the operation does, in Spanish, with the data that decides
- * it. It replaces the operation's JSON, which the user had to read raw and in English. Authority is
- * unchanged: the record still binds the exact operation, generation and nonce the user approves.
+ * it. It replaces the operation's JSON, which the user had to read raw and in English. The headline
+ * is one sentence the form keeps; the details are Markdown blocks for the chat, because the form
+ * cannot show a request, a file list or a list of limits whole. Authority is unchanged: the record
+ * still binds the exact operation, generation and nonce the user approves.
  */
-export function operationSummary(operation: NativeOperation, contract?: AdaptiveContract): string {
+export function operationSummary(operation: NativeOperation, contract?: AdaptiveContract): { headline: string; details: string[] } {
   const args = operation.args;
   const text = (key: string): string => String(args[key]);
   switch (operation.kind) {
     case 'entry': {
-      if (!contract) return 'Admitir este pedido para implementarlo con MDD.';
+      const headline = 'Admitir este pedido para implementarlo con MDD.';
+      if (!contract) return { headline, details: [] };
       const scenarios = contract.acceptance.requirements.reduce((count, item) => count + item.scenarios.length, 0);
-      return ['Admitir este pedido para implementarlo con MDD.',
-        `Pedido: «${contract.objective}»`,
-        `Resultado buscado: ${contract.acceptance.goal}`,
-        `Requisitos: ${contract.acceptance.requirements.length}, con ${scenarios} escenario(s). Tareas: ${contract.assignments.length}.`,
+      return { headline, details: [section('Pedido:', quoted(contract.objective)),
+        `**Resultado buscado:** ${contract.acceptance.goal}`,
+        `**Requisitos:** ${contract.acceptance.requirements.length}, con ${scenarios} escenario(s). **Tareas:** ${contract.assignments.length}.`,
         assessed(contract.assessment),
-        `Archivos que puede escribir:\n${bullets(contract.scope.writes)}`,
-        ...(contract.exclusions.length ? [`Queda fuera:\n${bullets(contract.exclusions)}`] : [])].join('\n');
+        section('Archivos que puede escribir:', files(contract.scope.writes)),
+        ...(contract.exclusions.length ? [section('Queda fuera:', bullets(contract.exclusions))] : [])] };
     }
     case 'select': {
       const assignment = contract?.assignments.find(item => item.id === args.assignmentID);
       const context = args.context as { reason?: unknown } | undefined;
-      return [`Lanzar el agente ${text('actor')} para la tarea ${text('assignmentID')}.`,
-        `Propósito: ${text('purpose')}`,
-        ...(args.repairOf !== undefined ? [`Es un reintento que corrige el resultado ${text('repairOf')}.`] : []),
-        ...(args.actor === 'mdd-apply' && assignment ? [`Archivos que puede modificar:\n${bullets(assignment.scope.writes)}`] : []),
-        ...(typeof context?.reason === 'string' ? [`Contexto actualizado: ${context.reason}`] : [])].join('\n');
+      return { headline: `Lanzar el agente ${text('actor')} para la tarea ${text('assignmentID')}.`, details: [
+        `**Propósito:** ${text('purpose')}`,
+        ...(args.repairOf !== undefined ? [`Es un reintento que corrige el resultado \`${text('repairOf')}\`.`] : []),
+        ...(args.actor === 'mdd-apply' && assignment ? [section('Archivos que puede modificar:', files(assignment.scope.writes))] : []),
+        ...(typeof context?.reason === 'string' ? [`**Contexto actualizado:** ${context.reason}`] : [])] };
     }
     case 'prepare':
-      return 'Tomar una instantánea de los archivos del alcance para preparar la evidencia de verificación. No modifica archivos.';
+      return { headline: 'Tomar una instantánea de los archivos del alcance para preparar la evidencia de verificación.', details: ['No modifica archivos.'] };
     case 'submit': {
       const evidence = args.evidence as { snapshotID?: unknown; limits?: unknown } | undefined;
       const limits = Array.isArray(evidence?.limits) ? evidence.limits.map(String) : [];
-      return [`Registrar la evidencia de verificación de la instantánea ${String(evidence?.snapshotID)}.`,
-        ...(limits.length ? [`Límites que declara:\n${bullets(limits)}`] : [])].join('\n');
+      return { headline: 'Registrar la evidencia de verificación.', details: [`**Instantánea:** \`${String(evidence?.snapshotID)}\``,
+        ...(limits.length ? [section('Límites que declara:', bullets(limits))] : [])] };
     }
     case 'close': {
       const limits = Array.isArray(args.limits) ? args.limits.map(String) : [];
-      return [args.outcome === 'verified' ? 'Cerrar el trabajo como verificado.' : 'Cerrar el trabajo sin verificar.',
-        ...(limits.length ? [`Límites pendientes:\n${bullets(limits)}`] : [])].join('\n');
+      return { headline: args.outcome === 'verified' ? 'Cerrar el trabajo como verificado.' : 'Cerrar el trabajo sin verificar.',
+        details: limits.length ? [section('Límites pendientes:', bullets(limits))] : [] };
     }
     case 'escalate':
-      return [args.depth === 'high'
-        ? 'Pasar el trabajo a la ruta alta: propuesta, especificación, diseño, tareas, implementación y verificación.'
-        : 'Pasar el trabajo a la ruta media: plan, implementación y verificación.',
-        `Motivo: ${text('rationale')}`, assessed(args.assessment)].join('\n');
+      return { headline: args.depth === 'high' ? 'Pasar el trabajo a la ruta alta.' : 'Pasar el trabajo a la ruta media.', details: [
+        args.depth === 'high' ? '**Etapas:** propuesta, especificación, diseño, tareas, implementación y verificación.' : '**Etapas:** plan, implementación y verificación.',
+        `**Motivo:** ${text('rationale')}`, assessed(args.assessment)] };
     case 'recover':
-      return 'Recuperar el agente que quedó detenido y volver a elegir el siguiente paso.';
+      return { headline: 'Recuperar el agente que quedó detenido y volver a elegir el siguiente paso.', details: [] };
     case 'transfer':
-      return `Traer a esta conversación la ejecución ${text('runID')}, que hoy pertenece a la conversación ${text('sourceSessionID')}.`;
+      return { headline: 'Traer a esta conversación una ejecución de otra conversación.', details: [
+        `**Ejecución:** \`${text('runID')}\``, `**Conversación de origen:** \`${text('sourceSessionID')}\``] };
     case 'transfer-recovery':
-      return args.action === 'abort'
-        ? `Cancelar el traspaso interrumpido de la ejecución ${text('runID')} y dejarla en la conversación ${text('sourceSessionID')}.`
-        : `Terminar el traspaso interrumpido de la ejecución ${text('runID')} desde la conversación ${text('sourceSessionID')}.`;
+      return { headline: args.action === 'abort' ? 'Cancelar el traspaso interrumpido de una ejecución y dejarla en su conversación de origen.'
+        : 'Terminar el traspaso interrumpido de una ejecución desde su conversación de origen.', details: [
+        `**Ejecución:** \`${text('runID')}\``, `**Conversación de origen:** \`${text('sourceSessionID')}\``] };
     default:
-      return `Ejecutar la operación ${operation.kind}.`;
+      return { headline: `Ejecutar la operación ${operation.kind}.`, details: [] };
   }
 }
 
-/** The interactive approval of one exact operation, in Spanish, with the operation summarized. */
-export function operationApprovalEnvelope(operation: NativeOperation, contract?: AdaptiveContract): QuestionEnvelope {
-  return { questions: [{ header: 'Aprobación de operación',
-    question: `¿Autorizás esta operación de MDD? Autoriza solo lo que se describe acá; los permisos nativos de las herramientas siguen aplicando.\n\n${operationSummary(operation, contract)}`,
+/**
+ * The interactive approval of one exact operation, in Spanish. The form asks one short question that
+ * names the operation; the brief carries everything that decides it.
+ */
+export function operationApprovalEnvelope(operation: NativeOperation, contract?: AdaptiveContract): BriefedEnvelope {
+  const { headline, details } = operationSummary(operation, contract);
+  return { args: { questions: [{ header: 'Aprobación de operación',
+    question: `¿Autorizás esta operación de MDD? ${headline}`,
     multiple: false, options: [{ label: OPERATION_LABELS.approve, description: 'Autorizar solo la operación descrita arriba.' },
       { label: OPERATION_LABELS.pause, description: 'Conservar el trabajo sin autorizar esta operación.' },
-      { label: OPERATION_LABELS.decline, description: 'No autorizar esta operación.' }] }] };
+      { label: OPERATION_LABELS.decline, description: 'No autorizar esta operación.' }] }] },
+    brief: [`**Aprobación de operación:** ${headline}`, ...details,
+      'Autoriza solo esta operación; los permisos nativos de las herramientas siguen aplicando.'].join('\n\n') };
 }
 
 /** Native policy bridge. It selects guarded runner operations; it never executes commands. */
@@ -184,7 +204,8 @@ export class AdaptiveNative {
     if (!entry) return record?.version === 2 && ['prepared', 'pending', 'answered'].includes(record.state)
       ? { ...this.runner.status(parent), state: 'blocked', reason: 'Interrupted native question is not consent. Its unresolved outcome remains fenced.' } : undefined;
     return { ...this.runner.status(parent), ...(entry.state !== 'active' ? { state: entry.state } : {}),
-      ...(entry.state === 'question-ready' ? { question: structuredClone(entry.record!.slot.args) } : {}),
+      ...(entry.state === 'question-ready' ? { question: structuredClone(entry.record!.slot.args),
+        ...(entry.record!.slot.brief ? { questionBrief: entry.record!.slot.brief } : {}) } : {}),
       ...(entry.reason ? { reason: entry.reason } : {}), nativePolicy: structuredClone(entry.policy),
       ...(entry.state === 'await-contract' ? { clarificationAnswers: structuredClone(entry.policy.questions.at(-1)?.answer) } : {}) };
   }
@@ -270,10 +291,10 @@ export class AdaptiveNative {
           entry.policy = previous.policy;
         }
         if (draft.productQuestions.length) {
-          const questions = openQuestions(input.questions ?? draft.productQuestions.map(question => ({ question, why: 'Resolve the product decision before immutable admission.', options: [] })));
+          const questions = openQuestions(input.questions ?? draft.productQuestions.map(question => ({ question, why: DEFAULT_PRODUCT_WHY, options: [] })));
           if (!isDeepStrictEqual(questions.map(question => question.question), draft.productQuestions)) throw new Error('Native product questions must cover the complete draft question set.');
           // Mode is the only missing preference that must be asked; genuine product questions follow it.
-          if (entry.policy.answers.mode) return this.#ask(entry, 'product', adaptiveQuestionsEnvelope(questions, 'pending'));
+          if (entry.policy.answers.mode) return this.#ask(entry, 'product', productEnvelope(questions));
         }
       } else {
         if (!saved) throw new Error('Restore the durable native run before proposing an operation.');
@@ -291,18 +312,18 @@ export class AdaptiveNative {
   async #next(entry: Entry): Promise<unknown> {
     if (!entry.policy.answers.mode) {
       const mode = questionEnvelope().questions.find(question => question.header === 'Modo')!;
-      return this.#ask(entry, 'mode', { questions: [mode] });
+      return this.#ask(entry, 'mode', { args: { questions: [mode] } });
     }
     if (entry.draft?.productQuestions.length) {
-      const questions = openQuestions(entry.operation.args.questions ?? entry.draft.productQuestions.map(question => ({ question, why: 'Resolve the product decision before immutable admission.', options: [] })));
-      return this.#ask(entry, 'product', adaptiveQuestionsEnvelope(questions, 'pending'));
+      const questions = openQuestions(entry.operation.args.questions ?? entry.draft.productQuestions.map(question => ({ question, why: DEFAULT_PRODUCT_WHY, options: [] })));
+      return this.#ask(entry, 'product', productEnvelope(questions));
     }
     if (entry.operation.kind === 'questions') {
       const status = this.runner.status(entry.runtime.sessionID);
       if (!('productQuestions' in status) || !status.productQuestions) throw new Error('No actual actor questions are pending.');
       const pending = status.productQuestions;
       if (entry.operation.args.receiptID !== pending.receiptID || entry.operation.args.callID !== pending.callID) throw new Error('Question receipt or actual native actor call differs.');
-      return this.#ask(entry, 'product', adaptiveQuestionsEnvelope(pending.questions, 'pending'));
+      return this.#ask(entry, 'product', productEnvelope(pending.questions));
     }
     if (entry.policy.answers.mode === 'interactive')
       return this.#ask(entry, 'operation', operationApprovalEnvelope(entry.operation, entry.draft ?? this.#heldContract(entry)));
@@ -316,9 +337,9 @@ export class AdaptiveNative {
     const source = ['transfer', 'transfer-recovery'].includes(entry.operation.kind) ? String(entry.operation.args.sourceSessionID) : entry.runtime.sessionID;
     try { return this.store.read(source)?.data.contract; } catch { return undefined; }
   }
-  #ask(entry: Entry, purpose: AdaptiveQuestionBinding['purpose'], envelope: QuestionEnvelope): unknown {
+  #ask(entry: Entry, purpose: AdaptiveQuestionBinding['purpose'], envelope: BriefedEnvelope): unknown {
     const parent = entry.runtime.sessionID, old = this.questions.read(parent), nonce = randomUUID();
-    const args = structuredClone(envelope);
+    const args = structuredClone(envelope.args);
     args.questions[0]!.question = args.questions[0]!.question.replace(' [MDD adaptive pending]', '') + ` [MDD adaptive ${nonce}]`;
     const generation = this.#binding(entry.operation, entry.runtime);
     const record: QuestionRecord = { version: 2, parent, sequence: (old?.sequence ?? -1) + 1,
@@ -328,7 +349,7 @@ export class AdaptiveNative {
       ...(entry.userMessageID ? { userMessageID: entry.userMessageID } : {}),
       adaptive: { directory: entry.runtime.directory, worktree: entry.runtime.worktree, nonce, purpose,
         operation: structuredClone(entry.operation), ...(generation ? { generation } : {}) },
-      state: 'prepared', slot: { kind: 'adaptive', args }, clarifications: [], deferred: [], clarificationAnswers: [],
+      state: 'prepared', slot: { kind: 'adaptive', args, ...(envelope.brief ? { brief: envelope.brief } : {}) }, clarifications: [], deferred: [], clarificationAnswers: [],
       ...(old?.callID ? { retiredCalls: [...(old.retiredCalls ?? []), old.callID] } : {}) };
     this.questions.write(parent, record); entry.record = record; entry.state = 'question-ready';
     if (['mode', 'operation'].includes(purpose) && ['transfer', 'transfer-recovery'].includes(entry.operation.kind))

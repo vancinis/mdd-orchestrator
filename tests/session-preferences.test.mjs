@@ -207,7 +207,7 @@ for (const changed of [false, true]) test(`PF-1 P1: fresh-start error restores p
   if (changed) assert.doesNotMatch(failed.notice ?? '', /planned run is ready/i);
   assert.deepEqual(f.store.read(f.runtime), choices);
   const confirmation = await gate.changeRequest({ kind: 'rerun', userText: 'Redo the current objective.' }, f.runtime, 'redo');
-  assert.ok(confirmation.question.questions[0].question.includes(requirements), 'intake and runner retain the same objective');
+  assert.ok(confirmation.questionBrief.includes(`> ${requirements}`), 'intake and runner retain the same objective');
 });
 
 test('recovered transfer material change uses target defaults rather than inherited held choices', async t => {

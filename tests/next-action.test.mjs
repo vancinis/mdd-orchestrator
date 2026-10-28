@@ -87,6 +87,18 @@ test('next action: a pending question outranks everything the run could otherwis
   const action = nextAction({ state: 'ready', question, task, mode: 'delegate' });
   assert.equal(action.tool, 'question');
   assert.deepEqual(action.args, question);
+  assert.doesNotMatch(action.why, /questionBrief/, 'no brief, nothing to write first');
+});
+
+// The form cannot scroll, so the detail of a question travels as questionBrief. The user reads it
+// only if the coordinator writes it in the chat before asking, so the next action says so first.
+test('next action: a question brief is written in the chat before the exact question', () => {
+  const fixed = nextAction({ state: 'question-ready', question, questionBrief: '**Razón:** Contenida.' });
+  assert.deepEqual(fixed.args, question, 'the brief never becomes part of the native arguments');
+  assert.match(fixed.why, /^A native question is pending\. First write questionBrief in the chat, in this same turn and exactly as it is/);
+  const internal = nextAction({ lane: 'adaptive-native-protocol-internal', state: 'question-ready', question, questionBriefRef: { kind: 'detail', args: { cursor: 'held:0' } } });
+  assert.deepEqual(internal.args, question);
+  assert.match(internal.why, /^First read questionBriefRef with the detail operation, reassemble its JSON-text pages/);
 });
 
 test('next action: review resolves uncertainties first and pause never advances automatically', () => {

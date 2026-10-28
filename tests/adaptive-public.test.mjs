@@ -364,7 +364,9 @@ test('AL05c public: an earlier objective is never admitted on an unrelated curre
     let status = await f.send('entry', { contract: draft });
     assert.equal(status.state, 'question-ready');
     assert.equal(status.question.questions[0].header, 'Pedido anterior');
-    assert.match(status.question.questions[0].question, /Replace only the bounded source\./);
+    assert.match(status.questionBrief, /^\*\*Pedido anterior, tal como lo escribiste:\*\*\n> Replace only the bounded source\./);
+    assert.equal(status.next.present, 'questionBrief');
+    assert.match(status.nextAction.why, /First write questionBrief in the chat/);
     assert.equal(f.store.read(f.sessionID), undefined, 'nothing is admitted before the native answer');
     status = await f.answer(status, [[label]]);
     if (!admitted) {

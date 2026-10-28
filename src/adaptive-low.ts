@@ -19,6 +19,7 @@ import type { OpenQuestion } from './open-questions.js';
 import { validateQuestionRecord } from './question-checkpoint.js';
 import type { QuestionRecord } from './question-checkpoint.js';
 import type { QuestionEnvelope } from './preflight.js';
+import { WHY_PREFIX, whyBrief } from './question-brief.js';
 
 export type AdaptiveActor = 'mdd-explore' | 'mdd-risk' | 'mdd-plan' | 'mdd-apply' | 'mdd-verify' | ContinuationActor;
 type Scope = { complete: true; reads: string[]; writes: string[] };
@@ -76,24 +77,38 @@ export type AdaptiveData = {
 };
 
 /**
- * The fixed text around a product question, which the user reads. The legacy frame is what records
- * written before it was Spanish carry; a restore compares against either, never a mix.
+ * The fixed text around a product question, which the user reads. The current frame asks only the
+ * question: why it matters is in the chat brief, because the form cannot scroll. The earlier
+ * Spanish frame put the why inside the question, and the legacy one was English. Records keep the
+ * frame they were issued with, so a restore compares against each of them, never a mix.
  */
-const PRODUCT_FRAME = { header: 'Decisión de producto', why: 'Por qué importa: ',
-  pause: { label: 'Pausar', description: 'Dejar esta decisión de producto sin resolver.' } };
-const LEGACY_PRODUCT_FRAME = { header: 'Product decision', why: 'Why: ',
-  pause: { label: 'Pause', description: 'Leave this product decision unresolved.' } };
+const PRODUCT_FRAMES = {
+  current: { header: 'Decisión de producto', why: undefined,
+    pause: { label: 'Pausar', description: 'Dejar esta decisión de producto sin resolver.' } },
+  inline: { header: 'Decisión de producto', why: WHY_PREFIX,
+    pause: { label: 'Pausar', description: 'Dejar esta decisión de producto sin resolver.' } },
+  legacy: { header: 'Product decision', why: 'Why: ',
+    pause: { label: 'Pause', description: 'Leave this product decision unresolved.' } },
+} as const;
+export type ProductFrame = keyof typeof PRODUCT_FRAMES;
+export const PRODUCT_FRAME_NAMES = Object.freeze(Object.keys(PRODUCT_FRAMES) as ProductFrame[]);
 /** A product answer that leaves the decision open, in either language: it authorizes nothing. */
 export const UNRESOLVED_PRODUCT_ANSWER = /^(?:pause|decline|stop|pausar|rechazar|detener)$/i;
 
 /** Exact display mapping: every native option retains its original label and description. */
-export function adaptiveQuestionsEnvelope(questions: OpenQuestion[], nonce: string, legacy = false): QuestionEnvelope {
-  const frame = legacy ? LEGACY_PRODUCT_FRAME : PRODUCT_FRAME;
+export function adaptiveQuestionsEnvelope(questions: OpenQuestion[], nonce: string, name: ProductFrame = 'current'): QuestionEnvelope {
+  const frame = PRODUCT_FRAMES[name];
   return { questions: questions.map((question, index) => ({ header: frame.header,
-    question: `${question.question}\n${frame.why}${question.why}${index === 0 ? ` [MDD adaptive ${nonce}]` : ''}`,
+    question: `${question.question}${frame.why ? `\n${frame.why}${question.why}` : ''}${index === 0 ? ` [MDD adaptive ${nonce}]` : ''}`,
     multiple: question.multiple === true,
     options: question.options.length ? question.options.map(({ label, description }) => ({ label, description }))
       : [{ ...frame.pause }] })) };
+}
+
+/** Why each product question matters, written in the chat before the form that asks them. */
+export function adaptiveQuestionsBrief(questions: OpenQuestion[]): string | undefined {
+  return whyBrief(questions.map((question, index) => ({ label: questions.length > 1 ? `Decisión de producto ${index + 1}` : 'Decisión de producto',
+    question: question.question, why: question.why })));
 }
 const RESTORE = Symbol('validated adaptive data');
 
@@ -665,7 +680,7 @@ export class AdaptiveLow {
     if (!pending || pending.receiptID !== receiptID || native.version !== 2 || native.state !== 'answered' ||
         native.adaptive?.purpose !== 'product' || native.adaptive.operation.kind !== 'questions' ||
         native.adaptive.operation.args.receiptID !== receiptID || native.adaptive.operation.args.callID !== pending.callID ||
-        ![false, true].some(legacy => isDeepStrictEqual(native.slot.args, adaptiveQuestionsEnvelope(pending.questions, native.adaptive!.nonce, legacy))) ||
+        !PRODUCT_FRAME_NAMES.some(frame => isDeepStrictEqual(native.slot.args, adaptiveQuestionsEnvelope(pending.questions, native.adaptive!.nonce, frame))) ||
         !native.answer || native.answer.some((answers, index) => !answers.length ||
           answers.some(answer => UNRESOLVED_PRODUCT_ANSWER.test(answer.trim()) || !pending.questions[index]!.options.some(option => option.label === answer))))
       throw new Error('Product answers require the exact actual actor receipt and complete native selections; free text or pause leaves questions unresolved.');

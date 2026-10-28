@@ -14,6 +14,8 @@ import { adaptiveTransferRequest } from './adaptive-transfer.js';
 
 const REQUEST_BYTES = 160000;
 const PAGE_CHARS = 6000;
+/** A question brief up to this size ships inline next to the question; a larger one is paged. */
+const QUESTION_BRIEF_INLINE_BYTES = 12000;
 const specs = {
   // The host binds the user message from the actual caller; a supplied messageID is a checked assertion.
   entry: { required: ['contract'], optional: ['messageID', 'questions'] },
@@ -129,7 +131,8 @@ export const ENTRY_GUIDE = Object.freeze({
     'Each assignment needs source or check obligations. complexity or impact medium/high freezes the medium/high stages.',
     'Mark a scenario evidence:"external" only when it is observable solely outside this workspace (device, staging/production, live service, real worker or a person); evidence then reports it as external (pending), never as a gap.',
     'Ask productQuestions only for decisions the repository cannot answer. Read inputRef for complete definitions.',
-    'The user reads acceptance.goal, exclusions and productQuestions, and a select purpose, escalate rationale and close limits, in the native approval and questions: write them in Spanish, in complete sentences with ordinary spacing and no abbreviations. No field has a size budget of its own, so never compress one to fit.',
+    'The user reads acceptance.goal, exclusions and productQuestions, and a select purpose, escalate rationale and close limits, in the questionBrief MDD publishes with each native approval and question: write them in Spanish, in complete sentences with ordinary spacing and no abbreviations. No field has a size budget of its own, so never compress one to fit.',
+    'The native form cannot scroll: a product question is one direct sentence, its why carries the context (MDD shows it in the chat brief, not in the form) and each option description is one short sentence.',
   ],
 });
 
@@ -348,8 +351,14 @@ export class AdaptiveProtocol {
       const question = status.question;
       if (Buffer.byteLength(JSON.stringify(question)) <= 16000) projection.question = question;
       else projection.questionRef = this.#reference(held, 'question', question);
+      // The context the short form leaves out. A long request makes it long, so past its inline
+      // share it travels like a long question: whole, behind a paged reference.
+      const brief = typeof status.questionBrief === 'string' ? status.questionBrief : undefined;
+      if (brief && Buffer.byteLength(JSON.stringify(brief)) <= QUESTION_BRIEF_INLINE_BYTES) projection.questionBrief = brief;
+      else if (brief) projection.questionBriefRef = this.#reference(held, 'questionBrief', brief);
       if (snapshot.proposal) projection.proposedOperation = this.#reference(held, 'operation', snapshot.proposal);
-      projection.next = { native: 'question', source: projection.question ? 'question' : 'questionRef', exact: true };
+      projection.next = { native: 'question', source: projection.question ? 'question' : 'questionRef', exact: true,
+        ...(brief ? { present: projection.questionBrief ? 'questionBrief' : 'questionBriefRef' } : {}) };
     } else if (status.task) {
       projection.task = status.task; projection.next = { native: 'task', source: 'task', exact: true };
     } else if (state === 'await-selection' && handle) {
@@ -457,6 +466,10 @@ export class AdaptiveProtocol {
       if (Buffer.byteLength(JSON.stringify(projection)) > budget && data?.completion) {
         projection.completion = { outcome: data.completion.outcome, limits: data.completion.limits.length,
           limitsRef: this.#reference(held, 'completion', data.completion) };
+      }
+      if (Buffer.byteLength(JSON.stringify(projection)) > budget && typeof projection.questionBrief === 'string') {
+        projection.questionBriefRef = this.#reference(held, 'questionBrief', projection.questionBrief); delete projection.questionBrief;
+        projection.next = { ...(projection.next as Record<string, unknown>), present: 'questionBriefRef' };
       }
       if (Buffer.byteLength(JSON.stringify(projection)) > budget) throw new Error('Native protocol descriptor exceeds its bounded status budget.');
     }

@@ -57,8 +57,10 @@ export type QuestionRecord = {
   /**
    * `fields` counts the leading preflight-field questions of a preflight envelope; the questions
    * after them are clarifications (startup doubts and the note). Absent means all are fields.
+   * `brief` is the context the form leaves out, which the coordinator writes in the chat right
+   * before asking: OpenCode's form cannot scroll, so a long question hid its own options.
    */
-  slot: { kind: Kind; phase?: Phase; requirements?: string; fields?: number; args: QuestionEnvelope };
+  slot: { kind: Kind; phase?: Phase; requirements?: string; fields?: number; args: QuestionEnvelope; brief?: string };
   clarifications: Clarification[]; deferred: Clarification[];
   clarificationAnswers: { question: string; answer: string; phase: Phase; disposition: 'answered' | 'deferred' }[];
   callID?: string; answer?: string[][];
@@ -123,7 +125,8 @@ export function validateQuestionRecord(value: unknown): QuestionRecord {
       !Number.isSafeInteger(item.sequence) || (item.sequence as number) < 0 ||
       Buffer.byteLength(JSON.stringify(value) ?? '') > QUESTION_CHECKPOINT_BYTES ||
       !['prepared', 'pending', 'answered', 'cancelled', 'settled', 'withdrawn'].includes(String(item.state))) throw new ValidationError('Invalid native question record.');
-  const slot = objectWithKeys(item.slot, 'native question slot', ['kind', 'phase', 'requirements', 'fields', 'args']);
+  const slot = objectWithKeys(item.slot, 'native question slot', ['kind', 'phase', 'requirements', 'fields', 'args', 'brief']);
+  if (slot.brief !== undefined && !text(slot.brief)) throw new ValidationError('Invalid native question brief.');
   if (!text(item.requirements) || (item.userMessageID !== undefined && !text(item.userMessageID, 256)) ||
       !isDeepStrictEqual(parsePartialAnswers(item.known), item.known)) throw new ValidationError('Invalid native question objective.');
   if (item.context !== undefined) {
