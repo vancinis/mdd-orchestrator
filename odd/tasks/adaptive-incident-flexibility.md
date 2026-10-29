@@ -10,7 +10,7 @@ Fix the reproducible MDD contract contradictions found in the authorized `Mover-
 - Adaptive Apply rejects a presentation field accepted by the canonical Apply report reader. Structured planning prompts mix whole-plan obligations with single-assignment wording.
 - Preserve held acceptance/source bindings, actor/run/call identity validation, edit scopes, parent-owned command execution and truthful failed-check history.
 - The held-binding rejection lacks its original structured payload. The separate tool-input serialization failure is not proven to originate in MDD. Neither warrants weakening a guard.
-- Only this MDD source checkout may change. The incident repository, journals, installed package and global configuration stay untouched. No remote operations, publication or live recovery are authorized.
+- Only this MDD source checkout may change. The incident repository, journals, installed package and global configuration stay untouched. The user subsequently explicitly authorized fetching `origin/main`, integrating these commits and pushing to `main` using configured Git HTTPS authentication without force. No live recovery or installation is authorized.
 
 ## Task and acceptance criteria
 
@@ -62,10 +62,11 @@ Protective coverage also passed: `AL-04c: invalid remaining authority pauses the
 ## Delivery and recovery
 
 - Forecast: approximately 120–250 authored changed lines plus this tracking document; advisory, not a hard cap.
-- Strategy: `ask-on-risk`; ask about delivery slices if the forecast or measured work exceeds approximately 400 authored lines. No push or PR requested.
+- Strategy: `ask-on-risk`; ask about delivery slices if the forecast or measured work exceeds approximately 400 authored lines. The user explicitly requested publication to `main`; no PR was requested.
 - Work-unit boundary: one coherent incident-friction fix, including behavior, tests and packaged guidance.
 - Rollback boundary: this task's changes only; no installed/live state is changed.
 - Running authored lines: behavior/guidance/tests total 125 additions + 14 deletions = 139 changed lines, plus the tracking document. Generated output is excluded; total remains below the approximately 400-line delivery heuristic.
 - RDD: off, decided by clone-local preference; ordinary checks apply, review remains disabled/unmanaged.
+- Publication check: authorized fetch found `origin/main` already an ancestor of the two local work-unit commits, with zero remote-only commits. Integration can fast-forward without source changes. Publication preserves the partial full-suite result above; it is not a claim that all checks passed.
 - Engram mirror: pending; this worker's required save to the resolved `mdd-orchestrator` project also failed with `session_project_mismatch`. No project switch or invented session was attempted.
-- Next step: resolve full-suite timing reliability if a fully green aggregate run is required. Installing this source into the user's active MDD is a separate operation and has not occurred. No push or PR was performed.
+- Next step: publish the authorized fast-forward to `main` and confirm its remote identity. Full-suite timing reliability remains unresolved. Installing this source into the user's active MDD is a separate operation and has not occurred.
