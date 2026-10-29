@@ -7,6 +7,13 @@ Verify reports commands and their outcomes. MDD validates the **consistency of a
 evidence**, not independent execution attestation, semantic correctness or independent review.
 Model-backed E2E is pending.
 
+**Guards are off by default.** Every refusal of a task, question or child tool that MDD did not
+issue, every pinned phase-actor tool profile and every worker-fence check described below applies
+only with `guards.enabled: true` (strict mode). By default MDD keeps the exact protocol for what it
+issued — dispatch handles, full prompts it composed, its own questions, security audits and
+Judgment Day — and lets everything else run untouched. See
+[Free and strict mode](configuration.md#free-and-strict-mode).
+
 ## Bound artifact reader
 
 Singular dispatched phase actors can call `mdd_artifact_read` for bounded pages of their run's
@@ -1843,15 +1850,29 @@ A process killed mid-write leaves its `wx` lock behind, which would otherwise ma
 write to that name fail with `EEXIST` permanently. A lock untouched for 60 seconds is therefore
 reclaimed, since no local write here takes anywhere near that long.
 
-Inspection bounds are per subject, because they measure unrelated things. Message history stays
-at the requested 100-message page. Reaching that limit no longer fails: a conversation longer
-than one page is what a finished route looks like, and refusing to read it stopped intake,
-approvals and the PR-body tool exactly when a run had produced the most. What a full page cannot
-do is prove something about the whole conversation, so the two readings that need that say so
-themselves. Setup recovery reports no pending objective rather than guessing at one, and question
-consent accepts only the running call of the current message, which is a tighter correlation than
-the full scan it replaces. Correlating the actual caller and the latest native user text is
-unaffected either way, because both live at the tail. Agent registries
+Inspection bounds are per subject, because they measure unrelated things. Message history is read
+as a 100-message page only where the tail is all that matters — a child's last message, the
+current caller. Every proof about the conversation reads all of it: who the user is, which
+question call is being answered, whether a dispatched task stopped, setup recovery, the security
+lineage, and above all the adaptive idle proof that retiring, admitting or transferring a run
+needs. Those proofs used to read the page and refuse once it was full, so a conversation past a
+hundred messages — a few routes' worth — failed with "Complete native idle history is
+unavailable; unknown children remain fenced" on every later request, permanently. A page that is
+not full already is the whole conversation, so short conversations still cost one read. Intake
+still searches recent messages first and reaches older ones only when nothing recent matches, so
+reading further back finds the user's request without turning a unique recent match ambiguous.
+
+A compaction no longer refuses the idle proof either. On OpenCode 2 the readable context starts at
+the last compaction, but the host compacts only at a step boundary of the parent, where every
+earlier call already had its result, and coordinator dispatches are foreground-only. What can
+still be live is exactly what the host reports running, so any session the host reports not idle
+whose parent is this conversation refuses, whether or not the readable history still names it.
+
+On OpenCode 2 a session no status event has reached this process for — the ordinary state of a
+child that finished before OpenCode last restarted — is read from the host's own record: idle at
+or after its last update is idle, anything else stays unknown. It used to read as unknown for the
+life of the process, which fenced every later idle proof and kept a failed dispatch uncertain.
+Agent registries
 (2,000), resolved permission rulesets (4,000) and message parts (1,000) are sized for real
 installations, where many agents and skill directories routinely resolve to well over a hundred
 entries each. Every overflow names its own subject, so a bound that is reached is diagnosable

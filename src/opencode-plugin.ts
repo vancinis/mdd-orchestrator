@@ -4,9 +4,10 @@ import { Plugin as V2Plugin } from '@opencode/plugin';
 import { setupV2 } from './opencode-v2.js';
 import { isDeepStrictEqual } from 'node:util';
 import { createHash, randomUUID } from 'node:crypto';
-import { boundedText, movedMessage, nonemptyText, PhaseRunner } from './phase-runner.js';
+import { ACTOR_INSTRUCTIONS_MARKER, boundedText, DISPATCH_HANDLE_PREFIX, movedMessage, nonemptyText, PhaseRunner } from './phase-runner.js';
+import { FREE_ADAPT_ROLE, STRICT_ADAPT_ROLE, STRICT_COORDINATOR } from './guards.js';
 import type { Inspect, Liveness, Runtime, TaskCall } from './phase-runner.js';
-import { DEFAULT_AUTOMATIC_CORRECTIONS, freezeProfile, setupDiagnostic } from './settings.js';
+import { DEFAULT_AUTOMATIC_CORRECTIONS, freeMode, freezeProfile, setupDiagnostic } from './settings.js';
 import { loadGlobalSettings } from './global-settings.js';
 import { installationPaths } from './installation-paths.js';
 import { applyModelOverrides } from './native-models.js';
@@ -47,7 +48,7 @@ import type { Phase } from './policy.js';
 import { recordSession } from './session-log.js';
 import { staleAssets } from './project-assets.js';
 import { visualTitle, presentationSettings } from './visual-ux.js';
-import { JD_JUDGES, JD_FIX, JD_INSPECT, isJudge, judgmentTask, inspectJudgmentTarget } from './judgment-day.js';
+import { JD_JUDGES, JD_FIX, JD_INSPECT, isJudge, isJudgmentActor, judgmentTask, inspectJudgmentTarget } from './judgment-day.js';
 
 /**
  * Every MDD tool answers through here, so the derived next call and the payload budget are
@@ -149,7 +150,7 @@ const PINNED_AGENTS: readonly string[] = Object.freeze([...PHASE_AGENTS, RISK_AG
  * dispatches phases, and its own work is not a phase. `mdd-risk` gets the same restricted profile,
  * so dispatching it adds no capability a phase actor does not already have.
  */
-export function pinPhaseAgents(config: { agent?: Record<string, Record<string, unknown>> }): void {
+export function pinPhaseAgents(config: { agent?: Record<string, Record<string, unknown>> }, free = false): void {
   config.agent ??= {};
   config.agent[SECURITY_AGENT] = { ...config.agent[SECURITY_AGENT],
     permission: { '*': 'deny', [CHECK_TOOL]: 'allow' }, tools: { '*': false, [CHECK_TOOL]: true } };
@@ -160,7 +161,9 @@ export function pinPhaseAgents(config: { agent?: Record<string, Record<string, u
     // it. The checker reads nothing and records nothing; it only tells the actor whether the document it
     // is about to return can be read. That question has to be answerable here, because the
     // session that can still fix the document is gone by the time MDD validates it.
-    agent.tools = { ...(agent.tools as Record<string, boolean> | undefined), task: false, skill: false, [CHECK_TOOL]: true, [ARTIFACT_READ_TOOL]: true };
+    // With guards off a phase actor keeps delegation and skills like any other agent.
+    agent.tools = { ...(agent.tools as Record<string, boolean> | undefined), ...(free ? {} : { task: false, skill: false }),
+      [CHECK_TOOL]: true, [ARTIFACT_READ_TOOL]: true };
     config.agent[name] = agent;
   }
   for (const name of ['general', 'explore']) config.agent[name] = { ...config.agent[name],
@@ -168,9 +171,31 @@ export function pinPhaseAgents(config: { agent?: Record<string, Record<string, u
 }
 
 /**
- * Inspection bounds are per subject. History stays tied to the requested page size, while
- * agent registries and resolved permission rulesets scale with the user's installed skills
- * and agents, so a history-sized cap would reject ordinary real installations.
+ * The coordinator definition on disk is the free one. With guards on, its strict rules are
+ * appended here, where the host composes the agent. A coordinator the host did not load from its
+ * definition has no prompt to extend and is left as it is.
+ */
+export function strictCoordinator(config: { agent?: Record<string, Record<string, unknown>> }): void {
+  const agent = config.agent?.[COORDINATOR];
+  if (agent && typeof agent.prompt === 'string' && !agent.prompt.includes(STRICT_COORDINATOR.trim()))
+    config.agent![COORDINATOR] = { ...agent, prompt: agent.prompt + STRICT_COORDINATOR };
+}
+
+/**
+ * With guards off, the tasks MDD routes through its bookkeeping are only the ones it issued: a
+ * dispatch handle (or the transcript note standing in for one), or a full prompt MDD composed,
+ * which always carries its by-value actor instructions. Everything else the coordinator wrote.
+ */
+export function mddIssuedTask(args: unknown): boolean {
+  const prompt = args && typeof args === 'object' && !Array.isArray(args) ? (args as Record<string, unknown>).prompt : undefined;
+  return typeof prompt === 'string' && (prompt.startsWith(DISPATCH_HANDLE_PREFIX) || prompt.includes(ACTOR_INSTRUCTIONS_MARKER));
+}
+
+/**
+ * Inspection bounds are per subject. HISTORY_MAX is the tail page that correlates the current
+ * caller, never a ceiling on the conversation: proofs that span the conversation read all of it
+ * (`conversation` in the inspector). Agent registries and resolved permission rulesets scale with
+ * the user's installed skills and agents, so a history-sized cap would reject real installations.
  */
 export const HISTORY_MAX = 100;
 export const AGENTS_MAX = 2000;
@@ -223,17 +248,32 @@ export function createInspector(input: PluginInput, timeout = 5000, now: () => n
     return record(response.data);
   };
   /**
-   * A full page means the conversation is longer than one page, not that this read failed.
-   * Correlating the actual caller or the exact running question only ever needs the tail, so a
-   * full page is returned as it is: failing there used to make every MDD tool stop working once a
-   * real run had produced a hundred messages, which is an ordinary length for a completed route.
-   * Only proof that has to span the whole conversation needs completeness, and it asks for it.
+   * The tail page. A full page means the conversation is longer than one page, not that this read
+   * failed. Reading the last message of a child only ever needs the tail, so a full page is
+   * returned as it is: failing there used to make every MDD tool stop working once a real run had
+   * produced a hundred messages, which is an ordinary length for a completed route.
    */
   const messages = async (id: string, directory: string) => {
     const response = await readSdk(signal => input.client.session.messages({
-      path: { id }, query: { directory, limit: 100 }, signal, throwOnError: true,
+      path: { id }, query: { directory, limit: HISTORY_MAX }, signal, throwOnError: true,
     }), timeout);
     return list(response.data, 'message history', HISTORY_MAX);
+  };
+  /**
+   * The whole readable conversation, for every proof about it: who the user is, which call is
+   * being answered, and whether anything is still running. Those proofs used to read the tail page
+   * and refuse once it was full, so a conversation past a hundred messages — a few routes' worth —
+   * could never prove itself idle again, nor start, transfer or retire another run in it. The host
+   * already holds this history; reading all of it is the only way to prove something about all of
+   * it. A page that is not full already is the whole conversation, so short ones cost one read.
+   */
+  const conversation = async (id: string, directory: string) => {
+    const tail = await messages(id, directory);
+    if (tail.length < HISTORY_MAX) return tail;
+    const response = await readSdk(signal => input.client.session.messages({
+      path: { id }, query: { directory }, signal, throwOnError: true,
+    }), timeout);
+    return list(response.data, 'message history', Number.POSITIVE_INFINITY);
   };
   /** The installed SDK exposes GET /session/{id}/message/{messageID}; no tail scan proves an older ID. */
   const exactMessage = async (sessionID: string, messageID: string, directory: string) => {
@@ -266,10 +306,10 @@ export function createInspector(input: PluginInput, timeout = 5000, now: () => n
           typeof output.output === 'string' && output.output.startsWith(`<task id="${completed}" state="completed">`) && TASK_ENVELOPE.test(output.output.trim()))
         return { verdict: 'stopped', child: completed, detail: 'The exact progress-bound native child returned its completed foreground result.' };
     }
-    const history = await messages(runtime.sessionID, runtime.directory);
+    const history = await conversation(runtime.sessionID, runtime.directory);
     const matches = history.flatMap(message => list(message.parts, 'message parts', PARTS_MAX))
       .filter(part => part.type === 'tool' && part.tool === 'task' && part.callID === call.callID);
-    if (matches.length !== 1) return { verdict: 'unknown', detail: 'The dispatched task is not uniquely visible in the recent parent history.' };
+    if (matches.length !== 1) return { verdict: 'unknown', detail: 'The dispatched task is not uniquely visible in the readable parent history.' };
     const state = record(matches[0]!.state, 'task state');
     if (state.status === 'completed' && typeof state.output === 'string' && TASK_ENVELOPE.test(state.output.trim())) return { verdict: 'stopped', detail: 'The task returned its completed result.' };
     const metadata = state.metadata === undefined ? {} : record(state.metadata, 'task metadata');
@@ -367,7 +407,7 @@ export function createInspector(input: PluginInput, timeout = 5000, now: () => n
   };
   const securityTaskPart = async (binding: SecurityBinding, call: { callID: string }, childID?: string) => {
     await inspector.parent(binding.runtime);
-    const history = await messages(binding.runtime.sessionID, binding.runtime.directory);
+    const history = await conversation(binding.runtime.sessionID, binding.runtime.directory);
     const latestUser = history.findLast(message => record(message.info).role === 'user');
     if (!latestUser || record(latestUser.info).id !== binding.userMessageID ||
         authoredNativeText(list(latestUser.parts, 'user parts', PARTS_MAX).filter(part => part.type === 'text'), binding.runtime.sessionID, binding.userMessageID) !== binding.userText)
@@ -432,7 +472,8 @@ export function createInspector(input: PluginInput, timeout = 5000, now: () => n
     },
     async securityCaller(runtime, messageID, userText) {
       await inspector.parent(runtime);
-      const history = await messages(runtime.sessionID, runtime.directory);
+      // The latest user turn can sit past the tail page in a long turn; current controls cannot.
+      const history = await conversation(runtime.sessionID, runtime.directory);
       const info = record(history.at(-1)?.info);
       const location = record(info.path);
       if (info.id !== messageID || info.role !== 'assistant' || info.agent !== COORDINATOR ||
@@ -441,7 +482,7 @@ export function createInspector(input: PluginInput, timeout = 5000, now: () => n
       const latestUser = history.findLast(message => record(message.info).role === 'user');
       const user = record(latestUser?.info);
       if (authoredNativeText(list(latestUser?.parts, 'user parts', PARTS_MAX).filter(part => part.type === 'text'), runtime.sessionID, String(user.id)) !== userText ||
-          history.some(message => list(message.parts, 'native control parts', PARTS_MAX).some(part => part.type === 'tool' &&
+          history.slice(-HISTORY_MAX).some(message => list(message.parts, 'native control parts', PARTS_MAX).some(part => part.type === 'tool' &&
             ['task', 'question', 'mdd_transfer', 'mdd_transfer_recover'].includes(String(part.tool)) && ['pending', 'running'].includes(String(record(part.state).status)))))
         throw new Error('Security request differs or a native control is pending.');
     },
@@ -465,7 +506,7 @@ export function createInspector(input: PluginInput, timeout = 5000, now: () => n
         security = parent.agent === SECURITY_AGENT;
         // Unrelated off-location histories are outside this adapter, not evidence of an audit.
         if (!security && parent.projectID === input.project.id && parent.directory === input.directory) {
-          security = (await messages(parentID, input.directory)).some(message => list(message.parts, 'native parent parts', PARTS_MAX).some(part => {
+          security = (await conversation(parentID, input.directory)).some(message => list(message.parts, 'native parent parts', PARTS_MAX).some(part => {
             if (part.type !== 'tool' || part.tool !== 'task') return false;
             const state = record(part.state);
             return state.input && typeof state.input === 'object' && record(state.input).subagent_type === SECURITY_AGENT &&
@@ -541,8 +582,7 @@ export function createInspector(input: PluginInput, timeout = 5000, now: () => n
       const state = record(statuses.data, 'session statuses')[runtime.sessionID];
       if (state !== undefined && record(state, 'target status').type !== 'idle') return 'running';
       const history = assistantMessageID ? [await exactMessage(runtime.sessionID, assistantMessageID, runtime.directory)]
-        : await messages(runtime.sessionID, runtime.directory);
-      if (!assistantMessageID && history.length >= HISTORY_MAX) throw new Error('Transfer liveness history is incomplete.');
+        : await conversation(runtime.sessionID, runtime.directory);
       if (assistantMessageID) {
         const info = record(history[0]!.info, 'transfer assistant message');
         const path = record(info.path, 'transfer assistant path');
@@ -611,17 +651,27 @@ export function createInspector(input: PluginInput, timeout = 5000, now: () => n
       if (info.role !== 'user' || authored === undefined || canonicalNativeText(authored) !== canonicalNativeText(objective))
         throw new Error('Archived fresh admission lacks its exact genuine native user request.');
     },
+    /**
+     * Positive proof that nothing this conversation started is still running. It reads the whole
+     * readable conversation, never a page: refusing a full page or a compaction made every
+     * conversation past a hundred messages, or summarized once, permanently unable to retire,
+     * admit or transfer a run, because the proof could no longer be made at all.
+     *
+     * A compaction is not a gap in that proof. The host compacts only at a step boundary of this
+     * parent, where every earlier call already had its result, and a coordinator dispatch is
+     * foreground-only, so its child had returned with it. What can still be live there is exactly
+     * what the host reports running, so every session the host reports not idle whose parent is
+     * this conversation refuses, whether or not the readable history still names it.
+     */
     async adaptiveTransferIdle(runtime, role, settledQuestionCallID) {
       await inspector.parent(runtime);
-      const history = await messages(runtime.sessionID, runtime.directory);
-      if (history.length >= HISTORY_MAX || history.some(message => record(message.info).summary === true ||
-          list(message.parts, 'adaptive idle parts', PARTS_MAX).some(part => part.type === 'compaction')))
-        throw new Error('Complete native idle history is unavailable; unknown children remain fenced.');
+      const history = await conversation(runtime.sessionID, runtime.directory);
       const statuses = await readSdk(signal => input.client.session.status({ query: { directory: runtime.directory }, signal, throwOnError: true }), timeout);
       const states = record(statuses.data, 'adaptive native statuses');
       if (role === 'source' && states[runtime.sessionID] !== undefined &&
           record(states[runtime.sessionID], 'adaptive source status').type !== 'idle')
         throw new Error('The source native parent is running or unknown, not idle.');
+      const named = new Set<string>();
       for (const message of history) for (const part of list(message.parts, 'adaptive native controls', PARTS_MAX)) {
         if (part.type !== 'tool' || !['task', 'question', 'mdd_adapt', 'mdd_transfer', 'mdd_transfer_recover'].includes(String(part.tool))) continue;
         const state = record(part.state, 'adaptive control state'), info = record(message.info, 'adaptive control author');
@@ -635,6 +685,7 @@ export function createInspector(input: PluginInput, timeout = 5000, now: () => n
         if (part.tool !== 'task') continue;
         const childID = record(state.metadata ?? {}, 'adaptive child metadata').sessionId;
         if (typeof childID !== 'string') throw new Error('Native task has an unknown child; transfer cannot infer termination.');
+        named.add(childID);
         const child = await session(childID, runtime.directory), childStatus = states[childID];
         if (child.parentID !== runtime.sessionID || child.directory !== runtime.directory ||
             childStatus !== undefined && record(childStatus, 'adaptive child status').type !== 'idle')
@@ -646,14 +697,19 @@ export function createInspector(input: PluginInput, timeout = 5000, now: () => n
               !['completed', 'error'].includes(String(record(item.state).status))))
           throw new Error('Native child termination is unknown; no age-based transfer release is allowed.');
       }
+      for (const [id, value] of Object.entries(states)) {
+        if (id === runtime.sessionID || named.has(id) || record(value, 'adaptive native status').type === 'idle') continue;
+        if ((await session(id, runtime.directory)).parentID === runtime.sessionID)
+          throw new Error('A native child of this conversation is running or unknown; transfer cannot infer termination.');
+      }
     },
     /**
      * Recovers the objective of a start that only failed because MDD was not set up yet. That is a
      * narrow, legacy shape: one completed `mdd_start` whose own output says it stopped at setup.
      *
      * Everything else is an ordinary conversation, not a fault. History that carries real work,
-     * an earlier successful start, another tool or a page that does not reach back far enough
-     * simply proves no pending setup, so recovery is unavailable and this returns nothing. It
+     * an earlier successful start, another tool or a compaction simply proves no pending setup,
+     * so recovery is unavailable and this returns nothing. It
      * used to throw instead, which made a second `mdd_start` in a working conversation fail with
      * an unreadable message and left `mdd_reset` with scope run promising a restart it could not
      * deliver. Nothing is lost by degrading: the objective of an ordinary start is proven by
@@ -661,10 +717,8 @@ export function createInspector(input: PluginInput, timeout = 5000, now: () => n
      */
     async setupPending(runtime, selected, messageID) {
       await inspector.parent(runtime);
-      const history = await messages(runtime.sessionID, runtime.directory);
+      const history = await conversation(runtime.sessionID, runtime.directory);
       if (messageID !== undefined && record(history.at(-1)?.info, 'caller message').id !== messageID) throw new Error('Setup recovery does not match the actual native caller message.');
-      // Proof has to span the whole conversation, so a page that is already full cannot carry it.
-      if (history.length >= HISTORY_MAX) return undefined;
       let candidates: Map<string, { requirements: string; userMessageID: string }>;
       try { candidates = setupOnlyStarts(history, runtime); } catch { return undefined; }
       const matches = [...candidates.values()].filter(item => selected === undefined || item.requirements === selected);
@@ -687,18 +741,13 @@ export function createInspector(input: PluginInput, timeout = 5000, now: () => n
         throw new Error(`MDD runs in a top-level ${COORDINATOR} conversation in this workspace.`);
       }
       if (tool !== 'question' || callID === undefined) return;
-      const history = await messages(runtime.sessionID, runtime.directory);
+      // Uniqueness is only proof across the whole conversation, so that is what is read.
+      const history = await conversation(runtime.sessionID, runtime.directory);
       const parts = history.flatMap(message => list(message.parts, 'message parts', PARTS_MAX)
         .filter(part => part.type === 'tool' && part.tool === tool && part.callID === callID)
         .map(part => ({ part, info: record(message.info, 'message') })));
       if (parts.length !== 1) throw new Error('The native question call is not uniquely readable.');
       const { part, info } = parts[0]!;
-      // A full page hides older messages, so being unique inside it proves nothing by itself. The
-      // call being answered is always the one the current message is running, and requiring
-      // exactly that is a tighter correlation than scanning a history that may be incomplete.
-      if (history.length >= HISTORY_MAX && record(history.at(-1)!.info, 'message').id !== info.id) {
-        throw new Error('The native question call is not the running call of the current message, and this incomplete history cannot prove consent.');
-      }
       const state = record(part.state, 'tool state');
       if (part.sessionID !== runtime.sessionID || part.messageID !== info.id || info.role !== 'assistant' ||
           state.status !== 'running' || !isDeepStrictEqual(state.input, args)) {
@@ -713,20 +762,29 @@ export function createInspector(input: PluginInput, timeout = 5000, now: () => n
      * and made it unstartable for the rest of the conversation. Reaching an earlier message is
      * still their own words, never the model's, and the fresh-start guard keeps a message that
      * already ran from running again. Identical texts are refused rather than picked between.
+     *
+     * The whole conversation is read, so neither the latest user turn nor an earlier objective can
+     * fall outside it. Recent messages are still searched first, exactly as when only they were
+     * readable, and older ones only when nothing recent matches: reaching further back finds the
+     * user's request instead of refusing it, without turning a recent unique match ambiguous.
      */
     async intake(runtime, requirements, messageID, scope = 'latest') {
       await inspector.parent(runtime);
-      const history = await messages(runtime.sessionID, runtime.directory);
+      const history = await conversation(runtime.sessionID, runtime.directory);
       const caller = history.at(-1);
       if (!caller || record(caller.info, 'caller message').id !== messageID || record(caller.info, 'caller message').role !== 'assistant') throw new Error('Start does not match the actual native caller message.');
-      const users = history.slice(0, -1).filter(message => record(message.info, 'message').role === 'user');
+      const isUser = (message: Record<string, unknown>) => record(message.info, 'message').role === 'user';
+      const users = history.slice(0, -1).filter(isUser);
+      const recentStart = Math.max(0, history.length - HISTORY_MAX);
+      const recentUsers = history.slice(recentStart, -1).filter(isUser), olderUsers = history.slice(0, recentStart).filter(isUser);
       if (scope === 'native-current' || scope === 'native-current-objective') {
         const info = record(caller.info), path = record(info.path);
         if (info.sessionID !== runtime.sessionID || info.agent !== COORDINATOR || info.error != null ||
             path.cwd !== runtime.directory || path.root !== runtime.worktree || info.parentID !== record(users.at(-1)?.info).id)
           throw new Error('The current native assistant caller does not belong to this coordinator, workspace and user turn.');
         const question = new QuestionCheckpointStore(mddDataRoot(runtime.directory)).read(runtime.sessionID);
-        for (const message of history) for (const part of list(message.parts, 'current native controls', PARTS_MAX)) {
+        // Current controls live at the end; the whole-conversation idle proof covers the rest.
+        for (const message of history.slice(recentStart)) for (const part of list(message.parts, 'current native controls', PARTS_MAX)) {
           if (part.type !== 'tool' || !['task', 'question', 'mdd_adapt', 'mdd_transfer', 'mdd_transfer_recover'].includes(String(part.tool))) continue;
           const state = record(part.state), author = record(message.info);
           if (!['pending', 'running'].includes(String(state.status))) continue;
@@ -739,7 +797,6 @@ export function createInspector(input: PluginInput, timeout = 5000, now: () => n
           if (!consumedQuestion) throw new Error('A current native control remains unsettled; no adaptive admission or transfer is authorized.');
         }
       }
-      const candidates = scope === 'objective' ? users : users.slice(-1);
       if (!users.length) throw new Error('No actual native user requirements found.');
       const canonicalRequirements = canonicalNativeText(requirements);
       const matching = (list_: typeof users) => list_.filter(user => {
@@ -750,19 +807,17 @@ export function createInspector(input: PluginInput, timeout = 5000, now: () => n
         try { candidate = authoredNativeText(parts, runtime.sessionID, String(info.id)); } catch { return false; }
         return candidate !== undefined && canonicalNativeText(candidate) === canonicalRequirements;
       });
-      let matches = matching(candidates);
       // Adaptive entry prefers the current turn; an earlier request ("si, confirmo" after it) is
       // still the user's own words, and the bridge asks fresh native confirmation before admitting it.
-      if (scope === 'native-current-objective' && !matches.length) matches = matching(users.slice(0, -1));
+      const latest = users.slice(-1), earlier = (list_: typeof users) => list_.filter(user => user !== latest[0]);
+      const tiers = scope === 'objective' ? [recentUsers, olderUsers]
+        : scope === 'native-current-objective' ? [latest, earlier(recentUsers), earlier(olderUsers)] : [latest];
+      let matches: typeof users = [];
+      for (const tier of tiers) if (!matches.length) matches = matching(tier);
       if (matches.length > 1) throw new Error('Several native user messages carry exactly this text; ask the user to restate the objective so the run binds to one message.');
       if (!matches.length) {
-        // A full page proves nothing about what came before it, so the honest answer is that the
-        // objective cannot be read here at all — not that it failed to match. Otherwise, the
-        // first offset where the latest authored user text actually differs turns "no match" into
-        // something the caller can act on instead of guessing what changed.
-        if (history.length >= HISTORY_MAX) {
-          throw new Error('The objective is outside the readable native history; ask the user to restate it so a recent message carries it.');
-        }
+        // The first offset where the latest authored user text actually differs turns "no match"
+        // into something the caller can act on instead of guessing what changed.
         let detail = '';
         const latestUser = users.at(-1);
         if (latestUser) {
@@ -785,7 +840,8 @@ export function createInspector(input: PluginInput, timeout = 5000, now: () => n
     /** The user turn the actual running coordinator message answers; read-only, never consent. */
     async currentUser(runtime, callerMessageID) {
       await inspector.parent(runtime);
-      const history = await messages(runtime.sessionID, runtime.directory);
+      // A long turn can push its own user message past the tail page; the conversation still has it.
+      const history = await conversation(runtime.sessionID, runtime.directory);
       const caller = history.at(-1);
       if (!caller || record(caller.info, 'caller message').id !== callerMessageID || record(caller.info, 'caller message').role !== 'assistant')
         throw new Error('Start does not match the actual native caller message.');
@@ -801,7 +857,7 @@ export function createInspector(input: PluginInput, timeout = 5000, now: () => n
      */
     async typed(runtime, text, messageID, after) {
       await inspector.parent(runtime);
-      const history = await messages(runtime.sessionID, runtime.directory);
+      const history = await conversation(runtime.sessionID, runtime.directory);
       const caller = history.at(-1);
       if (!caller || record(caller.info, 'caller message').id !== messageID || record(caller.info, 'caller message').role !== 'assistant')
         throw new Error('The answer does not come from the actual native caller message. Nothing was recorded.');
@@ -821,7 +877,7 @@ export function createInspector(input: PluginInput, timeout = 5000, now: () => n
       return boundedText(info.id, 'native user message ID', 256);
     },
     async questionInput(call: TaskCall) {
-      const history = await messages(call.sessionID, input.directory);
+      const history = await conversation(call.sessionID, input.directory);
       const matches = history.flatMap(message => list(message.parts, 'question identity', PARTS_MAX)
         .filter(part => part.type === 'tool' && part.tool === 'question' && part.callID === call.callID)
         .map(part => ({ part, info: record(message.info) })));
@@ -929,6 +985,8 @@ const plugin: Plugin = async input => {
   const inputProjectID = input.project.id;
   const settings = (() => { try { return loadGlobalSettings(); } catch { throw new Error(setupDiagnostic(installationPaths().ownedRoot).action); } })();
   const profile = freezeProfile(settings);
+  /** Guards off (the default): MDD keeps the bookkeeping of what it issued and refuses nothing else. */
+  const free = freeMode(settings);
   const inspector = createInspector(input);
   // Everything MDD persists locally is anchored at the repository, not the checkout a run happens
   // in. A linked git worktree is removed as soon as its task is done; anchored there, the dossier
@@ -944,6 +1002,7 @@ const plugin: Plugin = async input => {
     ...(settings.knowledge.enabled ? { knowledge: (runtime, selection, memory) => intake.resolveKnowledge(selection, runtime, memory) } : {}),
     workers: profile.workers,
     automaticCorrections: settings.verify?.automaticCorrections ?? DEFAULT_AUTOMATIC_CORRECTIONS,
+    ...(free ? { free: true } : {}),
     ...(workerHost ? { workerCapability: { phase: 'mdd-explore' as const, readOnly: true as const,
       ...(workerHost.applyEditing ? { applyEditing: true as const } : {}) } } : {}),
     // The runner passes the run's own checkout directory to these callbacks; MDD writes to the
@@ -1040,6 +1099,33 @@ const plugin: Plugin = async input => {
   const standaloneCalls = new Map<string, { args: NonNullable<ReturnType<typeof judgmentTask>>; settled: boolean }>();
   const standaloneFixes = new Set<string>();
   const standaloneKey = (sessionID: string, callID: string) => JSON.stringify([sessionID, callID]);
+  /** Guards off: native calls MDD let run untouched, so their results and errors skip MDD too. */
+  const freeCalls = new Set<string>();
+  /**
+   * A task MDD neither issued nor has to account for: not its dispatch, not a security audit and
+   * not a Judgment Day actor, which keep their own exact protocols because they were asked for.
+   */
+  const foreignTask = (sessionID: string, args: unknown): boolean => {
+    const task = args && typeof args === 'object' && !Array.isArray(args) ? args as Record<string, unknown> : {};
+    return !mddIssuedTask(args) && task.subagent_type !== SECURITY_AGENT && !isJudgmentActor(task.subagent_type) &&
+      !(typeof task.prompt === 'string' && task.prompt.startsWith(SECURITY_HANDLE_PREFIX)) && !copiesReadyTask(sessionID, task);
+  };
+  /**
+   * A task with the actor and description of the one MDD holds ready is an attempt to dispatch it
+   * whose handle did not survive the copy. It stays MDD's, so the lost-handle recovery can expose
+   * the full prompt or remint the handle; running it as the caller's own would leave the run
+   * waiting for a dispatch that already went out under a prompt MDD never wrote.
+   */
+  const copiesReadyTask = (sessionID: string, task: Record<string, unknown>): boolean => {
+    let status: { task?: unknown; tasks?: unknown };
+    try { status = runner.status(sessionID) as typeof status; } catch { return false; }
+    const ready = [status.task, ...(Array.isArray(status.tasks) ? status.tasks : [])];
+    return ready.some(item => !!item && typeof item === 'object' && (item as Record<string, unknown>).subagent_type === task.subagent_type &&
+      (item as Record<string, unknown>).description === task.description);
+  };
+  const claimsQuestion = (call: TaskCall, args: unknown): boolean => {
+    try { return intake.claimsQuestion(call, args); } catch { return false; }
+  };
   const pendingStandalone = (sessionID: string) => [...standaloneCalls].some(([key, call]) =>
     !call.settled && JSON.parse(key)[0] === sessionID);
   const guardStandalone = (sessionID: string, fix: boolean) => {
@@ -1092,12 +1178,13 @@ const plugin: Plugin = async input => {
     config: async config => {
       applyModelOverrides(config, profile);
       restrictTools(config as Parameters<typeof restrictTools>[0]);
-      pinPhaseAgents(config as Parameters<typeof pinPhaseAgents>[0]);
+      pinPhaseAgents(config as Parameters<typeof pinPhaseAgents>[0], free);
       pinJudgmentAgents(config as Parameters<typeof pinJudgmentAgents>[0]);
+      if (!free) strictCoordinator(config as Parameters<typeof strictCoordinator>[0]);
     },
     tool: {
       mdd_adapt: tool({
-        description: 'Native version-3 implementation entry and guarded adaptive operations: the default for every new implementation, including precise edits. Supply only a JSON payload {routingVersion:3,kind,args}; write the text the user reads in full Spanish sentences, never compressed. Read status, its entryGuide and its exact operation/input/detail references. Entry needs only the contract: the host binds the user message whose exact text is contract.objective (messageID is an optional assertion) and fills omitted empty lists and source fingerprints. Transfer messageID must identify the current native USER request. No runtime, profile, approval or stopped claims. A refusal names what to correct; fix it and retry instead of switching routes. Low selects actors by need; medium/high require genuine structured stages and Verify. Fixed mdd_start is compatibility-only, on explicit request.',
+        description: `Native version-3 implementation entry and guarded adaptive operations: ${free ? FREE_ADAPT_ROLE : STRICT_ADAPT_ROLE}. Supply only a JSON payload {routingVersion:3,kind,args}; write the text the user reads in full Spanish sentences, never compressed. Read status, its entryGuide and its exact operation/input/detail references. Entry needs only the contract: the host binds the user message whose exact text is contract.objective (messageID is an optional assertion) and fills omitted empty lists and source fingerprints. Transfer messageID must identify the current native USER request. No runtime, profile, approval or stopped claims. A refusal names what to correct; fix it and retry instead of switching routes. Low selects actors by need; medium/high require genuine structured stages and Verify. Fixed mdd_start is compatibility-only, on explicit request.`,
         args: { payload: tool.schema.string().min(1).max(160000) },
         async execute(args, context) {
           enter(context, 'mdd_adapt');
@@ -1721,7 +1808,7 @@ const plugin: Plugin = async input => {
     // boundary; phase tasks and consent questions keep their existing workflow observation.
     'tool.execute.before': async (input, output) => {
       await security.enforce(input.sessionID, input.tool, output.args);
-      if (nativeChildren.has(input.sessionID) && (['task', 'skill', CHECK_TOOL].includes(input.tool) || input.tool.startsWith('mdd_') && !['mdd_worker_edit', ARTIFACT_READ_TOOL].includes(input.tool))) {
+      if (!free && nativeChildren.has(input.sessionID) && (['task', 'skill', CHECK_TOOL].includes(input.tool) || input.tool.startsWith('mdd_') && !['mdd_worker_edit', ARTIFACT_READ_TOOL].includes(input.tool))) {
         throw new Error('A tracked native fallback must work directly and return its report to the parent. Recursive orchestration, skill loading, and MDD tools are not allowed.');
       }
       // V2 supplies the live hook actor before its assistant history necessarily catches up.
@@ -1747,6 +1834,13 @@ const plugin: Plugin = async input => {
           throw new Error('Standalone correction requires an admitted native fix task in this workspace.');
         if (!['read', 'glob', 'grep', 'edit', 'write', 'apply_patch', 'bash'].includes(input.tool))
           throw new Error('The bounded fix actor cannot delegate, write memory or invoke unrelated tools.');
+        return;
+      }
+      // Guards off: a task or question MDD did not issue is the caller's own. It runs untouched,
+      // whatever MDD is holding in this conversation, and its result never reaches MDD either.
+      if (free && (input.tool === 'task' ? foreignTask(input.sessionID, output.args)
+        : input.tool === 'question' && !claimsQuestion(input, output.args))) {
+        freeCalls.add(standaloneKey(input.sessionID, input.callID));
         return;
       }
       if (standaloneFixes.has(input.sessionID) && ['task', 'question'].includes(input.tool))
@@ -1803,6 +1897,7 @@ const plugin: Plugin = async input => {
       });
     },
     'tool.execute.after': async (input, output) => {
+      if (freeCalls.delete(standaloneKey(input.sessionID, input.callID))) return;
       const standalone = standaloneCalls.get(standaloneKey(input.sessionID, input.callID));
       if (input.tool === 'task' && (standalone || judgmentTask(input.args))) {
         if (!standalone || !isDeepStrictEqual(standalone.args, input.args)) throw new Error('Standalone result does not match its admitted native task.');
@@ -1880,6 +1975,8 @@ const plugin: Plugin = async input => {
       if (event.type === 'session.compacted') { runner.owner(event.properties.sessionID); runner.compacted(event.properties.sessionID); return; }
       if (event.type !== 'message.part.updated') return;
       const part = event.properties.part;
+      if (part.type === 'tool' && ['task', 'question'].includes(part.tool) && part.state.status === 'error' &&
+          freeCalls.delete(standaloneKey(part.sessionID, part.callID))) return;
       if (part.type === 'tool' && part.tool === 'task' && part.state.status === 'error') {
         if (security.failed(part)) return;
         if (settleStandalone(part.sessionID, part.callID)) return;

@@ -53,6 +53,13 @@
       "required": ["enabled"],
       "properties": { "enabled": { "type": "boolean", "default": true } }
     },
+    "guards": {
+      "description": "MDD's strict workflow guards, off by default (free mode). Off: the coordinator works directly, dispatches any agent and asks any question, phase actors keep every native tool and no declared footprint fences them; only tasks and questions MDD itself issued go through its bookkeeping. On: every implementation and native interaction in an MDD conversation goes through MDD's own routes, and anything else is refused. Captured at startup; native permissions apply in both.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": { "enabled": { "type": "boolean", "default": false } }
+    },
     "telemetry": {
       "type": "object",
       "additionalProperties": false,

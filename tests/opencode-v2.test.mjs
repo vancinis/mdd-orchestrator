@@ -77,8 +77,8 @@ for (const mode of ['fresh', 'restored', 'fallback']) test(`R04: V2 reader regis
   await assert.rejects(f.tools.get('mdd_artifact_read').execute(args, invocation), /active|binding/);
 });
 
-test('R04: V2 scoped workers retain their custom-tool denial for artifact reads', async t => {
-  const f = await fixture(t);
+test('R04 (strict): V2 scoped workers retain their custom-tool denial for artifact reads', async t => {
+  const f = await fixture(t, true, true, '2.0.22', undefined, true);
   const workItems = ['a', 'b'].map(id => ({ id, purpose: `Inspect ${id}`, complete: true, independent: true,
     dependsOn: [], reads: [{ root: f.root, files: [`${id}.txt`] }] }));
   for (const id of ['a', 'b']) await writeFile(join(f.root, `${id}.txt`), id);
@@ -115,7 +115,8 @@ test('R04: V2 contextual workers keep predecessor bytes inline under soft-budget
   assert.match(dispatch.input.prompt, /Assigned read-only work item:/);
 });
 
-async function fixture(t, completeProfile = true, workersEnabled = true, version = '2.0.22', securityModel) {
+// Free by default, as MDD ships; guards runs the same host with the strict workflow on.
+async function fixture(t, completeProfile = true, workersEnabled = true, version = '2.0.22', securityModel, guards = false) {
   isolateHome(t);
   const root = await mkdtemp(join(tmpdir(), 'mdd-v2-'));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -127,12 +128,14 @@ async function fixture(t, completeProfile = true, workersEnabled = true, version
   settings.profiles.default.models['mdd-jd-judge-a'] = 'openai/judge-model#high';
   // These tests pin the manual stop after a failed Verify; automatic correction has its own tests.
   settings.verify = { automaticCorrections: 0 };
+  settings.guards.enabled = guards;
   saveGlobalSettings(settings);
   const sessionID = 'ses_parent';
   const sessions = new Map([[sessionID, { id: sessionID, agent: 'mdd-orchestrator', projectID: 'project', location: { directory: root }, time: { created: 1, updated: 1 } }]]);
   const messages = new Map([[sessionID, []]]);
   const tools = new Map(); const toolHooks = new Map(); const sessionHooks = new Map();
-  const agents = ['mdd-orchestrator', 'mdd-explore', 'mdd-risk', 'mdd-plan', 'mdd-apply', 'mdd-verify', 'mdd-security', 'general'].map(id => ({ id, permissions: [], request: {} }));
+  const agents = ['mdd-orchestrator', 'mdd-explore', 'mdd-risk', 'mdd-plan', 'mdd-apply', 'mdd-verify', 'mdd-security', 'general'].map(id => ({ id, permissions: [], request: {},
+    ...(id === 'mdd-orchestrator' ? { system: 'The user decides.' } : {}) }));
   const queue = []; let wake;
   const ctx = {
     app: { version },
@@ -266,8 +269,8 @@ for (const agent of ['explore', 'general']) test(`PK3 unrelated native ${agent} 
   assert.deepEqual(event.messages[0].content[0].input, input);
 });
 
-async function auditFixture(t, text = 'Run mdd-security', securityModel) {
-  const f = await fixture(t, true, true, '2.0.22', securityModel);
+async function auditFixture(t, text = 'Run mdd-security', securityModel, guards = false) {
+  const f = await fixture(t, true, true, '2.0.22', securityModel, guards);
   const gitPath = process.platform === 'win32' ? 'C:/Program Files/Git/cmd/git.exe' : '/usr/bin/git';
   const git = (...args) => execFileSync(gitPath, ['-c', 'core.autocrlf=false', '-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/dev/null', ...args],
     { cwd: f.root, encoding: 'utf8', stdio: 'pipe', env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' } }).trim();
@@ -378,14 +381,17 @@ for (const actor of ['mdd-jd-judge-a', 'mdd-jd-fix']) {
   });
 }
 
-test('V2 standalone judges hold coordinator controls without losing concurrent dual admission', async t => {
-  const f = await fixture(t);
+for (const guards of [true, false]) test(`V2 standalone judges hold coordinator controls without losing concurrent dual admission (${guards ? 'strict' : 'free'})`, async t => {
+  const f = await fixture(t, true, true, '2.0.22', undefined, guards);
   f.user('Judge the committed target.');
   const calls = ['mdd-jd-judge-a', 'mdd-jd-judge-b'].map(agent => f.begin('subagent', { agent, description: 'Judge', prompt: 'Frozen committed target.' }));
   await Promise.all(calls.map(call => f.toolHooks.get('execute.before')(call)));
   f.user('Implement a separate change.');
   await assert.rejects(f.call('mdd_start', { requirements: 'Implement a separate change.' }), /standalone.*flight/i);
-  await assert.rejects(f.toolHooks.get('execute.before')(f.begin('question', {})), /standalone.*flight/i);
+  // MDD's own controls wait for the judges in both modes; the coordinator's own question only in strict.
+  const own = f.toolHooks.get('execute.before')(f.begin('question', {}));
+  if (guards) await assert.rejects(own, /standalone.*flight/i);
+  else await own;
   await assert.rejects(f.toolHooks.get('execute.before')(f.begin('subagent', { agent: 'mdd-jd-fix', description: 'Fix', prompt: 'Authorized correction.' })), /standalone.*flight/i);
   for (const call of calls) await f.toolHooks.get('execute.after')({ ...call, status: 'error', error: {} });
   assert.equal((await f.call('mdd_start', { requirements: 'Implement a separate change.' })).task.agent, 'mdd-explore');
@@ -442,8 +448,8 @@ for (const mutation of ['synthetic', 'wrong-text', 'wrong-agent', 'nested-parent
   });
 }
 
-test('V2 security child independently rejects every non-checker tool and forged role', async t => {
-  const f = await auditFixture(t); const audit = await dispatchAudit(f);
+for (const guards of [true, false]) test(`V2 security child independently rejects every non-checker tool and forged role (${guards ? 'strict' : 'free'})`, async t => {
+  const f = await auditFixture(t, undefined, undefined, guards); const audit = await dispatchAudit(f);
   for (const tool of ['read', 'glob', 'grep', 'write', 'edit', 'bash', 'shell', 'webfetch', 'subagent', 'skill', 'question', 'mcp_secret', 'mdd_start']) {
     await assert.rejects(f.toolHooks.get('execute.before')({ sessionID: audit.child.id, agent: 'mdd-security', messageID: 'child', id: `call-${tool}`, tool, input: {} }), /security/i);
   }
@@ -451,7 +457,10 @@ test('V2 security child independently rejects every non-checker tool and forged 
   await assert.rejects(f.toolHooks.get('execute.before')({ sessionID: audit.child.id, agent: 'mdd-security', id: 'wrong-role', tool: 'mdd_check_report', input: { phase: 'mdd-apply', result: 'text' } }), /security/i);
   await assert.rejects(f.call('mdd_transfer', { userText: f.text, sourceSessionID: 'source', runID: 'run' }), /security/i);
   await assert.rejects(f.call('mdd_reset', { scope: 'run', userText: f.text }), /security/i);
-  await assert.rejects(f.toolHooks.get('execute.before')(f.begin('question', {})), /security/i);
+  // The audit child stays isolated in both modes; only strict mode also holds the coordinator's own question.
+  const own = f.toolHooks.get('execute.before')(f.begin('question', {}));
+  if (guards) await assert.rejects(own, /security/i);
+  else await own;
 });
 
 test('V2 security isolation follows the authenticated child, not its current claimed or native agent name', async t => {
@@ -656,18 +665,26 @@ for (const mutation of ['snapshot', 'evidence', 'coverage', 'credentials', 'arti
   });
 }
 
-test('V2 setup registers native tools, model variants and ordered isolation permissions', async t => {
-  const f = await fixture(t);
+for (const guards of [true, false]) test(`V2 setup registers native tools, model variants and ordered isolation permissions (${guards ? 'strict' : 'free'})`, async t => {
+  const f = await fixture(t, true, true, '2.0.22', undefined, guards);
   assert.equal(plugin.id, 'mdd');
   assert.ok(f.tools.has('mdd_start'));
   assert.equal(f.tools.get('mdd_start').options.codemode, false);
   assert.equal(typeof f.tools.get('mdd_start').input.safeParse, 'function');
   assert.deepEqual(f.agents.find(agent => agent.id === 'mdd-plan').model, { providerID: 'openai', id: 'test-model', variant: 'high' });
+  // Strict phase actors are pinned; free ones keep delegation and skills like any other agent.
+  const pinned = guards ? [['subagent', 'deny'], ['skill', 'deny']] : [];
   for (const id of ['mdd-explore', 'mdd-risk'])
-    assert.deepEqual(f.agents.find(agent => agent.id === id).permissions.slice(-3).map(rule => [rule.action, rule.effect]),
-      [['subagent', 'deny'], ['skill', 'deny'], ['mdd_check_report', 'allow']]);
-  assert.deepEqual(f.agents.find(agent => agent.id === 'mdd-apply').permissions.slice(-4).map(rule => [rule.action, rule.effect]),
-    [['subagent', 'deny'], ['skill', 'deny'], ['mdd_check_report', 'allow'], ['mdd_worker_edit', 'allow']]);
+    assert.deepEqual(f.agents.find(agent => agent.id === id).permissions.slice(guards ? -3 : -1).map(rule => [rule.action, rule.effect]),
+      [...pinned, ['mdd_check_report', 'allow']]);
+  assert.deepEqual(f.agents.find(agent => agent.id === 'mdd-apply').permissions.slice(guards ? -4 : -2).map(rule => [rule.action, rule.effect]),
+    [...pinned, ['mdd_check_report', 'allow'], ['mdd_worker_edit', 'allow']]);
+  for (const id of ['mdd-explore', 'mdd-apply'])
+    assert.equal(f.agents.find(agent => agent.id === id).permissions.some(rule => ['subagent', 'skill'].includes(rule.action)), guards);
+  // The coordinator definition is the free one; strict mode appends its rules once.
+  const system = f.agents.find(agent => agent.id === 'mdd-orchestrator').system;
+  assert.ok(system.startsWith('The user decides.'));
+  assert.equal(system.split('STRICT MODE').length - 1, guards ? 1 : 0);
   assert.equal(f.tools.get('mdd_worker_edit').options.codemode, false);
   assert.equal(f.agents.find(agent => agent.id === 'general').permissions.findLast(rule => rule.action === 'mdd_*').effect, 'deny');
   assert.equal(f.agents.find(agent => agent.id === 'general').permissions.at(-1).action, 'mdd_artifact_read');
@@ -882,6 +899,20 @@ test('V2 grouped native question accepts correlated structured answers, never fo
   assert.equal((await f.call('mdd_status', {})).state, 'ready');
 });
 
+// The V2 adapter used to hand the motor only the last 100 context messages, so a turn longer than
+// that lost its own user message and every proof about the conversation refused. No limit is now
+// the whole context, which V2 had already read.
+test('V2 a turn longer than one page still proves its own user request', async t => {
+  const f = await fixture(t, false);
+  f.user('Implement the requested change.');
+  const history = f.messages.get(f.sessionID), current = history.pop();
+  for (let index = 0; index < 150; index++) history.push({ id: `filler-${index}`, type: 'assistant', agent: 'mdd-orchestrator',
+    model: { providerID: 'openai', id: 'test-model' }, content: [{ type: 'text', text: `step ${index}` }], time: { created: 1000 + index } });
+  history.push(current);
+  await assert.rejects(f.call('mdd_start', { requirements: 'Invented objective' }), /native user|latest/);
+  assert.equal((await f.call('mdd_start', { requirements: 'Implement the requested change.' })).state, 'question-ready');
+});
+
 /** Settles exploration and a validated low risk verdict through the real V2 foreground hooks. */
 async function settleExploreAndRisk(f) {
   for (const phase of ['mdd-explore', 'mdd-risk']) {
@@ -1002,8 +1033,8 @@ for (const restored of [false, true]) test(`R05: V2 failedVerify idle questions 
   }
 });
 
-test('R05: V2 no-run passthrough rechecks actor activation and refuses native completion', async t => {
-  const f = await fixture(t); f.user('Inspect the change.');
+test('R05 (strict): V2 no-run passthrough rechecks actor activation and refuses native completion', async t => {
+  const f = await fixture(t, true, true, '2.0.22', undefined, true); f.user('Inspect the change.');
   const ordinary = r05Question(f); await ordinary.before(); await ordinary.after();
   await f.call('mdd_start', { requirements: 'Inspect the change.' });
   const q = r05Question(f); await q.before();
@@ -1017,12 +1048,15 @@ test('R05: V2 no-run passthrough rechecks actor activation and refuses native co
   assert.equal((await f.call('mdd_status', {})).state, 'await-result');
 });
 
-test('R05: V2 pending question, changed owned callback and foreign parent remain refused', async t => {
-  const f = await fixture(t, false); f.user('Implement the requested change.');
+for (const guards of [true, false]) test(`R05: V2 pending question, changed owned callback and foreign parent remain refused (${guards ? 'strict' : 'free'})`, async t => {
+  const f = await fixture(t, false, true, '2.0.22', undefined, guards); f.user('Implement the requested change.');
   const ready = await f.call('mdd_start', { requirements: 'Implement the requested change.' });
   assert.ok(ready.question);
+  // An unrelated question waits for MDD's in strict mode and runs untouched in free mode. MDD's own
+  // question, its callback and its parent stay exactly checked in both.
   const unrelated = r05Question(f);
-  await assert.rejects(unrelated.before()); await assert.rejects(unrelated.after());
+  if (guards) { await assert.rejects(unrelated.before()); await assert.rejects(unrelated.after()); }
+  else { await unrelated.before(); await unrelated.after(); }
   const owned = f.begin('question', ready.question);
   await f.toolHooks.get('execute.before')(owned);
   const changed = { ...owned, input: unrelated.call.input, status: 'completed', result: unrelated.completion.result };
@@ -1075,8 +1109,8 @@ for (const failed of [false, true]) {
   });
 }
 
-test('V2 tracked native fallback children cannot recursively orchestrate', async t => {
-  const f = await fixture(t); f.user('Implement the requested change.');
+test('V2 (strict) tracked native fallback children cannot recursively orchestrate', async t => {
+  const f = await fixture(t, true, true, '2.0.22', undefined, true); f.user('Implement the requested change.');
   await f.call('mdd_start', { requirements: 'Implement the requested change.' });
   // Settle exploration and a validated low risk verdict first, so native selection below falls
   // on a main tail phase and exercises the `general` fallback, not the `explore` prelude one.
@@ -1126,6 +1160,27 @@ test('V2 child recovery never treats missing or foreign status events as idle', 
   await f.emit({ type: 'session.status', location: { directory: f.root }, data: { sessionID: child.id, status: { type: 'idle' } } });
   assert.equal((await f.call('mdd_status', {})).liveness.verdict, 'stopped');
 });
+
+// After a restart no status event ever arrives for a child that already finished, so it used to
+// read as unknown for the life of the process. The host's own idle record decides now, and only
+// when it postdates the child's last update; a later update keeps it unknown.
+for (const [name, time, stopped] of [['finished', { created: 1, updated: 5, idle: 5 }, true], ['updated after idle', { created: 1, updated: 6, idle: 5 }, false]])
+  test(`V2 a child with no status event is read from the host idle record (${name})`, async t => {
+    const f = await fixture(t); f.user('Implement the requested change.');
+    await f.call('mdd_start', { requirements: 'Implement the requested change.' });
+    const ready = await f.call('mdd_status', {});
+    const call = f.begin('subagent', ready.task);
+    await f.toolHooks.get('execute.before')(call);
+    f.sessions.set('ses_child', { ...f.sessions.get(f.sessionID), id: 'ses_child', parentID: f.sessionID, time });
+    f.messages.set('ses_child', [{ id: 'child-last', type: 'assistant', agent: 'mdd-explore', model: { providerID: 'openai', id: 'test-model' },
+      content: [{ type: 'text', text: 'Done.' }], finish: 'stop', time: { created: 2, completed: 5 } }]);
+    f.messages.get(f.sessionID).at(-1).content.find(part => part.id === call.id).state.metadata.sessionID = 'ses_child';
+    await f.toolHooks.get('execute.after')({ ...call, status: 'error', error: {} });
+    const status = await f.call('mdd_status', {});
+    // A recorded idle child releases its failed dispatch for an explicit retry; anything else stays fenced.
+    if (stopped) { assert.equal(status.state, 'ready'); assert.equal(status.uncertain, false); }
+    else { assert.equal(status.state, 'await-result'); assert.equal(status.uncertain, true); assert.equal(status.liveness.verdict, 'unknown'); }
+  });
 
 test('V2 model context collapses superseded status replies and keeps the latest one whole', async t => {
   const f = await fixture(t); f.user('Implement the requested change.');

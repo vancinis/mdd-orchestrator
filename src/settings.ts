@@ -28,6 +28,13 @@ export type Settings = {
   telemetry: { enabled: boolean };
   workers: { enabled: boolean };
   knowledge: { enabled: boolean };
+  /**
+   * Off by default: MDD is free. The coordinator works directly and dispatches any agent or
+   * question, phase actors keep every native tool, and only what MDD itself issued goes through
+   * its bookkeeping. On restores the strict workflow, where every implementation and native
+   * interaction in an MDD conversation has to pass through MDD's own routes.
+   */
+  guards: { enabled: boolean };
   /** Omitted means the default: two automatic correction passes after a failed Verify in automatic mode. */
   verify?: { automaticCorrections: number };
 };
@@ -54,12 +61,17 @@ export function parseModel(value: unknown): string {
 export function defaultSettings(): Settings {
   return {
     version: 1, activeProfile: 'default', profiles: { default: { models: {}, answers: {} } },
-    telemetry: { enabled: true }, workers: { enabled: true }, knowledge: { enabled: true },
+    telemetry: { enabled: true }, workers: { enabled: true }, knowledge: { enabled: true }, guards: { enabled: false },
   };
 }
 
+/** Whether MDD stays out of the way: the default, unless the settings switch its guards on. */
+export function freeMode(settings: Pick<Settings, 'guards'> | undefined): boolean {
+  return settings?.guards?.enabled !== true;
+}
+
 export function parseSettings(value: unknown): Settings {
-  const input = objectWithKeys(value, 'settings', ['version', 'activeProfile', 'profiles', 'engram', 'telemetry', 'workers', 'knowledge', 'verify']);
+  const input = objectWithKeys(value, 'settings', ['version', 'activeProfile', 'profiles', 'engram', 'telemetry', 'workers', 'knowledge', 'guards', 'verify']);
   if (input.version !== 1) throw new ValidationError('settings.version must be 1.');
   const names = typeof input.profiles === 'object' && input.profiles !== null ? Object.keys(input.profiles) : [];
   if (!names.length || names.length > 64) throw new ValidationError('Settings require 1–64 named profiles.');
@@ -90,6 +102,11 @@ export function parseSettings(value: unknown): Settings {
     const knowledge = objectWithKeys(input.knowledge, 'knowledge', ['enabled']);
     if (typeof knowledge.enabled !== 'boolean') throw new ValidationError('knowledge.enabled must be boolean.');
     result.knowledge.enabled = knowledge.enabled;
+  }
+  if (Object.hasOwn(input, 'guards')) {
+    const guards = objectWithKeys(input.guards, 'guards', ['enabled']);
+    if (typeof guards.enabled !== 'boolean') throw new ValidationError('guards.enabled must be boolean.');
+    result.guards.enabled = guards.enabled;
   }
   if (Object.hasOwn(input, 'verify')) {
     const verify = objectWithKeys(input.verify, 'verify', ['automaticCorrections']);

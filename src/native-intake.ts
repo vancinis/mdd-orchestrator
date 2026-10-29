@@ -1469,6 +1469,21 @@ export class NativeIntake {
     return this.#sessions.get(call.sessionID);
   }
 
+  /**
+   * Whether MDD issued this native question or still holds its call: a registered envelope, the
+   * durable record's question or call, or a call this conversation already showed or answered.
+   * With guards off everything else is the coordinator's own question and never reaches MDD.
+   */
+  claimsQuestion(call: TaskCall, args: unknown): boolean {
+    const entry = this.#sessions.get(call.sessionID);
+    // An unreadable record proves no claim; in free mode it must not turn into a refusal either.
+    let held: QuestionRecord | undefined;
+    try { held = this.durable.questions?.read(call.sessionID); } catch { held = undefined; }
+    return this.#owned(args) || !!held && (isDeepStrictEqual(args, held.slot.args) || held.callID === call.callID ||
+      !!held.retiredCalls?.includes(call.callID)) || !!entry && (entry.slot?.callID === call.callID ||
+      !!entry.shown?.calls.includes(call.callID) || entry.receipts.some(receipt => receipt.callID === call.callID));
+  }
+
   /** Both hooks recheck the same facts. Ordinary answers create no MDD authority or state. */
   async #coordinatorQuestion(call: TaskCall, args: unknown): Promise<boolean> {
     const claimed = (value: unknown): boolean => {

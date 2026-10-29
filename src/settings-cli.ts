@@ -70,6 +70,21 @@ export async function settingsCommand(args: string[], root: string, write: (text
     }
     return true;
   }
+  if (command === 'guards') {
+    if (args.length !== 2 || !['status', 'on', 'off'].includes(action ?? '')) {
+      throw new ValidationError('Uso: mdd guards status | on | off');
+    }
+    const settings = loadGlobalSettings();
+    if (action === 'status') write(`${JSON.stringify(settings.guards)}\n`);
+    else {
+      settings.guards.enabled = action === 'on';
+      saveGlobalSettings(settings);
+      write(action === 'on'
+        ? 'Guardas de MDD activadas (modo estricto): toda implementación pasa por las rutas de MDD. Reiniciá OpenCode para cargarlo.\n'
+        : 'Guardas de MDD desactivadas (modo libre): el coordinador trabaja directo y MDD no bloquea nada. Reiniciá OpenCode para cargarlo.\n');
+    }
+    return true;
+  }
   if (command === 'profile') {
     if (action === 'list' && args.length === 2) {
       const settings = loadGlobalSettings();

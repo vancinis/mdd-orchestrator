@@ -385,8 +385,11 @@ test('invalid setup names actual file without exposing values or claiming tools 
 
 test('informational_request_does_not_start_implementation: shipped instruction contract only', async () => {
   const asset = await readFile(new URL('../assets/opencode/agents/mdd-orchestrator.md', import.meta.url), 'utf8');
-  assert.match(asset, /Information-only requests[\s\S]*MUST NOT use mdd_start/);
-  assert.match(asset, /Follow the available safe step; surface a blocked state/);
+  // Free by default: an information-only request needs no run; strict mode forbids starting one.
+  assert.match(asset, /Information-only requests need no run/);
+  const { STRICT_COORDINATOR } = await import('../dist/guards.js');
+  assert.match(STRICT_COORDINATOR, /Information-only requests MUST NOT use mdd_start/);
+  assert.match(asset, /Follow the available safe step; when MDD is blocked, say so and keep helping the user directly/);
   assert.match(asset, /works\s+with\s+or\s+without\s+an\s+accepted\s+run/);
   assert.doesNotMatch(asset, /no standalone read-only investigation route/);
   assert.match(asset, /Never end a phase report with an approval question of your own/);
@@ -587,8 +590,16 @@ test('standalone dispatch refuses preflight interactions, extra capabilities and
   for (const extra of [{ background: true }, { session_id: 'child' }, { model: 'p/m' }]) {
     await assert.rejects(fresh.hooks['tool.execute.before']({ ...call, tool: 'task' }, { args: { ...jdTask('mdd-jd-judge-a'), ...extra } }), /exact|foreground/);
   }
-  await fresh.hooks.tool.mdd_start.execute({ requirements: fresh.requirements }, fresh.context);
-  await assert.rejects(fresh.hooks['tool.execute.before']({ ...call, tool: 'task' }, { args: jdTask('mdd-jd-judge-a-extra') }), /dispatch|subagent|match/);
+  // An actor-name lookalike never gets standalone handling. Strict mode refuses it as a stray
+  // dispatch during the run; free mode runs it untouched as the coordinator's own task.
+  for (const guards of [true, false]) {
+    const run = await modeFixture(t, guards);
+    await run.hooks.tool.mdd_start.execute({ requirements: run.requirements }, run.context);
+    const lookalike = { args: jdTask('mdd-jd-judge-a-extra') };
+    const sent = run.hooks['tool.execute.before']({ ...call, tool: 'task' }, lookalike);
+    if (guards) await assert.rejects(sent, /dispatch|subagent|match/);
+    else { await sent; assert.deepEqual(lookalike.args, jdTask('mdd-jd-judge-a-extra')); }
+  }
 });
 
 test('judges deny arbitrary native/MCP tools live even when native permission is overridden', async t => {
@@ -1100,7 +1111,13 @@ for (const [mode, start] of [['automatic', startAutomatic], ['interactive', star
     const altered = structuredClone(blocked.question);
     altered.questions[0].options[0].label = 'Forged';
     const rc = questionCall(f, altered, 'recover_altered');
-    await assert.rejects(f.hooks['tool.execute.before'](rc, { args: altered }));
+    if (f.settings.guards.enabled) await assert.rejects(f.hooks['tool.execute.before'](rc, { args: altered }));
+    else {
+      // Free mode: an altered envelope is no longer MDD's question. It runs as the coordinator's
+      // own, and its answer, whatever it says, reaches nothing MDD holds.
+      await f.hooks['tool.execute.before'](rc, { args: altered });
+      await f.hooks['tool.execute.after']({ ...rc, args: altered }, questionOutput(altered, [['Forged']]));
+    }
     const after = JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context));
     assert.equal(after.workflow.nextAction.kind, 'blocked-risk');
     assert.equal(after.task, undefined);
@@ -1272,34 +1289,35 @@ test('native intake SDK contract: line-ending and outer-whitespace differences s
   await createInspector(f.input).intake(runtime, 'Line one\nLine two', 'msg_parent');
 });
 
-// A full page of history proves nothing about what came before it, so a caller reading the error
-// learns that the objective cannot be read here at all, not that it failed to match.
-test('native intake SDK contract: a full history page reports the objective as unreadable, not unmatched', async () => {
+// A full page used to be reported as "the objective is outside the readable history". The whole
+// conversation is read now, so a full page is only a long conversation: a requirement that matches
+// nothing the user wrote gets the ordinary mismatch refusal, never an unreadable-history one.
+test('native intake SDK contract: a full history page is read whole, so a mismatch is reported as a mismatch', async () => {
   const f = sdkFixture(); addNativeUser(f, 'Please implement the caching layer.');
   const caller = f.parentMessages.at(-1);
-  // The read itself is capped at exactly HISTORY_MAX (100) entries; one more than that fails
-  // earlier, as "exceeds the inspection limit", which is a different and unrelated refusal.
   f.parentMessages.push(...Array.from({ length: 98 }, () => ({ info: { role: 'user' }, parts: [] })));
   f.parentMessages.splice(f.parentMessages.indexOf(caller), 1);
   f.parentMessages.push(caller);
-  await assert.rejects(createInspector(f.input).intake(runtime, 'Something else entirely.', 'msg_parent'), /outside the readable native history/);
+  await assert.rejects(createInspector(f.input).intake(runtime, 'Something else entirely.', 'msg_parent'), error =>
+    /must exactly match/.test(error.message) && !/outside the readable/.test(error.message));
+  assert.equal(await createInspector(f.input).intake(runtime, 'Please implement the caching layer.', 'msg_parent', 'objective'), 'msg_user');
 });
 
-// A conversation longer than one page is ordinary once a route has actually run, so refusing to
-// read it at all stopped approvals exactly where they were needed most. What an incomplete history
-// cannot do is prove that some older call is the one being answered: only the running call of the
-// current message qualifies, which is a tighter correlation than the full scan it replaces.
-test('native question SDK contract: an incomplete history proves only the current running call', async () => {
+// A conversation longer than one page is ordinary once a route has actually run. Uniqueness is
+// proof once the whole conversation is read, so a running call is consent wherever it sits, and
+// a second call carrying the same identity is still refused rather than picked between.
+test('native question SDK contract: a long conversation proves the uniquely readable running call', async () => {
   const f = sdkFixture();
   const args = { questions: [] };
   const call = questionCall(f, args);
   const current = f.parentMessages.at(-1);
   f.parentMessages.push(...Array.from({ length: 99 }, () => ({ info: { role: 'user' }, parts: [] })));
-  await assert.rejects(createInspector(f.input).question(runtime, call, args), /incomplete history/);
-  // The same full page, with the call belonging to the message that is running it, is consent.
+  await createInspector(f.input).question(runtime, call, args);
   f.parentMessages.splice(f.parentMessages.indexOf(current), 1);
   f.parentMessages.push(current);
   await createInspector(f.input).question(runtime, call, args);
+  f.parentMessages[0] = { info: { ...current.info, id: 'msg_older' }, parts: [{ ...current.parts[0], messageID: 'msg_older' }] };
+  await assert.rejects(createInspector(f.input).question(runtime, call, args), /not uniquely readable/);
 });
 
 for (const [name, mutate] of Object.entries({
@@ -1335,15 +1353,21 @@ for (const [name, mutate] of Object.entries({
 }
 
 // Actors are no longer policed tool by tool: their capability is the user's native decision.
-// MDD only refuses to let an unregistered session drive one of its own phases.
-test('plugin contract: ordinary tools pass through untouched; only stray MDD phases are refused', async () => {
+// With guards on, MDD only refuses to let an unregistered session drive one of its own phases;
+// with guards off (the default) an MDD actor name alone is not an MDD dispatch either.
+for (const guards of [false, true]) test(`plugin contract (${guards ? 'strict' : 'free'}): ordinary tools pass through untouched; ${guards ? 'only stray MDD phases are refused' : 'so does a stray MDD actor name'}`, async t => {
+  isolateHome(t);
+  const settings = defaultSettings();
+  settings.guards.enabled = guards;
+  saveGlobalSettings(settings);
   const hooks = await plugin(sdkFixture().input);
   for (const tool of ['bash', 'edit', 'read', 'webfetch', 'list_mcp_resources', 'read_mcp_resource']) {
     await hooks['tool.execute.before']({ tool, sessionID: 'ses_child', callID: `${tool}-call` }, { args: {} });
   }
   await hooks['tool.execute.before']({ tool: 'task', sessionID: 'ses_child', callID: 'general' }, { args: { subagent_type: 'general' } });
-  await assert.rejects(hooks['tool.execute.before']({ tool: 'task', sessionID: 'ses_child', callID: 'phase' },
-    { args: { subagent_type: 'mdd-apply' } }), /registered parent run/);
+  const stray = hooks['tool.execute.before']({ tool: 'task', sessionID: 'ses_child', callID: 'phase' }, { args: { subagent_type: 'mdd-apply' } });
+  if (guards) await assert.rejects(stray, /registered parent run/);
+  else await stray;
 });
 
 test('plugin config contract: settings frozen at startup; only explicit model overrides applied', async t => {
@@ -1352,6 +1376,8 @@ test('plugin config contract: settings frozen at startup; only explicit model ov
   t.after(() => rm(root, { recursive: true, force: true }));
   const settings = defaultSettings();
   settings.profiles.default.models = { orchestrator: 'selected/main', 'mdd-plan': 'selected/planner' };
+  // Strict mode pins the phase actors below; the free config hook has its own contract test.
+  settings.guards.enabled = true;
   saveGlobalSettings(settings);
   const hooks = await plugin({ ...sdkFixture().input, directory: root, worktree: root });
   settings.profiles.default.models['mdd-plan'] = 'changed/planner';
@@ -1431,3 +1457,81 @@ test('global plugin profiles match in two private targets; conflicting legacy se
   assert.deepEqual(await readdir(a), ['mdd.config.json']);
   assert.deepEqual(await readdir(b), []);
 });
+
+// Guards are off by default: MDD keeps the bookkeeping of what it issued and refuses nothing else.
+// The same conversations run strict when the settings switch the guards on.
+async function modeFixture(t, guards, known = answers) {
+  const f = await pluginFixture(t, known);
+  if (guards) {
+    f.settings.guards = { enabled: true };
+    saveGlobalSettings(f.settings);
+    f.hooks = await plugin(f.input);
+  }
+  return f;
+}
+
+for (const guards of [false, true]) {
+  test(`${guards ? 'strict' : 'free'} mode: a task the coordinator wrote during a ready run ${guards ? 'is refused' : 'runs untouched and leaves the run as it was'}`, async t => {
+    const f = await modeFixture(t, guards);
+    const ready = JSON.parse(await f.hooks.tool.mdd_start.execute({ requirements: f.requirements }, f.context));
+    assert.equal(ready.state, 'ready');
+    const own = { subagent_type: 'general', description: 'Initialize the project', prompt: 'Initialize the Expo project with Supabase auth.' };
+    const dispatch = { ...call, callID: 'own_task', tool: 'task' };
+    f.parentMessages.at(-1).parts = [{ type: 'tool', tool: 'task', callID: dispatch.callID, state: { status: 'running' } }];
+    const output = { args: structuredClone(own) };
+    if (guards) {
+      await assert.rejects(f.hooks['tool.execute.before'](dispatch, output), /differ from the ready task/);
+      return;
+    }
+    await f.hooks['tool.execute.before'](dispatch, output);
+    assert.deepEqual(output.args, own);
+    const done = { title: 'Initialize the project', metadata: {}, output: 'Project initialized.' };
+    await f.hooks['tool.execute.after']({ ...dispatch, args: own }, done);
+    assert.equal(done.output, 'Project initialized.');
+    // A failed own task is just as foreign: its error never reaches the run.
+    const failed = { ...call, callID: 'own_failed', tool: 'task' };
+    await f.hooks['tool.execute.before'](failed, { args: structuredClone(own) });
+    await f.hooks.event({ event: { type: 'message.part.updated', properties: { part: { type: 'tool', tool: 'task',
+      sessionID: failed.sessionID, callID: failed.callID, state: { status: 'error' } } } } });
+    const after = JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context));
+    assert.equal(after.state, 'ready');
+    assert.equal(after.task.subagent_type, ready.task.subagent_type);
+    // MDD's own dispatch still works, and its actor is told its written limits are guidance.
+    const issued = { ...call, callID: 'mdd_task', tool: 'task' };
+    f.parentMessages.at(-1).parts = [{ type: 'tool', tool: 'task', callID: issued.callID, state: { status: 'running' } }];
+    const sent = { args: structuredClone(after.task) };
+    await f.hooks['tool.execute.before'](issued, sent);
+    assert.match(sent.args.prompt, /MDD guards: off: tool and scope limits/);
+    assert.equal(JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context)).state, 'await-result');
+  });
+
+  test(`${guards ? 'strict' : 'free'} mode: the coordinator's own question while MDD's is pending ${guards ? 'is refused' : 'runs and leaves MDD\'s question intact'}`, async t => {
+    const f = await modeFixture(t, guards, { certainty: 'very-sure', artifactStore: 'none', summary: 'low', complexity: 'not-complex' });
+    const pending = JSON.parse(await f.hooks.tool.mdd_start.execute({ requirements: f.requirements }, f.context));
+    assert.ok(pending.question);
+    const own = { questions: [{ question: '¿Usamos Expo Router?', header: 'Navegación', options: [{ label: 'Sí', description: 'Rutas basadas en archivos.' }] }] };
+    const qc = questionCall(f, own, 'own_question');
+    if (guards) {
+      await assert.rejects(f.hooks['tool.execute.before'](qc, { args: own }), /pending/);
+      return;
+    }
+    await f.hooks['tool.execute.before'](qc, { args: own });
+    await f.hooks['tool.execute.after']({ ...qc, args: own }, questionOutput(own, [['Sí']]));
+    const mdd = questionCall(f, pending.question, 'mdd_question');
+    await f.hooks['tool.execute.before'](mdd, { args: pending.question });
+    await f.hooks['tool.execute.after']({ ...mdd, args: pending.question }, questionOutput(pending.question, [['Interactivo'], ['Nada que agregar']]));
+    const ready = JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context));
+    assert.equal(ready.state, 'ready');
+    assert.equal(ready.questionReceipts.length, 1);
+  });
+
+  test(`${guards ? 'strict' : 'free'} mode: the config hook ${guards ? 'pins phase actors and appends the strict rules' : 'leaves phase actors their tools and the coordinator free'}`, async t => {
+    const f = await modeFixture(t, guards);
+    const config = { agent: { 'mdd-orchestrator': { prompt: 'The user decides.' }, 'mdd-apply': {} } };
+    await f.hooks.config(config);
+    assert.equal(config.agent['mdd-apply'].tools.task, guards ? false : undefined);
+    assert.equal(config.agent['mdd-apply'].tools.skill, guards ? false : undefined);
+    assert.equal(config.agent['mdd-orchestrator'].prompt.includes('STRICT MODE'), guards);
+    assert.equal(f.hooks.tool.mdd_adapt.description.includes('the default for every new implementation'), guards);
+  });
+}

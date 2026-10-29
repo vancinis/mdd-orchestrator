@@ -3,7 +3,8 @@ import type { Plugin } from '@opencode/plugin';
 import type { Plugin as LegacyPlugin, PluginInput } from '@opencode-ai/plugin';
 import type { SessionMessageInfo, SessionInfo } from '@opencode/client';
 import { z } from 'zod';
-import { MODEL_ROLES, modelFor, freezeProfile } from './settings.js';
+import { MODEL_ROLES, modelFor, freeMode, freezeProfile } from './settings.js';
+import { STRICT_COORDINATOR } from './guards.js';
 import { PHASES } from './policy.js';
 import { loadGlobalSettings } from './global-settings.js';
 import { collapsedPrompt, COLLAPSE_MIN_BYTES } from './dispatch-transcript.js';
@@ -137,6 +138,20 @@ function legacyResult(name: string, input: unknown, result: unknown): ObjectValu
     metadata: { answers, truncated: false } };
 }
 
+/**
+ * What the host durably recorded about a session no status event has reached this process for.
+ * A session records when its loop went idle, and any later activity moves its update time past
+ * that, so idle at or after the last update is the host's own record that nothing is running.
+ * That is the ordinary state of a child that finished before OpenCode last restarted, which used
+ * to read as unknown for the life of the process and fence every later idle proof. Anything else
+ * stays unknown: no record, a later update, or a value that is not a time.
+ */
+export function recordedStatus(time: { idle?: unknown; updated?: unknown } | undefined): { type: 'idle' | 'unknown' } {
+  const idle = time?.idle, updated = time?.updated;
+  return typeof idle === 'number' && typeof updated === 'number' && Number.isFinite(idle) && idle >= updated
+    ? { type: 'idle' } : { type: 'unknown' };
+}
+
 export async function setupV2(ctx: Plugin.Context, createMotor: LegacyPlugin): Promise<Plugin.Cleanup> {
   const directory = ctx.location.directory;
   const worktree = ctx.location.project.directory;
@@ -152,6 +167,11 @@ export async function setupV2(ctx: Plugin.Context, createMotor: LegacyPlugin): P
       throw new Error('Native session moved outside this MDD location.');
     return legacyHistory(messages, session, worktree);
   };
+  // A session that cannot be read has no recorded state to offer, so it stays unknown.
+  const durableStatus = async (id: string, signal?: AbortSignal): Promise<{ type: string }> => {
+    try { return recordedStatus((await ctx.session.get({ sessionID: id }, signal ? { signal } : undefined)).time); }
+    catch { return { type: 'unknown' }; }
+  };
   // A small protocol adapter, not an HTTP client: calls stay on this exact host (including remote/standalone servers).
   const input = {
     directory, worktree, project: { id: ctx.location.project.id }, workerHost,
@@ -161,14 +181,19 @@ export async function setupV2(ctx: Plugin.Context, createMotor: LegacyPlugin): P
         const session = await ctx.session.get({ sessionID: options.path.id }, { signal: options.signal });
         return { data: { ...session, directory: session.location.directory } };
       },
-      messages: async (options: { path: { id: string }; query: { limit: number }; signal: AbortSignal }) =>
-        ({ data: (await history(options.path.id, options.signal)).slice(-options.query.limit) }),
+      // No limit is a request for the whole readable conversation, which V2 already returns.
+      messages: async (options: { path: { id: string }; query: { limit?: number }; signal: AbortSignal }) => {
+        const messages = await history(options.path.id, options.signal);
+        return { data: options.query.limit === undefined ? messages : messages.slice(-options.query.limit) };
+      },
       message: async (options: { path: { id: string; messageID: string }; signal: AbortSignal }) => {
         const matches = (await history(options.path.id, options.signal)).filter(message => object(message.info).id === options.path.messageID);
         if (matches.length !== 1) throw new Error('Exact native message is unavailable in the V2 context.');
         return { data: matches[0] };
       },
-      status: async () => ({ data: Object.fromEntries([...seen].map(id => [id, statuses.get(id) ?? { type: 'unknown' }])) }),
+      // Every session this process has seen or heard from; an observed event outranks the record.
+      status: async (options: { signal?: AbortSignal }) => ({ data: Object.fromEntries(await Promise.all(
+        [...new Set([...seen, ...statuses.keys()])].map(async id => [id, statuses.get(id) ?? await durableStatus(id, options.signal)] as const))) }),
       abort: async (options: { path: { id: string }; signal: AbortSignal }) => {
         await ctx.session.interrupt({ sessionID: options.path.id, resume: false }, { signal: options.signal });
         return { data: true };
@@ -201,13 +226,20 @@ export async function setupV2(ctx: Plugin.Context, createMotor: LegacyPlugin): P
     if (bound && agent !== SECURITY_AGENT) throw new Error('Security native actor attribution differs.');
     return bound;
   };
-  const profile = freezeProfile(loadGlobalSettings());
+  const settings = loadGlobalSettings();
+  const profile = freezeProfile(settings);
+  // Guards off (the default): phase actors keep delegation and skills, and no worker footprint
+  // fences a child's native tools. The scoped editor still writes only its assignment's files.
+  const free = freeMode(settings);
   const agentPolicy: Parameters<typeof ctx.agent.transform>[0] = editor => {
     for (const agent of editor.list()) editor.update(String(agent.id), draft => {
       const id = String(draft.id);
       const role = id === COORDINATOR ? 'orchestrator' : MODEL_AGENTS.includes(id as typeof MODEL_AGENTS[number]) ? id as typeof MODEL_AGENTS[number] : undefined;
       const selected = role ? modelFor(profile, role) : undefined;
       if (selected) draft.model = Model.Ref.parse(selected);
+      // The definition on disk is the free one; strict rules are added only with guards on.
+      if (!free && id === COORDINATOR && typeof draft.system === 'string' && !draft.system.includes(STRICT_COORDINATOR.trim()))
+        draft.system += STRICT_COORDINATOR;
       if (id === SECURITY_AGENT) draft.permissions.push(
         { action: '*', resource: '*', effect: 'deny' },
         { action: 'mdd_check_report', resource: '*', effect: 'allow' });
@@ -215,7 +247,7 @@ export async function setupV2(ctx: Plugin.Context, createMotor: LegacyPlugin): P
       if (PINNED_AGENTS.includes(id as typeof PINNED_AGENTS[number]) || ['general', 'explore'].includes(id))
         draft.permissions.push({ action: 'mdd_artifact_read', resource: '*', effect: 'allow' });
       if (PINNED_AGENTS.includes(id as typeof PINNED_AGENTS[number])) draft.permissions.push(
-        { action: 'subagent', resource: '*', effect: 'deny' }, { action: 'skill', resource: '*', effect: 'deny' },
+        ...(free ? [] : [{ action: 'subagent', resource: '*', effect: 'deny' as const }, { action: 'skill', resource: '*', effect: 'deny' as const }]),
         { action: 'mdd_check_report', resource: '*', effect: 'allow' });
       if (id === 'mdd-apply') draft.permissions.push({ action: 'mdd_worker_edit', resource: '*', effect: 'allow' });
       if (isJudge(id)) draft.permissions.push(
@@ -238,7 +270,7 @@ export async function setupV2(ctx: Plugin.Context, createMotor: LegacyPlugin): P
         await enforceSecurity(context.sessionID, name, args, context.agent);
         await settleAgentPolicy();
         const session = await ctx.session.get({ sessionID: context.sessionID }, { signal: context.signal });
-        await workerHost.fence.guard(session, name, args, !!session.parentID && !!workerHost.protectedParent?.(session.parentID));
+        if (!free) await workerHost.fence.guard(session, name, args, !!session.parentID && !!workerHost.protectedParent?.(session.parentID));
         if (session.location.directory !== directory || session.projectID !== ctx.location.project.id)
           throw new Error('Native MDD tool context differs from its plugin location.');
         const output = await definition.execute(args, { ...context, callID: context.id, abort: context.signal, directory, worktree } as never);
@@ -253,7 +285,7 @@ export async function setupV2(ctx: Plugin.Context, createMotor: LegacyPlugin): P
     await enforceSecurity(event.sessionID, call.tool, event.input, event.agent);
     await settleAgentPolicy();
     const session = await ctx.session.get({ sessionID: event.sessionID });
-    await workerHost.fence.guard(session, event.tool, event.input,
+    if (!free) await workerHost.fence.guard(session, event.tool, event.input,
       !!session.parentID && !!workerHost.protectedParent?.(session.parentID));
     if (session.location.directory !== directory || session.projectID !== ctx.location.project.id) {
       if (event.agent === SECURITY_AGENT || session.agent === SECURITY_AGENT) throw new Error('Security session left its bound workspace.');

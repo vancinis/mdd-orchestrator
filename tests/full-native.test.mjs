@@ -63,7 +63,9 @@ test('evidence handoff: native downstream dispatch retains locator and limits th
 test('R02: Design accepted before Tasks overflow remains committed across restart', async t => {
   const f = await fixture(t, { route: 'high', memoryEnabled: false, store: 'local' });
   while ((await f.status()).phase !== 'mdd-design') await f.phase();
-  await f.hooks.tool.mdd_context.execute({ label: 'Bounded input', content: 'x'.repeat(70000) }, f.context);
+  // Sized so Design's own dispatch still fits, with room for the free-mode actor line, while the
+  // decisions it returns push Tasks several KiB past the cap.
+  await f.hooks.tool.mdd_context.execute({ label: 'Bounded input', content: 'x'.repeat(69000) }, f.context);
   const decisions = Array.from({ length: 24 }, (_, i) => ({ id: `D${i + 1}`, description: 'd'.repeat(500), requirements: ['R1'] }));
   await f.phase({ narrative: { decisions } });
   const checkpoint = new CheckpointStore(f.root).read(f.runtime.sessionID).checkpoint;
@@ -413,7 +415,7 @@ test('opt-in pending native approval requires attestation, then re-presents with
 // envelope is minted from the current replayed action, never from the earlier prepared record's
 // text, and only a fresh call answering it (never the earlier one) can retry or choose a route.
 test('a settled blocked-risk assessment re-presents a fresh recovery question on restart and never accepts the old call', async t => {
-  const f = await fixture(t, { mode: 'interactive', store: 'none', memoryEnabled: false });
+  const f = await fixture(t, { mode: 'interactive', store: 'none', memoryEnabled: false, guards: true });
   await f.phase({ only: true });
   const before = await f.phase({ only: true, outcome: 'failed' });
   assert.equal(before.workflow.nextAction.kind, 'blocked-risk');
@@ -798,7 +800,7 @@ test('opt-in failed Verify restores rework and complete runs close before a fres
 });
 
 // Native SDK/hook contract fixtures. No model or real shell execution is performed.
-async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', partial = false, summary = 'low', telemetry = true, memoryEnabled = true, memoryFault, start = true, worktree: worktreeLayout = false, distinctWorktree = false, autoReview = true, automaticCorrections = 0 } = {}) {
+async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', partial = false, summary = 'low', telemetry = true, memoryEnabled = true, memoryFault, start = true, worktree: worktreeLayout = false, distinctWorktree = false, autoReview = true, automaticCorrections = 0, guards = false } = {}) {
   isolateHome(t);
   // When asked, the session runs inside a linked git worktree laid out as git does on disk — a
   // `.git` file pointing at the administrative directory, which names the shared git directory. It
@@ -836,6 +838,8 @@ async function fixture(t, { mode = 'automatic', route = 'low', store = 'none', p
   settings.telemetry.enabled = telemetry;
   // Most tests here pin the manual stop after a failed Verify; null keeps the shipped default (2).
   if (automaticCorrections !== null) settings.verify = { automaticCorrections };
+  // Free by default, as MDD ships; guards:true pins the strict workflow these tests were written for.
+  settings.guards.enabled = guards;
   saveGlobalSettings(settings);
   const runtime = { sessionID: 'ses_parent', agent: 'mdd-orchestrator', directory: root, worktree: hostWorktree };
   const model = { providerID: 'contract-only', modelID: 'model' };
@@ -1710,8 +1714,8 @@ test('rework is refused where there is no failed verification to correct', async
   assert.deepEqual((await f.status()).workflow, blocked.workflow);
 });
 
-async function failedVerification(t) {
-  const f = await fixture(t, { memoryEnabled: false });
+async function failedVerification(t, options = {}) {
+  const f = await fixture(t, { memoryEnabled: false, ...options });
   await f.phase(); await f.phase();
   await f.phase({ outcome: 'failed', exit: 1, unverified: true });
   return f;
@@ -1744,7 +1748,7 @@ for (const restored of [false, true]) test(`R05: legacy idle failedVerify permit
 });
 
 test('R05: legacy no-run passthrough and activation between question hooks', async t => {
-  const f = await fixture(t, { start: false, memoryEnabled: false });
+  const f = await fixture(t, { start: false, memoryEnabled: false, guards: true });
   const q = coordinatorQuestion(f);
   await q.before(); await q.after();
   await f.hooks.tool.mdd_start.execute({ requirements: f.requirements }, f.context);
@@ -1757,9 +1761,12 @@ test('R05: legacy no-run passthrough and activation between question hooks', asy
   await assert.rejects(coordinatorQuestion(f, f.hooks, 'during-actor').before(), /idle|pending|flight|writer|active/i);
 });
 
-test('R05: legacy pending and retired questions never become generic after changed arguments', async t => {
-  const f = await fixture(t, { partial: true, memoryEnabled: false });
-  await assert.rejects(coordinatorQuestion(f).before());
+for (const guards of [true, false]) test(`R05 (${guards ? 'strict' : 'free'}): legacy pending and retired questions never become generic after changed arguments`, async t => {
+  const f = await fixture(t, { partial: true, memoryEnabled: false, guards });
+  // Only strict mode refuses an unrelated question while MDD's preflight is pending; in both modes
+  // a question carrying MDD's own call or envelope stays MDD's and is checked exactly.
+  if (guards) await assert.rejects(coordinatorQuestion(f).before());
+  else await coordinatorQuestion(f, f.hooks, 'own-question').before();
   const issued = await f.answer();
   const altered = coordinatorQuestion(f, f.hooks, issued.call.callID);
   await assert.rejects(altered.before(), /question|call/i);
@@ -1790,7 +1797,7 @@ for (const restored of [false, true]) test(`R05: retained issued identity refuse
 });
 
 test('R05: actual issued native input cannot be disguised as generic callback arguments', async t => {
-  const f = await failedVerification(t);
+  const f = await failedVerification(t, { guards: true });
   const q = coordinatorQuestion(f);
   await q.before();
   q.part.state.input = { questions: [{ ...q.args.questions[0], question: 'Different actual native input' }] };
@@ -1798,12 +1805,12 @@ test('R05: actual issued native input cannot be disguised as generic callback ar
 });
 
 test('R05: contextual work and pending intake claims fence both hooks', async t => {
-  const f = await failedVerification(t), q = coordinatorQuestion(f);
+  const f = await failedVerification(t, { guards: true }), q = coordinatorQuestion(f);
   await q.before();
   await f.hooks.tool.mdd_contextual_explore.execute({ purpose: 'Investigate the failed evidence.' }, f.context);
   await assert.rejects(q.after(), /idle|active/i);
   await assert.rejects(coordinatorQuestion(f, f.hooks, 'context-active').before(), /idle|active/i);
-  const empty = await fixture(t, { start: false, memoryEnabled: false }), pending = coordinatorQuestion(empty);
+  const empty = await fixture(t, { start: false, memoryEnabled: false, guards: true }), pending = coordinatorQuestion(empty);
   await pending.before();
   new RunOwnershipStore(empty.root).claimIntake(empty.runtime.sessionID, 'pending-intake-token', 'user');
   await assert.rejects(pending.after(), /pending/i);
@@ -1811,7 +1818,7 @@ test('R05: contextual work and pending intake claims fence both hooks', async t 
 });
 
 for (const state of ['prepared', 'pending', 'answered']) test(`R05: durable ${state} question fences generic hooks before intake restoration`, async t => {
-  const f = await fixture(t, { partial: true, memoryEnabled: false }), store = new QuestionCheckpointStore(f.root);
+  const f = await fixture(t, { partial: true, memoryEnabled: false, guards: true }), store = new QuestionCheckpointStore(f.root);
   const record = store.read(f.runtime.sessionID);
   if (state === 'answered') store.write(f.runtime.sessionID, { ...record, sequence: record.sequence + 1, state: 'pending', callID: 'unconfirmed-question' });
   store.write(f.runtime.sessionID, { ...record, sequence: record.sequence + 2, state,
@@ -1824,7 +1831,7 @@ for (const state of ['prepared', 'pending', 'answered']) test(`R05: durable ${st
 });
 
 test('R05: durable retired call and pending progress remain negative authority', async t => {
-  const f = await fixture(t, { partial: true, memoryEnabled: false });
+  const f = await fixture(t, { partial: true, memoryEnabled: false, guards: true });
   await f.answer(); await f.phase(); await f.phase(); await f.phase({ outcome: 'failed', exit: 1, unverified: true });
   const store = new QuestionCheckpointStore(f.root), record = store.read(f.runtime.sessionID);
   store.write(f.runtime.sessionID, { ...record, sequence: record.sequence + 1, retiredCalls: ['retired-question'] });
@@ -3190,14 +3197,30 @@ test('a phase whose report only needs restating is not run again', async t => {
   assert.equal(restated.rejected, undefined, 'a recorded result clears the report it replaced');
 });
 
-test('an MDD run dispatches only its own phase actors', async t => {
-  const f = await fixture(t, { memoryEnabled: false });
+test('strict mode: an MDD run dispatches only its own phase actors', async t => {
+  const f = await fixture(t, { memoryEnabled: false, guards: true });
   const ready = await f.status();
   await assert.rejects(
     f.hooks['tool.execute.before']({ sessionID: f.runtime.sessionID, callID: 'foreign-1', tool: 'task' },
       { args: { description: 'Do the thing', subagent_type: 'gentle-ai', prompt: 'anything' } }),
     /Task arguments differ/);
   // The refusal changes nothing: the real phase is still exactly where it was.
+  const held = await f.status();
+  assert.equal(held.state, 'ready');
+  assert.equal(held.attempts, 0);
+  assert.equal(held.task.subagent_type, ready.phase);
+});
+
+test('free mode: a task to any agent runs untouched during a run, which stays exactly where it was', async t => {
+  const f = await fixture(t, { memoryEnabled: false });
+  const ready = await f.status();
+  const args = { description: 'Do the thing', subagent_type: 'gentle-ai', prompt: 'anything' };
+  const output = { args: structuredClone(args) };
+  await f.hooks['tool.execute.before']({ sessionID: f.runtime.sessionID, callID: 'foreign-1', tool: 'task' }, output);
+  assert.deepEqual(output.args, args);
+  const result = { title: 'Do the thing', metadata: {}, output: 'done' };
+  await f.hooks['tool.execute.after']({ sessionID: f.runtime.sessionID, callID: 'foreign-1', tool: 'task', args }, result);
+  assert.equal(result.output, 'done');
   const held = await f.status();
   assert.equal(held.state, 'ready');
   assert.equal(held.attempts, 0);
@@ -3218,8 +3241,8 @@ test('MDD tools belong to the coordinator and are withdrawn from every other age
   assert.equal(config.agent['mdd-orchestrator'].tools, undefined);
 });
 
-test('tracked native children cannot recurse or use MDD tools; unrelated native sessions are unchanged', async t => {
-  const f = await fixture(t, { memoryEnabled: false });
+test('strict mode: tracked native children cannot recurse or use MDD tools; unrelated native sessions are unchanged', async t => {
+  const f = await fixture(t, { memoryEnabled: false, guards: true });
   await f.hooks.tool.mdd_phase_result.execute({ result: 'Select native work.' }, f.context);
   await f.phase();
   for (const tool of ['task', 'skill', 'mdd_check_report', 'mdd_start']) {
@@ -3241,6 +3264,17 @@ test('tracked native children cannot recurse or use MDD tools; unrelated native 
   }]);
   await f.hooks['tool.execute.before'](call, { args });
   assert.deepEqual(args, before);
+});
+
+test('free mode: tracked native children keep delegation and skills', async t => {
+  const f = await fixture(t, { memoryEnabled: false });
+  await f.hooks.tool.mdd_phase_result.execute({ result: 'Select native work.' }, f.context);
+  await f.phase();
+  for (const tool of ['task', 'skill']) {
+    const output = { args: { subagent_type: 'general', description: 'Nested help', prompt: 'Look this up.' } };
+    await f.hooks['tool.execute.before']({ sessionID: 'child-1', callID: `nested-${tool}`, tool }, output);
+    assert.deepEqual(output.args, { subagent_type: 'general', description: 'Nested help', prompt: 'Look this up.' });
+  }
 });
 
 test('uncertain Apply cannot skip interactive approval or automatically retry partial writes', async t => {

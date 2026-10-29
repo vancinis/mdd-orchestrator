@@ -421,7 +421,7 @@ for (const [label, fixture, expectState] of [
   assert.equal(result.stage, 'mdd-risk');
   assert.equal(result.state, expectState);
   // The source is fenced the moment the target claims it: no late callback can reach it.
-  await assert.rejects(source['tool.execute.before']({ sessionID: sourceID, callID: 'late-task', tool: 'task' }, { args: previous.task ?? { description: 'old work', subagent_type: 'mdd-risk', prompt: 'old work' } }));
+  await assert.rejects(source['tool.execute.before']({ sessionID: sourceID, callID: 'late-task', tool: 'task' }, { args: previous.task ?? { description: 'old work', subagent_type: 'mdd-risk', prompt: 'mdd:dispatch:old work' } }));
   const restarted = await plugin(input);
   const restored = JSON.parse(await restarted.tool.mdd_status.execute({}, context('ses_target_a')));
   assert.equal(restored.state, expectState);
@@ -535,7 +535,7 @@ test('explicit transferred-target discard frees a new objective without reviving
   assert.equal(new RunOwnershipStore(root).read(runID).ownerSessionID, targetID);
   assert.equal(new CheckpointStore(root).read(targetID), undefined);
   await assert.rejects(source['tool.execute.before']({ sessionID: sourceID, callID: 'source-after-target-discard', tool: 'task' },
-    { args: { description: 'old work', subagent_type: 'mdd-plan', prompt: 'old work' } }));
+    { args: { description: 'old work', subagent_type: 'mdd-plan', prompt: 'mdd:dispatch:old work' } }));
   const newText = 'Build a new independent target objective.';
   appendUser(histories, targetID, 'user-new-target', newText);
   const started = JSON.parse(await target.tool.mdd_start.execute({ requirements: newText }, context(targetID)));
@@ -622,7 +622,7 @@ for (const stage of ['after-recovery-owner', 'after-target-retirement']) test(`i
   assert.equal(owners.read(runID).recoveringTransfer.operationID, intent.operationID);
   assert.equal(owners.parent(targetID), stage === 'after-recovery-owner' ? runID : undefined);
   await assert.rejects(source['tool.execute.before']({ sessionID: sourceID, callID: 'stale-recovery-task', tool: 'task' },
-    { args: { description: 'old task', subagent_type: 'mdd-plan', prompt: 'old task' } }));
+    { args: { description: 'old task', subagent_type: 'mdd-plan', prompt: 'mdd:dispatch:old task' } }));
   const second = await plugin(input);
   const confirmed = JSON.parse(await second.tool.mdd_transfer_recover.execute(request, context(targetID)));
   assert.equal(confirmed.state, 'transfer-recovered', JSON.stringify(confirmed));
@@ -703,7 +703,7 @@ test('explicit recovery finishes complete publication but never invents missing 
   assert.equal(new RunOwnershipStore(root).read(runID).ownerSessionID, targetID);
   assert.equal(new RunOwnershipStore(root).read(runID).receipt.operationID, claim.operationID);
   await assert.rejects(source['tool.execute.before']({ sessionID: sourceID, callID: 'late-after-recovery', tool: 'task' },
-    { args: { description: 'old work', subagent_type: 'mdd-propose', prompt: 'old work' } }));
+    { args: { description: 'old work', subagent_type: 'mdd-propose', prompt: 'mdd:dispatch:old work' } }));
 });
 
 /** Crash the transfer after the target checkpoint is published but before its progress marker. */
@@ -743,7 +743,7 @@ test('partial publication finishes on explicit request by regenerating the deter
   assert.deepEqual(new ProgressGuard(root).read('ses_target_a'),
     { ...new ProgressGuard(root).read(sourceID), userMessageID: claim.nativeUserMessageID });
   await assert.rejects(source['tool.execute.before']({ sessionID: sourceID, callID: 'late-after-partial', tool: 'task' },
-    { args: { description: 'old work', subagent_type: 'mdd-propose', prompt: 'old work' } }));
+    { args: { description: 'old work', subagent_type: 'mdd-propose', prompt: 'mdd:dispatch:old work' } }));
 });
 
 test('partial publication aborts on explicit request by removing only the exact projected target bytes', async t => {
@@ -903,7 +903,10 @@ test('transfer publishes progress but requires a new target-native phase approva
   isolateHome(t);
   const root = mkdtempSync(join(tmpdir(), 'mdd-transfer-approval-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  saveGlobalSettings(defaultSettings());
+  // Strict: the source must refuse even a question shaped like the target's own approval.
+  const settings = defaultSettings();
+  settings.guards.enabled = true;
+  saveGlobalSettings(settings);
   approvalCheckpoint(root);
   const { input, context, histories } = host(root);
   const source = await plugin(input);
@@ -1067,7 +1070,7 @@ test('two fresh target plugin instances race one source without two confirmed ow
     assert.equal(owner.receipt.targetSessionID, owner.ownerSessionID);
     assert.ok(['ses_target_a', 'ses_target_b'].includes(owner.ownerSessionID));
     await assert.rejects(source['tool.execute.before']({ sessionID: sourceID, callID: 'late-source', tool: 'task' },
-      { args: { description: 'late', subagent_type: 'mdd-propose', prompt: 'late' } }));
+      { args: { description: 'late', subagent_type: 'mdd-propose', prompt: 'mdd:dispatch:late' } }));
   }
   const other = owner.ownerSessionID === 'ses_target_a' ? 'ses_target_b' : 'ses_target_a';
   if (new RunOwnershipStore(root).parentClaim(other)?.transfer) {
@@ -1098,7 +1101,7 @@ test('two OS processes running the transfer plugin cannot confirm two targets', 
     const target = await plugin(input);
     assert.equal(JSON.parse(await target.tool.mdd_status.execute({}, context(owner.ownerSessionID))).transfer.state, 'confirmed');
     await assert.rejects(source['tool.execute.before']({ sessionID: sourceID, callID: 'late-process-task', tool: 'task' },
-      { args: { description: 'old work', subagent_type: 'mdd-plan', prompt: 'old work' } }));
+      { args: { description: 'old work', subagent_type: 'mdd-plan', prompt: 'mdd:dispatch:old work' } }));
   }
 });
 
@@ -1130,7 +1133,7 @@ test('killed transfer process after checkpoint publication stays fenced until ex
   assert.equal(result.transfer?.state, 'confirmed', JSON.stringify(result));
   assert.equal(owners.read(runID).ownerSessionID, 'ses_target_a');
   await assert.rejects(source['tool.execute.before']({ sessionID: sourceID, callID: 'late-killed-source', tool: 'task' },
-    { args: { description: 'old work', subagent_type: 'mdd-plan', prompt: 'old work' } }));
+    { args: { description: 'old work', subagent_type: 'mdd-plan', prompt: 'mdd:dispatch:old work' } }));
 });
 
 test('target memory binding fails before transfer reservation when source needs Engram', async t => {
@@ -1303,11 +1306,13 @@ test('target-first claim blocks native target startup before source is fenced', 
   assert.equal(JSON.parse(await target.tool.mdd_status.execute({}, context(targetID))).state, 'recovery-blocked');
 });
 
-test('a transferring owner fences a restored source across coordinator tools and native callbacks', async t => {
+for (const guards of [true, false]) test(`a transferring owner fences a restored source across coordinator tools and native callbacks (${guards ? 'strict' : 'free'})`, async t => {
   isolateHome(t);
   const root = mkdtempSync(join(tmpdir(), 'mdd-source-fence-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  saveGlobalSettings(defaultSettings());
+  const settings = defaultSettings();
+  settings.guards.enabled = guards;
+  saveGlobalSettings(settings);
   checkpoint(root);
   const { input, context } = host(root);
   const source = await plugin(input);
@@ -1318,8 +1323,16 @@ test('a transferring owner fences a restored source across coordinator tools and
   const call = { sessionID: sourceID, callID: 'stale-task', tool: 'task' };
   await assert.rejects(source['tool.execute.before'](call, { args: { ...status.task } }), /durable run owner/);
   await assert.rejects(source['tool.execute.after']({ ...call, args: status.task }, { output: 'forged' }), /durable run owner/);
-  await assert.rejects(source['tool.execute.before']({ ...call, tool: 'question' }, { args: { questions: [] } }), /durable run owner/);
-  await assert.rejects(source['tool.execute.after']({ ...call, tool: 'question', args: { questions: [] } }, { output: 'forged' }), /durable run owner/);
+  // MDD's own dispatch above stays fenced in both modes. A question MDD never issued is the
+  // coordinator's: strict mode fences it with the source, free mode lets it run untouched.
+  const own = { ...call, callID: 'own-question', tool: 'question' };
+  if (guards) {
+    await assert.rejects(source['tool.execute.before'](own, { args: { questions: [] } }), /durable run owner/);
+    await assert.rejects(source['tool.execute.after']({ ...own, args: { questions: [] } }, { output: 'forged' }), /durable run owner/);
+  } else {
+    await source['tool.execute.before'](own, { args: { questions: [] } });
+    await source['tool.execute.after']({ ...own, args: { questions: [] } }, { output: 'answered' });
+  }
   for (const [name, args] of [
     ['mdd_prepare_advance', { questions: [] }], ['mdd_revisit', {}], ['mdd_phase_result', { result: 'forged' }],
     ['mdd_reset', { scope: 'run' }], ['mdd_context', { label: 'source', content: 'forged' }],

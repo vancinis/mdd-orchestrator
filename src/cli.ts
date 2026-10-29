@@ -13,6 +13,7 @@ Uso:
   mdd-ai config | doctor | init | update
   mdd-ai profile list | create <nombre> | use <nombre>
   mdd-ai workers status | on | off
+  mdd-ai guards status | on | off   off (por defecto): MDD no bloquea nada; on: modo estricto
   mdd-ai telemetry status | report | on | off | clear
   mdd-ai lessons report | list [texto] | mark <id> | clear
   mdd-ai retro               qué viene pasando: ejecuciones, fallos y automejoras

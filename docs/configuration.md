@@ -102,6 +102,7 @@ no Engram setup, and telemetry/workers enabled. Reading never creates a settings
 | `engram` | Omitted means memory off. `{ endpoint }` opts into an explicit loopback service; `{ mode: 'local', binary, dataDirectory }` opts into a managed installed binary. Legacy `project` is deprecated and ignored with a runtime notice. No secrets or session IDs in settings. |
 | `telemetry` | Optional `{ "enabled": boolean }`, default enabled. No external destination. |
 | `workers` | Optional `{ "enabled": boolean }`, default enabled when the whole field is omitted. Global, not per profile. If present, `enabled` is required; strings, numbers, null, arrays, and unknown keys are rejected. |
+| `guards` | Optional `{ "enabled": boolean }`, default **off** (free mode) when omitted. See [Free and strict mode](#free-and-strict-mode). Read at runtime startup; restart after changing it. |
 | `verify` | Optional `{ "automaticCorrections": 0 \| 1 \| 2 }`, default 2 when omitted. Automatic mode only: a failed Verify of the implementation goes back to one Apply correction pass for every finding, and the next Verify rechecks only those findings; a further pass runs only when that recheck closed findings and opened none. A design or requirements cause, interactive mode, no progress or a spent bound stops for the user. 0 keeps every failed Verify waiting for the user. Read at runtime startup; restart after changing it. |
 
 Capture active profile/model mappings and worker preference **once at runtime startup** with `freezeProfile`.
@@ -109,6 +110,31 @@ Restart after changing them; never replace an in-flight workflow's answers. Gene
 New native runs use Engram after successful configured project/session bootstrap, otherwise local.
 The adapter verifies the exact registered runtime session/project/directory; it never fabricates
 a session or switches a restored run's backend. Legacy general memory remains independent of artifacts.
+
+## Free and strict mode
+
+MDD runs **free** unless `guards.enabled` is `true`. `mdd-ai guards status | on | off` reads or
+saves it; restart OpenCode afterwards.
+
+- **Free (default).** The coordinator definition tells the model to do what the user asks
+  directly, with every native tool, and to use MDD's planned workflow only when the user wants
+  it. A native `task` or `question` MDD did not issue runs untouched in both hooks, even while a
+  run, an investigation or an MDD question is active, and its result or error never reaches MDD.
+  A task counts as MDD's when its prompt is a `mdd:dispatch:` handle (or the transcript note
+  standing in for one) or a full prompt MDD composed, which always carries its by-value actor
+  instructions. Phase actors keep `task`/`skill` (V1 tools, V2 `subagent`/`skill` permissions),
+  native fallback children are not fenced, and the V2 worker fence no longer checks children's
+  native tools; `mdd_worker_edit` still writes only its assignment's files. Every actor prompt
+  MDD composes carries one short self-contained `MDD guards: off:` line after the by-value actor
+  instructions (which are unchanged in both modes): written tool and scope limits become guidance
+  and the report format stays unchanged.
+- **Strict.** The pre-existing behavior: MDD refuses any other task or question while it holds
+  a run, an investigation or a question, phase actors are pinned, scoped workers are fenced, and
+  the plugin appends the strict rules to the coordinator definition (V1 `prompt`, V2 `system`).
+
+In both modes what MDD issued keeps its exact protocol, approvals appear only in interactive
+mode, the explicitly requested security audit and Judgment Day keep their isolation, and native
+permissions apply.
 
 ## Accepted session preferences
 
@@ -337,7 +363,9 @@ type Settings = {
   version: 1; activeProfile: string; profiles: Record<string, NamedProfile>;
    engram?: { endpoint: string; project?: string } | { mode: 'local'; binary: string; dataDirectory: string }; telemetry: { enabled: boolean };
   workers: { enabled: boolean };
+  guards: { enabled: boolean }; // default false: free mode
 };
+function freeMode(settings?: Pick<Settings, 'guards'>): boolean; // true unless guards.enabled === true
 type StartupProfile = Readonly<{
   name: string; models: Readonly<Partial<Record<ModelRole, string>>>;
   answers: Readonly<Partial<Answers>>;

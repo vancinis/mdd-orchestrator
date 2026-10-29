@@ -149,7 +149,25 @@ flowchart LR
 | CLI | `dist/cli.js` (bins `mdd` y `mdd-ai`) | Instalador, actualizador, doctor, editor de configuración, perfiles, telemetría, lecciones, retro y la prueba de ruteo |
 | Kernel | `dist/kernel.js` (export `.`) | Evaluación pura y validada del ruteo (`evaluate`, `preflight`) |
 
-### Cómo se protege cada actor
+### Modo libre (por defecto) y modo estricto
+
+MDD **no bloquea nada por defecto**: `guards.enabled` vale `false` en la configuración global.
+
+| | Modo libre (`guards.enabled: false`, por defecto) | Modo estricto (`guards.enabled: true`) |
+|---|---|---|
+| Coordinador | Trabaja directo: edita, ejecuta comandos, instala, usa cualquier subagente y cualquier skill. MDD es una herramienta opcional | Toda implementación pasa por `mdd_adapt`; no hace trabajo de fase en línea |
+| Tareas y preguntas propias | Se ejecutan intactas aunque haya una ejecución, investigación o pregunta de MDD activa; su resultado nunca llega a MDD | Mientras MDD tenga algo activo, se rechaza cualquier tarea o pregunta que MDD no haya emitido |
+| Actores de fase | Conservan `task` y `skill`. El prompt lleva `MDD guards: off`, así que sus límites escritos (huellas declaradas, sin shell, sin tests) son una guía | `task: false`, `skill: false`; los workers acotados solo leen y escriben lo declarado |
+| Rechazos de MDD | Nunca frenan al usuario: el coordinador lo dice en una frase y sigue directo | Son un alto: se corrige lo que nombran o se informa el bloqueo |
+
+En los dos modos se mantiene lo mismo: lo que MDD emite (handles `mdd:dispatch:`, sus preguntas,
+sus ejecuciones) pasa por su propia contabilidad. Las aprobaciones entre fases aparecen solo en
+modo interactivo, que elegís vos. La auditoría de seguridad y Judgment Day conservan su
+aislamiento, porque solo corren cuando los pedís. Los permisos nativos de OpenCode se aplican siempre.
+
+Para cambiar de modo: `mdd-ai guards on` o `mdd-ai guards off`, y reiniciá OpenCode.
+
+### Cómo se protege cada actor (modo estricto)
 
 - **Instrucciones por valor:** `assets/opencode/mdd-instructions.md` se inyecta en cada prompt de
   fase junto con su ruta y su digest. Nunca se instala en el directorio compartido, así que ningún
@@ -1097,6 +1115,7 @@ Un único archivo global: `$XDG_CONFIG_HOME/opencode/mdd/mdd.config.json` (o
 | `telemetry.enabled` | Booleano estricto | `true` |
 | `workers.enabled` | Booleano estricto (global, no por perfil) | `true` |
 | `knowledge.enabled` | Booleano estricto | `true` |
+| `guards.enabled` | Booleano estricto. `false` = modo libre: MDD no rechaza nada que no haya emitido y los actores conservan todas sus herramientas. `true` = modo estricto (ver [Modo libre y modo estricto](#modo-libre-por-defecto-y-modo-estricto)) | `false` |
 | `verify.automaticCorrections` | Entero de 0 a 2: pasadas de corrección automática tras un Verify fallido (solo modo automático). 0 = siempre decidís vos | `2` |
 | `engram` | Omitido = memoria apagada. `{endpoint}` loopback o `{mode: "local", binary, dataDirectory}` | Omitido |
 
@@ -1135,6 +1154,7 @@ Editor de terminal en español:
 | `mdd-ai config` | Editor de configuración avanzado |
 | `mdd-ai profile list \| create <nombre> \| use <nombre>` | Perfiles con nombre (`*` marca el activo). `create` también lo activa |
 | `mdd-ai workers status \| on \| off` | Preferencia de workers paralelos |
+| `mdd-ai guards status \| on \| off` | Guardas de MDD: `off` (por defecto) es el modo libre, `on` el estricto. Requiere reiniciar OpenCode |
 | `mdd-ai telemetry status \| report \| on \| off \| clear` | Telemetría local |
 | `mdd-ai lessons report \| list [texto] \| mark <id> \| clear` | Mejoras registradas |
 | `mdd-ai retro` | Retrospectiva: ejecuciones, fallos y mejoras |

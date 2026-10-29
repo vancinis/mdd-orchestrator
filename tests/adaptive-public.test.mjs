@@ -23,13 +23,15 @@ const wire = (kind, args = {}) => JSON.stringify({ routingVersion: 3, kind, args
 const hash = text => createHash('sha256').update(text).digest('hex');
 
 // The host identities and hooks match the installed V2 2.0.22 transport.
-async function fixture(t, mode = 'automatic') {
+// Free by default, as MDD ships; `guards` runs the same host with the strict workflow on.
+async function fixture(t, mode = 'automatic', guards = false) {
   isolateHome(t);
   const root = await mkdtemp(join(tmpdir(), 'mdd-public-adaptive-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   await writeFile(join(root, 'own.txt'), 'before');
   const settings = defaultSettings();
   settings.profiles.default.answers = mode ? { mode } : {};
+  settings.guards.enabled = guards;
   saveGlobalSettings(settings);
   let sessionID = 'ses_parent';
   const tools = new Map(), hooks = new Map(), sessionHooks = new Map();
@@ -104,8 +106,13 @@ async function fixture(t, mode = 'automatic') {
     messages.set(childID, []);
     await emit({ type: 'session.tool.progress', data: { sessionID, assistantMessageID: call.messageID, id: call.id,
       metadata: { status: 'running', sessionID: childID } } });
-    for (const tool of ['shell', 'mcp_external', 'subagent']) await assert.rejects(hooks.get('execute.before')({ sessionID: childID, agent: actor,
-      messageID: `child-message-${count}`, id: `denied-${tool}-${count}`, tool, input: {} }), /worker|scope|denied|allow|tool/i);
+    // Strict children are fenced to their footprint; free children keep every native tool.
+    for (const tool of ['shell', 'mcp_external', 'subagent']) {
+      const used = hooks.get('execute.before')({ sessionID: childID, agent: actor,
+        messageID: `child-message-${count}`, id: `${guards ? 'denied' : 'free'}-${tool}-${count}`, tool, input: {} });
+      if (guards) await assert.rejects(used, /worker|scope|denied|allow|tool/i);
+      else await used;
+    }
     if (edit) await tools.get('mdd_worker_edit').execute({ operations: Array.isArray(edit) ? [{ path: 'own.txt', kind: 'edit', oldString: edit[0], newString: edit[1] }] : edit.operations },
       { sessionID: childID, agent: actor, messageID: `child-message-${count}`, id: `edit-${count}`, signal: new AbortController().signal });
     const text = typeof fields === 'string' ? fields : reportDocument({ phase: actor, outcome: 'passed', evidenceSummary: 'Actual scoped actor report.', artifact: 'Read actual held source.', ...fields });
@@ -903,11 +910,12 @@ test('grill: a chat reply during the session keeps the request; it is confirmed 
   assert.equal(f.store.read(f.sessionID).userMessageID, first);
 });
 
-test('grill: a session cannot run over a pending MDD question, and the refusal leaves it answerable', async t => {
-  const f = await fixture(t), draft = grilledDraft(f), userID = f.user(draft.objective);
+for (const guards of [true, false]) test(`grill (${guards ? 'strict' : 'free'}): ${guards ? 'a session cannot run over a pending MDD question, and the refusal leaves it answerable' : 'a session runs over a pending MDD question and leaves it answerable'}`, async t => {
+  const f = await fixture(t, 'automatic', guards), draft = grilledDraft(f), userID = f.user(draft.objective);
   let status = await f.send('entry', { contract: { ...structuredClone(draft), productQuestions: ['Which replacement format?'] }, messageID: userID });
   assert.ok(status.question);
-  await assert.rejects(ownQuestion(f, round), /question|pending|differs|envelope/i);
+  if (guards) await assert.rejects(ownQuestion(f, round), /question|pending|differs|envelope/i);
+  else await ownQuestion(f, round);
   status = await f.answer(status, [['Keep the original format.']]);
   status = await f.send('entry', { contract: draft, messageID: userID });
   assert.equal(status.state, 'await-selection');
@@ -936,15 +944,20 @@ test('grill: a dismissed session question settles without holding the parent', a
   assert.equal(status.state, 'await-selection'); assert.equal(status.route, 'high');
 });
 
-test('grill: a session past the readable native history fails closed without creating a run', async t => {
+// This used to fail closed: the request had fallen out of the 100-message page MDD read, so it
+// could not be proven. Every proof reads the whole conversation now, so a question session of any
+// length admits the request it started from, bound to that exact user message.
+test('grill: a session longer than one page still admits the request it started from', async t => {
   const f = await fixture(t), draft = grilledDraft(f), userID = f.user(draft.objective);
   for (let step = 0; step < 99; step++) {
     f.messages.get(f.sessionID).push({ id: `grill-long-${step}`, type: 'assistant', agent: 'mdd-orchestrator', model: { providerID: 'openai', id: 'test' }, content: [], time: { created: 1000 + step } });
     f.switchParent(f.sessionID);
     await ownQuestion(f, [['Opción A (Recomendada)']]);
   }
-  await assert.rejects(f.send('entry', { contract: draft, messageID: userID }));
-  assert.equal(f.store.read(f.sessionID), undefined);
+  assert.ok(f.messages.get(f.sessionID).length > 100, 'the request must sit past one page');
+  const status = await f.send('entry', { contract: draft, messageID: userID });
+  assert.equal(status.state, 'await-selection'); assert.equal(status.route, 'high');
+  assert.equal(f.store.read(f.sessionID).userMessageID, userID);
 });
 
 // A closed version-3 run keeps its parent until a fresh request replaces it. MDD used to refuse
@@ -980,12 +993,12 @@ for (const outcome of ['unverified', 'verified']) for (const restart of [false, 
   });
 }
 
-// The allowance is only for a closed run with nothing of MDD's own outstanding.
-test('grill: active runs, pending MDD questions and interrupted durable questions still refuse other questions', async t => {
-  const active = await fixture(t);
+// With guards on, the allowance is only for a closed run with nothing of MDD's own outstanding.
+test('grill (strict): active runs, pending MDD questions and interrupted durable questions still refuse other questions', async t => {
+  const active = await fixture(t, 'automatic', true);
   await active.entry(active.contract());
   await assert.rejects(ownQuestion(active, round), /requires an idle run/);
-  const f = await fixture(t);
+  const f = await fixture(t, 'automatic', true);
   await closeRun(f, 'unverified');
   const draft = grilledDraft(f, 'Add a different new capability.'), userID = f.user(draft.objective);
   const open = { ...structuredClone(draft), productQuestions: ['Which replacement format?'] };
@@ -994,4 +1007,20 @@ test('grill: active runs, pending MDD questions and interrupted durable question
   await assert.rejects(ownQuestion(f, round), /question|pending|differs|envelope/i);
   await f.restart(); await f.call('mdd_status');
   await assert.rejects(ownQuestion(f, round), /question|consent|intake|interrupted/i);
+});
+
+// Free mode, as MDD ships: none of those states can refuse a question MDD did not issue.
+test('grill (free): active runs, pending MDD questions and interrupted durable questions never refuse other questions', async t => {
+  const active = await fixture(t);
+  await active.entry(active.contract());
+  await ownQuestion(active, round);
+  const f = await fixture(t);
+  await closeRun(f, 'unverified');
+  const draft = grilledDraft(f, 'Add a different new capability.'), userID = f.user(draft.objective);
+  const open = { ...structuredClone(draft), productQuestions: ['Which replacement format?'] };
+  const status = await f.send('entry', { contract: open, messageID: userID });
+  assert.ok(status.question);
+  await ownQuestion(f, round);
+  await f.restart(); await f.call('mdd_status');
+  await ownQuestion(f, round);
 });
