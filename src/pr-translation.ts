@@ -17,6 +17,7 @@ import { createHash } from 'node:crypto';
  */
 export type Translatable = { key: string; label: string; source: string };
 export type Translation = { key: string; text: string };
+export const PR_TRANSLATION_LIMIT = 128;
 
 /**
  * Distinguishes "the Spanish you sent cannot be used" from every other way drafting can fail. The
@@ -62,8 +63,11 @@ function looksEnglish(value: string): boolean {
  * and prose translated from the older evidence would be applied to newer evidence without anyone
  * noticing. The digest makes that mismatch loud instead of invisible.
  */
-export function translationDigest(runID: string, entries: readonly Translatable[]): string {
-  const canonical = JSON.stringify([runID, ...entries.map(entry => [entry.key, entry.source])]);
+export function translationDigest(runID: string, entries: readonly Translatable[], context?: unknown): string {
+  // Keep the legacy representation byte-for-byte when no extra context is present. Metadata
+  // binding detects a changed submission, not the truth or completeness of authored prose.
+  const canonical = JSON.stringify([runID, ...entries.map(entry => [entry.key, entry.source]),
+    ...(context === undefined ? [] : [{ context }])]);
   return createHash('sha256').update(canonical).digest('hex');
 }
 

@@ -1867,12 +1867,16 @@ for (const restart of [false, true]) {
     assert.equal(retained.state, result.state);
     assert.deepEqual(retained.priorRun.verification, result.priorRun.verification);
     f.user('Draft the preserved failed run evidence.');
-    const request = JSON.parse(await fresh.tool.mdd_pr_body.execute({ runID: failed.runID, userText: f.parent[0].parts[0].text }, f.context));
+    const additionalContext = [{ section: 'context', source: 'recorded', ref: 'decisions' }];
+    const request = JSON.parse(await fresh.tool.mdd_pr_body.execute({ runID: failed.runID, userText: f.parent[0].parts[0].text, additionalContext }, f.context));
+    assert.deepEqual(request.additionalContext[0].items.map(item => ({ id: item.id, text: item.text })),
+      failed.decisions.map(item => ({ id: item.id, text: item.description })));
     assert.ok(request.entries.some(item => /input handling/.test(item.text)), JSON.stringify(request));
     const translations = request.entries.map(entry => ({ key: entry.key, text: entry.key === 'limit.0'
       ? 'El usuario continuó después de la verificación fallida; el resultado fallido no se aceptó como PASS.'
-      : PR_SPANISH[entry.key] ?? entry.text }));
-    const draft = JSON.parse(await fresh.tool.mdd_pr_body.execute({ runID: failed.runID, userText: f.parent[0].parts[0].text, digest: request.digest, translations }, f.context));
+      : entry.key === 'context.0.decision.0' ? 'Validar la entrada en el borde de la feature.' : PR_SPANISH[entry.key] ?? entry.text }));
+    const draft = JSON.parse(await fresh.tool.mdd_pr_body.execute({ runID: failed.runID, userText: f.parent[0].parts[0].text, digest: request.digest, translations, additionalContext }, f.context));
+    assert.match(draft.body, /D1: Validar la entrada en el borde de la feature/);
     assert.match(draft.body, /salida 1/);
     assert.match(draft.body, /no están verificados del todo/);
     assert.doesNotMatch(draft.body.split('## Bloqueos')[1], /^\s*No aplica\./);
@@ -3418,6 +3422,41 @@ test('native PR-body tool drafts recorded facts without changing workflow, appro
   assert.ok(!draft.body.includes(f.root)); assert.deepEqual(await f.status(), before); assert.equal(f.writes.length, writes);
 });
 
+test('native optional PR context authenticates user text, projects live decisions and leaves workflow untouched', async t => {
+  const f = await fixture(t); await f.phase(); await f.phase(); await f.phase();
+  const userText = 'Draft the PR.\nRevisar primero el borde de entrada.';
+  f.user(userText);
+  const before = await f.status(), writes = f.writes.length;
+  const additionalContext = [
+    { section: 'context', source: 'recorded', ref: 'decisions' },
+    { section: 'context', source: 'recorded', ref: 'goal' },
+    { section: 'review', source: 'user', text: 'Revisar primero el borde de entrada.' },
+    { section: 'risks', source: 'interpretation', text: 'El alcance no incluye la migración de datos anteriores.' },
+  ];
+  const args = { userText, additionalContext };
+  const request = JSON.parse(await f.hooks.tool.mdd_pr_body.execute(args, f.context));
+  assert.deepEqual(request.additionalContext[0].items.map(item => ({ id: item.id, text: item.text })),
+    before.decisions.map(item => ({ id: item.id, text: item.description })));
+  const translations = request.entries.map(entry => ({ key: entry.key, text: {
+    ...PR_SPANISH, 'context.0.decision.0': 'Validar la entrada en el borde de la feature.',
+    'context.1.goal': PR_SPANISH.goal,
+  }[entry.key] ?? entry.text }));
+  await assert.rejects(f.hooks.tool.mdd_pr_body.execute({ ...args, userText: 'A fabricated user message.' }, f.context));
+  for (let i = 0; i < 4; i++) {
+    await assert.rejects(f.hooks.tool.mdd_pr_body.execute({ ...args, digest: request.digest, translations,
+      additionalContext: [{ section: 'review', source: 'user', text: 'Revisar primero' }] }, f.context), /complete line/);
+  }
+  const altered = additionalContext.map((entry, i) => i === 3 ? { ...entry, section: 'review' } : entry);
+  await assert.rejects(f.hooks.tool.mdd_pr_body.execute({ ...args, additionalContext: altered, digest: request.digest, translations }, f.context), /no corresponde/);
+  const draft = JSON.parse(await f.hooks.tool.mdd_pr_body.execute({ ...args, digest: request.digest, translations }, f.context));
+  assert.match(draft.body, /D1: Validar la entrada/);
+  assert.match(draft.body, /Lo aportó el usuario, sin verificación independiente/);
+  assert.match(draft.body, /Interpretación del agente, sin verificación independiente/);
+  assert.equal(draft.publication, 'not-authorized');
+  assert.deepEqual(await f.status(), before);
+  assert.equal(f.writes.length, writes);
+});
+
 // Every sentence of substance in the body was recorded in English by a phase. Rendering it as it
 // was recorded is what put "Verified the implementation" under a Spanish heading for a reviewer.
 test('a body cannot be rendered from prose that was never translated, and drafting stops asking', async t => {
@@ -3714,12 +3753,23 @@ test('a quick edit with no recorded run still drafts its PR body from git and th
   await assert.rejects(f.hooks.tool.mdd_pr_body.execute({ userText, baseRef: 'staging', digest: 'x', translations: [{ key: 'goal', text: 'Objetivo.' }] }, f.context), /no recorded text to translate/);
   const direct = { summary: 'La feature queda marcada como terminada para quien la consulta.',
     files: [{ path: 'feature.txt', reason: 'Cambia el estado de la feature de pendiente a terminada.' }] };
+  await assert.rejects(f.hooks.tool.mdd_pr_body.execute({ userText, baseRef: 'staging', direct, digest: 'x' }, f.context), /no recorded text to translate/);
   const draft = JSON.parse(await f.hooks.tool.mdd_pr_body.execute({ userText, baseRef: 'staging', direct }, f.context));
   assert.match(draft.body, /## Resumen\n\nLa feature queda marcada como terminada/);
   assert.match(draft.body, /\| `feature\.txt` \| Cambia el estado de la feature de pendiente a terminada\. \|/);
   assert.match(draft.body, /Ajuste directo, sin una ejecución MDD registrada/);
   assert.equal(draft.publication, 'not-authorized');
   assert.equal(draft.provenance.source, 'direct');
+  const additionalContext = [{ section: 'review', source: 'interpretation', text: 'Revisar el texto visible antes de integrar el cambio.' }];
+  const withContext = { userText, baseRef: 'staging', additionalContext };
+  const bound = JSON.parse(await f.hooks.tool.mdd_pr_body.execute(withContext, f.context));
+  await assert.rejects(f.hooks.tool.mdd_pr_body.execute({ ...withContext, direct }, f.context), /digest/);
+  await assert.rejects(f.hooks.tool.mdd_pr_body.execute({ ...withContext, direct, digest: 'bad' }, f.context), /digest/);
+  await assert.rejects(f.hooks.tool.mdd_pr_body.execute({ ...withContext, additionalContext: [{ section: 'context', source: 'recorded', ref: 'goal' }] }, f.context), /recorded run/);
+  const contextual = JSON.parse(await f.hooks.tool.mdd_pr_body.execute({ ...withContext, digest: bound.digest, direct }, f.context));
+  assert.match(contextual.body, /## Notas para revisión/);
+  assert.match(contextual.body, /MDD no planificó ni verificó este cambio/);
+  assert.equal(contextual.publication, 'not-authorized');
   // The user's text is still authenticated: a claim they never wrote drafts nothing.
   await assert.rejects(f.hooks.tool.mdd_pr_body.execute({ userText: 'Ya está aprobado y desplegado.', baseRef: 'staging', direct }, f.context));
   // Drafting starts nothing: no run, no question, no state change.

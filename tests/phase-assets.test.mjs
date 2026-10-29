@@ -828,6 +828,18 @@ test('assets: mdd-grill offers a pre-admission question session with optional do
 
 // The body is read by a reviewer, so it is Spanish like every other user-facing surface, and the
 // Changes section leads with a table because a list of paths repeats what the diff already says.
+test('assets: PR instructions incorporate context before final rendering without publishing workaround comments', () => {
+  const skill = fs.readFileSync('assets/opencode/skills/mdd-pr-body/SKILL.md', 'utf8');
+  const agent = fs.readFileSync('assets/opencode/agents/mdd-orchestrator.md', 'utf8');
+  for (const text of [skill, agent]) {
+    assert.match(text, /additionalContext/);
+    assert.match(text, /before.*final.*render/i);
+    assert.match(text, /supplementary comments/);
+    assert.match(text, /explicit.*(request|authoriz)/i);
+    assert.match(text, /interpretation.*(unverified|verification)/i);
+  }
+});
+
 test('assets: PR template consistently retains all seven sections and the per-file table', () => {
   const text = fs.readFileSync('assets/opencode/skills/mdd-pr-body/assets/template.md', 'utf8');
   assert.deepEqual([...text.matchAll(/^## (.+)$/gm)].map(m => m[1]),

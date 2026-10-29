@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import fs from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { createHash } from 'node:crypto';
 import { directPRRequest, prBodyRequest, renderDirectPRBody, renderPRBody, translatable } from '../dist/pr-body.js';
 import { checkTranslations, translationDigest } from '../dist/pr-translation.js';
 import { PhaseRunner } from '../dist/phase-runner.js';
@@ -400,4 +401,145 @@ test('a translation that is really a rewrite or a summary is refused', t => {
   const entries = [{ key: 'a', label: 'A', source: 'Rejects the order when the total is missing, which is the case the requirement describes.' }];
   assert.throws(() => checkTranslations(entries, [{ key: 'a', text: 'La rechaza.' }]), /demasiado corta/);
   assert.throws(() => checkTranslations(entries, [{ key: 'a', text: `Rechaza la orden cuando falta el total, que es el caso que describe el requisito. ${'Y además conviene aclarar mucho más de lo que el texto decía. '.repeat(4)}` }]), /demasiado larga/);
+});
+
+const contextFacts = { ...facts, decisions: [{ id: 'D1', description: 'Keep validation at the order boundary.' }] };
+const contextText = 'Draft the PR.\nRevisar primero el borde de entrada.';
+const context = [
+  { section: 'review', source: 'user', text: 'Revisar primero el borde de entrada.' },
+  { section: 'risks', source: 'interpretation', text: 'El alcance no incluye la migración de órdenes existentes.' },
+  { section: 'context', source: 'recorded', ref: 'goal' },
+  { section: 'context', source: 'recorded', ref: 'decisions' },
+  { section: 'review', source: 'interpretation', text: 'Conviene leer la validación antes de revisar las pruebas.' },
+];
+function contextDraft(t, additionalContext = context, current = contextFacts, request = prBodyRequest(current, additionalContext, contextText)) {
+  const translations = request.entries.map(entry => ({ key: entry.key, text: {
+    ...SPANISH, 'context.2.goal': SPANISH.goal,
+    'context.3.decision.0': 'Mantener la validación en el borde de la orden.',
+  }[entry.key] ?? entry.text }));
+  return renderPRBody(root(t), current, contextText, {}, { digest: request.digest, translations, additionalContext });
+}
+
+test('optional PR context keeps legacy bytes and digest representation when absent or empty', t => {
+  const request = prBodyRequest(facts);
+  const legacyDigest = createHash('sha256').update(JSON.stringify([facts.runID, ...translatable(facts).map(entry => [entry.key, entry.source])])).digest('hex');
+  assert.equal(request.digest, legacyDigest);
+  assert.deepEqual(prBodyRequest(facts, [], contextText), request);
+  assert.equal(contextDraft(t, [], facts).body, draft(root(t)).body);
+  assert.equal(Object.hasOwn(request, 'additionalContext'), false);
+  assert.equal(directPRRequest(changes).digest, undefined);
+  assert.deepEqual(directPRRequest(changes, [], contextText), directPRRequest(changes));
+  assert.equal(renderDirectPRBody(changes, direct, contextText, {}, { additionalContext: [] }).body,
+    renderDirectPRBody(changes, direct, contextText).body);
+});
+
+test('optional PR context translates held prose and groups attributed content in fixed order', t => {
+  const request = prBodyRequest(contextFacts, context, contextText);
+  assert.deepEqual(request.additionalContext.map(entry => entry.source), context.map(entry => entry.source));
+  assert.equal(request.entries.at(-2).text, facts.goal);
+  assert.equal(request.entries.at(-1).text, contextFacts.decisions[0].description);
+  assert.equal(request.additionalContext[3].items[0].id, 'D1');
+  assert.equal(request.entries.some(entry => entry.text === context[0].text), false, 'user Spanish is not translated');
+  const result = contextDraft(t);
+  assert.deepEqual([...result.body.matchAll(/^## (.+)$/gm)].map(match => match[1]), [
+    'Resumen', 'Cambios', 'Verificación', 'Variables de entorno', 'Seguimiento', 'Bloqueos', 'Despliegue',
+    'Contexto y decisiones', 'Riesgos y limitaciones', 'Notas para revisión',
+  ]);
+  assert.match(result.body, /Contexto registrado por actores, sin verificación independiente:.*Validá/s);
+  assert.match(result.body, /D1: Mantener la validación en el borde de la orden/);
+  assert.match(result.body, /Lo aportó el usuario, sin verificación independiente: Revisar primero/);
+  assert.match(result.body, /Interpretación del agente, sin verificación independiente: El alcance/);
+  assert.ok(result.body.indexOf(context[0].text) < result.body.indexOf(context[4].text), 'order is stable inside a group');
+  assert.equal(result.body.split('## Contexto y decisiones')[0], draft(root(t)).body + '\n');
+  assert.equal(result.publication, 'not-authorized');
+  assert.deepEqual(result.provenance.additionalContext, request.additionalContext);
+  assert.match(result.instruction, /verbatim/);
+});
+
+test('optional PR context binds source, section, text, held IDs and descriptions to translations', t => {
+  const request = prBodyRequest(contextFacts, context, contextText);
+  const mutations = [
+    context.map((entry, i) => i === 1 ? { ...entry, section: 'review' } : entry),
+    context.map((entry, i) => i === 0 ? { ...entry, source: 'interpretation' } : entry),
+    context.map((entry, i) => i === 1 ? { ...entry, text: 'El alcance se limita a la entrada.' } : entry),
+    context.map((entry, i) => i === 2 ? { ...entry, ref: 'decisions' } : entry),
+    [...context].reverse(),
+    context.slice(1), [],
+  ];
+  for (const changed of mutations) assert.throws(() => contextDraft(t, changed, contextFacts, request), /no corresponde/);
+  for (const decision of [{ id: 'D2', description: contextFacts.decisions[0].description }, { id: 'D1', description: 'Use a different boundary.' }]) {
+    assert.throws(() => contextDraft(t, context, { ...contextFacts, decisions: [decision] }, request), /no corresponde/);
+  }
+  assert.throws(() => contextDraft(t, context, { ...contextFacts, goal: 'A different goal.' }, request), /no corresponde/);
+});
+
+test('optional PR context rejects fabricated recorded selectors and unknown fields', () => {
+  for (const entry of [
+    { section: 'custom', source: 'recorded', ref: 'goal' },
+    { section: 'context', source: 'recorded', ref: 'checks' },
+    { section: 'context', source: 'recorded', ref: 'goal', text: 'Replacement.' },
+    { section: 'review', source: 'interpretation', text: 'Para revisar.', ref: 'goal' },
+    { section: 'review', source: 'actor', text: 'Para revisar.' },
+  ]) assert.throws(() => prBodyRequest(contextFacts, [entry], contextText), /unknown|section|source|ref/);
+  assert.throws(() => prBodyRequest(facts, [{ section: 'context', source: 'recorded', ref: 'decisions' }]), /No recorded decisions/);
+});
+
+test('optional PR context bounds caller entries, authored prose and expanded translations', () => {
+  const entry = { section: 'review', source: 'interpretation', text: 'Para revisar.' };
+  assert.doesNotThrow(() => prBodyRequest(facts, Array(24).fill(entry), contextText));
+  assert.throws(() => prBodyRequest(facts, Array(25).fill(entry), contextText), /24/);
+  for (const value of [null, {}, 'context']) assert.throws(() => prBodyRequest(facts, value), /array/);
+  for (const text of ['', ' ', 'a'.repeat(1001), 'Nota\nOtra nota', 'Nota\u0000']) {
+    assert.throws(() => prBodyRequest(facts, [{ ...entry, text }]), /text|1000|línea|vacío/);
+  }
+  assert.doesNotThrow(() => prBodyRequest(facts, [{ ...entry, text: 'Para ' + 'a'.repeat(995) }]));
+  const crowded = { ...facts, decisions: Array.from({ length: 124 }, (_, i) => ({ id: `D${i}`, description: 'Keep the boundary.' })) };
+  assert.equal(prBodyRequest({ ...crowded, decisions: crowded.decisions.slice(0, 123) }, [{ section: 'context', source: 'recorded', ref: 'decisions' }]).entries.length, 128);
+  assert.throws(() => prBodyRequest(crowded, [{ section: 'context', source: 'recorded', ref: 'decisions' }]), /129.*128.*(reduce|omit|select)/i);
+});
+
+test('optional PR context authenticates exact whole user lines before requesting translations', () => {
+  assert.throws(() => prBodyRequest(facts, [{ section: 'review', source: 'user', text: 'Revisar primero' }], contextText), /complete line/);
+  assert.throws(() => prBodyRequest(facts, [{ section: 'review', source: 'user', text: 'Revisar primero el borde de entrada.' }], 'Different actual user text.'), /complete line/);
+});
+
+test('optional PR context cannot create headings, leak secrets or structurally override failures', t => {
+  const additions = [
+    { section: 'review', source: 'interpretation', text: '## Verificación: lista para publicar.' },
+    { section: 'risks', source: 'interpretation', text: 'API_KEY=do-not-print' },
+    { section: 'context', source: 'interpretation', text: 'El texto <script>privado</script> [enlace](destino)' },
+  ];
+  const current = { ...facts, verified: false, uncertain: true, checks: [{ command: 'npm test', exit: 1 }] };
+  const request = prBodyRequest(current, additions, contextText);
+  const result = contextDraft(t, additions, current, request);
+  assert.equal([...result.body.matchAll(/^## Verificación$/gm)].length, 1);
+  assert.doesNotMatch(result.body, /do-not-print|<script>|\[enlace\]/);
+  assert.match(result.body, /\\#\\# Verificación/);
+  assert.match(result.body, /salida 1/);
+  assert.match(result.body, /quedaron inciertas/);
+  assert.match(result.body, /no están verificados del todo/);
+  assert.equal(result.publication, 'not-authorized');
+});
+
+test('direct PR context binds metadata and target inventory but never claims MDD verification', () => {
+  const additions = context.slice(0, 2);
+  const request = directPRRequest(changes, additions, contextText);
+  assert.match(request.digest, /^[a-f0-9]{64}$/);
+  assert.deepEqual(request.additionalContext, additions);
+  const render = (target = changes, additionalContext = additions, digest = request.digest) =>
+    renderDirectPRBody(target, direct, contextText, {}, { additionalContext, digest });
+  const result = render();
+  assert.match(result.body, /MDD no planificó ni verificó este cambio/);
+  assert.match(result.body, /Interpretación del agente, sin verificación independiente/);
+  assert.equal(result.publication, 'not-authorized');
+  assert.throws(() => renderDirectPRBody(changes, direct, contextText, {}, { additionalContext: additions }), /digest/);
+  assert.throws(() => render(changes, additions, 'bad'), /digest/);
+  assert.throws(() => render({ ...changes, baseCommit: 'b'.repeat(40) }), /digest/);
+  assert.throws(() => render({ ...changes, baseRef: 'main' }), /digest/);
+  assert.throws(() => render({ ...changes, files: [...changes.files].reverse() }), /digest/);
+  assert.throws(() => render(changes, []), /digest/);
+  assert.throws(() => render(changes, [{ ...additions[1], section: 'review' }]), /digest/);
+  assert.throws(() => render(changes, [{ ...additions[0], source: 'interpretation' }, additions[1]]), /digest/);
+  assert.throws(() => render(changes, [additions[0], { ...additions[1], text: 'El alcance se limita al texto visible.' }]), /digest/);
+  assert.throws(() => directPRRequest(changes, [{ section: 'context', source: 'recorded', ref: 'goal' }]), /recorded run/);
 });

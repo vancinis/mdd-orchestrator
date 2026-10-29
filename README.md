@@ -900,18 +900,35 @@ flowchart TD
   U["Pedido de cuerpo de PR"] --> H{"¿Hay una ejecución registrada?"}
   H -- Sí --> T1["1.ª llamada: pending-translation<br/>textos con clave y digest"] --> T2["2.ª llamada: translations al español<br/>validadas estructuralmente"]
   H -- "No, edición directa" --> D1["1.ª llamada con baseRef<br/>pending-direct y archivos según git"] --> D2["2.ª llamada con direct<br/>resumen y un motivo por archivo"]
-  T2 --> OUT["Cuerpo en 7 secciones<br/>publication: not-authorized"]
+  T2 --> OUT["7 secciones base y contexto opcional<br/>publication: not-authorized"]
   D2 --> OUT
 ```
 
 - **Secciones fijas:** Resumen, Cambios (una fila por archivo), Verificación, Variables de entorno,
   Seguimiento, Bloqueos y Despliegue. Lo que falta se escribe como `No aplica.`.
+- **Contexto dentro del cuerpo:** `additionalContext` permite agregar información relevante antes
+  del renderizado final. Los grupos no vacíos se añaden en este orden: Contexto y decisiones,
+  Riesgos y limitaciones, Notas para revisión. Sin contexto, el cuerpo y el protocolo no cambian.
+  - Cada entrada elige `section: context|risks|review` y una fuente: `recorded` con `ref: goal|decisions`
+    (texto e IDs resueltos por MDD), `user` con una línea completa del último mensaje autenticado,
+    o `interpretation` con síntesis del agente en español, explícitamente sin verificación independiente.
+  - Máximo 24 entradas; cada texto aportado tiene entre 1 y 1000 caracteres y ocupa una línea.
+    No se aceptan campos desconocidos ni encabezados adicionales arbitrarios. El filtro de seguridad
+    también se aplica al contexto; no se deben incluir secretos, fuentes privadas ni trabajo ajeno.
+  - Se repiten las entradas originales y el `digest` de la primera llamada. El contexto normalizado
+    devuelto es metadato de consulta, no una entrada de reemplazo. Con ejecución registrada, solo
+    se traducen los textos registrados; el pedido expandido admite hasta 128 claves.
+  - En edición directa solo se permiten `user` e `interpretation`; el digest vincula contexto,
+    destino Git y lista de archivos, no el contenido ni la veracidad de lo escrito.
 - **Validación de las traducciones:** cada clave aparece una vez y se conservan números, rutas e
   identificadores.
   - La longitud tiene que estar entre 0,5× y 2,5× del original.
   - Después de tres rechazos, el orquestador se detiene.
 - **Sin publicación:** redactar no autoriza publicar. Commit, push y PR solo ocurren si los pedís
   explícitamente, y con el cuerpo renderizado sin cambios.
+  El contexto no reemplaza verificaciones, fallos ni bloqueos y no permite afirmar pruebas o
+  despliegues no observados. No se publican comentarios suplementarios para eludir el formato;
+  un comentario solicitado explícitamente conserva su autorización independiente.
 
 ### Conocimiento del proyecto
 
@@ -974,7 +991,7 @@ El plugin registra **22 herramientas**: 19 son exclusivas del orquestador, `mdd_
 | Transferencia | `mdd_transfer` | `sourceSessionID`, `runID`, `userText` | Mueve una ejecución a esta conversación |
 | Transferencia | `mdd_transfer_recover` | `…`, `operationID`, `action` | Resuelve una transferencia interrumpida |
 | Independientes | `mdd_security` | `userText`, `baseRef?` | Auditoría de seguridad de un solo uso |
-| Independientes | `mdd_pr_body` | `userText`, `runID?`, `notes?`, `digest?`, `translations?`, `baseRef?`, `direct?` | Borrador del cuerpo del PR en dos llamadas |
+| Independientes | `mdd_pr_body` | `userText`, `runID?`, `notes?`, `additionalContext?`, `digest?`, `translations?`, `baseRef?`, `direct?` | Borrador del cuerpo del PR en dos llamadas |
 | Conocimiento | `mdd_knowledge` | `query?`, `phase?`, `paths?`, `limit?` (1–10) | Consulta observaciones con su frescura |
 | Conocimiento | `mdd_knowledge_record` | `userText`, `observation` | Registra una observación candidata |
 | Mejoras | `mdd_improve` | `userText`, `title`, `detail`, `phase?` | Registra algo que MDD hizo mal |

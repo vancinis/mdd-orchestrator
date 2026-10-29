@@ -3948,6 +3948,7 @@ export class PhaseRunner {
       if (!prior?.continuation && runID === undefined) return undefined;
       if (!prior?.continuation) throw new Error('No recorded MDD run is available for this parent or retained failed verification target. A draft cannot claim implementation evidence.');
       return { runID: prior.runID, goal: prior.acceptance?.goal ?? prior.requirements,
+        decisions: (prior.decisions ?? []).map(({ id, description }) => ({ id, description })),
         ...(prior.verificationVersion ? { verificationVersion: prior.verificationVersion } : {}),
         ...(prior.delivered ? { delivered: { ...prior.delivered } } : {}),
         verification: prior.verification?.changes ?? 'Verification failed.', changedFiles: prior.changedFiles,
@@ -3957,6 +3958,7 @@ export class PhaseRunner {
     }
     if (!run) throw new Error('No recorded MDD run is available for this parent. A draft cannot claim implementation evidence.');
     return { runID: run.id, goal: run.acceptance?.goal ?? 'Unverified: a requested outcome has not been recorded.',
+      decisions: run.decisions.map(({ id, description }) => ({ id, description })),
       ...(run.verificationVersion ? { verificationVersion: run.verificationVersion } : {}),
       ...(run.delivered ? { delivered: { ...run.delivered } } : {}),
       // Verify's own account of what it found. It belongs under the verification heading: printed

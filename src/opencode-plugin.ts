@@ -24,7 +24,7 @@ import { QuestionCheckpointStore } from './question-checkpoint.js';
 import { RunOwnershipStore } from './run-ownership.js';
 import { directPRRequest, prBodyRequest, renderDirectPRBody, renderPRBody } from './pr-body.js';
 import { directChanges } from './pr-direct.js';
-import { TranslationError } from './pr-translation.js';
+import { PR_TRANSLATION_LIMIT, TranslationError } from './pr-translation.js';
 import { mddDataRoot } from './engram-http.js';
 import { AdaptiveStore } from './adaptive-store.js';
 import { adaptiveTransferRequest } from './adaptive-transfer.js';
@@ -1373,8 +1373,16 @@ const plugin: Plugin = async input => {
           userText: tool.schema.string().min(1),
           runID: tool.schema.string().min(1).optional().describe('Optional explicit retained failed-run target after continuation; never uses another run as its evidence.'),
           notes: tool.schema.object({ environmentVariables: tool.schema.string().optional(), followUps: tool.schema.string().optional(), deployment: tool.schema.string().optional() }).optional(),
-          digest: tool.schema.string().min(1).optional().describe('The digest the first call returned. Required with translations, and it binds them to the evidence they were made from.'),
-          translations: tool.schema.array(tool.schema.object({ key: tool.schema.string().min(1), text: tool.schema.string().min(1) })).max(128).optional()
+          additionalContext: tool.schema.array(tool.schema.discriminatedUnion('source', [
+            tool.schema.object({ section: tool.schema.enum(['context', 'risks', 'review']), source: tool.schema.literal('recorded'),
+              ref: tool.schema.enum(['goal', 'decisions']) }).strict(),
+            tool.schema.object({ section: tool.schema.enum(['context', 'risks', 'review']), source: tool.schema.literal('user'),
+              text: tool.schema.string().min(1).max(1000) }).strict(),
+            tool.schema.object({ section: tool.schema.enum(['context', 'risks', 'review']), source: tool.schema.literal('interpretation'),
+              text: tool.schema.string().min(1).max(1000) }).strict(),
+          ])).max(24).optional().describe('Optional in-body context, supplied before final rendering and repeated unchanged. Recorded selectors resolve held goal/decisions, never replacement text. User text quotes a complete actual user line; interpretation is Spanish agent synthesis without independent verification. No unobserved test/deployment claims, readiness overrides or publication authority.'),
+          digest: tool.schema.string().min(1).optional().describe('The digest the first call returned. Required with translations or direct text with additionalContext; binds source/context metadata and, in direct mode, git target identity/file list, not changed contents.'),
+          translations: tool.schema.array(tool.schema.object({ key: tool.schema.string().min(1), text: tool.schema.string().min(1) })).max(PR_TRANSLATION_LIMIT).optional()
             .describe('One Spanish translation per key returned by the first call. Translate only: keep numbers, paths, identifiers and commands exactly, add no fact and drop none.'),
           baseRef: tool.schema.string().min(1).max(200).optional()
             .describe('Only when no MDD run is recorded here: the PR target branch, such as staging or origin/staging. The changed files are read from git against it.'),
@@ -1394,15 +1402,17 @@ const plugin: Plugin = async input => {
           if (facts?.runID !== current?.runID) throw new Error('The current run changed while drafting; no draft was produced.');
           // No run recorded here: a direct edit. Its files come from git, never from the caller.
           if (!facts) {
-            if (args.translations || args.digest) throw new Error('No MDD run is recorded here, so there is no recorded text to translate. Pass baseRef, then direct with your Spanish summary and reasons.');
+            if (args.translations || (args.digest && !args.additionalContext?.length)) throw new Error('No MDD run is recorded here, so there is no recorded text to translate. Pass baseRef, then direct with your Spanish summary and reasons.');
             if (!args.baseRef) throw new Error('No MDD run is recorded here, so this body describes a direct edit. Call again with baseRef, the PR target branch (for example staging or origin/staging); the changed files are read from git against it.');
             const changes = await directChanges(context.directory, args.baseRef, context.abort);
-            return JSON.stringify(args.direct ? renderDirectPRBody(changes, args.direct, args.userText, args.notes) : directPRRequest(changes));
+            return JSON.stringify(args.direct
+              ? renderDirectPRBody(changes, args.direct, args.userText, args.notes, { additionalContext: args.additionalContext, digest: args.digest })
+              : directPRRequest(changes, args.additionalContext, args.userText));
           }
           if (args.direct) throw new Error('This conversation has a recorded MDD run, so its body comes from that evidence. Omit direct and translate the recorded text instead.');
           // Asking again for the recorded text is how a stuck translation is restarted, so it
           // clears the budget: the next set is judged on its own, not on what came before it.
-          if (!args.translations) { translationAttempts.delete(context.sessionID); return JSON.stringify(prBodyRequest(facts)); }
+          if (!args.translations) { translationAttempts.delete(context.sessionID); return JSON.stringify(prBodyRequest(facts, args.additionalContext, args.userText)); }
           if (!args.digest) throw new Error('Translations must carry the digest the first call returned; without it nothing proves they belong to this evidence.');
           const spent = translationAttempts.get(context.sessionID) ?? 0;
           if (spent >= PR_TRANSLATION_ATTEMPTS) {
@@ -1410,7 +1420,8 @@ const plugin: Plugin = async input => {
             throw new Error(`The Spanish sent for this body failed its checks ${PR_TRANSLATION_ATTEMPTS} times and no body was drafted. Tell the user plainly, in Spanish, rather than trying again: a body that mixes languages or loses a recorded fact is the defect this refuses to produce.`);
           }
           try {
-            const drafted = JSON.stringify(renderPRBody(context.directory, facts, args.userText, args.notes, { digest: args.digest, translations: args.translations }));
+            const drafted = JSON.stringify(renderPRBody(context.directory, facts, args.userText, args.notes,
+              { digest: args.digest, translations: args.translations, additionalContext: args.additionalContext }));
             translationAttempts.delete(context.sessionID);
             return drafted;
           } catch (error) {

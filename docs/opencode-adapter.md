@@ -1508,7 +1508,7 @@ for the file format, the retention rule and the optional memory index.
 
 ## PR-body drafts
 
-When requested, `mdd_pr_body({ userText, notes?, digest?, translations?, baseRef?, direct? })`
+When requested, `mdd_pr_body({ userText, runID?, notes?, additionalContext?, digest?, translations?, baseRef?, direct? })`
 checks the actual latest native user text and current parent, then renders the shared local
 template without changing workflow, approval, artifacts or memory. It drafts with or without a
 recorded run, and it never starts implementation merely to draft a body. Optional notes contain
@@ -1531,7 +1531,7 @@ with the user's global configuration, so their global ignore file applies, but w
 textconv, fsmonitor, the pager, prompts and lazy fetch switched off. `direct` is refused when a run
 is recorded, and translations are refused when none is.
 
-Drafting takes two calls, because every sentence of substance in a body was written by a phase
+Recorded drafting takes two calls, because the base body prose was written by a phase
 actor in English and a body is read by a reviewer in Spanish. Rendering the recorded prose as it
 was recorded is what produced Spanish headings over English paragraphs. The first call returns
 `render: 'pending-translation'` with one keyed entry per recorded string and a digest over them;
@@ -1545,6 +1545,60 @@ structural: they cannot tell whether the Spanish means what the English meant, a
 claim to. A conversation gets `PR_TRANSLATION_ATTEMPTS` rejected sets before drafting refuses
 outright; asking again for the recorded text restarts it. `provenance.translated` names the keys
 that reached the reviewer through a translation.
+
+#### Additional reviewer context
+
+Incorporate relevant information through `additionalContext` **before the final tool rendering**.
+Return the final body verbatim; do not append hand-written Markdown or auto-publish supplementary
+comments to bypass its format. Explicitly requested comments remain separately authorized actions.
+
+The input is an ordered array of at most 24 discriminated entries, with no unknown fields:
+
+| Source | Allowed fields besides `section` and `source` | Meaning |
+|---|---|---|
+| `recorded` | `ref: 'goal'` or `'decisions'` | Resolve the held goal or every held decision, including ID and description, from the live or explicitly retained run. Caller replacement text is rejected. Actor context is not independent verification. |
+| `user` | `text` | Quote an exact complete line of the authenticated latest actual user message; native intake authenticates that message, as for existing notes. |
+| `interpretation` | `text` | Useful Spanish motivation, tradeoffs, scope, reviewer guidance or followups authored by the agent, explicitly without independent verification. |
+
+`section` must be `'context'`, `'risks'` or `'review'`. User/interpretation text must be nonempty,
+single-line and at most 1000 characters per entry. Only nonempty groups are appended, after the
+seven unchanged base sections, in fixed order: Contexto y decisiones / Riesgos y limitaciones /
+Notas para revisión. Caller order is retained inside each group, and the existing safety filter
+is applied to the rendered text. No arbitrary headings/Markdown appendix, credentials, private
+source excerpts or unrelated work are allowed.
+
+```json
+{
+  "userText": "Draft the PR body.",
+  "additionalContext": [
+    {"section":"context","source":"recorded","ref":"decisions"},
+    {"section":"review","source":"interpretation","text":"Revisar primero el borde de entrada; la migración queda fuera del alcance."}
+  ]
+}
+```
+
+The first call returns normalized context and a digest. Repeat the **original input entries**
+alongside translations and the digest; normalized output is read-only metadata, not valid selector
+input. Recorded context adds keyed translatable strings (`context.<index>.goal` and
+`context.<index>.decision.<index>`); user quotes and original Spanish interpretation are not
+translated. The digest binds their source, group, text, order, held decision IDs and descriptions.
+Changed context or held text requires a fresh request. If expanded entries exceed the existing
+128-translation submission bound, the request fails with instructions to reduce recorded selectors.
+
+Direct mode accepts only user/interpretation context. With context, repeat the returned digest
+with `direct` and the same `baseRef`; MDD recomputes the binding over normalized context, resolved
+Git base ref/commit and ordered file list. This detects metadata changes, not file-content changes,
+semantic accuracy or unobserved test/deployment claims. There is no cache or new durable schema.
+Without context, the legacy body bytes, digest representation and direct two-call protocol remain
+unchanged. Stateless compatibility does not prevent a caller starting a new legacy draft.
+
+Labels and digest binding do not verify arbitrary prose. Interpretations must not claim unobserved
+tests/deployments, override verification, blockers or readiness, or authorize publication. The tool
+keeps those evidence/authority fields structurally separate and unchanged; semantic truth still
+requires review. Context does not consume or create approval, workflow transitions or publication
+permission.
+
+#### Base sections and evidence
 
 The seven sections always remain Resumen / Cambios / Verificación / Variables de entorno /
 Seguimiento / Bloqueos / Despliegue. `Resumen` is Apply's `delivered` summary — what the change

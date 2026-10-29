@@ -473,6 +473,17 @@ test('plugin contract: scoped tools, in-place native args, result gating, no nat
   assert.deepEqual(Object.keys(hooks.tool.mdd_adapt.args), ['payload']);
   assert.deepEqual(Object.keys(hooks.tool.mdd_start.args), ['requirements', 'context', 'exploration', 'questions']);
   assert.deepEqual(Object.keys(hooks.tool.mdd_contextual_explore.args), ['purpose', 'workItems']);
+  const contextSchema = hooks.tool.mdd_pr_body.args.additionalContext;
+  assert.ok(contextSchema, 'PR tool exposes bounded discriminated context');
+  assert.equal(contextSchema.safeParse([{ section: 'context', source: 'recorded', ref: 'goal' }]).success, true);
+  for (const entry of [
+    { section: 'context', source: 'recorded', ref: 'goal', text: 'Fabricated replacement.' },
+    { section: 'context', source: 'recorded', ref: 'checks' },
+    { section: 'custom', source: 'interpretation', text: 'Nota.' },
+    { section: 'review', source: 'user', text: 'Nota.', extra: true },
+    { section: 'risks', source: 'interpretation', text: 'a'.repeat(1001) },
+  ]) assert.equal(contextSchema.safeParse([entry]).success, false);
+  assert.equal(contextSchema.safeParse(Array(25).fill({ section: 'review', source: 'user', text: 'Nota.' })).success, false);
   const ready = JSON.parse(await hooks.tool.mdd_start.execute({ requirements: f.requirements }, context));
   const nativeArgs = ready.task;
   const output = { args: nativeArgs };

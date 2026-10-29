@@ -1,12 +1,13 @@
 import { assetText, PACKAGE_ROOT } from './project-assets.js';
 import type { ChangedFile, Check, Delivered, VerificationVersion } from './phase-evidence.js';
 import type { DirectChanges } from './pr-direct.js';
-import { authoredProblem, checkTranslations, TranslationError, translationDigest } from './pr-translation.js';
+import { authoredProblem, checkTranslations, PR_TRANSLATION_LIMIT, TranslationError, translationDigest } from './pr-translation.js';
 import type { Translatable, Translation } from './pr-translation.js';
 import { objectWithKeys } from './validation.js';
 
 export type PRFacts = {
   runID: string; goal: string; delivered?: Delivered; verification: string;
+  decisions?: { id: string; description: string }[];
   /** Missing means legacy exit-based reporting; never infer the contract from check IDs. */
   verificationVersion?: VerificationVersion;
   changedFiles: number; files: ChangedFile[]; checks: Check[]; verified: boolean; uncertain: boolean; limits: string[];
@@ -123,8 +124,75 @@ function userNotes(userText: string, value: unknown): (key: string) => string {
   };
 }
 
-function finished(template: { content: string }, sections: Record<string, string>, provenance: Record<string, unknown>) {
-  const body = template.content.replace(/^## (.+)\r?\n[\s\S]*?(?=^## |$(?![\s\S]))/gm, (_section, heading: string) => `## ${heading}\n\n${sections[heading]}\n\n`).trimEnd() + '\n';
+type ContextSection = 'context' | 'risks' | 'review';
+type ContextItem = { key: string; text: string; id?: string };
+type NormalizedContext =
+  | { section: ContextSection; source: 'recorded'; ref: 'goal' | 'decisions'; items: ContextItem[] }
+  | { section: ContextSection; source: 'user' | 'interpretation'; text: string };
+type ContextSubmission = { additionalContext?: unknown; digest?: string | undefined };
+const CONTEXT_HEADINGS: Record<ContextSection, string> = {
+  context: 'Contexto y decisiones', risks: 'Riesgos y limitaciones', review: 'Notas para revisión',
+};
+
+/** Select held actor prose, never caller replacements; native intake authenticates userText. */
+function normalizeContext(value: unknown, userText: string, facts?: PRFacts): NormalizedContext[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 24) throw new Error('additionalContext must be an array of at most 24 entries.');
+  return value.map((item, index) => {
+    const entry = objectWithKeys(item, `additionalContext.${index}`, ['section', 'source', 'ref', 'text']);
+    if (!['context', 'risks', 'review'].includes(entry.section as string)) throw new Error('Unknown additionalContext section; use context, risks or review.');
+    const section = entry.section as ContextSection;
+    if (entry.source === 'recorded') {
+      objectWithKeys(entry, `additionalContext.${index}`, ['section', 'source', 'ref']);
+      if (entry.ref !== 'goal' && entry.ref !== 'decisions') throw new Error('Unknown recorded ref; use goal or decisions.');
+      if (!facts) throw new Error('Recorded context requires a recorded run; direct edits cannot supply recorded selectors.');
+      const items: ContextItem[] = entry.ref === 'goal'
+        ? [{ key: `context.${index}.goal`, text: facts.goal }]
+        : (facts.decisions ?? []).map((decision, i) => ({ key: `context.${index}.decision.${i}`, id: decision.id, text: decision.description }));
+      if (!items.length) throw new Error('No recorded decisions are available; omit that selector instead of inventing context.');
+      return { section, source: 'recorded', ref: entry.ref, items };
+    }
+    objectWithKeys(entry, `additionalContext.${index}`, ['section', 'source', 'text']);
+    if (entry.source !== 'user' && entry.source !== 'interpretation') throw new Error('Unknown additionalContext source; use recorded, user or interpretation.');
+    if (typeof entry.text !== 'string' || !entry.text.trim() || entry.text.length > OVERSIZE) {
+      throw new Error('additionalContext text must be nonempty and at most 1000 characters.');
+    }
+    const text = entry.text;
+    // Do not translate or trim user quotes: only complete lines of the authenticated message
+    // are eligible. As with native intake, CRLF and surrounding whitespace are immaterial.
+    if (entry.source === 'user' && !userText.split(/\r?\n/).some(line => line.trim() === text.trim())) {
+      throw new Error('additionalContext user text must quote a complete line of the actual latest user text.');
+    }
+    const fault = entry.source === 'interpretation' ? authoredProblem(text)
+      : /[\x00-\x1f\x7f]/.test(text) ? 'text must be a single line without control characters' : undefined;
+    if (fault) throw new Error(`additionalContext text ${fault}.`);
+    return { section, source: entry.source, text };
+  });
+}
+
+function contextEntries(facts: PRFacts, context: readonly NormalizedContext[]): Translatable[] {
+  const entries = [...translatable(facts), ...context.flatMap(entry => entry.source === 'recorded'
+    ? entry.items.map(item => ({ key: item.key, label: CONTEXT_HEADINGS[entry.section], source: item.text })) : [])];
+  if (context.length && entries.length > PR_TRANSLATION_LIMIT) {
+    throw new Error(`This context requests ${entries.length} translations, exceeding ${PR_TRANSLATION_LIMIT}; reduce or omit recorded selectors before requesting the texts again.`);
+  }
+  return entries;
+}
+
+function contextBody(context: readonly NormalizedContext[], translated: ReadonlyMap<string, string>): string {
+  return (Object.keys(CONTEXT_HEADINGS) as ContextSection[]).flatMap(section => {
+    const lines = context.filter(entry => entry.section === section).flatMap(entry => {
+      if (entry.source === 'recorded') return entry.items.map(item =>
+        `- Contexto registrado por actores, sin verificación independiente: ${item.id === undefined ? '' : `${safeCopy(item.id)}: `}${safeCopy(translated.get(item.key) ?? '')}`);
+      const label = entry.source === 'user' ? 'Lo aportó el usuario' : 'Interpretación del agente';
+      return [`- ${label}, sin verificación independiente: ${safeCopy(entry.text)}`];
+    });
+    return lines.length ? [`\n## ${CONTEXT_HEADINGS[section]}\n\n${lines.join('\n')}\n`] : [];
+  }).join('');
+}
+
+function finished(template: { content: string }, sections: Record<string, string>, provenance: Record<string, unknown>, appendix = '') {
+  const body = template.content.replace(/^## (.+)\r?\n[\s\S]*?(?=^## |$(?![\s\S]))/gm, (_section, heading: string) => `## ${heading}\n\n${sections[heading]}\n\n`).trimEnd() + '\n' + appendix;
   return {
     body,
     // The body is assembled here from recorded facts against a fixed template, so reformatting it
@@ -138,7 +206,8 @@ function finished(template: { content: string }, sections: Record<string, string
 
 /**
  * The recorded prose this body is made of, named so it can be translated and put back. Nothing
- * else in the body is actor text: the rest is MDD's own frame, already written for the reader.
+ * else in the base body is actor text: the rest is MDD's own frame, already written for the reader.
+ * Selected recorded context is expanded separately by contextEntries.
  */
 export function translatable(facts: PRFacts): Translatable[] {
   const entries: Translatable[] = facts.delivered
@@ -157,23 +226,30 @@ export function translatable(facts: PRFacts): Translatable[] {
  * The first half of drafting: the recorded text, and the digest that binds a translation to it.
  * No body is rendered here, because a body rendered from English prose is the defect being fixed.
  */
-export function prBodyRequest(facts: PRFacts): Record<string, unknown> {
-  const entries = translatable(facts);
+export function prBodyRequest(facts: PRFacts, additionalContext?: unknown, userText = ''): Record<string, unknown> {
+  const context = normalizeContext(additionalContext, userText, facts);
+  const entries = contextEntries(facts, context);
   return {
     render: 'pending-translation',
-    digest: translationDigest(facts.runID, entries),
+    digest: translationDigest(facts.runID, entries, context.length ? context : undefined),
     entries: entries.map(entry => ({ key: entry.key, label: entry.label, text: entry.source })),
-    instruction: 'Translate every entry into Spanish for the reviewer who reads the PR, then call mdd_pr_body again with the same userText, this digest and one translation per key. Translate only: keep numbers, paths, identifiers, quoted code and command names exactly as they are, add no fact the entry does not state, and drop none it does. Do not draft sections, headings or prose of your own; MDD renders the body.',
+    ...(context.length ? { additionalContext: context,
+      contextInstruction: 'Repeat the original additionalContext selectors/text with the digest and translations. The normalized additionalContext here is read-only source metadata, not replacement input. Translate recorded entries only; user quotes and Spanish agent interpretation stay unchanged. Context never overrides verification, blockers or publication authority.' } : {}),
+    instruction: 'Translate every entry into Spanish for the reviewer who reads the PR, then call mdd_pr_body again with the same userText, this digest and one translation per key. Translate only: keep numbers, paths, identifiers, quoted code and command names exactly as they are, add no fact the entry does not state, and drop none it does. '
+      + (context.length ? 'Do not add authored prose to translations or invent headings; repeat additionalContext separately as originally supplied. MDD renders the body.'
+        : 'Do not draft sections, headings or prose of your own; MDD renders the body.'),
     publication: 'not-authorized',
   };
 }
 
-export function renderPRBody(root: string, facts: PRFacts, userText: string, value: unknown = {}, supplied: { digest: string; translations: readonly Translation[] }) {
+export function renderPRBody(root: string, facts: PRFacts, userText: string, value: unknown = {}, supplied: { digest: string; translations: readonly Translation[]; additionalContext?: unknown }) {
   const { skill, template } = packaged();
-  const entries = translatable(facts);
-  if (supplied.digest !== translationDigest(facts.runID, entries)) {
+  const context = normalizeContext(supplied.additionalContext, userText, facts);
+  const entries = contextEntries(facts, context);
+  if (supplied.digest !== translationDigest(facts.runID, entries, context.length ? context : undefined)) {
     throw new TranslationError('Esa traducción no corresponde a la evidencia registrada ahora; la ejecución cambió mientras se redactaba. Pedí de nuevo los textos con mdd_pr_body sin traducciones y traducí los que devuelva.');
   }
+  if (supplied.translations.length > PR_TRANSLATION_LIMIT) throw new TranslationError(`Submit at most ${PR_TRANSLATION_LIMIT} translations; ask for the texts again and reduce recorded context selectors.`);
   const translated = checkTranslations(entries, supplied.translations);
   const spanish = (key: string): string => translated.get(key) ?? '';
   const human = userNotes(userText, value);
@@ -210,7 +286,11 @@ export function renderPRBody(root: string, facts: PRFacts, userText: string, val
   return finished(template, sections, { runID: facts.runID, skill: { path: skill.path, digest: skill.digest }, template: { path: template.path, digest: template.digest },
     // Named so the record shows which sentences reached the reviewer through a translation
     // rather than straight from the phase that recorded them.
-    translated: entries.map(entry => entry.key) });
+    translated: entries.map(entry => entry.key), ...(context.length ? { additionalContext: context } : {}) }, contextBody(context, translated));
+}
+
+function directContextDigest(changes: DirectChanges, context: readonly NormalizedContext[]): string {
+  return translationDigest('direct', [], { baseRef: changes.baseRef, baseCommit: changes.baseCommit, files: changes.files, additionalContext: context });
 }
 
 /**
@@ -218,9 +298,12 @@ export function renderPRBody(root: string, facts: PRFacts, userText: string, val
  * write about them. No phase recorded any prose, so there is nothing to translate; the coordinator
  * writes the Spanish itself, and only for the files listed here.
  */
-export function directPRRequest(changes: DirectChanges): Record<string, unknown> {
+export function directPRRequest(changes: DirectChanges, additionalContext?: unknown, userText = ''): Record<string, unknown> {
+  const context = normalizeContext(additionalContext, userText);
   return {
     render: 'pending-direct', source: 'direct', baseRef: changes.baseRef, files: [...changes.files],
+    ...(context.length ? { additionalContext: context, digest: directContextDigest(changes, context),
+      contextInstruction: 'Repeat additionalContext and this digest with direct and the same baseRef. The digest binds context and the git target identity/file list only; it does not verify changed contents, tests, deployments or prose. Never claim unobserved checks or readiness.' } : {}),
     instruction: 'No MDD run is recorded here, so this body describes a direct edit. Write in Spanish, for the reviewer, one line each: direct.summary says what the change delivers and what it enables, not how it was built; direct.files gives exactly one reason per path listed here, saying why that file changed. Then call mdd_pr_body again with the same userText and baseRef plus direct. State only what was changed; never claim tests, checks or deployments. If a listed path should not be in the PR, stop and tell the user instead of leaving it out.',
     publication: 'not-authorized',
   };
@@ -233,8 +316,12 @@ export function directPRRequest(changes: DirectChanges): Record<string, unknown>
  * It is not a blocker on its own — a small edit made on request is ordinary work — but no check
  * is invented for it either.
  */
-export function renderDirectPRBody(changes: DirectChanges, value: unknown, userText: string, notes: unknown = {}) {
+export function renderDirectPRBody(changes: DirectChanges, value: unknown, userText: string, notes: unknown = {}, supplied: ContextSubmission = {}) {
   const { skill, template } = packaged();
+  const context = normalizeContext(supplied.additionalContext, userText);
+  if ((context.length || supplied.digest !== undefined) && supplied.digest !== directContextDigest(changes, context)) {
+    throw new Error('The direct PR context digest is missing or changed; request the context and git target/file list again before rendering.');
+  }
   const direct = objectWithKeys(value, 'direct PR text', ['summary', 'files']);
   const faults: string[] = [];
   const summary = typeof direct.summary === 'string' ? direct.summary.trim() : '';
@@ -265,5 +352,6 @@ export function renderDirectPRBody(changes: DirectChanges, value: unknown, userT
     Bloqueos: 'No aplica.', Despliegue: human('deployment'),
   };
   return finished(template, sections, { source: 'direct', baseRef: changes.baseRef, baseCommit: changes.baseCommit,
-    skill: { path: skill.path, digest: skill.digest }, template: { path: template.path, digest: template.digest } });
+    skill: { path: skill.path, digest: skill.digest }, template: { path: template.path, digest: template.digest },
+    ...(context.length ? { additionalContext: context } : {}) }, contextBody(context, new Map()));
 }

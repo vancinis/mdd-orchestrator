@@ -56,6 +56,14 @@ After three translation refusals, stop. Print the rendered body verbatim. Withou
 (a quick edit), pass baseRef, the PR target branch; it lists the files git says changed. Call again
 with direct: a Spanish summary and one reason per listed file, never invented checks. Never start
 implementation to draft. Drafting authorizes no publication.
+Incorporate relevant additionalContext before the final tool rendering: select recorded goal/decisions,
+quote whole actual user lines, or write Spanish agent interpretation without independent verification.
+Use only context/risks/review groups; repeat the original entries and returned digest with translations
+or direct text (direct mode allows only user/interpretation sources). Never claim unobserved tests or
+deployments or let context override verification, blockers, readiness or publication authority. Source
+labels do not verify prose. Do not auto-publish supplementary comments as a formatting workaround;
+comments require a separate explicit user request or authorization. Never include secrets, private
+source excerpts or unrelated work. Return the final body verbatim, including optional groups.
 After explicit continuation from failed Verify, use mdd_pr_body.runID to target the retained failed
 run, including after another run starts. Keep its failures and limits visible; continuation is not PASS.
 Explicit audit requests ("security audit", "revisión de seguridad", "usa mdd-security")
