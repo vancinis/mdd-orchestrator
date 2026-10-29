@@ -171,6 +171,42 @@ test('AL-04c: medium executes actual Plan, revises remaining execution and prese
   assert.notEqual(task.prompt, f.status().selection.handle);
 });
 
+for (const depth of ['medium', 'high']) test(`incident regression: ${depth} planning prompt covers every unfinished held ID, not its selection anchor`, async t => {
+  const f = fixture(t); await f.admit(); await f.start(depth);
+  if (depth === 'high') for (const [actor, data] of [
+    ['mdd-propose', {}], ['mdd-spec', { domain: 'project', acceptance: f.contract.acceptance }], ['mdd-design', { decisions: [] }],
+  ]) {
+    await f.select(actor, 'A1'); await f.dispatch(f.report({ verificationVersion: 1, ...data }));
+    assert.equal(f.status().lastReceipt.outcome, 'passed', f.status().lastReceipt.failure);
+  }
+  const actor = depth === 'medium' ? 'mdd-plan' : 'mdd-tasks';
+  const deliverables = f.contract.assignments.map(item => ({ id: item.id, description: item.description, path: item.path,
+    scenarios: item.scenarios, decisions: item.decisions, dependsOn: item.dependsOn, parallel: item.scope,
+    checks: [{ id: `C${item.id}`, command: `node --check ${item.path}`, requirement: 'required' }] }));
+  await f.select(actor, 'A1');
+  const call = { sessionID: 'parent', callID: 'whole-plan' }, args = await f.runner.before(call, f.status().task);
+  const reader = f.runner.workerAssignment(call);
+  assert.equal(reader.phase, 'mdd-explore'); assert.equal(reader.scope, undefined);
+  assert.deepEqual(reader.reads, [{ root: f.root, files: ['one.txt', 'two.txt'] }]);
+  assert.match(args.prompt, /Plan\/Tasks report ALL unfinished held IDs \(A1, A2\)/);
+  assert.doesNotMatch(args.prompt, /Perform only this assignment|Selected assignment:|Assignment: A1\./);
+  assert.match(args.prompt, /Selection anchor \(routing only, not the report scope\)/);
+  assert.match(args.prompt, /Omit optional phase, runID and callID echoes; never guess/);
+  const report = f.report({ verificationVersion: 1, deliverables,
+    ...(actor === 'mdd-plan' ? { acceptance: f.contract.acceptance, decisions: [] } : {}) });
+  await f.runner.after(call, args, JSON.stringify({ ...report, deliverables: deliverables.slice(0, 1) }));
+  assert.equal(f.status().lastReceipt.outcome, 'failed'); assert.match(f.status().lastReceipt.failure, /exactly the unfinished held IDs/);
+  await f.select(actor, 'A1'); await f.dispatch(report);
+  assert.equal(f.status().lastReceipt.outcome, 'passed', f.status().lastReceipt.failure);
+  assert.equal(f.status().continuation.next, 'mdd-apply');
+  await f.select('mdd-apply', 'A1');
+  const applyCall = { sessionID: 'parent', callID: 'single-writer' }, applyArgs = await f.runner.before(applyCall, f.status().task);
+  assert.match(applyArgs.prompt, /Perform only this assignment/);
+  assert.deepEqual(f.runner.workerAssignment(applyCall).scope, f.contract.assignments[0].scope);
+  await f.runner.after(applyCall, applyArgs, JSON.stringify(f.report({ completed: ['A1'], changes: ['one.txt'], checks: [] })));
+  assert.deepEqual(f.status().selection.completed, ['A1']);
+});
+
 test('AL-04c: high permits only the frozen real Propose Spec Design Tasks sequence', async t => {
   const f = fixture(t); await f.admit(); await f.retain(); await f.start('high');
   for (const [actor, data] of [['mdd-propose', {}], ['mdd-spec', { domain: 'project', acceptance: f.contract.acceptance }],

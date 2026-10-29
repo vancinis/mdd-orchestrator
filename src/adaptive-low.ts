@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { lstatSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
-import { acceptance, decisions, evidenceID, externalScenarios, references, reportText, shortText, summaryText, assertNoTraceSection, checkAccounting } from './acceptance.js';
+import { acceptance, decisions, evidenceID, externalScenarios, references, reportText, shortText, summaryText, assertNoTraceSection, checkAccounting, COMMON_RESULT_FIELDS, PHASE_RESULT_FIELDS } from './acceptance.js';
 import type { Acceptance, Decision } from './acceptance.js';
 import { applyPlan, taskIDs } from './apply-batches.js';
 import { changed, plannedChecks, executed } from './phase-evidence.js';
@@ -975,8 +975,9 @@ export class AdaptiveLow {
         this.#receipts.push(receipt); this.#selection = undefined; this.#handle = randomUUID(); this.#state = 'await-selection';
         return;
       }
-      const input = objectWithKeys(fields, 'adaptive actor receipt', ['outcome', 'evidenceSummary', 'artifact', 'phase', 'runID', 'callID',
-        'how', 'purpose', 'openItems', 'learnings', 'confidence', 'questions', ...(selected.actor === 'mdd-apply' ? ['completed', 'changes', 'noChangeReason', 'checks'] : []),
+      // Reuse canonical report vocabulary, not fixed-route correction or execution authority.
+      const input = objectWithKeys(fields, 'adaptive actor receipt', [...COMMON_RESULT_FIELDS,
+        ...(selected.actor === 'mdd-apply' ? PHASE_RESULT_FIELDS['mdd-apply'] : []),
         ...(selected.actor === 'mdd-risk' ? ['assessment'] : [])]);
       if (input.phase !== undefined && input.phase !== selected.actor || input.runID !== undefined && input.runID !== runID ||
           input.callID !== undefined && input.callID !== callID) throw new Error('Receipt is bound to another actor, run or native call.');

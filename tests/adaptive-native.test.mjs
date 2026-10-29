@@ -88,6 +88,21 @@ test('integration: adaptive actor receives the exact runtime workspace binding',
   assert.match(sent.prompt, /not a grant of scope, permission or approval/);
 });
 
+for (const echo of [undefined, 'phase', 'runID', 'callID']) test(`incident regression: native Apply ${echo ? `rejects explicit wrong ${echo}` : 'accepts omitted identity echoes'}`, async t => {
+  const f = fixture(t, 'automatic'); await f.admit(); await f.gate.adaptiveInternal(f.operation(), f.runtime);
+  const call = { sessionID: 'parent', callID: 'incident-child' }, args = await f.runner.before(call, f.runner.status('parent').task);
+  assert.match(args.prompt, /Omit optional phase, runID and callID echoes; never guess/);
+  assert.match(args.prompt, /delivered\?:\{what,implies\}/);
+  const report = { outcome: 'passed', evidenceSummary: 'The held text was updated.', artifact: 'Only the assigned replacement.',
+    completed: ['A1'], changes: ['own.txt'], checks: [], delivered: { what: 'Text updated.', implies: 'Replacement available.' },
+    ...(echo ? { [echo]: 'wrong-native-identity' } : {}) };
+  await f.runner.after(call, args, JSON.stringify(report));
+  const status = f.runner.status('parent');
+  assert.equal(status.lastReceipt.outcome, echo ? 'failed' : 'passed', status.lastReceipt.failure);
+  if (echo) assert.match(status.lastReceipt.failure, /another actor, run or native call/);
+  assert.deepEqual(status.selection.completed, echo ? [] : ['A1']);
+});
+
 test('AL05b: real native protocol admits, selects and retains actual native dispatch', async t => {
   const f = fixture(t, 'automatic');
   const status = await f.gate.adaptiveInternal(wire('entry', { contract: f.contract, messageID: 'native-message' }), f.runtime);
