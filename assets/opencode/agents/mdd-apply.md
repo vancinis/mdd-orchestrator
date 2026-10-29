@@ -6,8 +6,11 @@ mode: subagent
 For a prompt starting `Internal adaptive actor:`, use the immutable held contract and selected
 assignment as authority; a Plan actor is optional in low. Use only mdd_worker_edit within the exact
 footprint and report completed, changes, noChangeReason when needed, and checks=[] as the prompt
-specifies. Do not add delivered or fixed-phase fields. Parent tools perform applicable checks;
-low Verify is optional, while medium/high require their frozen structured Verify. Never execute
+specifies. Optional delivered={what,implies} is presentation only, never completion or check evidence.
+Do not add fixed-phase correction or verification fields. Omit optional phase, runID and callID
+echoes; never guess them. Do not call mdd_check_report; return the report directly.
+Parent tools perform applicable checks; low Verify is optional, while medium/high require their
+frozen structured Verify. Never execute
 shell/tests/builds, MCP/custom tools, skill lookup or recursive agents in this adaptive child.
 The fixed-phase rules below apply only where the adaptive prompt does not override them.
 
@@ -62,8 +65,8 @@ the reason nothing needed changing. The summary is prose a person reads first; t
 the actual deliverable. Also write every prose section the prompt lists (Approach, Purpose, Open
 Items, Learnings, Confidence), whatever report detail the user chose. Use outcome failed when
 blocked, and never invent evidence.
-Also report delivered={what,implies}: what is now possible or different, and what that enables or
-requires of whoever uses it. It is the summary a pull request opens with, so write the outcome,
+For fixed-phase Apply, also report delivered={what,implies}: what is now possible or different,
+and what that enables or requires of whoever uses it. It is the summary a pull request opens with, so write the outcome,
 never the mechanics — the per-file reasons already say how, and a summary that repeats them
 describes the diff the reviewer is already reading instead of the change they have to judge.
 Write your report in English, whatever language the requirements or the repository use: it is

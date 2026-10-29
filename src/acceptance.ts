@@ -116,8 +116,11 @@ export const STRUCTURED_FIELD_SCHEMA: Record<string, string> = {
  * them, but an ordinary Apply prompt does not spend its schema on a field it has no use for.
  */
 export const CORRECTION_FIELDS: readonly string[] = Object.freeze(['closure']);
+/** Shared report envelope, separate from phase data and correction/version authority. */
+export const COMMON_RESULT_FIELDS: readonly string[] = Object.freeze(['phase', 'runID', 'callID', 'outcome', 'evidenceSummary',
+  'how', 'purpose', 'openItems', 'learnings', 'confidence', 'artifact', 'concerns', 'questions']);
 export function phaseFields(phase: Phase, result: Record<string, unknown>): { fields: Record<string, unknown>; ignored: string[] } {
-  const allowed = new Set(['phase', 'runID', 'callID', 'verificationVersion', 'outcome', 'evidenceSummary', 'how', 'purpose', 'openItems', 'learnings', 'confidence', 'artifact', 'concerns', 'questions', ...PHASE_RESULT_FIELDS[phase],
+  const allowed = new Set([...COMMON_RESULT_FIELDS, 'verificationVersion', ...PHASE_RESULT_FIELDS[phase],
     ...(phase === 'mdd-apply' ? CORRECTION_FIELDS : [])]);
   const fields: Record<string, unknown> = {};
   const ignored: string[] = [];

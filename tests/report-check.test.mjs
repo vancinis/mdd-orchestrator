@@ -14,6 +14,17 @@ const planReport = (overrides = {}) => reportDocument({
   artifact: 'Plan: implement the scoped feature and check it.', ...traceFixture(), ...overrides,
 });
 
+test('incident regression: canonical Apply metadata preserves duplicate and completion validation', () => {
+  const data = { evidenceSummary: 'The assigned replacement is ready.', artifact: 'Only the held source changed.',
+    changes: ['own.txt'], completed: ['A1'], checks: [], delivered: { what: 'Text updated.', implies: 'Replacement available.' } };
+  const document = reportDocument(data);
+  assert.equal(checkReportForm('mdd-apply', document).ok, true);
+  const duplicate = checkReportForm('mdd-apply', `${document}\n## MDD Data\n\`\`\`json\n{}\n\`\`\``);
+  assert.equal(duplicate.ok, false); assert.match(duplicate.problems.join(' '), /repeats/);
+  for (const completed of [[], ['A1', 'A1']])
+    assert.equal(checkReportForm('mdd-apply', reportDocument({ ...data, completed })).ok, false);
+});
+
 test('a readable report checks clean, and says a clean check is not an acceptance', () => {
   const checked = checkReportForm('mdd-plan', planReport());
   assert.deepEqual(checked.problems, []);
