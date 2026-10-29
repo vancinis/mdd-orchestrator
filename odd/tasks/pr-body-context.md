@@ -105,7 +105,7 @@ All failing files are outside the authorized edit surfaces and passed unchanged 
 
 ## Next step
 
-Requested implementation is complete. Following explicit user authorization, commit this task document, fetch and integrate the latest `origin/main`, verify the integrated result proportionately, and push directly to `origin/main` without force. No PR publication is authorized. Engram task mirror remains pending because of the known session/project mismatch; no unsupported recovery or project reassignment was attempted.
+Requested implementation and latest-main integration are complete and verified. Publish the integrated result directly to `origin/main` using an ordinary fast-forward push, as explicitly authorized; no force-push or PR publication. This document is a pre-publication snapshot; the actual remote mutation outcome is reported in the session summary and final user reply. Engram task mirror remains pending because of the known session/project mismatch; no unsupported recovery or project reassignment was attempted.
 
 ### Parent and independent verification
 
@@ -122,4 +122,10 @@ Requested implementation is complete. Following explicit user authorization, com
 ### Subsequent delivery authorization
 
 - User requested commit, latest main integration and direct push, then selected `Directamente en main` after confirmation of the exact origin URL, operations and existing Git authentication.
-- Tracking commit, fetch, integration, integrated-result checks and push: pending at this entry. Preserve the implementation's original verification limitations above.
+- Tracking commit: `b262cd6dfdcca340afca3f35656eed36d5f23e49` (`docs(odd): record PR context implementation and checks`).
+- Fetched latest `origin/main`: `e16776b3ecd7a8674f4890e009654cb40dde5c04`, three upstream commits. Integrated automatically without conflicts as merge `af6b327307690f7a6f93e0a174dfc97a0f85bbb9`; parents are the tracking commit and the fetched main tip.
+- Integration added nine upstream files (197 additions, 14 deletions), preserving both PR context and adaptive-incident changes. No manual production edits or test timeout changes were required.
+- Integrated checks: `npm run build` exit 0 (3406 ms); `npm run typecheck` exit 0 (2656 ms); `node --import ./tests/isolate-home.mjs --test --test-concurrency=1 tests/pr-body.test.mjs tests/phase-assets.test.mjs tests/adaptive-continuation.test.mjs tests/adaptive-low.test.mjs tests/adaptive-native.test.mjs tests/report-check.test.mjs` exit 0, 414 passed, no failures or skips (120390.52 ms); `git diff --check` exit 0.
+- Native read-only committed integration assessment against `b262cd6dfdcca340afca3f35656eed36d5f23e49`: risk `medium`, nine paths, 211 authored changed lines, executable Apply-instruction change. Under the RDD-off medium-tier rule, writer verification plus parent spot check applies; no reviewer or review lifecycle was started.
+- Complete integrated full-suite rerun was not performed; the earlier feature serial full-suite evidence and initial parallel failures remain recorded without claiming they ran on the merged candidate.
+- Direct-main publication follows these checks and the user's exact destination/authentication authorization. No remote mutation success is claimed by this pre-publication entry.
