@@ -1,103 +1,49 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "MDD global settings version 1",
+  "$id": "https://github.com/my-driven-development/mdd/docs/mdd-config.schema.json",
+  "title": "MDD global configuration",
+  "description": "Global MDD settings at $XDG_CONFIG_HOME/opencode/mdd/mdd.config.json (or ~/.config/opencode/mdd/mdd.config.json). Keys written by earlier versions (engram, telemetry, workers, knowledge, guards, verify; answers.certainty, answers.artifactStore, answers.complexity) are accepted and ignored.",
   "type": "object",
-  "additionalProperties": false,
   "required": ["version", "activeProfile", "profiles"],
   "properties": {
     "version": { "const": 1 },
-    "activeProfile": { "$ref": "#/$defs/name" },
+    "activeProfile": { "$ref": "#/$defs/profileName" },
     "profiles": {
       "type": "object",
       "minProperties": 1,
       "maxProperties": 64,
-      "propertyNames": { "$ref": "#/$defs/name" },
+      "propertyNames": { "$ref": "#/$defs/profileName" },
       "additionalProperties": { "$ref": "#/$defs/profile" }
     },
-    "engram": {
-      "description": "Optional memory integration. New native runs use Engram after validated project/session bootstrap; omission means complete local task storage. Configured failures block without fallback. Setup may install only with explicit consent; runtime never installs or upgrades.",
-      "oneOf": [{
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["endpoint"],
-      "properties": {
-        "endpoint": {
-          "type": "string",
-          "pattern": "^http://127\\.0\\.0\\.1:[1-9][0-9]{0,4}/?$",
-          "description": "Runtime additionally checks that the explicit port is at most 65535."
-        },
-        "project": { "$ref": "#/$defs/name", "deprecated": true, "description": "Legacy field ignored by native runtime with a migration notice. The provider resolves each actual workspace independently." }
-      }
-      }, {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["mode", "binary", "dataDirectory"],
-        "properties": {
-          "mode": { "const": "local" },
-          "binary": { "type": "string", "minLength": 1, "description": "Absolute path to an already installed, approved Engram executable. Runtime validates absolute paths." },
-          "dataDirectory": { "type": "string", "minLength": 1, "description": "Absolute managed memory directory, normally the global OpenCode mdd/memory directory; records are bound to provider-resolved workspace identities." }
-        }
-      }]
-    },
-    "knowledge": {
-      "description": "Optional canonical Engram observations and explicit per-checkout mdd/knowledge.json approved skill catalog. Defaults on when omitted; explicit false disables it. Does not configure Engram or create a catalog. Freshness validates declared bytes, not truth or authority. Child-only excerpts and observations share three entries/8 KiB; delivery metrics use existing telemetry opt-out. Catalogs never grant tools or permissions.",
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["enabled"],
-      "properties": { "enabled": { "type": "boolean", "default": true } }
-    },
-    "workers": {
-      "description": "Global parallel-worker preference, default on when omitted. Captured at startup; dispatch remains sequential until batch execution is supported.",
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["enabled"],
-      "properties": { "enabled": { "type": "boolean", "default": true } }
-    },
-    "guards": {
-      "description": "MDD's strict workflow guards, off by default (free mode). Off: the coordinator works directly, dispatches any agent and asks any question, phase actors keep every native tool and no declared footprint fences them; only tasks and questions MDD itself issued go through its bookkeeping. On: every implementation and native interaction in an MDD conversation goes through MDD's own routes, and anything else is refused. Captured at startup; native permissions apply in both.",
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["enabled"],
-      "properties": { "enabled": { "type": "boolean", "default": false } }
-    },
-    "telemetry": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["enabled"],
-      "properties": { "enabled": { "type": "boolean" } }
-    },
-    "verify": {
-      "description": "Automatic correction after a failed Verify, automatic mode only. Each pass corrects every implementation finding in Apply, then Verify rechecks only those findings; a second pass runs only when the first recheck closed findings and opened none. Design or requirement causes and interactive mode always stop for the user. 0 keeps every failed Verify waiting for the user. Defaults to 2 when omitted.",
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["automaticCorrections"],
-      "properties": { "automaticCorrections": { "type": "integer", "minimum": 0, "maximum": 2, "default": 2 } }
-    }
+    "engram": { "deprecated": true },
+    "telemetry": { "deprecated": true },
+    "workers": { "deprecated": true },
+    "knowledge": { "deprecated": true },
+    "guards": { "deprecated": true },
+    "verify": { "deprecated": true }
   },
+  "additionalProperties": false,
   "$defs": {
-    "name": {
+    "profileName": {
       "type": "string",
-      "minLength": 1,
-      "maxLength": 64,
-      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]*$",
-      "description": "Runtime also rejects prototype names and case-insensitive Windows device names. Active profile must exist."
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
     },
     "model": {
       "type": "string",
       "maxLength": 256,
       "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]*(/[a-zA-Z0-9][a-zA-Z0-9_.:-]*)+(#[a-zA-Z0-9][a-zA-Z0-9_.-]*)?$",
-      "description": "provider/model, optionally with a nested model path and a trailing #variant reasoning-effort suffix (e.g. provider/model#high)."
+      "description": "provider/model, optionally with a nested path and a #variant reasoning-effort suffix."
     },
     "profile": {
       "type": "object",
-      "additionalProperties": false,
       "properties": {
         "models": {
           "type": "object",
-          "additionalProperties": false,
+          "description": "Model per agent. An omitted role inherits OpenCode's native selection.",
           "properties": {
             "orchestrator": { "$ref": "#/$defs/model" },
             "mdd-explore": { "$ref": "#/$defs/model" },
+            "mdd-risk": { "$ref": "#/$defs/model" },
             "mdd-plan": { "$ref": "#/$defs/model" },
             "mdd-propose": { "$ref": "#/$defs/model" },
             "mdd-spec": { "$ref": "#/$defs/model" },
@@ -105,25 +51,27 @@
             "mdd-tasks": { "$ref": "#/$defs/model" },
             "mdd-apply": { "$ref": "#/$defs/model" },
             "mdd-verify": { "$ref": "#/$defs/model" },
-            "mdd-risk": { "$ref": "#/$defs/model" },
             "mdd-security": { "$ref": "#/$defs/model" },
             "mdd-jd-judge-a": { "$ref": "#/$defs/model" },
             "mdd-jd-judge-b": { "$ref": "#/$defs/model" },
             "mdd-jd-fix": { "$ref": "#/$defs/model" }
-          }
+          },
+          "additionalProperties": false
         },
         "answers": {
           "type": "object",
-          "additionalProperties": false,
+          "description": "Orchestrator preferences. Unset mode is asked once per run; unset summary means medium.",
           "properties": {
-            "certainty": { "enum": ["very-sure", "somewhat-sure", "not-sure"] },
-            "artifactStore": { "enum": ["engram", "openspec", "both", "none", "local"], "deprecated": true, "description": "Retained legacy data; ignored for automatic new native-run backend resolution. Restored runs keep their frozen backend." },
-            "mode": { "enum": ["interactive", "automatic"] },
-            "summary": { "enum": ["detailed", "medium", "low"] },
-            "complexity": { "enum": ["very-complex", "somewhat-complex", "not-complex"] }
-          }
+            "mode": { "enum": ["automatic", "interactive"] },
+            "summary": { "enum": ["low", "medium", "detailed"] },
+            "certainty": { "deprecated": true },
+            "artifactStore": { "deprecated": true },
+            "complexity": { "deprecated": true }
+          },
+          "additionalProperties": false
         }
-      }
+      },
+      "additionalProperties": false
     }
   }
 }
