@@ -403,10 +403,9 @@ safety limits remain explicit; no truncation or automatic re-asking substitutes 
 
 All pending clarifications are asked together in one native interaction. Each may name a short
 topic, say why it matters, allow several choices, or offer no choices for an open-ended answer;
-delegation to the agent and free text are always available. They come from three places: doubts
-the coordinator passes to `mdd_start` (asked with preflight), decisions a phase reports under
-`## MDD Questions` (asked at the next boundary, in automatic mode too), and the coordinator's own
-questions before a ready phase is dispatched. Answers are context, never approval.
+delegation to the agent and free text are always available. They come from the contract's
+product questions at entry, decisions an actor reports under `## MDD Questions`, and the
+coordinator's own questions. Answers are context, never approval.
 
 ## 4. Runnable proof and verification boundaries
 

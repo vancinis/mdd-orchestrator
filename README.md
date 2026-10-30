@@ -1287,19 +1287,17 @@ node dist/cli.js --answers examples/answers.json
   la caché de npm en un directorio temporal, así que nunca se toca tu instalación real.
 - **Fixtures:** `tests/adapter-fixture.mjs` trae un servidor Engram falso por loopback, reportes en
   el formato real y helpers que llevan una ejecución hasta la parada de riesgo.
-- **Suites:** 78 archivos. Las más grandes son `full-native`, `native-intake`, `phase-runner`,
-  `opencode-plugin` y `opencode-v2`.
+- **Suites:** 75 archivos. Las más grandes son `adaptive-native`, `adaptive-public`,
+  `adaptive-low`, `phase-assets` y `opencode-plugin`.
 - **Smokes contra un OpenCode real** (manuales, fuera de `npm test`):
   - `tests/opencode-v2-host-smoke.mjs`: herramientas y permisos expuestos; no hace pedidos a modelos.
-  - `tests/apply-batches-host-smoke.mjs`: sesiones hijas nativas con un modelo guionado por loopback.
-  - `tests/opencode-v2-workers-host-smoke.mjs` (`--exploration-workers`, `--apply-workers`,
-    `--formatter-boundary`): este último es un **RED esperado**, porque el formateador nativo de
-    2.0.22 saltea el hook.
+  - Los smokes de lotes de Apply y de workers (`apply-batches-host-smoke.mjs`,
+    `opencode-v2-workers-host-smoke.mjs`) se quitaron junto con la ruta v2, que era la que usaban.
 - **Skips habituales:** 3 pruebas se saltean, dos que necesitan privilegios de symlink en Windows y
   el smoke opt-in de Engram instalado (`MDD_SMOKE_ENGRAM`).
 
-**Último resultado verificado** (commit `943d32a`, Node 26.9.0 en Windows): **2.609 pruebas, 2.606
-pasan, 0 fallan y 3 se saltean**, en unos 10,5 minutos. Son pruebas de contrato deterministas, con
+**Último resultado verificado** (retiro de la ruta v2, Node 26.9.0 en Windows): **1.995 pruebas,
+1.992 pasan, 0 fallan y 3 se saltean**, en unos 3 minutos. Son pruebas de contrato deterministas, con
 SDK simulado y transporte HTTP real por loopback; no ejecutan modelos.
 
 ---

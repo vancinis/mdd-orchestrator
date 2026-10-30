@@ -169,9 +169,8 @@ startup snapshot does not change when the settings file changes.
 Existing version-1 files without `workers` remain valid and default to enabled in memory;
 reads never rewrite legacy files. An explicit save materializes the effective preference.
 **Production OpenCode V2 supports bounded independent exploration and Apply workers.**
-The default-on preference permits at most two explicitly declared independent exploration items,
-both for `mdd_start.exploration.workItems` (when the route begins with exploration) and
-`mdd_contextual_explore.workItems`. It never invents a split or adds an exploration phase.
+The default-on preference permits at most two explicitly declared independent exploration items
+through `mdd_contextual_explore.workItems`. It never invents a split or adds an exploration phase.
 Each item needs a distinct `id` and `purpose`, `dependsOn: []`, `independent: true`,
 `complete: true`, and `reads: [{ root: <local absolute root>, files: <exact relative files> }]`.
 Missing, incomplete, dependent, disabled or unsupported declarations retain singular dispatch.
@@ -474,19 +473,15 @@ question before/after correlation, validates ordered native answer metadata, and
 runner only after accepted preflight. Complete frozen profiles skip the question. All starts
 require requirements matching the actual latest nonsynthetic native user text.
 
-Public `mdd_start` accepts only `{ requirements }`; model-supplied profiles, answers, scoring
+The public `mdd_adapt` entry accepts only its contract; model-supplied profiles, answers, scoring
 overrides, endpoints, and project keys are not accepted. Configure those supported settings
 through the global file/editor and restart. Absent Engram settings mean memory off; opted-in
 memory automatically bootstraps the actual native parent. Unavailable configured memory is not silently disabled.
 
-Interactive phase approval uses one native Proceed/Stop question bound to the run and exact
-next phase. No public approval setter exists. `mdd_status.question` is the exact question
-argument object, and `questionReceipts` retains consumed native call IDs and labels. Pending,
-failed, dismissed, stale, or duplicate calls cannot authorize work. When the user answers in
-their own words instead (typed inside the form, or in a chat message after the form was shown and
-closed), `mdd_answer` records it only after checking every chosen option against their actual
-text; its receipt is marked `typed`. Automatic mode adds no phase approval questions. Valid
-approval prepares only the corresponding next task.
+Interactive mode asks one native, single-use operation approval for each `mdd_adapt` operation.
+No public approval setter exists. `mdd_status.question` is the exact question argument object.
+Pending, failed, dismissed, stale, or duplicate calls cannot authorize work, and only the native
+form records an answer. Automatic mode adds no continuation questions.
 
 ### Evidence reporting (`reporting.ts`)
 

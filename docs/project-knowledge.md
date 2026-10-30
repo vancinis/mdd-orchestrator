@@ -131,7 +131,7 @@ grounded in its existing requirements and exploration evidence; knowledge does n
 Bodies are added only to actual child arguments inside the native hook. Prepared handles, status,
 coordinator query results and phase telemetry contain no selected bodies; the existing transcript
 collapse removes dispatched prompts from subsequent coordinator context. Do not copy observations
-into `mdd_context`. This limits adapter-supplied context; it cannot prevent an actor from quoting a
+into the entry contract. This limits adapter-supplied context; it cannot prevent an actor from quoting a
 finding in its own report.
 
 Native `explore` and `general` fallbacks use the same bound-dispatch collapse check in V2 and the

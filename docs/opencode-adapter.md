@@ -1,5 +1,15 @@
 # Run the main MDD routes in OpenCode
 
+> **The fixed version-2 route was retired (2026-10-30).** Version 3 (`mdd_adapt`) is the only
+> implementation route. `mdd_start`, `mdd_prepare_advance`, `mdd_revisit`, `mdd_answer`,
+> `mdd_phase_result`, `mdd_change_request`, `mdd_context`, `mdd_transfer` and
+> `mdd_transfer_recover` no longer exist, `mdd_reset` accepts only `scope: phase` or
+> `scope: run`, and a leftover version-2 run record is read-only data that `mdd_reset` with
+> `scope: run` discards. Sections below that describe the preflight, per-phase approvals,
+> clarification rounds, written answers, report restatement, Verify rework scopes, sequential Apply
+> batches, worker host probes or version-2 transfer document that retired route and are kept only
+> as history until its remaining engine code is removed.
+
 This opt-in adapter targets OpenCode **V2 2.0.22** and preserves the approved low/high main routes.
 It uses the native permission-controlled foreground `subagent` tool, not SDK prompting.
 When optional Engram memory is enabled, receipts must be read back before dispatch and before recording a result.
@@ -338,11 +348,8 @@ interruption can still stop an actor. Final Verify always assesses the **full pl
 
 #### Reproduce the batch execution evidence
 
-After building, run `node tests/apply-batches-host-smoke.mjs`. It requires no credentials, ambient
-session/service, network provider or additional installs. It uses private HOME/config/data/temp
-directories and checks for ancestor configuration before launching anything. It never probes or
-reuses a user-running host. It starts only its own loopback host/provider when safe admission and
-the installed V2 2.0.22 executable are available; otherwise it reports `unavailable`, not PASS.
+The host probe `tests/apply-batches-host-smoke.mjs` drove this evidence through the retired
+version-2 route and was removed with it. The table below records what it established.
 
 | Evidence | What it establishes | What it does not establish |
 |---|---|---|
@@ -538,60 +545,18 @@ automatically replay retained work. Ordinary serial Apply retains native editing
 
 #### Pinned progress provenance and native proof
 
-Run
-`node tests/opencode-v2-workers-host-smoke.mjs` after building for the explicit local probe.
-It loads the actual production V2 plugin on a private **2.0.22** host, drives `mdd_start`,
-`mdd_status` and native foreground Plan using a test-owned loopback model fixture, and refuses
-a child read with an `execute.before` hook. No external model or ambient credential is used.
-Its observed running parent subagent has `metadata: {}` at the first child action. This is
-expected, not evidence that native provenance is unavailable. The public ephemeral event
-`session.tool.progress` carries the parent `sessionID`, exact `assistantMessageID` and native
-call `id`, with the child in `metadata.sessionID`. The native executor awaits progress publication
-before prompting the child. The probe verifies the exact native correlation on the real host.
-Plugin subscription processing is asynchronous: a production gate must await a bounded trusted
-binding, verify child parent/project/location and the admitted owner epoch, and refuse missing,
-stale, conflicting or stream-lost evidence. Ephemeral progress is not replayable authority.
-Completion's structured `sessionID` is too late for pre-action confinement. Actor names,
-arrival order, prompt text and the first pending slot are not trusted substitutes.
-
-The probe checks clean configuration ancestors, redirects local-runtime discovery to its own
-fixture, and removes other providers. It cleans up its private host/provider and temporary HOME.
-On Windows the per-user temp path may inherit `~/.opencode`; the probe uses a test-owned
-system-temp child only after verifying clean ancestors. It must fail rather than load user plugins.
-
-That original probe proves progress provenance and read refusal, not worker overlap. Run
-`node tests/opencode-v2-workers-host-smoke.mjs --exploration-workers` for actual production
-foreground exploration: main/contextual batches, a two-live-child barrier, reversed completion,
-own-scope reads, forbidden-tool refusal, delayed/dropped/conflicting progress, external-directory
-permission denial and disabled serial fallback. The fault scenarios wrap only event delivery,
-not the production motor or fences.
-Synthetic tests separately cover durable failures/restart and alias/schema denial. Exploration alone
-does not establish native editing confinement, arbitrary-script sandboxing or Apply overlap.
-
-Run `node tests/opencode-v2-workers-host-smoke.mjs --apply-workers` for the actual production Apply
-matrix: main, failure, progress-loss, disabled, dependent, overlap, missing-metadata and implicit
-instruction-write fallback. A two-live-child barrier and reversed edits/completion prove overlap,
-own-file edits and held-plan-order single-task results. Out-of-scope reads/writes and multi-file requests,
-generic editors, shell, execution, custom/MCP/control tools and recursion refuse before target mutation.
-The MCP fixture uses the same test-owned loopback listener/token, with a real native initialize/catalog
-handshake; its mutation endpoint is never called. No ambient MCP server or credential is contacted.
-The actual native HEAD watcher is exercised with identical test-owned HEAD bytes, without changing
-refs; 2.0.22 does not watch ordinary edited files. A configured formatter marker remains absent in worker cases;
-ordinary serial fallback performs a native edit and still invokes that formatter. Failure/progress
-loss preserves the successful sibling's durable evidence and refuses uncertain writes. Unit tests
-separately establish create/delete, mode/encoding, linked paths, concurrent requests, external drift,
-partial publication and restart/transfer behavior; those are not claimed as actual-host matrix proof.
-
-Run `node tests/opencode-v2-workers-host-smoke.mjs --formatter-boundary` for the explicit
-**expected safety RED**, not a passing worker test. Its hostile local model fixture attempts a
-native edit of a test-owned file while a deny-all `ctx.shell` hook is installed. On **2.0.22**
-the edit completes, the file changes and the test-owned formatter writes its marker, with zero
-shell-hook invocations. The native formatter calls `AppProcess.Service.run` directly, not the
-shell tool or shell hook. The public plugin context has no formatter gate or per-edit skip option.
-The assertion fails and cleanup still removes the private processes and test-owned files.
-The scoped worker route therefore denies that generic editor, rather than replacing its executor
-or globally disabling formatters. The separately registered primitive has its own native tool
-permission and exact-write authority fence. No arbitrary-script sandbox is claimed.
+The host probe `tests/opencode-v2-workers-host-smoke.mjs` drove these scenarios through the retired
+version-2 route and was removed with it. What it established on a private **2.0.22** host: the
+public ephemeral event `session.tool.progress` carries the parent `sessionID`, exact
+`assistantMessageID` and native call `id`, with the child in `metadata.sessionID`, and the native
+executor awaits progress publication before prompting the child. A production gate must await a
+bounded trusted binding, verify child parent/project/location and the admitted owner epoch, and
+refuse missing, stale, conflicting or stream-lost evidence; ephemeral progress is not replayable
+authority, and actor names, arrival order, prompt text or the first pending slot are not trusted
+substitutes. On **2.0.22** a native edit still runs the configured formatter directly, not through
+the shell tool or hook, so the scoped worker route denies that generic editor and uses its
+separately registered primitive with its own native permission and exact-write authority fence.
+No arbitrary-script sandbox is claimed.
 
 The formatter bypass does not block the mutation-denying read-only exploration fence.
 Legacy investigation remains singular and never invents unrelated splits.
@@ -606,7 +571,7 @@ and still require native `external_directory` permission. No remote probe/access
 
 ### Legacy setup-only recovery
 
-Read `mdd_status`, not `mdd_start`, for status updates. Absent Engram settings are now normal
+Read `mdd_status` for status updates. Absent Engram settings are now normal
 memory-off operation, not a setup block. Invalid settings still prevent plugin tools from
 loading; repair the named file against the schema and restart. No endpoint or project is guessed.
 
@@ -632,7 +597,7 @@ in turn made `mdd_reset` with `scope: run` promise a restart it could not delive
 abandoning the conversation as the only way to keep working.
 
 For information-only requests such as explaining a project, the coordinator calls
-`mdd_contextual_explore` instead of stopping or forcing `mdd_start`. That route is available
+`mdd_contextual_explore` instead of stopping or forcing an entry. That route is available
 with or without an accepted run, so a status block never leaves the conversation without a
 read-only answer. A quoted path neither changes the loaded workspace nor authorizes
 cross-project access or configuration edits.
@@ -643,7 +608,7 @@ operation descriptors and paged input/detail references rather than guessing nes
 status that offers `entry` also carries `entryGuide`: the call shape, a minimal valid low contract
 and the rules that refuse most drafts, so the first entry does not need every definition page.
 An idle reply without that projection (for example after `mdd_reset` with `scope: run`) points
-`nextAction` at the exact version-3 status call, never at `mdd_start`.
+`nextAction` at the exact version-3 status call.
 
 Entry needs only `contract`. The host binds the native **user** message whose exact authored text
 is `contract.objective`; the SDK tool context's `messageID` identifies the **assistant** caller,
