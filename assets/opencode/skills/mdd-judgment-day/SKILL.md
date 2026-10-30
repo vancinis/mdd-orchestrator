@@ -11,8 +11,8 @@ metadata:
 
 Activate only on an explicit user request for judgment-day, judgment day or judment-day (case-insensitive) on a
 concrete target. Mere mentions, ordinary review, implementation and completed Verify do not activate it.
-The parent must load this installed skill and its local reference before proceeding. No ninth phase,
-preflight run, refuter or RDD dependency; no receipt or delivery authority.
+The parent must load this installed skill and its local reference before proceeding. It is not a
+run phase and starts no run; it grants no delivery authority.
 
 ## Hard Rules
 
@@ -29,7 +29,7 @@ preflight run, refuter or RDD dependency; no receipt or delivery authority.
 - Strictly validate the neutral JSON per the reference. Missing, malformed, incomplete or unavailable
   inspection cannot produce APPROVED. Corroborate introduced severe defects; never infer agreement.
 - Correct only severe introduced defects confirmed by both, after explicit correction authorization,
-  with exact allowed surfaces and one writer. Respect live MDD workflow ownership and pending interactions.
+  with exact allowed surfaces and one writer. Do not correct files an active MDD run owns.
 - Permit at most two correction rounds and two scoped rejudgments over the frozen ledger plus
   immutable fix delta. Never reset the budget or broaden scope to avoid escalation.
 
@@ -47,7 +47,7 @@ preflight run, refuter or RDD dependency; no receipt or delivery authority.
 
 1. Follow the reference's freeze, readiness, skill-loading, native dispatch and strict validation contracts.
 2. Merge both blind results into a stable ledger; corroborate proof and ask before correction.
-3. Dispatch mdd-jd-fix only when authorized and ownership permits; freeze the complete corrected target.
+3. Dispatch mdd-jd-fix only when authorized and no active run owns the files; freeze the complete corrected target.
 4. Rejudge with both fresh judges, then obtain separate ordinary functional verification from the
    parent or an independent verifier, never from judges. Unverified material checks block approval.
 

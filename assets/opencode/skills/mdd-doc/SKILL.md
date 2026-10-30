@@ -4,15 +4,16 @@ description: "Trigger: writing a phase artifact, plan, proposal, specification, 
 license: MIT
 metadata:
   author: "mdd-maintainers"
-  version: "1.0"
+  version: "2.0"
 ---
 
 ## Activation Contract
 
-Load when composing the `artifact` document of a phase result. It shapes prose only: it never
-changes the result schema, the evidence rules, the requested scope or the phase's permissions.
-Cognitive-load principles are adapted from the Apache-2.0 `cognitive-doc-design` skill by
-gentleman-programming; this is an independent rewrite for MDD artifacts.
+Load when writing an MDD artifact (`.mdd/runs/<id>/NN-<actor>.md`) or any guide or report a
+reader must scan and verify. It shapes prose only: it never changes the report format, the
+evidence rules, the requested scope or the actor's permissions. Cognitive-load principles are
+adapted from the Apache-2.0 `cognitive-doc-design` skill by gentleman-programming; this is an
+independent rewrite for MDD artifacts.
 
 ## Hard Rules
 
@@ -24,14 +25,9 @@ gentleman-programming; this is an independent rewrite for MDD artifacts.
 - Write for a reviewer who must verify intent without reconstructing the whole story.
 - Keep unknowns visible. Never present an assumption, an unrun check or an unverified claim as
   a result; say what is not known and what would settle it.
-- Never put internal call IDs, run IDs, routing details or trace identifiers in prose.
-- Never write an `## Acceptance and plan links` section. That section is owned by the adapter,
-  which appends it with canonical JSON where it applies; an exploration never gets one. Writing
-  it yourself fabricates links and the result is rejected. Close the document so an appended
-  section reads as a continuation.
-- `evidenceSummary` is a separate short field, not a place for this document; do not duplicate
-  the artifact into it.
-- Do not propose, quote or imply running commands in a read-only phase.
+- Reference requirement, scenario, decision and task IDs (`R1`, `S1`, `D1`, `T1`) from the run
+  file instead of restating them; never invent new IDs for existing items.
+- Do not copy the artifact into the short report; the report points to it.
 
 ## Decision Gates
 
@@ -42,7 +38,7 @@ gentleman-programming; this is an independent rewrite for MDD artifacts.
 | A list is growing past roughly seven items | Group it into a table with a named column. |
 | Evidence is partial | State the gap and its impact explicitly, in its own section. |
 | A repo template already exists | Follow that template instead of this default shape. |
-| Content repeats the appended trace JSON | Remove the prose copy and reference the section. |
+| Content repeats the run file or an earlier artifact | Link it instead of copying it. |
 
 ## Execution Steps
 
@@ -50,7 +46,7 @@ gentleman-programming; this is an independent rewrite for MDD artifacts.
 2. Draft the quick path: the shortest ordered sequence that reaches that outcome.
 3. Move supporting decisions, constraints and alternatives into a details section.
 4. Convert any dense paragraph into a table, checklist or example where it fits naturally.
-5. Close with limitations and unknowns, so the appended trace section reads as continuation.
+5. Close with limitations and unknowns.
 
 ## Output Contract
 
