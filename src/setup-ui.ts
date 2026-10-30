@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Cancelled, choose, createTerminalIO, heading, note, rows } from './tui.js';
-import type { Choice, ConfigIO } from './tui.js';
+import type { ConfigIO } from './tui.js';
 import { loadGlobalSettings, saveGlobalSettings } from './global-settings.js';
 import { installationPaths } from './installation-paths.js';
 import { doctor } from './doctor.js';

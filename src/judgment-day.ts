@@ -5,22 +5,8 @@ import { delimiter, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { objectWithKeys } from './validation.js';
 
 export const JD_JUDGES = Object.freeze(['mdd-jd-judge-a', 'mdd-jd-judge-b'] as const);
-export const JD_FIX = 'mdd-jd-fix';
 export const JD_INSPECT = 'mdd_jd_inspect';
 export const isJudge = (value: unknown): boolean => JD_JUDGES.includes(value as typeof JD_JUDGES[number]);
-export const isJudgmentActor = (value: unknown): boolean => isJudge(value) || value === JD_FIX;
-
-/** Exact standalone foreground transport, not a workflow dispatch handle or model override. */
-export function judgmentTask(value: unknown): { subagent_type: string; description: string; prompt: string } | undefined {
-  if (!value || typeof value !== 'object' || !isJudgmentActor((value as Record<string, unknown>).subagent_type)) return undefined;
-  const args = objectWithKeys(value, 'standalone foreground task', ['subagent_type', 'description', 'prompt']);
-  for (const key of ['subagent_type', 'description', 'prompt']) {
-    if (typeof args[key] !== 'string' || !args[key].trim() || Buffer.byteLength(args[key]) > 96000) {
-      throw new Error('Standalone foreground tasks require exactly three nonempty bounded strings.');
-    }
-  }
-  return args as { subagent_type: string; description: string; prompt: string };
-}
 
 const execute = promisify(execFile);
 const LIMIT = 128 * 1024;

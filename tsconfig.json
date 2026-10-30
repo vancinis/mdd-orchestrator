@@ -5,6 +5,7 @@
     "strict": true,
     "skipLibCheck": true,
     "noUncheckedIndexedAccess": true,
+    "noUnusedLocals": true,
     "exactOptionalPropertyTypes": true,
     "verbatimModuleSyntax": true,
     "noEmitOnError": true,

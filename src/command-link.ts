@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { delimiter, dirname, join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { installationPaths } from './installation-paths.js';
 import { scopedPath } from './safe-paths.js';
 
@@ -75,9 +75,4 @@ export function registerPath(binRoot: string, execute = execFileSync): 'register
     env: { ...process.env, MDD_BIN_PATH: binRoot }, timeout: 30000, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
   });
   return 'registered';
-}
-
-/** Where a launcher points, so a stale one from an older layout is visible in review. */
-export function launcherTarget(binRoot: string): string {
-  return join(dirname(binRoot), RELATIVE_CLI.replaceAll('/', process.platform === 'win32' ? '\\' : '/'));
 }

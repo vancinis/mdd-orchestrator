@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import fs from 'node:fs';
 import { delimiter, join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { COMMAND, commandPlan, launcherFiles, launcherTarget, registerPath, writeLaunchers } from '../dist/command-link.js';
+import { COMMAND, commandPlan, launcherFiles, registerPath, writeLaunchers } from '../dist/command-link.js';
 import { installationPaths } from '../dist/installation-paths.js';
 import { isolateHome } from './helpers.mjs';
 
@@ -58,7 +58,6 @@ test('writing launchers is idempotent and repairs a modified launcher', t => {
   assert.equal(commandPlan(process.env, paths).files.find(file => file.name === `${COMMAND}.cmd`).action, 'update');
   writeLaunchers(paths);
   assert.equal(fs.readFileSync(cmd, 'utf8'), original);
-  assert.equal(launcherTarget(paths.binRoot), paths.cliPath);
 });
 
 test('PATH registration only appends its own folder to the user scope', t => {
