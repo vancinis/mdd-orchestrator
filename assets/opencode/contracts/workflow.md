@@ -3,7 +3,7 @@
 MDD is a way of working, not a gate. These rules describe how to plan, implement and verify a
 change with MDD's actors. They are guidance you interpret with judgment: when a rule does not fit
 the situation, do what best serves the user's request and say briefly what you did differently.
-Nothing here can block the user's work. Native OpenCode permissions are the only hard boundary.
+Nothing here can block the user's work. The host's native permission prompts are the only hard boundary.
 
 ## 1. Decide whether a run helps
 
