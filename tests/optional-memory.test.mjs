@@ -68,47 +68,7 @@ for (const fault of ['conflict', 'ended', 'incomplete', 'ambiguous', 'project-ro
 }
 
 for (const fault of ['conflict', 'ended', 'incomplete', 'ambiguous', 'project-root', 'health', 'race', 'ended-race', 'unknown-missing']) {
-  test(`PF-3: configured ${fault} bootstrap failure blocks native start without selecting local`, async t => {
-    transport(t, fault);
-    const settings = defaultSettings();
-    settings.engram = { endpoint: 'http://127.0.0.1:43210' };
-    settings.profiles.default.answers = { ...answers };
-    let starts = 0;
-    const gate = new NativeIntake({ status: () => ({ state: 'not-started' }), block() {}, async start() { starts++; } },
-      { async intake() { return 'native-user'; } }, settings);
-    await assert.rejects(gate.start({ requirements: 'Actual objective.' }, runtime, 'native-message'));
-    const status = gate.status(runtime.sessionID);
-    assert.equal(status.state, 'blocked');
-    assert.equal(status.memory, 'enabled');
-    assert.equal(status.storage, undefined, 'no successful backend activation is fabricated');
-    assert.equal(status.question, undefined);
-    assert.equal(starts, 0);
-  });
 }
-
-for (const store of ['engram', 'both']) test(`off profile transition ignores deprecated ${store} and asks only missing user fields`, async t => {
-  t.mock.method(globalThis, 'fetch', () => assert.fail('Off fetched'));
-  const settings = defaultSettings();
-  settings.profiles.default.answers = { ...answers, artifactStore: store };
-  delete settings.profiles.default.answers.summary;
-  const original = structuredClone(settings);
-  const gate = new NativeIntake({ status: () => ({ state: 'not-started' }) }, { intake: async () => 'actual-user' }, settings);
-  const status = await gate.start({ requirements: 'User request' }, runtime, 'actual-message');
-  assert.equal(status.memory, 'off');
-  assert.equal(status.storage.backend, 'local');
-  assert.deepEqual(status.question.questions.map(q => q.header), ['Resumen', 'Notas']);
-  assert.deepEqual(settings, original);
-});
-
-test('explicit legacy endpoint failure stays enabled and blocks without fallback', async t => {
-  t.mock.method(globalThis, 'fetch', () => { throw new Error('Unavailable'); });
-  const settings = defaultSettings(); settings.engram = { endpoint: 'http://127.0.0.1:43210', project: 'fixture' };
-  const gate = new NativeIntake({ status: () => ({ state: 'not-started' }), block() {} }, { intake: async () => 'actual-user' }, settings);
-  await assert.rejects(gate.start({ requirements: 'User request' }, runtime, 'actual-message'), /Unavailable/);
-  assert.equal(gate.status(runtime.sessionID).memory, 'enabled');
-  assert.equal(gate.status(runtime.sessionID).state, 'blocked');
-  assert.deepEqual(parseSettings(settings).engram, settings.engram);
-});
 
 function temporary(t) {
   const root = mkdtempSync(join(tmpdir(), 'mdd-managed-'));
@@ -229,46 +189,6 @@ test('managed service never accepts an unrelated listener when its process exits
   });
   await assert.rejects(service.endpoint(), /exited/);
   assert.equal(kills, 0);
-});
-
-for (const mode of ['endpoint', 'legacy', 'managed']) test(`global ${mode} memory resolves two roots and binds distinct actual parents`, async t => {
-  const root = temporary(t), a = join(root, 'a'), b = join(root, 'b');
-  mkdirSync(a); mkdirSync(b);
-  const sessions = new Map(), calls = [];
-  t.mock.method(globalThis, 'fetch', async (address, options) => {
-    const url = new URL(address); calls.push(url.pathname);
-    let data, status = 200;
-    if (url.pathname === '/health') data = { service: 'engram', status: 'ok' };
-    else if (url.pathname === '/project/current') {
-      const cwd = url.searchParams.get('cwd'); assert.ok([a, b].includes(cwd));
-      data = { cwd, project_path: cwd, project: cwd === a ? 'resolved-a' : 'resolved-b' };
-    } else if (url.pathname === '/sessions') {
-      data = JSON.parse(options.body); sessions.set(data.id, data); status = 201;
-    } else if (url.pathname.startsWith('/sessions/')) {
-      data = sessions.get(url.pathname.slice('/sessions/'.length));
-      if (!data) { status = 404; data = { error: 'session not found' }; }
-    } else assert.fail('Unexpected memory operation');
-    return new Response(JSON.stringify(data), { status });
-  });
-  let endpoints = 0;
-  if (mode === 'managed') t.mock.method(ManagedMemory.prototype, 'endpoint', async () => { endpoints++; return 'http://127.0.0.1:43210'; });
-  const settings = defaultSettings();
-  settings.engram = mode === 'managed' ? { mode: 'local', binary: process.execPath, dataDirectory: join(root, 'memory') }
-    : { endpoint: 'http://127.0.0.1:43210', ...(mode === 'legacy' ? { project: 'resolved-a' } : {}) };
-  const original = structuredClone(settings);
-  for (const [directory, sessionID] of [[a, 'actual-parent-a'], [b, 'actual-parent-b']]) {
-    const gate = new NativeIntake({ status: () => ({ state: 'not-started' }) }, { intake: async () => 'actual-user' }, settings);
-    const result = await gate.start({ requirements: 'Actual request' }, { ...runtime, directory, worktree: directory, sessionID }, 'actual-message');
-    if (mode === 'legacy') assert.match(result.notice, /deprecated.*ignored/);
-    await gate.close();
-  }
-  assert.deepEqual([...sessions.values()], [
-    { id: 'actual-parent-a', project: 'resolved-a', directory: a },
-    { id: 'actual-parent-b', project: 'resolved-b', directory: b },
-  ]);
-  assert.equal(endpoints, mode === 'managed' ? 2 : 0);
-  assert.deepEqual(settings, original);
-  assert.equal(calls.filter(path => path === '/sessions').length, 2);
 });
 
 test('isolated installed Engram managed smoke: bootstrap, reuse, readback, owned shutdown', { skip: !process.env.MDD_SMOKE_ENGRAM }, async t => {

@@ -57,63 +57,6 @@ for (const kind of ['approval', 'target']) {
 }
 
 for (const backend of ['none', 'local']) for (const legacy of [false, true]) {
-  test(`${backend}: transfer preserves the frozen ${legacy ? 'legacy' : 'structured'} held plan and target prompts`, async t => {
-    const root = mkdtempSync(join(tmpdir(), 'mdd-transfer-verification-'));
-    t.after(() => rmSync(root, { recursive: true, force: true }));
-    const store = new CheckpointStore(root); const progress = new ProgressGuard(root);
-    const source = { sessionID: 'source-contract', agent: 'mdd-orchestrator', directory: root, worktree: root };
-    const target = { ...source, sessionID: 'target-contract' };
-    const inspect = { parent: async () => {}, result: async (_r, _c, _p, output) => output, stopped: async () => true };
-    const first = new PhaseRunner(inspect, { checkpoint: store, progress });
-    await first.start({ preflight: { answers: { ...answers, artifactStore: backend } }, requirements: 'Transfer the exact held contract.' }, source,
-      { requirementsConfirmed: true, userMessageID: 'source-message' });
-    if (legacy) {
-      const historical = store.read(source.sessionID).checkpoint;
-      delete historical.data.verificationVersion;
-      historical.dataDigest = sealResumeData(historical.data, historical.runID, historical.parent, historical.events, historical.stable);
-      store.clear(source.sessionID); store.write(source.sessionID, historical);
-    }
-    const runner = new PhaseRunner(inspect, { checkpoint: store, progress });
-    assert.deepEqual(await runner.restore(source), { restored: true });
-    const ready = await throughRiskStop(runner, source.sessionID);
-    const trace = legacy ? traceFixture() : structuredTraceFixture();
-    const call = { sessionID: source.sessionID, callID: 'plan-contract' };
-    await runner.after(call, await runner.before(call, ready.task), reportDocument({ evidenceSummary: 'Plan held.', artifact: 'Boundary plan.', ...trace }));
-    if (backend === 'local') runner.recordConsent(source.sessionID, {
-      questionReceipts: [{ kind: 'preflight', callID: 'source-preflight', answers: [['Original accepted answer']] }],
-      usedMessages: ['source-message'], proposed: [],
-    });
-    const saved = store.read(source.sessionID).checkpoint;
-    const proof = { sessionID: target.sessionID, userMessageID: 'target-message', latest: true, authored: true,
-      userText: `Continue sourceSessionID=${source.sessionID} runID=${saved.runID}` };
-    const projected = projectTargetTransfer(saved, progress.read(source.sessionID), target, proof);
-    assert.equal(Workflow.replay(projected.checkpoint.request, projected.checkpoint.events).snapshot().answers.artifactStore, backend);
-    if (backend === 'local') {
-      assert.deepEqual(projected.checkpoint.data.task, saved.data.task);
-      assert.equal(projected.checkpoint.data.task.originSessionID, source.sessionID);
-      assert.deepEqual(projected.checkpoint.data.taskArtifacts, saved.data.taskArtifacts);
-    }
-    assert.equal(projected.checkpoint.data.verificationVersion, legacy ? undefined : 1);
-    assert.deepEqual(projected.checkpoint.data.planned, trace.deliverables);
-    store.write(target.sessionID, projected.checkpoint);
-    progress.write(target.sessionID, projected.progress);
-    const restored = new PhaseRunner(inspect, { checkpoint: store, progress });
-    assert.deepEqual(await restored.restore(target), { restored: true });
-    if (backend === 'local') {
-      const directory = join(root, '.mdd/tasks', saved.data.task.name);
-      const manifest = JSON.parse(readFileSync(join(directory, 'manifest.json'), 'utf8'));
-      const snapshots = manifest.records.filter(record => record.kind === 'snapshot')
-        .map(record => JSON.parse(readFileSync(join(directory, `snapshot-${record.id}.json`), 'utf8')));
-      assert.ok(snapshots.some(snapshot => snapshot.dossier.parent.sessionID === source.sessionID &&
-        snapshot.dossier.questionReceipts[0]?.callID === 'source-preflight'));
-      assert.equal(snapshots.at(-1).dossier.parent.sessionID, target.sessionID);
-      assert.equal(snapshots.at(-1).dossier.userMessageID, proof.userMessageID);
-      assert.equal(snapshots.at(-1).task.originSessionID, source.sessionID);
-    }
-    const args = await restored.before({ sessionID: target.sessionID, callID: 'target-apply' }, restored.status(target.sessionID).task);
-    assert.equal(/verificationVersion=1/.test(args.prompt), !legacy);
-    assert.deepEqual(JSON.parse(args.prompt.match(/^Applicable deliverables: (.*)$/m)[1]), trace.deliverables);
-  });
 }
 
 /** A validated verdict and its diagnostic artifact reference, shaped as checkpoint.ts expects. */

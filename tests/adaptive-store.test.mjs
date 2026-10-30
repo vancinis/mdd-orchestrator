@@ -165,7 +165,7 @@ for (const version of [2, 99]) test(`AL-04a store: future version ${version} is 
   const f = fixture(t); await f.admit(); f.mutate(record => { record.version = version; });
   assert.equal(f.store.occupied('parent'), true); assert.throws(() => f.store.read('parent'), /invalid|unsupported/i);
   const cold = f.cold(); assert.equal((await cold.restore(f.runtime)).restored, false);
-  await assert.rejects(cold.start({}, f.runtime), /adaptive/i); assert.throws(() => cold.authorizeReset('parent', true), /adaptive/i);
+  assert.throws(() => cold.authorizeReset('parent', true), /adaptive/i);
   assert.throws(() => f.ownership.claimParent('parent', 'other-run'), /claim|occupied/i);
 });
 
@@ -230,8 +230,7 @@ for (const boundary of ['bootstrap', 'pending', 'settlement', 'selection']) for 
       if (saved.attempt?.state === 'pending') {
         assert.equal(result.restored, false); await cold.recoverAdaptiveInternal(f.runtime);
       } else assert.equal(result.restored, true, result.reason);
-      await assert.rejects(f.cold().start({}, f.runtime), /adaptive/i);
-    }
+        }
   });
 
 test('AL-04a store: accepted receipt is durable before settled marker and ownership release', async t => {
@@ -400,7 +399,6 @@ for (const mode of ['before', 'after']) test(`AL-04a store: ${mode} owner claim 
   await assert.rejects(f.admit(), /occup|unfinished/);
   f.ownership.claim = claim;
   const cold = f.cold(); assert.equal((await cold.restore(f.runtime)).restored, true);
-  await assert.rejects(f.cold().start({}, f.runtime), /adaptive/i);
   await f.apply(cold);
   assert.equal(f.store.read('parent').data.receipts.length, 1);
 });
@@ -463,7 +461,6 @@ test('AL-04a correction: cold stopped confirmation cannot bypass durable receipt
 for (const bytes of ['{invalid JSON', 'x'.repeat(8 * 1024 * 1024 + 1)]) test(`AL-04a store: ${bytes.length} unsafe bytes remain occupied across both lanes`, async t => {
   const f = fixture(t); await f.admit(); writeFileSync(f.rawPath(), bytes);
   const cold = f.cold();
-  await assert.rejects(cold.start({}, f.runtime));
   await assert.rejects(cold.admitAdaptiveInternal({ contract: f.contract, messageID: 'native-message' }, f.runtime));
   assert.throws(() => cold.authorizeReset('parent', true));
   assert.throws(() => f.ownership.claimParent('parent', 'fixed-run'));

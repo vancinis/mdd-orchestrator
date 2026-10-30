@@ -12,12 +12,12 @@ import type { PackagedSkillName } from './phase-assets.js';
 import { FREE_ACTOR_LINE } from './guards.js';
 import type { LessonInput } from './lessons.js';
 import type { RunLedgerInput, StopCause } from './run-ledger.js';
-import { changed, deliverables, delivered, executed, VERIFICATION_VERSION, verificationVersion, verifyReport, type VerificationVersion } from './phase-evidence.js';
+import { changed, deliverables, delivered, executed, verificationVersion, verifyReport, type VerificationVersion } from './phase-evidence.js';
 import type { ChangedFile, Check, Deliverable, Delivered } from './phase-evidence.js';
-import { emptyEvidence, invalidateEvidence, renderReport, renderClosure, phaseLabel, evidenceCoverage } from './reporting.js';
+import { invalidateEvidence, renderReport, renderClosure, phaseLabel, evidenceCoverage } from './reporting.js';
 import type { Evidence, EvidenceFlag, PhaseReport } from './reporting.js';
 import type { FailureClass, TelemetryEvent, TelemetryResult, TelemetryUsage } from './telemetry.js';
-import { acceptance, assertNoTraceSection, closure, decisions, deepestCause, failingRequirements, OPEN_CLOSURE_PASS, phaseFields, PHASE_RESULT_FIELDS, tracedLinks,
+import { acceptance, assertNoTraceSection, closure, decisions, deepestCause, failingRequirements, OPEN_CLOSURE_PASS, phaseFields, tracedLinks,
   UNMATCHED_PASS, unmet, UNMET_PASS, linkDecisions, mergeRecheck, pendingExternal, validatePlan, traceArtifact, verificationFindings } from './acceptance.js';
 import type { Closure, Unmet } from './acceptance.js';
 import { MALFORMED_RESTATEMENTS, MalformedReport, narrativeOf, parsePhaseReport, parseRiskReport, reportFormatLines } from './phase-report.js';
@@ -2546,93 +2546,6 @@ export class PhaseRunner {
     return { document: input.document, ...retainedArtifactChunk(artifact.content, artifact.ref.digest, input.offset, input.limit) };
   }
 
-  async start(value: unknown, runtime: Runtime, trusted?: { requirementsConfirmed: true; replace?: true; userMessageID?: string; authorityCallID?: string }): Promise<unknown> {
-    if (this.options.adaptiveStore?.occupied(runtime.sessionID)) throw new Error('Adaptive data occupies this parent; fixed startup is refused.');
-    if (this.#adaptive.has(runtime.sessionID) || this.#adaptiveAdmissions.has(runtime.sessionID)) throw new Error('An internal adaptive run occupies this parent; public startup is unchanged.');
-    if (runtime.agent !== 'mdd-orchestrator') throw new ValidationError('Only mdd-orchestrator may start MDD.');
-    const previous = this.#runs.get(runtime.sessionID);
-    this.owner(runtime.sessionID, trusted?.authorityCallID);
-    if (previous && !trusted?.replace) throw new ValidationError('This parent already has an MDD run; use mdd_status.');
-    if (previous) this.assertChangeable(runtime.sessionID);
-    else this.assertFreshStart(runtime.sessionID, trusted?.userMessageID);
-    if ((this.options.progress || this.options.checkpoint) && !trusted?.userMessageID) throw new Error('A native user message identity is required for startup protection.');
-    if (this.readOnlyWorkers(runtime.sessionID)) throw new Error('An unresolved exploration must not be replayed or replaced.');
-    const request = objectWithKeys(value, 'start', ['preflight', 'requirements', 'engramEndpoint', 'project', 'context', 'exploration']);
-    const items = request.exploration === undefined ? undefined : explorationItems(objectWithKeys(request.exploration, 'exploration', ['workItems']).workItems);
-    const workflow = new Workflow(request.preflight);
-    const first = workflow.nextAction();
-    if (first.kind !== 'execute') throw new ValidationError('No initial phase is ready.');
-    const requirements = nonemptyText(request.requirements, 'requirements');
-    if (workflow.snapshot().answers.artifactStore === 'local' && !trusted?.userMessageID)
-      throw new Error('A native user message identity is required for local task provenance.');
-    // Context supplied at startup rides with the very first phase; more can arrive later through
-    // mdd_context. It never substitutes for requirements, which stay the native user's own text.
-    const context = request.context === undefined ? [] : [runContext(request.context)];
-    let memory: EngramHttp | undefined;
-    if (request.engramEndpoint !== undefined || request.project !== undefined) {
-      const project = boundedText(request.project, 'project', 128);
-      if (!/^[a-z0-9][a-z0-9._-]*$/.test(project)) throw new ValidationError('Use an explicit canonical Engram project key.');
-      memory = new EngramHttp(boundedText(request.engramEndpoint, 'engramEndpoint', 100), { id: runtime.sessionID, project, directory: runtime.directory });
-    }
-    const id = randomUUID();
-    const task = workflow.snapshot().answers.artifactStore === 'local' ? TaskStore.create({ runID: id, directory: runtime.directory,
-      worktree: runtime.worktree, sessionID: runtime.sessionID, userMessageID: trusted!.userMessageID!, requirements,
-      ...(memory ? { project: memory.project } : {}) }) : undefined;
-    // Call IDs consumed by a run this process never saw still have to be refused, so a restart
-    // inherits that guard. It can only reject a replay; it never authorizes anything.
-    const inherited = previous ? undefined : [...(this.#inheritedCalls.get(runtime.sessionID) ?? []), ...(this.#prior(runtime.sessionID)?.calls ?? [])];
-    this.#inheritedCalls.delete(runtime.sessionID);
-    const run: Run = {
-      workerPolicy: this.#captureWorkers(),
-      ...(items ? { explorationItems: items } : {}),
-      id, runtime: { ...runtime }, workflow, phase: first.phase, requirements,
-      // The persisted request names the route this run started on, so replay after a restart
-      // follows it even when a later routing policy would choose another one.
-      ...(this.options.checkpoint || task ? { checkpointRequest: Workflow.recordedRequest(request.preflight, workflow), checkpointSequence: -1 } : {}),
-      // A confirmed replacement supersedes the previous run's checkpoint in this same parent.
-      ...(previous ? { replacesRunID: previous.id } : {}),
-      memory, artifacts: new ArtifactStore(runtime.directory, workflow.snapshot().answers.artifactStore, memory, task),
-      ...(task ? { task, riskHistory: [] } : {}),
-      args: { description: '', subagent_type: first.phase, prompt: '' }, state: 'starting',
-      history: [], calls: new Set(previous?.calls ?? inherited), planned: [], evidence: { ...emptyEvidence(), requirements: trusted?.requirementsConfirmed ? 'confirmed' : 'unearned' },
-      uncertain: false, userMessageID: trusted?.userMessageID ?? '', concerns: [], contexts: [], context, malformed: 0,
-      decisions: [], executedChecks: [], verificationVersion: VERIFICATION_VERSION, changedFiles: 0, changedList: [], attempts: 0, spent: 0, mode: 'delegate', brief: '',
-      report: { phase: first.phase, summary: `Preparando ${phaseLabel(first.phase).toLowerCase()}.`, how: [], status: 'in-progress', evidence: emptyEvidence() },
-    };
-    this.#runs.set(runtime.sessionID, run);
-    try {
-      await this.inspect.parent(run.runtime);
-      await run.memory?.checkBinding();
-      // The run being replaced still holds the durable owner until claimParent moves the parent.
-      if (previous) this.#ownerOf(runtime.sessionID, previous, trusted?.authorityCallID);
-      if (run.state !== 'starting') throw new Error('Run was blocked during initialization.');
-      this.options.ownership?.claimParent(runtime.sessionID, id, previous?.id);
-      this.options.ownership?.claim({ runID: id, sessionID: runtime.sessionID, directory: runtime.directory, worktree: runtime.worktree });
-      this.#prepare(run);
-      this.#checkpoint(run);
-      if (previous) this.#previous.set(runtime.sessionID, [...(this.#previous.get(runtime.sessionID) ?? []), previous]);
-      if (trusted?.requirementsConfirmed) this.#event(run, 'preflight', 'passed');
-      // A new accepted run supersedes whatever was preserved here, so the record is replaced now
-      // rather than leaving a dead run reported as recoverable alongside a live one.
-      this.#preserve(run);
-      return this.status(runtime.sessionID);
-    } catch (error) {
-      if (previous) { this.#runs.set(runtime.sessionID, previous); throw error; }
-      return this.#stop(run, error);
-    }
-  }
-
-  /**
-   * A run that cannot start, or whose route can no longer advance, stops without claiming
-   * progress. Stopping is never sealed: uncertainty is cleared and mdd_reset stays reachable.
-   */
-  #stop(run: Run, error: unknown): never {
-    if (error instanceof ArtifactWriteError) run.artifactAttempts = error.attempts;
-    const detail = error instanceof Error ? error.message : 'Unknown infrastructure outcome.';
-    this.block(run.runtime.sessionID, detail);
-    throw new Error(`MDD stopped this run: ${detail} Nothing is locked: read mdd_status, then use mdd_reset to retry the phase or start over.`);
-  }
-
   /**
    * Read-only attempts may retry. A completed malformed report may be restated without work;
    * every other uncertain Apply outcome retains pending protection and requires explicit recovery.
@@ -3014,85 +2927,6 @@ export class PhaseRunner {
       }
       return this.#degrade(run, error, 'result-rejected', reported);
     }
-  }
-
-  /**
-   * The coordinator carried the phase out itself. Delegation is the default route, but it must
-   * never be the only one: when a subagent cannot finish the work, the phase still has to close.
-   */
-  async submit(value: unknown, runtime: Runtime): Promise<unknown> {
-    if (runtime.agent !== 'mdd-orchestrator') throw new ValidationError('Only mdd-orchestrator may report a phase it carried out.');
-    const run = this.#runs.get(runtime.sessionID);
-    if (!run) {
-      const solo = this.#solo.get(runtime.sessionID);
-      if (!solo?.rejected || solo.state !== 'ready') throw new ValidationError('No rejected investigation report is waiting to be restated. Read mdd_status.');
-      const input = objectWithKeys(value, 'phase submission', ['result']);
-      const text = nonemptyText(input.result, 'investigation report');
-      solo.state = 'persisting-result';
-      try { this.#soloRecord(solo, text, { sessionID: runtime.sessionID, callID: solo.callID! }); }
-      catch (error) { this.#soloFail(solo, error, text); }
-      return this.status(runtime.sessionID);
-    }
-    if (run.state !== 'ready') throw new ValidationError(`This run is not waiting for a phase result right now (${run.state}). Read mdd_status.`);
-    if (!run.rejected) {
-      if (run.mode !== 'native') this.#native(run);
-      return this.status(runtime.sessionID);
-    }
-    const input = objectWithKeys(value, 'phase submission', ['result']);
-    const text = typeof input.result === 'string' ? input.result : JSON.stringify(input.result);
-    run.mode = 'inline';
-    run.state = 'persisting-result';
-    run.settledCheckpoint = false;
-    run.started = run.readyAt ?? this.#now();
-    run.attemptID = randomUUID();
-    try {
-      this.#startAttempt(run);
-      run.attempt = run.attempts + 1;
-      this.#event(run, 'phase-start');
-      // The inline route dispatches no native task, so no hook would otherwise record that this
-      // phase began. Without this marker an interruption here leaves nothing to recover from.
-      this.#mark(run, 'pending');
-      await this.#record(run, text);
-      return this.status(runtime.sessionID);
-    } catch (error) { return this.#degrade(run, error, 'result-rejected', text); }
-  }
-
-  /**
-   * The coordinator hands over material it already gathered for this objective: an issue body, a
-   * thread, an earlier decision. MDD, not the model, composes it into the phase prompt, so the
-   * ready `task` stays byte-for-byte what `before` expects and the guard against injected phase
-   * instructions is untouched. Entries accumulate, because useful context also appears after the
-   * run starts; the combined size is capped rather than replaced, so nothing is lost silently.
-   */
-  contribute(value: unknown, runtime: Runtime): unknown {
-    if (runtime.agent !== 'mdd-orchestrator') throw new ValidationError('Only mdd-orchestrator may contribute run context.');
-    const run = this.#runs.get(runtime.sessionID);
-    if (!run) throw new ValidationError('No MDD run in this conversation can carry context yet. Read mdd_status; supply startup context through mdd_start instead.');
-    if (run.workerState?.batch || this.#workerOperations.has(runtime.sessionID)) throw new ValidationError('Worker batch persistence and authority must settle before changing context.');
-    if (!['ready', 'await-approval', 'blocked', 'complete'].includes(run.state)) {
-      throw new ValidationError('A native task is in flight for this run, so its prompt cannot change now. Wait for its result, then contribute again; nothing was recorded.');
-    }
-    const entry = runContext(value);
-    run.context.push(entry);
-    // Truncating here would push an oversized prompt into `task` and break dispatch exactly where
-    // the byte budget exists to protect it, so the composed prompt is trial-built for whatever
-    // phase is current — not only a ready one — and an over-budget contribution fails explicitly
-    // instead of being accepted now and discovered unusable only once the phase is dispatched.
-    if (run.state !== 'complete') {
-      try {
-        const prompts = this.#phasePrompts(run, run.phase);
-        // A ready phase must actually carry the new material, so its prompt is recomposed here.
-        // The coordinator re-reads mdd_status and dispatches that updated task verbatim, as always.
-        if (run.state === 'ready') {
-          run.args = prompts.args;
-          run.brief = prompts.brief;
-          // The prompt changed, so the handle that stood for the old one must not dispatch the new.
-          this.#arm(run);
-        }
-      } catch (error) { run.context.pop(); throw error; }
-    }
-    this.#checkpoint(run);
-    return this.status(runtime.sessionID);
   }
 
   /**
@@ -3508,63 +3342,6 @@ export class PhaseRunner {
     catch { /* The caller reports its own failure to the actor; the run is already released. */ }
   }
 
-  approveNative(sessionID: string, phase: Phase): void {
-    const run = this.#runs.get(sessionID);
-    if (!run || run.state !== 'await-approval') throw new Error('No recorded phase is awaiting native approval.');
-    run.workflow.approve(phase);
-    try { this.#prepare(run); this.#checkpoint(run); this.#event(run, 'approval', 'passed'); this.#preserve(run); }
-    catch (error) { this.#stop(run, error); }
-  }
-
-  /**
-   * Forces the other tail while the suggested route's first phase still only awaits its ordinary
-   * approval, instead of approving it. `Workflow.overrideRoute()` both authorizes and selects the
-   * new tail's first phase in the same step, so there is no following `approveNative()` call: by
-   * the time it returns, the workflow is no longer in `approve`, it is already `execute`.
-   */
-  forceRoute(sessionID: string): void {
-    const run = this.#runs.get(sessionID);
-    if (!run || run.state !== 'await-approval') throw new Error('No recorded phase is awaiting native approval.');
-    run.workflow.overrideRoute();
-    try { this.#prepare(run); this.#checkpoint(run); this.#event(run, 'approval', 'passed'); this.#preserve(run); }
-    catch (error) { this.#stop(run, error); }
-  }
-
-  /**
-   * Retries a settled `blocked-risk` assessment. `Workflow.retry()` releases the risk stop back
-   * to `execute-risk` without discarding or inventing a verdict, and the new `mdd-risk` dispatch
-   * is prepared and checkpointed before it is exposed, the same discipline `forceRoute()` applies
-   * around an ordinary approval. Only a settled block (never an in-flight assessment or an
-   * unrelated blocked run) is eligible.
-   */
-  retryRisk(sessionID: string): void {
-    const run = this.#runs.get(sessionID);
-    if (!run || run.state !== 'blocked' || run.workflow.nextAction().kind !== 'blocked-risk') {
-      throw new Error('No settled blocked-risk assessment is available to retry.');
-    }
-    run.workflow.retry();
-    delete run.reason;
-    try { this.#prepare(run); this.#checkpoint(run); this.#preserve(run); }
-    catch (error) { this.#stop(run, error); }
-  }
-
-  /**
-   * Chooses a manual low or high tail after a settled `blocked-risk` assessment.
-   * `Workflow.chooseManualRoute()` authorizes the chosen tail's first phase in the same step,
-   * recording `routeOrigin: 'manual'` and never a fabricated `RiskVerdict`; that phase is prepared
-   * and checkpointed before it is exposed, again following `forceRoute()`'s persistence order.
-   */
-  chooseManualRoute(sessionID: string, route: 'low' | 'high'): void {
-    const run = this.#runs.get(sessionID);
-    if (!run || run.state !== 'blocked' || run.workflow.nextAction().kind !== 'blocked-risk') {
-      throw new Error('No settled blocked-risk assessment is available for a manual route choice.');
-    }
-    run.workflow.chooseManualRoute(route);
-    delete run.reason;
-    try { this.#prepare(run); this.#checkpoint(run); this.#event(run, 'approval', 'passed'); this.#preserve(run); }
-    catch (error) { this.#stop(run, error); }
-  }
-
   block(sessionID: string, reason: string): void {
     const workerRun = this.#runs.get(sessionID);
     if (workerRun?.workerState?.batch) { this.#workerBlocked(workerRun, reason); return; }
@@ -3667,11 +3444,6 @@ export class PhaseRunner {
         reason: `${last.phase} cannot satisfy held requirement(s) ${unmetIDs.join(', ')} within its scope: revise ${targets[0]} explicitly, or retry ${last.phase} with material that widens its scope.` };
     }
     return undefined;
-  }
-
-  failedVerification(sessionID: string): string | undefined {
-    const run = this.#runs.get(sessionID);
-    return run && this.#failedVerify(run) ? run.id : undefined;
   }
 
   reset(sessionID: string, scope: 'phase' | 'run' | 'rework' | 'continue', consent?: {
@@ -3934,8 +3706,6 @@ export class PhaseRunner {
       ...(findings.length ? { findings } : {}) });
   }
 
-  approvalStopped(sessionID: string): void { const run = this.#runs.get(sessionID); if (run) this.#event(run, 'approval', 'cancelled'); }
-
   prFacts(sessionID: string, runID?: string): PRFacts {
     const facts = this.recordedPRFacts(sessionID, runID);
     if (!facts) throw new Error('No recorded MDD run is available for this parent. A draft cannot claim implementation evidence.');
@@ -4054,28 +3824,6 @@ export class PhaseRunner {
     const active = this.#operation.getStore();
     if (owner && owner.state !== 'idle' && !(owner.state === 'reserved' && active?.sessionID === sessionID && owner.callID === active.callID)) return undefined;
     return { runID: claim.runID, finished };
-  }
-
-  /**
-   * Closes a finished (or data-only) run before a new native objective starts in its parent, the
-   * way an in-process run is replaced. Its evidence is set aside, never deleted: the dossier moves
-   * to the discarded slot and the run ledger already holds its final row. Call only after the new
-   * objective's native user message is proven.
-   */
-  closeForFreshStart(sessionID: string): void {
-    const closable = this.#closableClaim(sessionID);
-    if (!closable) return;
-    if (closable.moved) { this.retireMovedAway(sessionID); return; }
-    if (this.#continuedRetirement(sessionID)) {
-      this.options.checkpoint?.clear(sessionID);
-      this.options.progress?.clear(sessionID);
-      return;
-    }
-    const calls = this.#prior(sessionID)?.calls;
-    this.options.ownership!.retireParent(sessionID, closable.runID);
-    if (calls?.length) this.#inheritedCalls.set(sessionID, [...calls]);
-    this.options.checkpoint?.clear(sessionID);
-    try { this.options.dossier?.discard(sessionID, this.#now()); } catch { /* The ledger row remains the evidence. */ }
   }
 
   assertFreshStart(sessionID: string, userMessageID?: string): void {
@@ -4484,41 +4232,9 @@ export class PhaseRunner {
     };
   }
 
-  /**
-   * The intake owns consent, so it hands over the parts worth preserving. Receipts travel as
-   * history only. The reuse guards travel because they can only ever refuse a replay.
-   */
-  recordConsent(sessionID: string, consent: Consent): void {
-    this.#consent.set(sessionID, { questionReceipts: structuredClone(consent.questionReceipts),
-      usedMessages: [...consent.usedMessages], proposed: [...consent.proposed] });
-    // A recorded receipt is itself a committed fact, so it is preserved now rather than waiting
-    // for a phase transition that an interrupted conversation may never reach.
-    const run = this.#runs.get(sessionID);
-    if (run) { this.#checkpoint(run); this.#preserve(run); }
-  }
-
   /** Decisions the latest recorded phase left for the user, until the coordinator asks them. */
-  openQuestions(sessionID: string): { phase: Phase; questions: OpenQuestion[] } | undefined {
-    const run = this.#runs.get(sessionID);
-    return run?.openQuestions ? structuredClone(run.openQuestions) : undefined;
-  }
-
-  /**
-   * The coordinator has put the pending phase questions to the user (or found none still needed),
-   * so they stop being pending. Recorded durably: a restart must not ask them a second time.
-   */
-  takeOpenQuestions(sessionID: string): void {
-    const run = this.#runs.get(sessionID);
-    if (!run?.openQuestions) return;
-    delete run.openQuestions;
-    this.#checkpoint(run);
-  }
 
   /** Reuse guards from a run this process never saw. Restoring them can only reject, never allow. */
-  priorGuards(sessionID: string): { usedMessages: string[]; proposed: string[] } | undefined {
-    const prior = this.#prior(sessionID);
-    return prior ? { usedMessages: [...prior.usedMessages], proposed: [...prior.proposed] } : undefined;
-  }
 
   #prior(sessionID: string): RunDossier | undefined {
     try { return this.options.dossier?.read(sessionID); } catch { return undefined; }
@@ -4571,7 +4287,6 @@ export class PhaseRunner {
   }
 
   /** Whether this parent's live run still keeps a resumable checkpoint (true when there is no run). */
-  resumable(sessionID: string): boolean { return !this.#runs.get(sessionID)?.checkpointDegraded; }
 
   /**
    * Read-only boundaries may retry metadata writes and degrade to data-only. Apply boundaries

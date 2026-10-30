@@ -84,29 +84,3 @@ test('malformed or empty input is survivable, because a transform must never fai
   assert.equal(collapseDispatchPrompts(messages(dispatch('completed')), []), 0, 'no agents means nothing is MDD\'s to collapse');
 });
 
-for (const actor of ['explore', 'general']) test(`PK3 shared V1 collapse removes only bound ${actor} knowledge prompts`, async t => {
-  const root = mkdtempSync(join(tmpdir(), 'mdd-fallback-collapse-'));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-  const current = { ...runtime, directory: root, worktree: root };
-  const entry = knowledgeObservation({ summary: 'Parser knowledge', body: 'PRIVATE_SHARED_BODY parser validation',
-    sources: ['parser.ts'], applicability: { phases: ['mdd-explore', 'mdd-plan'], paths: ['parser.ts'] } },
-  'project', 'prior-session', 'user', 'assistant', 'a'.repeat(64), [{ path: 'parser.ts', digest: 'missing' }]);
-  const runner = new PhaseRunner({ parent: async () => {}, result: async (_r, _c, _p, output) => output },
-    { knowledge: async () => [{ id: 1, entry }] });
-  await runner.start({ requirements: 'Inspect parser validation', preflight: { answers } }, current);
-  if (actor === 'general') await throughRiskStop(runner, current.sessionID);
-  const ready = await runner.submit({ result: 'Select native execution' }, current);
-  assert.equal(ready.task.subagent_type, actor);
-  const call = { sessionID: current.sessionID, callID: 'bound-fallback' };
-  const args = await runner.before(call, ready.task);
-  assert.ok(args.prompt.includes('PRIVATE_SHARED_BODY'));
-  const bound = { ...dispatch('completed', actor, args.prompt), ...call, state: { status: 'completed', input: args } };
-  const unrelated = { ...bound, sessionID: 'unrelated' };
-  const pending = { ...bound, state: { ...bound.state, status: 'running' } };
-  const list = messages(bound, unrelated, pending);
-  assert.equal(collapseDispatchPrompts(list, AGENTS, (sessionID, callID, input) => runner.ownsNativePrompt(sessionID, callID, input)), 1);
-  assert.equal(list[0].parts[0].state.input.prompt.includes('PRIVATE_SHARED_BODY'), false);
-  assert.equal(list[0].parts[1].state.input.prompt, args.prompt);
-  assert.equal(list[0].parts[2].state.input.prompt, args.prompt);
-  assert.equal(bound.state.input.prompt, args.prompt, 'the original child arguments stay immutable');
-});

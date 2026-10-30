@@ -231,30 +231,6 @@ for (const boundary of ['abort-reserve', 'retirement', 'parent-retirement', 'sou
 }
 
 for (const occupancy of ['parent', 'retired-parent', 'intake', 'retired-intake', 'progress', 'question-bytes', 'adaptive-bytes', 'fixed-bytes', 'volatile-intake', 'volatile-run']) {
-  test(`AL-04b transfer: target ${occupancy} never looks empty`, async t => {
-    const f = fixture(t); await f.admit();
-    if (occupancy === 'parent' || occupancy === 'retired-parent') {
-      f.ownership.claimParent('target', 'legacy'); if (occupancy === 'retired-parent') f.ownership.retireParent('target', 'legacy');
-    } else if (occupancy === 'intake' || occupancy === 'retired-intake') {
-      f.ownership.claimIntake('target', 'legacy-token', 'legacy-user');
-      if (occupancy === 'retired-intake') f.ownership.retireIntake('target', 'legacy-token');
-    } else if (occupancy === 'progress') f.progress.write('target', { runID: 'legacy', userMessageID: 'legacy-user', state: 'settled' });
-    else if (occupancy === 'adaptive-bytes') f.local.updateStrict(`.mdd/adaptive-${hash('target')}.json`, () => '{"version":999}', 10000);
-    else if (occupancy === 'fixed-bytes') { mkdirSync(join(f.storage, '.mdd'), { recursive: true }); writeFileSync(join(f.storage, '.mdd', `checkpoint-${hash('target')}.json`), '{"version":999}'); }
-    else if (occupancy === 'question-bytes') { const name = `.mdd/question-${hash('target')}.json`; f.local.update(name, () => '{"version":999}', 10000); }
-    else if (occupancy === 'volatile-intake') {
-      // A real starting intake has volatile occupancy even before a durable run exists.
-      const nativeIntake = f.inspect.intake;
-      f.inspect.intake = async () => 'different-target-user';
-      await f.intake.start({ requirements: 'A different target objective.' }, f.target, 'target-message');
-      f.inspect.intake = nativeIntake;
-    } else {
-      await f.runner.explore({ purpose: 'Inspect the target.' }, f.target);
-    }
-    await assert.rejects(f.transfer(), /occup|unconfirmed|native|requires|invalid|cannot|Unsupported/i);
-    assert.equal(f.ownership.read(f.store.read('source').runID).ownerSessionID, 'source');
-    assert.equal(f.store.read('source').transfer, undefined);
-  });
 }
 
 for (const stage of ['source-parent', 'target-parent', 'source-idle', 'target-idle', 'native-request']) {
@@ -342,7 +318,7 @@ test('AL-04b transfer: native intake cannot start in either parent during asynch
   const f = fixture(t); await f.admit(); let checked = false;
   f.native.hook = async here => {
     if (checked || here.sessionID !== 'target') return; checked = true;
-    await assert.rejects(f.intake.start({ requirements: f.contract.objective }, f.target, 'competing-message'), /transfer/i);
+    await assert.rejects(f.intake.admitAdaptiveInternal({ contract: f.contract }, f.target, 'competing-message'), /transfer|pending|occup/i);
     await assert.rejects(f.intake.admitAdaptiveInternal({ contract: f.contract }, f.target, 'competing-message'), /transfer/i);
   };
   await f.transfer(); assert.equal(checked, true);

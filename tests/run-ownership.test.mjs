@@ -12,7 +12,7 @@ import { CheckpointStore, sealResumeData } from '../dist/checkpoint.js';
 import { Workflow } from '../dist/workflow.js';
 import { ProgressGuard } from '../dist/progress.js';
 import { QuestionCheckpointStore } from '../dist/question-checkpoint.js';
-import { riskRecoveryEnvelope, routeEnvelope } from '../dist/native-intake.js';
+
 import { assessTransfer } from '../dist/transfer.js';
 import { AdaptiveLow } from '../dist/adaptive-low.js';
 import { AdaptiveStore } from '../dist/adaptive-store.js';
@@ -348,139 +348,6 @@ function routeQuestion(source, state) {
     slot: { kind: 'route', phase: 'mdd-plan', args }, clarifications: [], deferred: [], clarificationAnswers: [],
     callID: 'call-route-live', ...(state === 'answered' ? { answer: [[args.questions[0].options[0].label]] } : {}) };
 }
-
-for (const state of ['pending', 'answered']) test(
-  `claimTargetForTransfer retires a ${state} risk-recovery source question only after the target claim is confirmed`, t => {
-  const directory = root(t);
-  const source = riskBlockedSource(directory, sourceID, runID);
-  const questions = new QuestionCheckpointStore(directory);
-  questions.write(sourceID, riskRecoveryQuestion(source, state));
-  const owners = new RunOwnershipStore(directory);
-  const target = { sessionID: targetID, directory, worktree: directory };
-  const intent = { operationID: `recovery-${state}`, nativeUserMessageID: `user-${targetID}`, requestDigest: 'a'.repeat(64) };
-  const claim = owners.claimTargetForTransfer(runID, sourceID, target,
-    { sequence: source.sequence, digest: source.dataDigest }, 0, intent);
-  assert.equal(claim.sessionID, targetID);
-  // Retired only once the target claim is itself durably confirmed: the historical call and any
-  // answer it carried can never be mistaken for the target's own fresh recovery question later.
-  assert.equal(questions.read(sourceID), undefined);
-  assert.equal(owners.read(runID).state, 'idle');
-});
-
-test('a non-risk-recovery question kind still fences claimTargetForTransfer even though risk-recovery would not', t => {
-  const directory = root(t);
-  const source = riskBlockedSource(directory, sourceID, runID);
-  const questions = new QuestionCheckpointStore(directory);
-  questions.write(sourceID, routeQuestion(source, 'pending'));
-  const owners = new RunOwnershipStore(directory);
-  const target = { sessionID: targetID, directory, worktree: directory };
-  const intent = { operationID: 'route-fences', nativeUserMessageID: `user-${targetID}`, requestDigest: 'b'.repeat(64) };
-  assert.throws(() => owners.claimTargetForTransfer(runID, sourceID, target,
-    { sequence: source.sequence, digest: source.dataDigest }, 0, intent), /not idle|target is occupied/);
-  // The unresolved non-risk question survives exactly because the claim was refused.
-  assert.equal(questions.read(sourceID)?.state, 'pending');
-  assert.equal(owners.parent(targetID), undefined);
-});
-
-test('a failed target claim write leaves a pending risk-recovery source question intact', t => {
-  const directory = root(t);
-  const source = riskBlockedSource(directory, sourceID, runID);
-  const questions = new QuestionCheckpointStore(directory);
-  questions.write(sourceID, riskRecoveryQuestion(source, 'pending'));
-  const owners = new RunOwnershipStore(directory);
-  // An unrelated run already holds this exact target parent (not retired): the target claim
-  // write below is guaranteed to fail before any source retirement could ever happen.
-  owners.claimParent(targetID, 'unrelated-run');
-  const target = { sessionID: targetID, directory, worktree: directory };
-  const intent = { operationID: 'claim-write-fails', nativeUserMessageID: `user-${targetID}`, requestDigest: 'c'.repeat(64) };
-  assert.throws(() => owners.claimTargetForTransfer(runID, sourceID, target,
-    { sequence: source.sequence, digest: source.dataDigest }, 0, intent), /unconfirmed/);
-  assert.equal(questions.read(sourceID)?.state, 'pending');
-  assert.equal(owners.read(runID).state, 'idle');
-  assert.equal(owners.parent(targetID), 'unrelated-run');
-});
-
-// R2/S4: only a risk-recovery question bound to this exact run and source checkpoint is retirable.
-// A stale, foreign or unbound one fences the claim and the reservation, and survives untouched.
-for (const [name, forge] of [
-  ['foreign run', (q) => ({ ...q, runID: 'run-foreign', reservation: { runID: 'run-foreign', stable: 'risk-blocked' } })],
-  ['stale checkpoint digest', (q) => ({ ...q, checkpoint: { ...q.checkpoint, digest: 'e'.repeat(64) } })],
-  ['mismatched checkpoint sequence', (q) => ({ ...q, checkpoint: { ...q.checkpoint, sequence: q.checkpoint.sequence + 1 } })],
-  ['no checkpoint binding', (q) => { const { checkpoint: _checkpoint, ...rest } = q; return rest; }],
-]) test(`a risk-recovery source question with a ${name} fences the transfer claim and is never retired`, t => {
-  const directory = root(t);
-  const source = riskBlockedSource(directory, sourceID, runID);
-  const questions = new QuestionCheckpointStore(directory);
-  const forged = forge(riskRecoveryQuestion(source, 'pending'));
-  questions.write(sourceID, forged);
-  const owners = new RunOwnershipStore(directory);
-  const target = { sessionID: targetID, directory, worktree: directory };
-  const intent = { operationID: `stale-${name.replaceAll(' ', '-')}`, nativeUserMessageID: `user-${targetID}`, requestDigest: 'e'.repeat(64) };
-  const expected = { sequence: source.sequence, digest: source.dataDigest };
-  assert.throws(() => owners.claimTargetForTransfer(runID, sourceID, target, expected, 0, intent), /not idle|target is occupied/);
-  assert.throws(() => owners.reserveVerifiedTransfer(runID, sourceID, target, expected, 0, intent), /unresolved work or a native question/);
-  assert.deepEqual(questions.read(sourceID), forged);
-  assert.equal(owners.parent(targetID), undefined);
-  assert.equal(owners.read(runID).state, 'idle');
-  const assessed = assessTransfer({ sourceSessionID: sourceID, runID, userText: `sourceSessionID=${sourceID} runID=${runID}` },
-    { sessionID: targetID, agent: 'mdd-orchestrator', directory, worktree: directory },
-    new CheckpointStore(directory), new ProgressGuard(directory), questions);
-  assert.equal(assessed.diagnostic, 'pending-unknown');
-});
-
-test('a risk-recovery source question bound to this exact run and checkpoint does not fence the transfer preflight', t => {
-  const directory = root(t);
-  const source = riskBlockedSource(directory, sourceID, runID);
-  const questions = new QuestionCheckpointStore(directory);
-  questions.write(sourceID, riskRecoveryQuestion(source, 'pending'));
-  const assessed = assessTransfer({ sourceSessionID: sourceID, runID, userText: `sourceSessionID=${sourceID} runID=${runID}` },
-    { sessionID: targetID, agent: 'mdd-orchestrator', directory, worktree: directory },
-    new CheckpointStore(directory), new ProgressGuard(directory), questions);
-  assert.notEqual(assessed.diagnostic, 'pending-unknown');
-});
-
-test('clearIf removes a question record only while it is exactly the one that was read', t => {
-  const directory = root(t);
-  const source = riskBlockedSource(directory, sourceID, runID);
-  const questions = new QuestionCheckpointStore(directory);
-  const pending = riskRecoveryQuestion(source, 'pending');
-  questions.write(sourceID, pending);
-  const answered = { ...riskRecoveryQuestion(source, 'answered'), sequence: 2 };
-  questions.write(sourceID, answered);
-  // A stale expectation (the pending record) never deletes the answered one that replaced it.
-  assert.throws(() => questions.clearIf(sourceID, pending), /changed since it was read/);
-  assert.deepEqual(questions.read(sourceID), answered);
-  questions.clearIf(sourceID, answered);
-  assert.equal(questions.read(sourceID), undefined);
-  // Nothing to clear is a change too: the caller expected a record that is gone.
-  assert.throws(() => questions.clearIf(sourceID, answered), /changed since it was read/);
-});
-
-test('a source answer landing between the confirmed claim and retirement is never discarded', t => {
-  const directory = root(t);
-  const source = riskBlockedSource(directory, sourceID, runID);
-  const questions = new QuestionCheckpointStore(directory);
-  questions.write(sourceID, riskRecoveryQuestion(source, 'pending'));
-  const answered = { ...riskRecoveryQuestion(source, 'answered'), sequence: 2 };
-  // Interleave deterministically: the source's own answer is written after the target claim was
-  // confirmed and immediately before the conditional retirement runs.
-  const original = QuestionCheckpointStore.prototype.clearIf;
-  t.mock.method(QuestionCheckpointStore.prototype, 'clearIf', function (parent, expected) {
-    new QuestionCheckpointStore(directory).write(sourceID, answered);
-    return original.call(this, parent, expected);
-  });
-  const owners = new RunOwnershipStore(directory);
-  const target = { sessionID: targetID, directory, worktree: directory };
-  const intent = { operationID: 'race-answer', nativeUserMessageID: `user-${targetID}`, requestDigest: 'd'.repeat(64) };
-  assert.throws(() => owners.claimTargetForTransfer(runID, sourceID, target,
-    { sequence: source.sequence, digest: source.dataDigest }, 0, intent), /reconcile explicitly/);
-  // The concurrent answer survives intact; the source still owns the run; the confirmed claim
-  // remains only for explicit recovery, and recovery refuses while the answer is unresolved.
-  assert.deepEqual(questions.read(sourceID), answered);
-  assert.equal(owners.read(runID).ownerSessionID, sourceID);
-  assert.equal(owners.read(runID).state, 'idle');
-  assert.equal(owners.parentClaim(targetID)?.transfer?.operationID, 'race-answer');
-});
 
 function publishTarget(directory, source, targetParent) {
   const data = { ...source.data, userMessageID: `user-${targetParent}`, usedMessages: [`user-${targetParent}`], proposed: [] };

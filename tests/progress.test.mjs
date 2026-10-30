@@ -41,40 +41,6 @@ test('progress never follows a linked metadata directory', t => {
   symlinkSync(outside, join(path, '.mdd'), process.platform === 'win32' ? 'junction' : 'dir');
   assert.throws(() => new ProgressGuard(path).write('parent', marker)); assert.deepEqual(readdirSync(outside), []);
 });
-test('work that ended frees the conversation; only the same request cannot silently replay', async t => {
-  const path = root(t); const guard = new ProgressGuard(path); const { endpoint, binding } = await memoryServer(t);
-  binding.directory = path;
-  const runtime = { sessionID: 'ses_parent', agent: 'mdd-orchestrator', directory: path, worktree: path };
-  const runner = () => new PhaseRunner({ parent: async () => {}, result: async () => '{}' }, { progress: guard });
-  for (const state of ['settled', 'complete']) {
-    guard.write(runtime.sessionID, { ...marker, state });
-    assert.equal(runner().status(runtime.sessionID).state, 'not-started');
-    await assert.rejects(runner().start(request(endpoint), runtime, { requirementsConfirmed: true, userMessageID: marker.userMessageID }));
-    assert.equal((await runner().start(request(endpoint), runtime, { requirementsConfirmed: true, userMessageID: 'new-user' })).state, 'ready');
-  }
-});
-test('reset after restart requires host evidence that the previous child stopped', async t => {
-  const path = root(t); const guard = new ProgressGuard(path); const { endpoint, binding } = await memoryServer(t);
-  binding.directory = path;
-  const runtime = { sessionID: 'ses_parent', agent: 'mdd-orchestrator', directory: path, worktree: path };
-  let stopped = false;
-  const runner = new PhaseRunner({ parent: async () => {}, result: async () => '{}', stopped: async () => stopped }, { progress: guard });
-  guard.write(runtime.sessionID, marker);
-  const status = runner.status(runtime.sessionID);
-  assert.equal(status.state, 'recovery-blocked');
-  assert.equal(status.recoverable, true);
-  await assert.rejects(runner.start(request(endpoint), runtime, { requirementsConfirmed: true, userMessageID: 'new-user' }), /mdd_reset/);
-  await runner.confirmStopped(runtime.sessionID, runtime);
-  assert.throws(() => runner.reset(runtime.sessionID, 'run'), /unconfirmed liveness/);
-  await assert.rejects(runner.explore({ purpose: 'Inspect while a writer may still be live.' }, runtime), /unconfirmed liveness/);
-  assert.deepEqual(guard.read(runtime.sessionID), marker);
-  stopped = true;
-  await runner.confirmStopped(runtime.sessionID, runtime);
-  assert.deepEqual(runner.reset(runtime.sessionID, 'run'), { scope: 'run' });
-  assert.equal(guard.read(runtime.sessionID), undefined);
-  assert.equal(runner.status(runtime.sessionID).state, 'not-started');
-  assert.equal((await runner.start(request(endpoint), runtime, { requirementsConfirmed: true, userMessageID: 'new-user' })).state, 'ready');
-});
 test('pending inline work without a call ID has unknown liveness and needs explicit user release', async t => {
   const path = root(t); const guard = new ProgressGuard(path);
   const runtime = { sessionID: 'ses_parent', agent: 'mdd-orchestrator', directory: path, worktree: path };
@@ -121,33 +87,3 @@ test('the user who interrupted a subagent can release it; a busy host still refu
   assert.deepEqual(runner.reset(runtime.sessionID, 'run'), { scope: 'run' });
 });
 
-test('a live dispatch interrupted in this process is released by the user and keeps its run', async t => {
-  const path = root(t); const { endpoint, binding } = await memoryServer(t);
-  binding.directory = path;
-  const runtime = { sessionID: 'ses_parent', agent: 'mdd-orchestrator', directory: path, worktree: path };
-  let verdict = 'unknown';
-  const inspect = { parent: async () => {}, result: async () => '{}', liveness: async () => ({ verdict, detail: `host says ${verdict}` }) };
-  const runner = new PhaseRunner(inspect, { progress: new ProgressGuard(path) });
-  const ready = await runner.start(request(endpoint), runtime, { requirementsConfirmed: true, userMessageID: 'native-user' });
-  const call = { sessionID: runtime.sessionID, callID: 'interrupted' };
-  await runner.before(call, ready.task);
-  assert.equal(runner.status(runtime.sessionID).state, 'await-result');
-  assert.throws(() => runner.reset(runtime.sessionID, 'phase'), /may still be running[\s\S]*userText/);
-  await runner.confirmStopped(runtime.sessionID, runtime, true);
-  const released = runner.status(runtime.sessionID);
-  assert.equal(released.state, 'blocked');
-  assert.match(released.reason, /user confirmed the interrupted subagent stopped/);
-  const again = runner.reset(runtime.sessionID, 'phase');
-  assert.equal(again.scope, 'phase');
-  assert.equal(runner.status(runtime.sessionID).state, 'ready');
-  assert.equal(runner.status(runtime.sessionID).runID, ready.runID);
-});
-
-test('a pending old conversation does not prevent a different native parent from starting', async t => {
-  const path = root(t); const guard = new ProgressGuard(path); guard.write('old-parent', marker);
-  const { endpoint, binding } = await memoryServer(t); binding.directory = path; binding.id = 'new-parent';
-  const runner = new PhaseRunner({ parent: async () => {}, result: async () => '{}' }, { progress: guard });
-  const runtime = { sessionID: binding.id, agent: 'mdd-orchestrator', directory: path, worktree: path };
-  assert.equal((await runner.start(request(endpoint), runtime, { requirementsConfirmed: true, userMessageID: 'actual-new-user' })).state, 'ready');
-  assert.deepEqual(guard.read('old-parent'), marker);
-});

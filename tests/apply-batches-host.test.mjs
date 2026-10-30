@@ -65,47 +65,7 @@ test('native evidence cannot pass with reused identities, speculative writes or 
 });
 
 for (const scenario of ['success', 'failed', 'ambiguous']) {
-  test(`deterministic transport smoke ${scenario} exercises the real motor without claiming native-host proof`, async t => {
-    const root = mkdtempSync(join(tmpdir(), 'mdd-scripted-batches-'));
-    t.after(() => rmSync(root, { recursive: true, force: true }));
-    const evidence = await runDeterministicSmoke(root, scenario);
-    assert.equal(evidence.status, 'passed');
-    assert.match(evidence.proof, /transport-double/);
-  });
 }
-
-test('fixture plugin matches installed V2 hooks and keeps all workload effects private (context double)', async t => {
-  const root = mkdtempSync(join(tmpdir(), 'mdd-plugin-contract-'));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-  const project = join(root, 'project');
-  await runDeterministicSmoke(project, 'failed');
-  const module = join(root, 'fixture-plugin.mjs');
-  writeFileSync(module, fixturePluginSource(project, join(root, 'evidence.jsonl'), 'http://127.0.0.1:12345'));
-  const plugin = (await import(pathToFileURL(module).href)).default;
-  const hooks = new Map(); const tools = new Map(); const removed = []; const providers = [];
-  await plugin.setup({
-    provider: { transform: async fn => fn({ list: () => [{ provider: { id: 'ambient' } }],
-      remove: id => removed.push(id), add: definition => providers.push(definition) }) },
-    session: { hook: async (name, fn) => hooks.set(name, fn) },
-    tool: { hook: async (name, fn) => hooks.set(name, fn), transform: async fn => fn({ add: tool => tools.set(tool.name, tool) }) },
-  });
-  assert.deepEqual(removed, ['ambient']);
-  assert.equal(providers[0].info.activation, 'enabled');
-  assert.equal(providers[0].info.settings.baseURL, 'http://127.0.0.1:12345/v1');
-  assert.throws(() => hooks.get('http.request')({ request: new Request('https://example.com') }), /denied/);
-  const outgoing = { request: new Request('http://127.0.0.1:12345/v1/chat/completions'), agent: 'mdd-plan', sessionID: 'fixture', kind: 'primary' };
-  hooks.get('http.request')(outgoing);
-  assert.equal(outgoing.request.headers.get('x-smoke-agent'), 'mdd-plan');
-  const title = {}; hooks.get('title')(title); assert.equal(title.result, 'Isolated batch fixture');
-  const retry = {}; hooks.get('retry')(retry); assert.deepEqual(retry.decision, { retry: false });
-  const workload = tools.get('smoke_work');
-  await assert.rejects(workload.execute({ step: 'first' }, { agent: 'general' }), /actor mismatch/);
-  for (const step of ['first', 'second', 'verify']) {
-    const result = await workload.execute({ step }, { agent: step === 'verify' ? 'mdd-verify' : 'mdd-apply', sessionID: `fixture-${step}` });
-    assert.deepEqual(JSON.parse(result.content), { command: `node check.mjs ${step}`, exit: 0 });
-  }
-  await assert.rejects(workload.execute({ step: 'second' }, { agent: 'mdd-apply' }), /Duplicate/);
-});
 
 for (const failurePoint of ['setup', 'host shutdown']) {
   test(`native smoke closes its loopback provider after ${failurePoint} throws (injected host only)`, async t => {

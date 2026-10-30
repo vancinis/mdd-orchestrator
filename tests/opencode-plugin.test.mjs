@@ -418,7 +418,6 @@ test('standalone judges are admitted concurrently without phase before/after or 
   const f = await pluginFixture(t);
   const before = t.mock.method(PhaseRunner.prototype, 'before', () => assert.fail('not a phase'));
   const after = t.mock.method(PhaseRunner.prototype, 'after', () => assert.fail('not a phase'));
-  const recorded = t.mock.method(NativeIntake.prototype, 'phaseRecorded', () => assert.fail('not a phase'));
   const initial = JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context));
   const tasks = ['mdd-jd-judge-a', 'mdd-jd-judge-b'].map(jdTask);
   await Promise.all(tasks.map((args, i) => f.hooks['tool.execute.before'](
@@ -427,7 +426,7 @@ test('standalone judges are admitted concurrently without phase before/after or 
     await f.hooks['tool.execute.after']({ sessionID: f.runtime.sessionID, callID: `jd-${i}`, tool: 'task', args },
       { title: 'Judge', output: '{"findings":[],"evidence":[]}', metadata: {} });
   }
-  assert.equal(before.mock.callCount(), 0); assert.equal(after.mock.callCount(), 0); assert.equal(recorded.mock.callCount(), 0);
+  assert.equal(before.mock.callCount(), 0); assert.equal(after.mock.callCount(), 0);
   assert.deepEqual(JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context)), initial);
 });
 

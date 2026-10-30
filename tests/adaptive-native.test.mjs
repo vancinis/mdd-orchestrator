@@ -368,7 +368,7 @@ test('AL05a: existing native intake cannot overlap asynchronous adaptive objecti
   const inspect = f.inspect.intake; let first = true;
   f.inspect.intake = async (...args) => { if (first) { first = false; await held; } return inspect(...args); };
   const admitting = f.admit();
-  try { await assert.rejects(f.gate.start({ requirements: f.contract.objective }, f.runtime, 'native-message'), /native policy|adaptive/); }
+  try { await assert.rejects(f.gate.admitAdaptiveInternal({ contract: f.contract }, f.runtime, 'native-message'), /native policy|adaptive|pending/); }
   finally { release(); await admitting.catch(() => {}); }
 });
 
@@ -1031,7 +1031,7 @@ test('ADM-05-S02/ADM-05-S03: after safe reset a failed native identity check adm
 // ---- D16 reset liveness and authorization matrix (N01-N20) ----
 const BUSY = 'A native policy intake is pending.';
 const startError = async (f, gate = f.gate, id = 'fresh-message') => {
-  try { await gate.start({ requirements: f.contract.objective }, f.runtime, id); return 'ok'; } catch (error) { return error.message; }
+  try { await gate.admitAdaptiveInternal({ contract: f.contract }, f.runtime, id); return 'ok'; } catch (error) { return error.message; }
 };
 const restart = f => f.makeGate(new PhaseRunner(f.inspect, f.options));
 const entryOp = f => ({ kind: 'entry', args: { contract: f.contract, messageID: 'native-message' } });

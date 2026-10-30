@@ -123,67 +123,6 @@ test('SA-2: PR renderer retains repeated structured command exits and evidence l
 });
 
 for (const scenario of ['optional-failure', 'recovered-required', 'unresolved-required', 'blocked-required', 'required-supplemental', 'semantic-gap']) {
-  test(`SA-2 reporting: runner-to-renderer classifies ${scenario} without losing evidence`, async t => {
-    const path = root(t);
-    const runtime = { sessionID: 'pr-reporting', agent: 'mdd-orchestrator', directory: path, worktree: path };
-    const runner = new PhaseRunner({ parent: async () => {}, result: async (_r, _c, _p, output) => output });
-    await runner.start({ preflight: { answers }, requirements: facts.goal }, runtime,
-      { requirementsConfirmed: true, userMessageID: 'pr-request' });
-    await throughRiskStop(runner, runtime.sessionID);
-    const trace = structuredTraceFixture(files[0].path, 'orders');
-    trace.acceptance.goal = facts.goal;
-    if (scenario === 'optional-failure') trace.deliverables[0].checks[0].requirement = 'optional';
-    const settle = async (callID, data) => {
-      const call = { sessionID: runtime.sessionID, callID };
-      await runner.after(call, await runner.before(call, runner.status(runtime.sessionID).task),
-        reportDocument({ evidenceSummary: 'Recorded scoped evidence.', artifact: 'Checked the planned boundary.', ...data }));
-    };
-    await settle('plan', trace);
-    await settle('apply', { completed: ['orders'], changes: files, delivered: facts.delivered });
-    const data = structuredVerificationFixture(trace);
-    data.verification.changes = facts.verification;
-    const result = data.verification.checkResults[0];
-    if (scenario === 'semantic-gap') {
-      data.verification.steps[0].status = 'not-verified';
-      data.verification.steps[0].assessment = 'Command succeeded but source behavior is not established.';
-    } else if (scenario === 'required-supplemental') {
-      data.checks.push({ id: 'E2', command: 'npm run integration', exit: 1 });
-      data.verification.supplementalChecks = [{ id: 'integration', requirement: 'required', disposition: 'failed', executions: ['E2'], reason: 'Integration behavior failed.' }];
-    } else {
-      data.checks[0].exit = 1;
-      data.checks.push({ id: 'E2', command: scenario === 'recovered-required' ? 'npm test' : 'npm run semantic-check', exit: 0 });
-      for (const row of [...data.verification.scenarios, ...data.verification.steps, ...data.verification.decisions]) row.checks = ['E2'];
-      if (scenario === 'recovered-required') {
-        result.executions = ['E1', 'E2'];
-        result.reason = 'Retried after the external test service recovered.';
-      } else {
-        result.disposition = scenario === 'blocked-required' ? 'blocked' : 'failed';
-        result.reason = 'The planned check could not establish the required behavior.';
-        if (scenario === 'blocked-required') { data.checks.shift(); result.executions = []; }
-        data.verification.supplementalChecks = [{ id: 'semantic', requirement: 'optional', disposition: 'passed', executions: ['E2'] }];
-      }
-    }
-    const complete = ['optional-failure', 'recovered-required'].includes(scenario);
-    await settle('verify', { ...data, outcome: complete ? 'passed' : 'failed' });
-    assert.equal(runner.status(runtime.sessionID).state, complete ? 'complete' : 'blocked');
-    const projected = runner.prFacts(runtime.sessionID);
-    assert.equal(projected.verificationVersion, 1);
-    assert.equal(projected.verified, complete);
-    assert.deepEqual(projected.checks, data.checks, 'PR projection retains all reported executions, including failures');
-    const rendered = draft(path, projected).body;
-    const verification = rendered.split('## Verificación\n\n')[1].split('\n## Variables de entorno')[0];
-    const blockers = rendered.split('## Bloqueos\n\n')[1].split('\n## Despliegue')[0].trim();
-    if (data.checks.some(check => check.exit === 1)) {
-      assert.match(verification, /Con salida distinta de 0:/);
-      assert.match(verification, /salida 1/);
-      assert.match(verification, /2 en total, 1 con salida 0 y 1 con salida distinta de 0/);
-    }
-    if (complete) assert.equal(blockers, 'No aplica.', 'resolved or optional failures are evidence, not current blockers');
-    else {
-      assert.notEqual(blockers, 'No aplica.', 'unresolved required checks and semantic gaps remain blockers');
-      assert.match(verification, /no están verificados del todo/);
-    }
-  });
 }
 
 test('SA-2 reporting: unversioned PR facts keep legacy nonzero-exit blockers', t => {

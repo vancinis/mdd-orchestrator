@@ -3,7 +3,7 @@ import type { Plugin, PluginInput } from '@opencode-ai/plugin';
 import { Plugin as V2Plugin } from '@opencode/plugin';
 import { setupV2 } from './opencode-v2.js';
 import { isDeepStrictEqual } from 'node:util';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { ACTOR_INSTRUCTIONS_MARKER, boundedText, DISPATCH_HANDLE_PREFIX, movedMessage, nonemptyText, PhaseRunner } from './phase-runner.js';
 import { FREE_ADAPT_ROLE, STRICT_ADAPT_ROLE, STRICT_COORDINATOR } from './guards.js';
 import type { Inspect, Liveness, Runtime, TaskCall } from './phase-runner.js';
@@ -18,8 +18,7 @@ import { recordTelemetry } from './telemetry.js';
 import type { TelemetryUsage } from './telemetry.js';
 import { ProgressGuard } from './progress.js';
 import { RunDossierStore } from './run-dossier.js';
-import { assessTransfer, projectTargetTransfer } from './transfer.js';
-import { CheckpointStore, STABLE_CHECKPOINT_VERSION } from './checkpoint.js';
+import { CheckpointStore } from './checkpoint.js';
 import { QuestionCheckpointStore } from './question-checkpoint.js';
 import { RunOwnershipStore } from './run-ownership.js';
 import { directPRRequest, prBodyRequest, renderDirectPRBody, renderPRBody } from './pr-body.js';
@@ -42,7 +41,6 @@ import { checkReportForm, checkRiskReportForm, checkSecurityReportForm } from '.
 import type { HeldReportContext } from './report-check.js';
 import { SecurityAudit, SECURITY_AGENT, SECURITY_HANDLE_PREFIX, SECURITY_RUNTIME_GUARD } from './security-audit.js';
 import type { SecurityInspect, SecurityBinding } from './security-audit.js';
-import { CHANGE_CATEGORIES, decodeConcerns } from './concerns.js';
 import { authoredNativeText, canonicalNativeText, firstDivergence } from './native-text.js';
 import type { Phase } from './policy.js';
 import { recordSession } from './session-log.js';
@@ -72,13 +70,6 @@ function record(value: unknown, subject = 'response'): Record<string, unknown> {
  * task is required; the body is validated separately, where a real problem can be reported.
  */
 export const TASK_ENVELOPE = /^<task id="[^"\r\n]*" state="completed">\r?\n(?:<summary>[^\r\n]*<\/summary>\r?\n)?<task_result>\r?\n([\s\S]*?)\r?\n?<\/task_result>\r?\n?<\/task>$/;
-
-/** One advisory concern as the change-request tool advertises it to the model. */
-const CONCERN_SCHEMA = tool.schema.object({
-  category: tool.schema.enum(CHANGE_CATEGORIES as unknown as [string, ...string[]]),
-  evidence: tool.schema.string(),
-  impact: tool.schema.string(),
-});
 
 /** MDD tools belong to the MDD coordinator. Other agents share the registry but not this state. */
 export const MDD_TOOLS = ['mdd_adapt', 'mdd_security', 'mdd_status', 'mdd_reset', 'mdd_contextual_explore', 'mdd_pr_body', 'mdd_improve', 'mdd_improvements', 'mdd_knowledge', 'mdd_knowledge_record'] as const;
@@ -962,22 +953,6 @@ function explorationWorkItemSchema() {
     })).min(1).max(8).optional() }).strict();
 }
 
-/**
- * The coordinator's clarification questions. Every user-visible string is Spanish; structure is
- * validated again inside the intake, so this schema only shapes what the model is offered.
- */
-function clarificationsSchema() {
-  return tool.schema.array(tool.schema.object({
-    question: tool.schema.string().min(1).describe('One direct question, in Spanish. The native form cannot scroll: put the context in why, not here.'),
-    header: tool.schema.string().min(1).max(30).optional().describe('Short topic shown above the question, at most 30 characters (for example "Formato de fecha"). Defaults to "Detalle".'),
-    why: tool.schema.string().min(1).optional().describe('Why it matters: what depends on the answer, or what the phase found that raised it. Write it in full: MDD shows it in the chat brief (questionBrief) before the form, not in the form.'),
-    options: tool.schema.array(tool.schema.object({ label: tool.schema.string().min(1), description: tool.schema.string().min(1), recommended: tool.schema.boolean().optional() })).max(6)
-      .describe('Zero to six concrete choices, each with a one-sentence description; leave empty for an open-ended answer the user types. Free text and "Que decida el agente" are always available.'),
-    multiple: tool.schema.boolean().optional().describe('True when several options can apply together.'),
-    deferrable: tool.schema.boolean().optional().describe('True only when a later phase can safely decide it.'),
-  })).max(8);
-}
-
 const plugin: Plugin = async input => {
   const workerHost = (input as PluginInput & { workerHost?: import('./worker-fence.js').WorkerHost }).workerHost;
   const inputDirectory = input.directory;
@@ -1397,9 +1372,6 @@ const plugin: Plugin = async input => {
           try { resumed = await runner.restore(nativeRuntime(context), project => intake.boundRunMemory(context, project)); }
           catch { return reply({ state: 'recovery-blocked', sessionID: context.sessionID, task: undefined, ...ambiguousTransfer(context.sessionID, true),
             reason: 'Durable run owner cannot be confirmed for this parent; no task or question was exposed.' }, args.detail ?? 'compact'); }
-          try { if (resumed.restored) intake.recover(context); }
-          catch { return reply({ state: 'recovery-blocked', sessionID: context.sessionID, task: undefined,
-            reason: 'Native question recovery could not be confirmed; do not ask, approve or dispatch. Inspect local question and checkpoint files.' }, args.detail ?? 'compact'); }
           const status = record(intake.status(context.sessionID), 'status');
           let adaptiveRecord: ReturnType<AdaptiveStore['read']>;
           try { adaptiveRecord = runner.options.adaptiveStore!.read(context.sessionID); }
@@ -1466,28 +1438,13 @@ const plugin: Plugin = async input => {
         },
       }),
       mdd_reset: tool({
-        description: 'Release stopped MDD work in this conversation. Scope phase retries; scope rework returns a recorded failed Verify, design or tasks to an earlier phase (status.reworkTargets, recommended status.reworkable); scope continue preserves a durably settled failed Verify and retires its active stop without PASS, a next phase, or permission for new work; scope run discards the active run. Rework and continue require exact latest userText; continue also requires the failed runID. A clear fresh objective uses a new mdd_adapt entry. Continue never attests a child stopped and cannot release pending actors, questions or transfers. For other scopes, interrupted-child recovery requires actual latest user text saying the child stopped; native liveness still applies.',
+        description: 'Release stopped MDD work in this conversation: the recovery hatch for an interrupted actor, a blocked entry, a crashed operation or an unreadable record. Scope phase releases the current attempt and keeps the run; scope run discards it. For interrupted-child recovery pass userText, the actual latest user text saying the child stopped; native liveness still applies. A clear fresh objective uses a new mdd_adapt entry.',
         args: {
-          scope: tool.schema.enum(['phase', 'run', 'rework', 'continue']).describe('phase retries; rework sends a failed Verify, design or tasks back to an earlier phase; continue archives settled failed Verify and frees this conversation without PASS or next work; run discards run state.'),
-          phase: tool.schema.enum(['mdd-apply', 'mdd-plan', 'mdd-spec', 'mdd-design']).optional().describe('Only for scope rework: the phase the user chose from status.reworkTargets. Omitted, a failed Verify returns to mdd-apply and a failed design or tasks to status.reworkable.'),
-          runID: tool.schema.string().min(1).optional().describe('Required for continue: the exact failed runID from status.'),
-          userText: tool.schema.string().min(1).optional().describe('Required for rework or continue: the exact latest native request choosing that action. Continuation is not stopped-child attestation. For other scopes, provide only when the user says an interrupted subagent stopped. Never rewrite it.'),
+          scope: tool.schema.enum(['phase', 'run']).describe('phase releases the current attempt and keeps the run; run discards run state.'),
+          userText: tool.schema.string().min(1).optional().describe('Only when the user says an interrupted subagent stopped, or to discard a transferred target: their exact latest message. Never rewrite it.'),
         },
         async execute(args, context) {
           enter(context, 'mdd_reset');
-          if (args.scope === 'continue') {
-            if (context.abort.aborted || !args.runID || !args.userText) throw new Error('Continue requires runID and the exact latest native userText; nothing was released.');
-            intake.assertContinuationIdle(context.sessionID);
-            // A request to proceed is never stopped-child attestation. Do not enter recovery,
-            // abort a child, release a question, or take over a crashed operation on this path.
-            runner.authorizeReset(context.sessionID, false);
-            return runner.withReset(context.sessionID, async () => {
-              const userMessageID = await inspector.intake(context, nonemptyText(args.userText, 'continuation request'), context.messageID);
-              if (context.abort.aborted || !userMessageID) throw new Error('The continuation request could not be confirmed.');
-              await runner.restore(context, project => intake.boundRunMemory(context, project));
-              return reply(intake.reset(context, 'continue', { runID: args.runID!, userMessageID, userText: args.userText!, kind: 'continue' }));
-            });
-          }
           const discard = args.scope === 'run';
           // The run left for another conversation: only freeing this one is meaningful here, and it
           // needs no attestation because nothing of that run can be touched from this side.
@@ -1503,18 +1460,14 @@ const plugin: Plugin = async input => {
               ownership.read(ownership.parentClaim(context.sessionID)!.runID)?.receipt?.targetSessionID === context.sessionID &&
               args.userText === undefined)
             throw new Error('Discarding a transferred target requires the exact latest native user request in userText. The source will not be reactivated.');
-          if (args.scope === 'rework' && args.userText === undefined) throw new Error('Rework changes the route, so it needs the user\'s own word: pass userText with their exact latest message asking to fix what verification found. Nothing was changed.');
-          if (args.phase !== undefined && args.scope !== 'rework') throw new Error('phase names a rework target and is accepted only with scope rework. Nothing was changed.');
           let attested = false;
           if (args.userText !== undefined) {
             if (context.abort.aborted) throw new Error('The reset was aborted.');
-            // The same proof mdd_improve and change requests require: the user's word releases a
-            // subagent, or sends a run back to Apply, only when it is the user's actual latest
-            // message, never the model's summary.
+            // The same proof mdd_improve requires: the user's word releases a subagent only when
+            // it is the user's actual latest message, never the model's summary.
             try { await inspector.intake(context, nonemptyText(args.userText, 'user confirmation'), context.messageID); }
             catch { throw new Error('userText must be the user\'s exact latest message in this conversation, unchanged. Nothing was released.'); }
-            // A request to correct the implementation says nothing about a subagent having stopped.
-            attested = args.scope !== 'rework';
+            attested = true;
           }
           // Which held writer this reset has to account for: a checkpointed pending child, a
           // native question, or otherwise a reservation whose process died without releasing it.
@@ -1528,16 +1481,13 @@ const plugin: Plugin = async input => {
           }
           if (!pendingTask && !pendingQuestion) runner.authorizeReset(context.sessionID, discard);
           return runner.withReset(context.sessionID, async resetCallID => {
-          const questionReleased = intake.releasePendingQuestion(context.sessionID, attested, resetCallID);
+          intake.releasePendingQuestion(context.sessionID, attested, resetCallID);
           const seen = await runner.confirmStopped(context.sessionID, context, attested, resetCallID);
           if (!seen || seen.verdict === 'stopped' || (attested && seen.verdict !== 'running')) runner.authorizeReset(context.sessionID, discard);
           if (!discard) await runner.restore(context, project => intake.boundRunMemory(context, project));
           try {
-            if (questionReleased) intake.recover(context);
-            const reset = record(intake.reset(context, args.scope, undefined, args.phase as Phase | undefined), 'reset');
-            const reviewing = questionReleased && args.scope === 'phase' && record(intake.status(context.sessionID), 'status').state === 'review-ready';
-            const ready = reviewing ? record(intake.prepareAdvance({ questions: [] }, context), 'question recovery') : reset;
-            return reply({ ...ready, ...(seen ? { liveness: seen } : {}) });
+            const reset = record(intake.reset(context, args.scope), 'reset');
+            return reply({ ...reset, ...(seen ? { liveness: seen } : {}) });
           }
           catch (error) {
             if (!seen || seen.verdict === 'stopped') throw error;
@@ -1645,7 +1595,6 @@ const plugin: Plugin = async input => {
       // account for. Conversations MDD is not running are untouched: this only speaks for its own.
       // Exact runner-issued arguments authorize a fallback, never the native agent name alone.
       runner.owner(input.sessionID);
-      intake.guardTask(input.sessionID);
       await runner.before(input, output.args, args => {
         const assignment = workerHost?.assignment?.(input.sessionID, input.callID);
         if (assignment && workerHost) {
@@ -1691,12 +1640,7 @@ const plugin: Plugin = async input => {
         runner.owner(input.sessionID, input.callID);
         try {
           const previousState = runner.status(input.sessionID).state;
-          // A rejected report (malformed, exhausted, or otherwise) may still have settled the
-          // workflow at a state with its own native recovery, such as blocked-risk after an
-          // exhausted mdd-risk fallback; that recovery is armed here too, not only on success.
-          try { await runner.after(input, input.args, output); }
-          catch (error) { intake.storageFailed(input.sessionID); throw error; }
-          finally { try { intake.phaseRecorded(input.sessionID); } catch { /* best effort re-arm; the original outcome still propagates. */ } }
+          await runner.after(input, input.args, output);
           const current = runner.status(input.sessionID);
           if ('lane' in current && current.lane === 'adaptive-low-internal') {
             const record = runner.options.adaptiveStore!.read(input.sessionID)!;
