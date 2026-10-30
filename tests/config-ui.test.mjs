@@ -1,13 +1,12 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readdirSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readdirSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { runConfigUI } from '../dist/config-ui.js';
-import { loadSettings, defaultSettings, MODEL_ROLES } from '../dist/settings.js';
-import { saveGlobalSettings } from '../dist/global-settings.js';
+import { loadSettings, MODEL_ROLES } from '../dist/settings.js';
 
 const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
 function fixture(t) {
@@ -22,10 +21,13 @@ function scripted(lines, isTTY = true) {
   const output = [];
   return { prompts, output, io: { isTTY, write: text => output.push(text), read: async prompt => { prompts.push(prompt); return lines.shift(); } } };
 }
+// Menu: 1 Perfiles, 2 Modelos, 3 Preferencias, 4 Guardar y salir, 5 Cancelar.
+const SAVE = '4';
+const CANCEL = '5';
 // The models menu reads the user's installed catalog; tests inject it for determinism.
 const noVariants = () => ({ status: 'unavailable', reason: 'variantes no disponibles en el test' });
 const noCatalog = { models: () => ({ status: 'unavailable', reason: 'catálogo no disponible en el test' }), variants: noVariants };
-const catalog = (models, variants = {}) => ({ models: () => ({ status: 'ok', models }), variants: provider => ({ status: 'ok', variants }) });
+const catalog = (models, variants = {}) => ({ models: () => ({ status: 'ok', models }), variants: () => ({ status: 'ok', variants }) });
 const sample = ['openai/gpt-a', 'openai/gpt-b', 'zai/glm-1'];
 
 function assertSpawn(result, started) {
@@ -50,45 +52,94 @@ function invoke(root, ...args) {
   return result;
 }
 
-test('scripted terminal creates profile, edits every model and preflight field, Engram setup and saves', async t => {
+test('the main menu offers only profiles, models, preferences, save and cancel', async t => {
+  const root = fixture(t);
+  const script = scripted([CANCEL]);
+  assert.equal(await runConfigUI(root, script.io, noCatalog), 'cancelled');
+  const text = script.output.join('');
+  for (const [index, label] of ['Perfiles', 'Modelos', 'Preferencias', 'Guardar y salir', 'Cancelar'].entries()) {
+    assert.match(text, new RegExp(`^.\\s${index + 1}\\s{2}${label}`, 'm'), label);
+  }
+  assert.doesNotMatch(text, /Engram|Telemetr|Workers|memoria|certeza/i);
+  assert.deepEqual(readdirSync(root), []);
+});
+
+test('scripted terminal creates profile, edits every model and both preferences, and saves', async t => {
   const root = fixture(t);
   const script = scripted(['1', '1', 'work', '2', ...MODEL_ROLES.map(() => 'provider/team/model'),
-    '3', '1', '1', '3', '4', '1', 'http://127.0.0.1:7437', '5', '2', '6']);
+    '3', '2', '1', SAVE]);
   assert.equal(await runConfigUI(root, script.io, noCatalog), 'saved');
   const settings = loadSettings(root);
   assert.equal(settings.activeProfile, 'work');
   assert.deepEqual(settings.profiles.work.models, Object.fromEntries(MODEL_ROLES.map(role => [role, 'provider/team/model'])));
-  assert.deepEqual(settings.profiles.work.answers, { certainty: 'very-sure', mode: 'interactive', summary: 'low' });
-  assert.doesNotMatch(script.prompts.join(''), /Dónde guardar|4\/4/);
-  assert.match(script.output.join(''), /3\/3 respondidas/);
-  assert.deepEqual(settings.engram, { endpoint: 'http://127.0.0.1:7437' });
-  assert.equal(settings.telemetry.enabled, false);
+  assert.deepEqual(settings.profiles.work.answers, { mode: 'interactive', summary: 'low' });
+  assert.deepEqual(settings.profiles.default, { models: {}, answers: {} });
+  assert.deepEqual(Object.keys(settings).sort(), ['activeProfile', 'profiles', 'version']);
+  assert.match(script.output.join(''), /Modo de avance {2}\(1\/2\)/);
+  assert.match(script.output.join(''), /Nivel de detalle de los reportes {2}\(2\/2\)/);
   assert.match(script.output.join(''), /Reiniciá OpenCode/);
   assert.deepEqual(readdirSync(root), ['mdd.config.json']);
 });
 
-test('terminal edits existing profile, clears answers/models and switches active profile', async t => {
+test('terminal edits existing profile, clears a model and a preference, and switches active profile', async t => {
   const root = fixture(t);
-  await runConfigUI(root, scripted(['1', '1', 'work', '2', ...MODEL_ROLES.map(() => 'p/m'), '3', '1', '1', '3', '6']).io, noCatalog);
-  await runConfigUI(root, scripted(['2', '-', ...MODEL_ROLES.slice(1).map(() => ''), '3', '4', '', '', '1', '2', 'default', '6']).io, noCatalog);
+  await runConfigUI(root, scripted(['1', '1', 'work', '2', ...MODEL_ROLES.map(() => 'p/m'), '3', '2', '1', SAVE]).io, noCatalog);
+  // Models: clear orchestrator, keep the rest. Preferences: clear mode, keep summary with Enter.
+  await runConfigUI(root, scripted(['2', '-', ...MODEL_ROLES.slice(1).map(() => ''), '3', '3', '', '1', '2', 'default', SAVE]).io, noCatalog);
   const settings = loadSettings(root);
   assert.equal(settings.activeProfile, 'default');
   assert.equal(settings.profiles.work.models.orchestrator, undefined);
   assert.equal(settings.profiles.work.models['mdd-verify'], 'p/m');
-  assert.equal(settings.profiles.work.answers.certainty, undefined);
-  assert.equal(settings.profiles.work.answers.mode, 'interactive');
+  assert.deepEqual(settings.profiles.work.answers, { summary: 'low' });
 });
 
-test('PF-3: profile editor preserves deprecated storage data without offering its selection', async t => {
+test('preferences set mode and summary, Enter keeps the current values, and Sin fijar clears them', async t => {
   const root = fixture(t);
-  const settings = defaultSettings();
-  settings.profiles.default.answers = { artifactStore: 'both' };
-  saveGlobalSettings(settings);
-  const script = scripted(['3', '1', '1', '3', '6']);
-  assert.equal(await runConfigUI(root, script.io), 'saved');
-  assert.deepEqual(loadSettings(root).profiles.default.answers, { artifactStore: 'both', certainty: 'very-sure', mode: 'interactive', summary: 'low' });
-  assert.doesNotMatch(script.prompts.join(''), /Dónde guardar/);
-  assert.match(script.output.join(''), /local automático/);
+  const set = scripted(['3', '1', '3', SAVE]);
+  assert.equal(await runConfigUI(root, set.io, noCatalog), 'saved');
+  assert.deepEqual(loadSettings(root).profiles.default.answers, { mode: 'automatic', summary: 'detailed' });
+  assert.match(set.output.join(''), /Sin fijar/);
+
+  const keep = scripted(['3', '', '', SAVE]);
+  assert.equal(await runConfigUI(root, keep.io, noCatalog), 'saved');
+  assert.deepEqual(loadSettings(root).profiles.default.answers, { mode: 'automatic', summary: 'detailed' });
+  const shown = keep.output.join('');
+  assert.match(shown, /Modo\s+Automático/);
+  assert.match(shown, /Detalle\s+Detallado/);
+  assert.match(shown, /❯ 1 {2}Automático/);
+  assert.match(shown, /❯ 3 {2}Detallado/);
+
+  const clear = scripted(['3', 'Sin fijar', '4', SAVE]);
+  assert.equal(await runConfigUI(root, clear.io, noCatalog), 'saved');
+  assert.deepEqual(loadSettings(root).profiles.default.answers, {});
+  const reopened = scripted([CANCEL]);
+  await runConfigUI(root, reopened.io, noCatalog);
+  assert.match(reopened.output.join(''), /Modo\s+Sin fijar/);
+  assert.match(reopened.output.join(''), /Detalle\s+Sin fijar/);
+});
+
+test('preference edits are drafts: cancel and EOF leave the saved bytes untouched', async t => {
+  const root = fixture(t);
+  await runConfigUI(root, scripted(['3', '2', '2', SAVE]).io, noCatalog);
+  const before = readFileSync(join(root, 'mdd.config.json'), 'utf8');
+  for (const exit of [[CANCEL], []]) {
+    assert.equal(await runConfigUI(root, scripted(['3', '1', '3', ...exit]).io, noCatalog), 'cancelled');
+    assert.equal(readFileSync(join(root, 'mdd.config.json'), 'utf8'), before);
+  }
+});
+
+test('retired settings keys are accepted on load and dropped on the next save', async t => {
+  const root = fixture(t);
+  writeFileSync(join(root, 'mdd.config.json'), JSON.stringify({
+    version: 1, activeProfile: 'default',
+    profiles: { default: { models: {}, answers: { artifactStore: 'both', certainty: 'very-sure', complexity: 'high', mode: 'automatic' } } },
+    engram: { endpoint: 'http://127.0.0.1:7437' }, telemetry: { enabled: false }, workers: { enabled: true },
+  }));
+  const script = scripted([SAVE]);
+  assert.equal(await runConfigUI(root, script.io, noCatalog), 'saved');
+  const saved = JSON.parse(readFileSync(join(root, 'mdd.config.json'), 'utf8'));
+  assert.deepEqual(saved, { version: 1, activeProfile: 'default', profiles: { default: { models: {}, answers: { mode: 'automatic' } } } });
+  assert.match(script.output.join(''), /Modo\s+Automático/);
 });
 
 test('cancel and EOF discard all draft edits, both absent and existing settings', async t => {
@@ -97,25 +148,34 @@ test('cancel and EOF discard all draft edits, both absent and existing settings'
   assert.deepEqual(readdirSync(root), []);
   assert.equal(await runConfigUI(root, scripted(['1', '1', 'discard']).io), 'cancelled');
   assert.deepEqual(readdirSync(root), []);
-  await runConfigUI(root, scripted(['6']).io);
+  await runConfigUI(root, scripted([SAVE]).io);
   const before = readFileSync(join(root, 'mdd.config.json'), 'utf8');
-  await runConfigUI(root, scripted(['1', '1', 'discard', '7']).io);
+  assert.equal(await runConfigUI(root, scripted(['1', '1', 'discard', CANCEL]).io), 'cancelled');
   assert.equal(readFileSync(join(root, 'mdd.config.json'), 'utf8'), before);
 });
 
-test('invalid edits are actionable; partial answers stay unanswered on Enter', async t => {
+test('invalid edits are actionable; unset preferences stay unset on Enter', async t => {
   const root = fixture(t);
-  const script = scripted(['1', '1', '../bad', '3', '', '', '', '6']);
+  const script = scripted(['1', '1', '../bad', '3', '', '', SAVE]);
   assert.equal(await runConfigUI(root, script.io, noCatalog), 'saved');
   assert.match(script.output.join(''), /safe/);
   assert.deepEqual(loadSettings(root).profiles.default.answers, {});
+  assert.deepEqual(Object.keys(loadSettings(root).profiles), ['default']);
+});
+
+test('creating a duplicate profile is reported and the draft continues', async t => {
+  const root = fixture(t);
+  const script = scripted(['1', '1', 'default', SAVE]);
+  assert.equal(await runConfigUI(root, script.io, noCatalog), 'saved');
+  assert.match(script.output.join(''), /Ese perfil ya existe/);
+  assert.deepEqual(Object.keys(loadSettings(root).profiles), ['default']);
 });
 
 // Regression: a well-formed but nonexistent model such as global/shared passes the format
 // check and then makes OpenCode discard the whole agent at startup.
 test('models are picked from the installed catalog by provider, never typed blind', async t => {
   const root = fixture(t);
-  const script = scripted(['2', '2', '1', ...MODEL_ROLES.slice(1).map(() => ''), '6']);
+  const script = scripted(['2', '2', '1', ...MODEL_ROLES.slice(1).map(() => ''), SAVE]);
   assert.equal(await runConfigUI(root, script.io, catalog(sample)), 'saved');
   assert.deepEqual(loadSettings(root).profiles.default.models, { orchestrator: 'openai/gpt-a' });
   const text = script.output.join('');
@@ -127,16 +187,16 @@ test('models are picked from the installed catalog by provider, never typed blin
 
 test('an existing override can be kept or inherited, and an unknown one is flagged', async t => {
   const root = fixture(t);
-  await runConfigUI(root, scripted(['2', '2', '2', ...MODEL_ROLES.slice(1).map(() => ''), '6']).io, catalog(sample));
+  await runConfigUI(root, scripted(['2', '2', '2', ...MODEL_ROLES.slice(1).map(() => ''), SAVE]).io, catalog(sample));
   assert.equal(loadSettings(root).profiles.default.models.orchestrator, 'openai/gpt-b');
-  const keep = scripted(['2', ...MODEL_ROLES.map(() => ''), '6']);
+  const keep = scripted(['2', ...MODEL_ROLES.map(() => ''), SAVE]);
   await runConfigUI(root, keep.io, catalog(sample));
   assert.equal(loadSettings(root).profiles.default.models.orchestrator, 'openai/gpt-b');
   assert.match(keep.output.join(''), /❯ 1 {2}Mantener lo actual\s+openai\/gpt-b/);
-  const stale = scripted(['2', ...MODEL_ROLES.map(() => ''), '6']);
+  const stale = scripted(['2', ...MODEL_ROLES.map(() => ''), SAVE]);
   await runConfigUI(root, stale.io, catalog(['zai/glm-1']));
   assert.match(stale.output.join(''), /Atención: orchestrator=openai\/gpt-b no está entre los modelos instalados/);
-  const inherit = scripted(['2', '2', ...MODEL_ROLES.slice(1).map(() => ''), '6']);
+  const inherit = scripted(['2', '2', ...MODEL_ROLES.slice(1).map(() => ''), SAVE]);
   await runConfigUI(root, inherit.io, catalog(sample));
   assert.deepEqual(loadSettings(root).profiles.default.models, {});
 });
@@ -145,7 +205,7 @@ test('effort is optional: a model with variants offers a default plus each varia
   const root = fixture(t);
   const withEffort = catalog(sample, { 'openai/gpt-a': ['high', 'low'] });
   // modelos -> orchestrator: openai -> gpt-a -> effort 'high' (2nd variant option, after the default entry).
-  const script = scripted(['2', '2', '1', '2', ...MODEL_ROLES.slice(1).map(() => ''), '6']);
+  const script = scripted(['2', '2', '1', '2', ...MODEL_ROLES.slice(1).map(() => ''), SAVE]);
   assert.equal(await runConfigUI(root, script.io, withEffort), 'saved');
   assert.equal(loadSettings(root).profiles.default.models.orchestrator, 'openai/gpt-a#high');
   assert.match(script.output.join(''), /Esfuerzo \(opcional\) para openai\/gpt-a/);
@@ -155,11 +215,11 @@ test('effort is optional: a model with variants offers a default plus each varia
 test('effort can be left at the model default, and a model without variants skips the step', async t => {
   const withEffort = catalog(sample, { 'openai/gpt-a': ['high', 'low'] });
   const rootDefault = fixture(t);
-  const skipEffort = scripted(['2', '2', '1', '1', ...MODEL_ROLES.slice(1).map(() => ''), '6']);
+  const skipEffort = scripted(['2', '2', '1', '1', ...MODEL_ROLES.slice(1).map(() => ''), SAVE]);
   assert.equal(await runConfigUI(rootDefault, skipEffort.io, withEffort), 'saved');
   assert.equal(loadSettings(rootDefault).profiles.default.models.orchestrator, 'openai/gpt-a');
   const rootNoVariant = fixture(t);
-  const noEffortModel = scripted(['2', '2', '2', ...MODEL_ROLES.slice(1).map(() => ''), '6']);
+  const noEffortModel = scripted(['2', '2', '2', ...MODEL_ROLES.slice(1).map(() => ''), SAVE]);
   assert.equal(await runConfigUI(rootNoVariant, noEffortModel.io, withEffort), 'saved');
   assert.equal(loadSettings(rootNoVariant).profiles.default.models.orchestrator, 'openai/gpt-b');
   assert.doesNotMatch(noEffortModel.output.join(''), /Esfuerzo/);
@@ -168,9 +228,9 @@ test('effort can be left at the model default, and a model without variants skip
 test('an existing #variant override is preread as current model and effort, and stays marked actual', async t => {
   const root = fixture(t);
   const withEffort = catalog(sample, { 'openai/gpt-a': ['high', 'low'] });
-  await runConfigUI(root, scripted(['2', '2', '1', '2', ...MODEL_ROLES.slice(1).map(() => ''), '6']).io, withEffort);
+  await runConfigUI(root, scripted(['2', '2', '1', '2', ...MODEL_ROLES.slice(1).map(() => ''), SAVE]).io, withEffort);
   assert.equal(loadSettings(root).profiles.default.models.orchestrator, 'openai/gpt-a#high');
-  const reopen = scripted(['2', ...MODEL_ROLES.map(() => ''), '6']);
+  const reopen = scripted(['2', ...MODEL_ROLES.map(() => ''), SAVE]);
   await runConfigUI(root, reopen.io, withEffort);
   assert.equal(loadSettings(root).profiles.default.models.orchestrator, 'openai/gpt-a#high');
   assert.match(reopen.output.join(''), /❯ 1 {2}Mantener lo actual\s+openai\/gpt-a#high/);
@@ -179,7 +239,7 @@ test('an existing #variant override is preread as current model and effort, and 
 test('a provider whose variant catalog is unavailable still saves the bare model, with a warning', async t => {
   const root = fixture(t);
   const brokenVariants = { models: () => ({ status: 'ok', models: sample }), variants: () => ({ status: 'unavailable', reason: 'sin red en el test' }) };
-  const script = scripted(['2', '2', '1', ...MODEL_ROLES.slice(1).map(() => ''), '6']);
+  const script = scripted(['2', '2', '1', ...MODEL_ROLES.slice(1).map(() => ''), SAVE]);
   assert.equal(await runConfigUI(root, script.io, brokenVariants), 'saved');
   assert.equal(loadSettings(root).profiles.default.models.orchestrator, 'openai/gpt-a');
   assert.match(script.output.join(''), /No se pudieron consultar los niveles de esfuerzo de openai: sin red en el test/);
@@ -187,7 +247,7 @@ test('a provider whose variant catalog is unavailable still saves the bare model
 
 test('an unavailable catalog falls back to free text and says the value is unverified', async t => {
   const root = fixture(t);
-  const script = scripted(['2', 'openai/gpt-a', ...MODEL_ROLES.slice(1).map(() => ''), '6']);
+  const script = scripted(['2', 'openai/gpt-a', ...MODEL_ROLES.slice(1).map(() => ''), SAVE]);
   assert.equal(await runConfigUI(root, script.io, noCatalog), 'saved');
   assert.equal(loadSettings(root).profiles.default.models.orchestrator, 'openai/gpt-a');
   assert.match(script.output.join(''), /no se pueden verificar/);
@@ -197,7 +257,7 @@ test('an unavailable catalog falls back to free text and says the value is unver
 
 test('the free-text fallback accepts a typed #variant suffix directly', async t => {
   const root = fixture(t);
-  const script = scripted(['2', 'openai/gpt-a#high', ...MODEL_ROLES.slice(1).map(() => ''), '6']);
+  const script = scripted(['2', 'openai/gpt-a#high', ...MODEL_ROLES.slice(1).map(() => ''), SAVE]);
   assert.equal(await runConfigUI(root, script.io, noCatalog), 'saved');
   assert.equal(loadSettings(root).profiles.default.models.orchestrator, 'openai/gpt-a#high');
 });
@@ -208,21 +268,21 @@ test('Judgment Day model editor selects variants, preserves and clears each inde
   for (const role of roles) assert.ok(MODEL_ROLES.includes(role), role);
   const choices = MODEL_ROLES.flatMap(role => roles.includes(role) ? ['2', '1', '2'] : ['']);
   const withEffort = catalog(sample, { 'openai/gpt-a': ['high'] });
-  const choose = scripted(['2', ...choices, '6']);
+  const choose = scripted(['2', ...choices, SAVE]);
   assert.equal(await runConfigUI(root, choose.io, withEffort), 'saved');
   const expected = Object.fromEntries(roles.map(role => [role, 'openai/gpt-a#high']));
   assert.deepEqual(loadSettings(root).profiles.default.models, expected);
   for (const role of roles) assert.ok(choose.output.join('').includes(role), role);
-  assert.equal(await runConfigUI(root, scripted(['2', ...MODEL_ROLES.map(() => ''), '6']).io, withEffort), 'saved');
+  assert.equal(await runConfigUI(root, scripted(['2', ...MODEL_ROLES.map(() => ''), SAVE]).io, withEffort), 'saved');
   assert.deepEqual(loadSettings(root).profiles.default.models, expected);
   const clear = MODEL_ROLES.map(role => roles.includes(role) ? '2' : '');
-  assert.equal(await runConfigUI(root, scripted(['2', ...clear, '6']).io, withEffort), 'saved');
+  assert.equal(await runConfigUI(root, scripted(['2', ...clear, SAVE]).io, withEffort), 'saved');
   assert.deepEqual(loadSettings(root).profiles.default.models, {});
 });
 
 test('nonTTY terminal and CLI reject immediately without reading input or writing settings', async t => {
   const root = fixture(t);
-  const script = scripted(['6'], false);
+  const script = scripted([SAVE], false);
   await assert.rejects(runConfigUI(root, script.io), /terminal interactiva/);
   assert.deepEqual(script.prompts, []);
   const result = invoke(root, 'config');
@@ -231,64 +291,34 @@ test('nonTTY terminal and CLI reject immediately without reading input or writin
   assert.deepEqual(readdirSync(root), []);
 });
 
-test('workers editor defaults on and persists the global toggle only on Save', async t => {
-  const root = fixture(t);
-  const off = scripted(['workers', 'off', '6']);
-  assert.equal(await runConfigUI(root, off.io, noCatalog), 'saved');
-  assert.equal(loadSettings(root).workers.enabled, false);
-  assert.match(off.output.join(''), /Workers.*enabled/);
-  assert.match(off.output.join(''), /dispatch remains sequential/);
-  const keep = scripted(['workers', '', '6']);
-  assert.equal(await runConfigUI(root, keep.io, noCatalog), 'saved');
-  assert.equal(loadSettings(root).workers.enabled, false);
-  assert.match(keep.output.join(''), /❯ 2 {2}Disabled/);
-  assert.equal(await runConfigUI(root, scripted(['workers', 'on', '6']).io, noCatalog), 'saved');
-  assert.equal(loadSettings(root).workers.enabled, true);
-});
-
-test('workers draft edits are discarded on cancel and EOF, preserving existing bytes', async t => {
-  const root = fixture(t);
-  for (const exit of [['7'], []]) {
-    assert.equal(await runConfigUI(root, scripted(['workers', 'off', ...exit]).io, noCatalog), 'cancelled');
-    assert.deepEqual(readdirSync(root), []);
-  }
-  await runConfigUI(root, scripted(['6']).io, noCatalog);
-  const before = readFileSync(join(root, 'mdd.config.json'), 'utf8');
-  for (const exit of [['7'], []]) {
-    assert.equal(await runConfigUI(root, scripted(['workers', 'off', ...exit]).io, noCatalog), 'cancelled');
-    assert.equal(readFileSync(join(root, 'mdd.config.json'), 'utf8'), before);
-  }
-});
-
-test('isolated CLI smoke: profile create/use/list and telemetry on/off/status/clear', t => {
+test('isolated CLI smoke: profile create/use/list', t => {
   const root = fixture(t);
   assert.equal(invoke(root, 'profile', 'list').stdout, '* default\n');
   assert.deepEqual(readdirSync(root), []);
   assert.equal(invoke(root, 'profile', 'create', 'work').status, 0);
   assert.equal(invoke(root, 'profile', 'list').stdout, '  default\n* work\n');
   assert.equal(invoke(root, 'profile', 'use', 'default').status, 0);
-  assert.equal(invoke(root, 'telemetry', 'off').status, 0);
-  assert.equal(JSON.parse(invoke(root, 'telemetry', 'status').stdout).enabled, false);
-  assert.equal(invoke(root, 'telemetry', 'on').status, 0);
-  assert.equal(JSON.parse(invoke(root, 'telemetry', 'clear').stdout).count, 0);
   assert.equal(loadSettings(root).activeProfile, 'default');
-  assert.deepEqual(loadSettings(root).profiles.work.answers, {});
+  assert.deepEqual(loadSettings(root).profiles.work, { models: {}, answers: {} });
   assert.deepEqual(readdirSync(root), ['mdd.config.json']);
 });
 
-test('new command validation and help are deterministic and preserve exit semantics', t => {
+test('command validation and help are deterministic and preserve exit semantics', t => {
   const root = fixture(t);
   for (const args of [['profile'], ['profile', 'use', 'missing'], ['profile', 'create', '../bad'], ['profile', 'list', 'extra'],
-    ['telemetry'], ['telemetry', 'export'], ['telemetry', 'off', 'extra'], ['config', 'extra'], ['profile', '--help']]) {
+    ['config', 'extra'], ['profile', '--help'],
+    // Retired commands are now unknown.
+    ['telemetry', 'status'], ['workers'], ['guards'], ['lessons'], ['retro'], ['init']]) {
     const result = invoke(root, ...args);
-    assert.equal(result.status, 2, result.stderr);
+    assert.equal(result.status, 2, `${args.join(' ')}: ${result.stderr}`);
     assert.equal(result.stdout, '');
   }
   const first = invoke(root, '--help');
   assert.equal(first.status, 0);
   assert.equal(first.stdout, invoke(root, '--help').stdout);
-  assert.match(first.stdout, /simulación: la CLI no ejecuta ninguna fase/);
+  assert.match(first.stdout, /mdd-ai config/);
   assert.match(first.stdout, /profile list/);
   assert.match(first.stdout, /Códigos de salida: 0/);
+  assert.doesNotMatch(first.stdout, /telemetry|workers|init|lessons|retro/);
   assert.deepEqual(readdirSync(root), []);
 });

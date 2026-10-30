@@ -1,51 +1,35 @@
-import type { Answers } from './policy.js';
-import { parsePartialAnswers } from './preflight.js';
 import { LocalFiles } from './local-files.js';
 import { objectWithKeys, ValidationError } from './validation.js';
-import { isAbsolute, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 
+/** Every agent whose model can be configured per profile. `orchestrator` maps to `mdd-orchestrator`. */
 export const MODEL_ROLES = Object.freeze([
-  'orchestrator', 'mdd-explore', 'mdd-plan', 'mdd-propose', 'mdd-spec',
-  'mdd-design', 'mdd-tasks', 'mdd-apply', 'mdd-verify', 'mdd-risk', 'mdd-security',
+  'orchestrator', 'mdd-explore', 'mdd-risk', 'mdd-plan', 'mdd-propose', 'mdd-spec',
+  'mdd-design', 'mdd-tasks', 'mdd-apply', 'mdd-verify', 'mdd-security',
   'mdd-jd-judge-a', 'mdd-jd-judge-b', 'mdd-jd-fix',
 ] as const);
-/**
- * Configurable actors are not necessarily workflow phases. Risk, security and standalone
- * Judgment Day roles are installed and modeled here without expanding routing, phase reports,
- * telemetry phases, or the adapters' phase-instruction/tool policy.
- */
 export type ModelRole = typeof MODEL_ROLES[number];
-export type NamedProfile = { models: Partial<Record<ModelRole, string>>; answers: Partial<Answers> };
-export type EngramSettings = { endpoint: string; project?: string } | { mode: 'local'; binary: string; dataDirectory: string };
-/** Preference only; batch eligibility and dispatch are separate runtime concerns. */
-export type WorkerPolicy = Readonly<{ enabled: boolean }>;
-export type Settings = {
-  version: 1;
-  activeProfile: string;
-  profiles: Record<string, NamedProfile>;
-  engram?: EngramSettings;
-  telemetry: { enabled: boolean };
-  workers: { enabled: boolean };
-  knowledge: { enabled: boolean };
-  /**
-   * Off by default: MDD is free. The coordinator works directly and dispatches any agent or
-   * question, phase actors keep every native tool, and only what MDD itself issued goes through
-   * its bookkeeping. On restores the strict workflow, where every implementation and native
-   * interaction in an MDD conversation has to pass through MDD's own routes.
-   */
-  guards: { enabled: boolean };
-  /** Omitted means the default: two automatic correction passes after a failed Verify in automatic mode. */
-  verify?: { automaticCorrections: number };
-};
-/** Automatic correction passes after a failed Verify when settings do not choose (gentle-orchestrator's bound). */
-export const DEFAULT_AUTOMATIC_CORRECTIONS = 2;
+
+export const MODES = Object.freeze(['automatic', 'interactive'] as const);
+export const SUMMARIES = Object.freeze(['low', 'medium', 'detailed'] as const);
+/** Preferences the orchestrator reads from its prompt. Unset values are asked or defaulted there. */
+export type Mode = typeof MODES[number];
+export type Summary = typeof SUMMARIES[number];
+export type Preferences = { mode?: Mode; summary?: Summary };
+export type NamedProfile = { models: Partial<Record<ModelRole, string>>; answers: Preferences };
+export type Settings = { version: 1; activeProfile: string; profiles: Record<string, NamedProfile> };
+
+/**
+ * Keys earlier MDD versions wrote. They are accepted and dropped, so upgrading never refuses a
+ * configuration that used to be valid.
+ */
+const RETIRED_SETTINGS = ['engram', 'telemetry', 'workers', 'knowledge', 'guards', 'verify'];
+const RETIRED_ANSWERS = ['certainty', 'artifactStore', 'complexity'];
 
 export function profileName(value: unknown): string {
   if (typeof value !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(value) ||
       (value === 'prototype' || Object.hasOwn(Object.prototype, value)) ||
       /^(con|prn|aux|nul|com[0-9]|lpt[0-9])$/i.test(value)) {
-    throw new ValidationError('Profile/project name must be a safe 1–64 character name (letters, digits, underscore, hyphen).');
+    throw new ValidationError('Profile name must be a safe 1–64 character name (letters, digits, underscore, hyphen).');
   }
   return value;
 }
@@ -58,125 +42,66 @@ export function parseModel(value: unknown): string {
   return value;
 }
 
-export function defaultSettings(): Settings {
-  return {
-    version: 1, activeProfile: 'default', profiles: { default: { models: {}, answers: {} } },
-    telemetry: { enabled: true }, workers: { enabled: true }, knowledge: { enabled: true }, guards: { enabled: false },
-  };
+export function parsePreferences(value: unknown): Preferences {
+  const input = objectWithKeys(value, 'answers', ['mode', 'summary', ...RETIRED_ANSWERS]);
+  const result: Preferences = {};
+  if (input.mode !== undefined) {
+    if (!MODES.includes(input.mode as never)) throw new ValidationError(`answers.mode must be one of: ${MODES.join(', ')}.`);
+    result.mode = input.mode as Mode;
+  }
+  if (input.summary !== undefined) {
+    if (!SUMMARIES.includes(input.summary as never)) throw new ValidationError(`answers.summary must be one of: ${SUMMARIES.join(', ')}.`);
+    result.summary = input.summary as Summary;
+  }
+  return result;
 }
 
-/** Whether MDD stays out of the way: the default, unless the settings switch its guards on. */
-export function freeMode(settings: Pick<Settings, 'guards'> | undefined): boolean {
-  return settings?.guards?.enabled !== true;
+export function defaultSettings(): Settings {
+  return { version: 1, activeProfile: 'default', profiles: { default: { models: {}, answers: {} } } };
 }
 
 export function parseSettings(value: unknown): Settings {
-  const input = objectWithKeys(value, 'settings', ['version', 'activeProfile', 'profiles', 'engram', 'telemetry', 'workers', 'knowledge', 'guards', 'verify']);
+  const input = objectWithKeys(value, 'settings', ['version', 'activeProfile', 'profiles', ...RETIRED_SETTINGS]);
   if (input.version !== 1) throw new ValidationError('settings.version must be 1.');
   const names = typeof input.profiles === 'object' && input.profiles !== null ? Object.keys(input.profiles) : [];
   if (!names.length || names.length > 64) throw new ValidationError('Settings require 1–64 named profiles.');
   names.forEach(profileName);
   const profiles = objectWithKeys(input.profiles, 'profiles', names);
-  const result = defaultSettings();
-  result.profiles = {};
+  const result: Settings = { version: 1, activeProfile: profileName(input.activeProfile), profiles: {} };
   for (const name of names) {
     const profile = objectWithKeys(profiles[name], 'profile', ['models', 'answers']);
-    const models = objectWithKeys(Object.hasOwn(profile, 'models') ? profile.models : {}, 'models', MODEL_ROLES);
-    const parsed: NamedProfile = { models: {}, answers: parsePartialAnswers(Object.hasOwn(profile, 'answers') ? profile.answers : {}) };
+    const models = objectWithKeys(profile.models ?? {}, 'models', MODEL_ROLES);
+    const parsed: NamedProfile = { models: {}, answers: parsePreferences(profile.answers ?? {}) };
     for (const role of MODEL_ROLES) if (Object.hasOwn(models, role)) parsed.models[role] = parseModel(models[role]);
     result.profiles[name] = parsed;
   }
-  result.activeProfile = profileName(input.activeProfile);
   if (!Object.hasOwn(result.profiles, result.activeProfile)) throw new ValidationError('Active profile does not exist.');
-  if (Object.hasOwn(input, 'telemetry')) {
-    const telemetry = objectWithKeys(input.telemetry, 'telemetry', ['enabled']);
-    if (typeof telemetry.enabled !== 'boolean') throw new ValidationError('telemetry.enabled must be boolean.');
-    result.telemetry.enabled = telemetry.enabled;
-  }
-  if (Object.hasOwn(input, 'workers')) {
-    const workers = objectWithKeys(input.workers, 'workers', ['enabled']);
-    if (typeof workers.enabled !== 'boolean') throw new ValidationError('workers.enabled must be boolean.');
-    result.workers.enabled = workers.enabled;
-  }
-  if (Object.hasOwn(input, 'knowledge')) {
-    const knowledge = objectWithKeys(input.knowledge, 'knowledge', ['enabled']);
-    if (typeof knowledge.enabled !== 'boolean') throw new ValidationError('knowledge.enabled must be boolean.');
-    result.knowledge.enabled = knowledge.enabled;
-  }
-  if (Object.hasOwn(input, 'guards')) {
-    const guards = objectWithKeys(input.guards, 'guards', ['enabled']);
-    if (typeof guards.enabled !== 'boolean') throw new ValidationError('guards.enabled must be boolean.');
-    result.guards.enabled = guards.enabled;
-  }
-  if (Object.hasOwn(input, 'verify')) {
-    const verify = objectWithKeys(input.verify, 'verify', ['automaticCorrections']);
-    if (!Number.isInteger(verify.automaticCorrections) || (verify.automaticCorrections as number) < 0 || (verify.automaticCorrections as number) > DEFAULT_AUTOMATIC_CORRECTIONS)
-      throw new ValidationError(`verify.automaticCorrections must be an integer from 0 to ${DEFAULT_AUTOMATIC_CORRECTIONS}.`);
-    result.verify = { automaticCorrections: verify.automaticCorrections as number };
-  }
-  if (Object.hasOwn(input, 'engram')) {
-    const engram = objectWithKeys(input.engram, 'engram', ['mode', 'binary', 'dataDirectory', 'endpoint', 'project']);
-    if (engram.mode === 'local') {
-      objectWithKeys(input.engram, 'local Engram', ['mode', 'binary', 'dataDirectory']);
-      for (const field of ['binary', 'dataDirectory'] as const) {
-        if (typeof engram[field] !== 'string' || !isAbsolute(engram[field]) || /[\r\n\0]/.test(engram[field])) throw new ValidationError(`Local Engram ${field} must be an absolute path.`);
-      }
-      result.engram = { mode: 'local', binary: engram.binary as string, dataDirectory: engram.dataDirectory as string };
-      return result;
-    }
-    objectWithKeys(input.engram, 'endpoint Engram', ['endpoint', 'project']);
-    if (typeof engram.endpoint !== 'string' || !/^http:\/\/127\.0\.0\.1:[1-9][0-9]{0,4}\/?$/.test(engram.endpoint) ||
-        Number(engram.endpoint.replace(/\/$/, '').split(':').at(-1)) > 65535) {
-      throw new ValidationError('Engram endpoint must be an explicit http://127.0.0.1:PORT loopback origin.');
-    }
-    result.engram = { endpoint: new URL(engram.endpoint).origin, ...(Object.hasOwn(engram, 'project') ? { project: profileName(engram.project) } : {}) };
-  }
   return result;
 }
 
 const LIMIT = 131072;
-export function setupDiagnostic(root: string) {
-  const workspaceRoot = resolve(root);
-  const configPath = join(workspaceRoot, 'mdd.config.json');
-  const command = `node "${fileURLToPath(new URL('./cli.js', import.meta.url))}" config`;
-  return { workspaceRoot, configPath, problem: 'invalid-settings', missingFields: [], command,
-    action: `Invalid settings at ${configPath}; plugin tools are unavailable. Repair using docs/mdd-config.schema.json, then in ${workspaceRoot} run ${command}, Save, and restart OpenCode. Engram is optional; omit it to keep memory off.` };
-}
+export const SETTINGS_FILE = 'mdd.config.json';
 
 export function loadSettings(root: string): Settings {
-  const text = new LocalFiles(root).read('mdd.config.json', LIMIT);
+  const text = new LocalFiles(root).read(SETTINGS_FILE, LIMIT);
   if (text === undefined) return defaultSettings();
   let input: unknown;
   try { input = JSON.parse(text.replace(/^\uFEFF/, '')); }
-  catch { throw new ValidationError('mdd.config.json contains malformed JSON.'); }
+  catch { throw new ValidationError(`${SETTINGS_FILE} contains malformed JSON.`); }
   return parseSettings(input);
 }
 
 export function saveSettings(root: string, value: unknown): Settings {
   const settings = parseSettings(value);
-  new LocalFiles(root).update('mdd.config.json', () => `${JSON.stringify(settings, null, 2)}\n`, LIMIT);
+  new LocalFiles(root).update(SETTINGS_FILE, () => `${JSON.stringify(settings, null, 2)}\n`, LIMIT);
   return settings;
 }
 
-export type StartupProfile = Readonly<{
-  name: string;
-  models: Readonly<Partial<Record<ModelRole, string>>>;
-  answers: Readonly<Partial<Answers>>;
-  workers: WorkerPolicy;
-}>;
-
-/** Capture once at plugin startup. Settings edits take effect after restart. */
-export function freezeProfile(value: unknown): StartupProfile {
-  const settings = parseSettings(value);
-  const profile = settings.profiles[settings.activeProfile]!;
-  return Object.freeze({
-    name: settings.activeProfile, models: Object.freeze(profile.models), answers: Object.freeze(profile.answers),
-    workers: Object.freeze(settings.workers),
-  });
+export function activeProfile(settings: Settings): NamedProfile {
+  return settings.profiles[settings.activeProfile]!;
 }
 
-/** undefined deliberately delegates model selection to the native runtime. */
-export function modelFor(profile: StartupProfile, role: ModelRole): string | undefined {
-  if (!MODEL_ROLES.includes(role)) throw new ValidationError('Unknown model role.');
-  return profile.models[role];
+/** The agent ID a model role configures. */
+export function agentFor(role: ModelRole): string {
+  return role === 'orchestrator' ? 'mdd-orchestrator' : role;
 }

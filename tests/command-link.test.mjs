@@ -5,7 +5,7 @@ import { delimiter, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { COMMAND, commandPlan, launcherFiles, launcherTarget, registerPath, writeLaunchers } from '../dist/command-link.js';
 import { installationPaths } from '../dist/installation-paths.js';
-import { isolateHome } from './adapter-fixture.mjs';
+import { isolateHome } from './helpers.mjs';
 
 function fixture(t) {
   const home = isolateHome(t);
@@ -83,7 +83,7 @@ test('PATH registration only appends its own folder to the user scope', t => {
 test('the wizard installs the launcher and the command runs the real CLI', async t => {
   const { paths } = fixture(t);
   const { runSetupUI } = await import('../dist/setup-ui.js');
-  const answers = ['', 'apply'];
+  const answers = ['apply'];
   const io = { isTTY: true, read: async () => answers.shift(), write: () => {} };
   const root = join(paths.configRoot);
   fs.mkdirSync(root, { recursive: true });
@@ -95,8 +95,6 @@ test('the wizard installs the launcher and the command runs the real CLI', async
   fs.cpSync('assets', join(pkg, 'assets'), { recursive: true });
   fs.writeFileSync(join(paths.ownedRoot, 'package.json'), '{"private":true}');
   await runSetupUI(root, io, {
-    detect: () => ({ status: 'not-found' }),
-    installMemory: () => { throw new Error('Unexpected download'); },
     installPackage: () => { throw new Error('Unexpected package install'); },
     check: async () => ({ ready: true, checks: [] }),
     registerPath: () => assert.fail('installing must never edit PATH by itself'),
@@ -108,6 +106,6 @@ test('the wizard installs the launcher and the command runs the real CLI', async
   const output = windows
     ? execFileSync('cmd', ['/d', '/c', launcher, '--help'], { encoding: 'utf8', timeout: 60000, windowsHide: true })
     : execFileSync(launcher, ['--help'], { encoding: 'utf8', timeout: 60000 });
-  assert.match(output, /Instalación global de MDD y prueba de ruteo/);
+  assert.match(output, /MDD: instalación y configuración/);
   assert.match(output, new RegExp(`${COMMAND} link`));
 });

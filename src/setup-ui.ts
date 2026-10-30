@@ -10,7 +10,6 @@ import { installationPaths } from './installation-paths.js';
 import { doctor } from './doctor.js';
 import { initProject, OWNED_PACKAGE, packageState, planProject, projectRoot } from './setup.js';
 import { PACKAGE_ROOT } from './project-assets.js';
-import { detectEngram, engramOffer, installEngram } from './engram-install.js';
 import { COMMAND, commandPlan, registerPath, writeLaunchers } from './command-link.js';
 import { fileDigest, scopedPath } from './safe-paths.js';
 import { ValidationError } from './validation.js';
@@ -88,18 +87,13 @@ export function pruneOwnedPackages(root: string, keep = KEPT_PACKAGES): string[]
 }
 
 type Dependencies = {
-  detect: typeof detectEngram; installMemory: typeof installEngram;
   installPackage: typeof installLocalPackage; check: typeof doctor;
   commandPlan: typeof commandPlan; writeLaunchers: typeof writeLaunchers; registerPath: typeof registerPath;
 };
-const defaults: Dependencies = { detect: detectEngram, installMemory: installEngram, installPackage: installLocalPackage, check: doctor, commandPlan, writeLaunchers, registerPath };
-const DETECTION_TEXT: Record<string, string> = {
-  compatible: 'encontrado y compatible', incompatible: 'encontrado con versión no soportada',
-  broken: 'encontrado pero no respondió la prueba de versión', 'not-found': 'no encontrado',
-};
+const defaults: Dependencies = { installPackage: installLocalPackage, check: doctor, commandPlan, writeLaunchers, registerPath };
 export type SetupMode = 'setup' | 'update';
 const STEPS: Record<SetupMode, readonly string[]> = {
-  setup: ['Instalación global', 'Memoria opcional', 'Revisión de cambios', 'Aplicar y verificar'],
+  setup: ['Instalación global', 'Revisión de cambios', 'Aplicar y verificar'],
   update: ['Instalación existente', 'Revisión de cambios', 'Aplicar y verificar'],
 };
 function step(mode: SetupMode, index: number): string {
@@ -135,35 +129,8 @@ export async function runSetupUI(cwd: string, io: ConfigIO, dependencies: Partia
         ['Estado', state.state === 'outdated' ? 'desactualizado: se puede actualizar en esta corrida' : 'al día: coincide con el paquete de origen']]));
     }
     const packageSnapshot = ['mdd/package.json', 'mdd/package-lock.json'].map(name => fileDigest(scopedPath(root, name)));
-    let install = false;
-    let detection: ReturnType<typeof detectEngram> | undefined;
-    let offer: ReturnType<typeof engramOffer> | undefined;
-    if (mode === 'setup') {
-      io.write(`${step(mode, 2)}${note('La memoria es opcional: MDD funciona completo sin ella.')}${note('La detección ejecuta una prueba de versión aislada y acotada; su chequeo de actualizaciones se redirige a un proxy loopback cerrado. Esto no es un sandbox para binarios arbitrarios.')}`);
-      let ownedOffer: ReturnType<typeof engramOffer> | undefined;
-      try { ownedOffer = engramOffer(paths.ownedRoot); } catch { /* Platform availability is reported below. */ }
-      detection = deps.detect(draft.engram && 'mode' in draft.engram ? { binary: draft.engram.binary } :
-        ownedOffer && fs.existsSync(ownedOffer.binary) ? { binary: ownedOffer.binary } : {});
-      io.write(rows([['Engram', `${DETECTION_TEXT[detection.status] ?? detection.status}${detection.version ? ` v${detection.version}` : ''}${detection.binary ? ` \u2014 ${detection.binary}` : ''}`]]));
-      if (detection.status !== 'compatible') {
-        try { offer = engramOffer(paths.ownedRoot); } catch { io.write(note('La instalación automática de memoria no está soportada en este sistema/arquitectura. Seguir sin memoria es una opción válida.')); }
-      }
-      const options: Choice[] = [{ value: 'keep', label: draft.engram ? 'Mantener la memoria ya activada' : 'Seguir sin memoria', hint: 'Es la opción por defecto' }];
-      if (draft.engram) options.push({ value: 'off', label: 'Apagar la memoria', hint: 'MDD sigue funcionando completo' });
-      if (detection.status === 'compatible' && detection.binary) options.push({ value: 'use', label: 'Usar el Engram encontrado', hint: 'Sin descargas ni actualizaciones' });
-      if (offer) options.push({ value: 'install', label: 'Instalar Engram 1.20.0', hint: 'Agrega un binario propio y fijado, sin tocar el existente' });
-      const choice = await choose(io, '¿Qué hacemos con la memoria opcional?', options);
-      if (choice === 'off') delete draft.engram;
-      else if (choice === 'use' && detection.status === 'compatible' && detection.binary) {
-        draft.engram = { mode: 'local', binary: detection.binary, dataDirectory: paths.memoryRoot };
-      } else if (choice === 'install' && offer) {
-        if (fs.existsSync(resolve(offer.binary, '..'))) throw new Error(`Installation destination exists: ${resolve(offer.binary, '..')}`);
-        draft.engram = { mode: 'local', binary: offer.binary, dataDirectory: paths.memoryRoot }; install = true;
-      }
-      if (draft.engram && 'mode' in draft.engram) io.write(`${rows([['Datos de memoria', draft.engram.dataDirectory]])}${note('La instalación nunca arranca el servicio de memoria ni crea una sesión.')}`);
-    }
     const command = deps.commandPlan();
-    const review = mode === 'update' ? 2 : 3;
+    const review = 2;
     io.write(`${step(mode, review)}${rows([...changes.map(file => [file.action, file.name] as const),
       ['record', 'mdd/setup-assets.json'],
       ...command.files.map(file => [file.action, file.path] as const),
@@ -171,9 +138,8 @@ export async function runSetupUI(cwd: string, io: ConfigIO, dependencies: Partia
     io.write(note(`El comando ${COMMAND} queda en ${command.binRoot} y abre esta misma instalación desde cualquier carpeta.`));
     if (state.state === 'absent') io.write(`\n${note(`Instalar MDD local y confiable desde ${PACKAGE_ROOT} en ${paths.ownedRoot}`)}${note('Guarda un tarball local direccionado por contenido en mdd/packages, actualiza solo package.json/package-lock.json y node_modules de la carpeta propia, y puede descargar dependencias fijadas vía npm. Los scripts de ciclo de vida quedan desactivados (--ignore-scripts). Los archivos raíz de OpenCode no se tocan.')}`);
     if (state.state === 'outdated') io.write(`\n${note(`Actualizar el paquete MDD instalado usando ${PACKAGE_ROOT}`)}${note(`Quita ${OWNED_PACKAGE} y su entrada de dependencias en la carpeta propia, y reinstala desde un tarball local direccionado por contenido. Puede descargar dependencias fijadas vía npm; los scripts de ciclo de vida quedan desactivados (--ignore-scripts).`)}${note(`No se tocan mdd.config.json, la carpeta memory, los artefactos ni otros agentes. Se conservan los ${KEPT_PACKAGES} tarballs más recientes y el referenciado en mdd/packages; el resto se borra.`)}`);
-    if (install) io.write(`\n${note('Instalar Engram v1.20.0 del proveedor Gentleman-Programming')}${rows([['Descarga', offer!.url], ['Destino', offer!.binary]])}${note('Se verifican el SHA-256 fijado y checksums.txt antes de extraer.')}${note('No se reemplaza ningún Engram existente ni se cambia el PATH global.')}`);
     if (state.state === 'matching' && changes.every(file => file.action === 'keep')) io.write(`\n${note('Todo está al día: no hay ningún cambio pendiente que aplicar.')}`);
-    io.write(`\n${rows([['Memoria', `${draft.engram ? 'activada (opt-in explícito)' : 'apagada'}${mode === 'update' ? '; mdd update no la modifica' : ''}`]])}${note('Los modelos heredan la selección nativa salvo que ya estén configurados. Las respuestas de perfil sin responder siguen sin responder. Los ajustes avanzados son opcionales con mdd config. Se preservan otros agentes, skills y default_agent.')}`);
+    io.write(`\n${note('Los modelos heredan la selección nativa salvo que ya estén configurados; se cambian con mdd-ai config. Se preservan otros agentes, skills y default_agent.')}`);
     if (await choose(io, '¿Aplicamos exactamente estos cambios y las descargas listadas?', [
       { value: 'apply', label: 'Aplicar', hint: 'Aprueba exactamente lo listado arriba' },
       { value: 'cancel', label: 'Cancelar', hint: 'No se escribe ni se descarga nada' },
@@ -184,7 +150,6 @@ export async function runSetupUI(cwd: string, io: ConfigIO, dependencies: Partia
     io.write(step(mode, review + 1));
     if (state.state === 'outdated') reconcileOwnedPackage(root);
     if (state.state !== 'matching') deps.installPackage(root);
-    if (install) await deps.installMemory(paths.ownedRoot);
     initProject(root, true);
     // The launcher lives in MDD's own folder, so the approved install covers it. The PATH is the
     // user's environment: it changes only through the explicit link command, never as a side effect.
@@ -192,11 +157,7 @@ export async function runSetupUI(cwd: string, io: ConfigIO, dependencies: Partia
     if (before !== JSON.stringify(draft) || !fs.existsSync(paths.settingsPath)) saveGlobalSettings(draft);
     const pruned = state.state === 'matching' ? [] : pruneOwnedPackages(root);
     if (pruned.length) io.write(rows([['Tarballs borrados', String(pruned.length)]]));
-    const report = await deps.check(cwd, false);
-    if (detection && draft.engram && 'mode' in draft.engram && !install && detection.status !== 'compatible') {
-      report.ready = false;
-      report.checks.push({ check: 'engram-version', status: 'action', message: 'The configured local binary did not pass the supported v1.20.0 version probe. Its setting was preserved; select off or an explicit separate install in setup.' });
-    }
+    const report = await deps.check(cwd);
     if (!report.ready) {
       io.write(`\n  Quedan cosas por resolver:\n${rows(report.checks.filter(item => item.status === 'action').map(item => [item.check, item.message] as const))}${note('Los cambios ya aplicados quedan en la instalación global de MDD. La instalación no arrancó OpenCode ni ningún modelo.')}`);
       return 'issues';

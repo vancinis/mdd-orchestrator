@@ -26,6 +26,5 @@ export function installationPaths({ home = homedir(), env = process.env }: Insta
     manifestPath: join(ownedRoot, 'setup-assets.json'),
     packagesRoot: join(ownedRoot, 'packages'),
     binRoot: join(ownedRoot, 'bin'),
-    memoryRoot: join(ownedRoot, 'memory'),
   });
 }

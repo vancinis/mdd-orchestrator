@@ -2,14 +2,15 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
-import { assetText, MDD_ASSETS, PACKAGE_ROOT } from './project-assets.js';
+import { assetText, installedAsset, installedName, MDD_ASSETS, MDD_PACKAGED_ASSETS, PACKAGE_ROOT } from './project-assets.js';
 import { scopedPath, fileDigest } from './safe-paths.js';
 import { LocalFiles } from './local-files.js';
 
 export const LOADER_PATH = 'plugins/mdd.ts';
 export const LOADER_TEXT = "export { default } from '../mdd/node_modules/my-driven-development/dist/opencode-plugin.js';\n";
+/** Earlier versions registered a terminal sidebar here. Setup removes that entry and nothing else. */
 export const TUI_CONFIG_PATH = 'cli.json';
-export const TUI_PLUGIN_SPEC = './mdd/node_modules/my-driven-development/dist/opencode-tui.js';
+export const RETIRED_TUI_PLUGIN_SPEC = './mdd/node_modules/my-driven-development/dist/opencode-tui.js';
 export const PRIVATE_IGNORE_PATH = 'mdd/.gitignore';
 export const PRIVATE_IGNORE_TEXT = '*\n!.gitignore\n';
 // Previously installed assets can exceed today's packaged-asset limit. Read them within a
@@ -26,7 +27,7 @@ export function installedPlugin(root: string): string {
 }
 export function assertMatchingPackage(root: string): void {
   const installed = dirname(dirname(installedPlugin(root)));
-  const files = [...MDD_ASSETS, ...fs.readdirSync(join(PACKAGE_ROOT, 'dist')).filter(name => /\.(js|d\.ts)$/.test(name)).map(name => `dist/${name}`)];
+  const files = [...MDD_PACKAGED_ASSETS, ...fs.readdirSync(join(PACKAGE_ROOT, 'dist')).filter(name => /\.(js|d\.ts)$/.test(name)).map(name => `dist/${name}`)];
   for (const name of files) {
     if (fileDigest(scopedPath(installed, name)) !== fileDigest(scopedPath(PACKAGE_ROOT, name))) throw new Error('Existing MDD package differs from this setup package. Run setup from that installation or explicitly reconcile the owned package first.');
   }
@@ -53,7 +54,7 @@ function packageDigest(root: string): string {
   const dist = join(root, 'dist');
   const built = fs.existsSync(dist) ? fs.readdirSync(dist).filter(name => /\.(js|d\.ts)$/.test(name)).map(name => `dist/${name}`) : [];
   const hash = createHash('sha256');
-  for (const name of [...MDD_ASSETS, ...built].sort()) hash.update(`${name}:${fileDigest(scopedPath(root, name))}\n`);
+  for (const name of [...MDD_PACKAGED_ASSETS, ...built].sort()) hash.update(`${name}:${fileDigest(scopedPath(root, name))}\n`);
   return hash.digest('hex');
 }
 
@@ -87,21 +88,24 @@ export function projectRoot(root: string): string {
   return root;
 }
 
-/** Merge only MDD's entry; do not replace other plugins or a user's attention choice. */
-export function registerTuiPlugin(previous?: string): string {
+/**
+ * Removes only the retired MDD sidebar entry from cli.json. Returns undefined when there is
+ * nothing to change, so a cli.json MDD never touched stays out of the plan entirely. A file that
+ * cannot be parsed is left alone: it is the user's, and MDD has nothing to remove from it.
+ */
+export function unregisterTuiPlugin(previous: string | undefined): string | undefined {
+  if (previous === undefined) return undefined;
   let value: Record<string, unknown>;
   try {
-    const parsed: unknown = previous === undefined ? {} : JSON.parse(previous);
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error();
+    const parsed: unknown = JSON.parse(previous);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
     value = parsed as Record<string, unknown>;
-  } catch { throw new Error('Existing cli.json is not a JSON object; reconcile it before installing MDD.'); }
-  if (value.plugins !== undefined && (!Array.isArray(value.plugins) || !value.plugins.every(entry => typeof entry === 'string' ||
-    (entry && typeof entry === 'object' && !Array.isArray(entry) && typeof entry.package === 'string')))) throw new Error('Existing cli.json plugins cannot be merged safely.');
-  if ((value.plugins as unknown[] | undefined)?.some(entry => entry === TUI_PLUGIN_SPEC ||
-    (entry && typeof entry === 'object' && !Array.isArray(entry) && (entry as Record<string, unknown>).package === TUI_PLUGIN_SPEC))) return previous!;
-  value.plugins = [...(value.plugins as unknown[] | undefined ?? []), TUI_PLUGIN_SPEC];
-  value.$schema ??= 'https://opencode.ai/v2/cli.json';
-  // Preserve all terminal preferences; V1 tui.json is left for OpenCode's own migration.
+  } catch { return undefined; }
+  if (!Array.isArray(value.plugins)) return undefined;
+  const isMdd = (entry: unknown) => entry === RETIRED_TUI_PLUGIN_SPEC ||
+    (!!entry && typeof entry === 'object' && (entry as Record<string, unknown>).package === RETIRED_TUI_PLUGIN_SPEC);
+  if (!value.plugins.some(isMdd)) return undefined;
+  value.plugins = value.plugins.filter(entry => !isMdd(entry));
   return `${JSON.stringify(value, null, 2)}\n`;
 }
 
@@ -110,13 +114,10 @@ export function planProject(root: string, updateOwned = false) {
   const storage = new LocalFiles(root);
   const previous = fs.existsSync(root) ? storage.read('mdd/setup-assets.json', 16384) : undefined;
   const manifest: Record<string, string> = previous ? JSON.parse(previous) : {};
-  if (!fs.existsSync(scopedPath(root, TUI_CONFIG_PATH)) &&
-      ['tui.json', 'tui.jsonc'].some(name => fs.existsSync(scopedPath(root, name)))) {
-    throw new Error('Start OpenCode V2 once to migrate terminal preferences from tui.json(c) to cli.json, then retry MDD setup. Existing preferences were not changed.');
-  }
   const tuiBefore = fs.existsSync(scopedPath(root, TUI_CONFIG_PATH)) ? assetText(root, TUI_CONFIG_PATH, 65536).content : undefined;
-  const files = [...MDD_ASSETS.map(name => ({ name: name.replace('assets/opencode/', ''), content: assetText(PACKAGE_ROOT, name).content })), { name: LOADER_PATH, content: LOADER_TEXT }, { name: PRIVATE_IGNORE_PATH, content: PRIVATE_IGNORE_TEXT },
-    { name: TUI_CONFIG_PATH, content: registerTuiPlugin(tuiBefore) }];
+  const tuiAfter = unregisterTuiPlugin(tuiBefore);
+  const files = [...MDD_ASSETS.map(name => ({ name: installedName(name), content: installedAsset(PACKAGE_ROOT, name).content })), { name: LOADER_PATH, content: LOADER_TEXT }, { name: PRIVATE_IGNORE_PATH, content: PRIVATE_IGNORE_TEXT },
+    ...(tuiAfter === undefined ? [] : [{ name: TUI_CONFIG_PATH, content: tuiAfter }])];
   return files.map(file => {
     const path = scopedPath(root, file.name);
     const before = fs.existsSync(path) ? assetText(root, file.name, INSTALLED_ASSET_MAX_BYTES) : undefined;
@@ -155,6 +156,8 @@ export function initProject(root: string, updateOwned = false): { created: numbe
     try { fs.writeFileSync(fd, file.content, 'utf8'); fs.fsyncSync(fd); created++; }
     finally { fs.closeSync(fd); }
   }
-  new LocalFiles(root).update('mdd/setup-assets.json', () => JSON.stringify(Object.fromEntries(files.map(file => [file.name, file.digest]))) + '\n', 16384);
+  // cli.json belongs to the user; MDD only removes its retired entry, so it is never recorded as owned.
+  const owned = files.filter(file => file.name !== TUI_CONFIG_PATH);
+  new LocalFiles(root).update('mdd/setup-assets.json', () => JSON.stringify(Object.fromEntries(owned.map(file => [file.name, file.digest]))) + '\n', 16384);
   return { created, unchanged, restartRequired: true };
 }

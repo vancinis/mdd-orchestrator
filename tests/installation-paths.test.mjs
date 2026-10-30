@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { installationPaths } from '../dist/installation-paths.js';
 import { loadGlobalSettings, saveGlobalSettings } from '../dist/global-settings.js';
-import { defaultSettings, freezeProfile } from '../dist/settings.js';
+import { defaultSettings } from '../dist/settings.js';
 import { scopedPath } from '../dist/safe-paths.js';
 
 function fixture(t) {
@@ -30,7 +30,6 @@ test('native-root-xdg-home-and-extra-config-directory-semantics', t => {
   assert.equal(paths.manifestPath, join(paths.ownedRoot, 'setup-assets.json'));
   assert.equal(paths.packagesRoot, join(paths.ownedRoot, 'packages'));
   assert.equal(paths.binRoot, join(paths.ownedRoot, 'bin'));
-  assert.equal(paths.memoryRoot, join(paths.ownedRoot, 'memory'));
   const unrelated = { APPDATA: join(root, 'appdata'), OPENCODE_TEST_HOME: join(root, 'test-home'), OPENCODE_CONFIG_DIR: join(root, 'extra') };
   assert.deepEqual(installationPaths({ home, env: { ...options.env, ...unrelated } }), paths);
   assert.equal(installationPaths({ home, env: unrelated }).configRoot, join(home, '.config', 'opencode'));
@@ -59,9 +58,8 @@ test('global-settings authority ignores workspace configs and freezes shared sta
   const settings = defaultSettings();
   settings.profiles.shared = { models: { orchestrator: 'provider/shared' }, answers: {} };
   settings.activeProfile = 'shared';
-  settings.telemetry.enabled = false;
   saveGlobalSettings(settings, options);
-  const frozen = freezeProfile(loadGlobalSettings(options));
+  const frozen = structuredClone(loadGlobalSettings(options).profiles.shared);
   for (const workspace of workspaces) {
     assert.equal(loadGlobalSettings(options).activeProfile, 'shared');
     assert.equal(fs.readFileSync(join(workspace, 'mdd.config.json'), 'utf8'), `legacy ${workspace}\r\n`);
@@ -93,12 +91,12 @@ test('global-settings API uses one authority from two actual empty process worki
   const module = new URL('../dist/global-settings.js', import.meta.url).href;
   const env = { ...process.env, HOME: home, USERPROFILE: home, XDG_CONFIG_HOME: options.env.XDG_CONFIG_HOME, OPENCODE_TEST_HOME: home, OPENCODE_CONFIG_DIR: join(home, 'extra') };
   const run = (cwd, body) => execFileSync(process.execPath, ['--input-type=module', '--eval', `import {loadGlobalSettings,saveGlobalSettings} from ${JSON.stringify(module)}; ${body}`], { cwd, env, encoding: 'utf8', timeout: 10000 });
-  for (const workspace of workspaces) assert.equal(JSON.parse(run(workspace, 'console.log(JSON.stringify(loadGlobalSettings()));')).engram, undefined);
+  for (const workspace of workspaces) assert.equal(JSON.parse(run(workspace, 'console.log(JSON.stringify(loadGlobalSettings()));')).activeProfile, 'default');
   assert.equal(fs.existsSync(paths.configRoot), false);
   run(workspaces[0], `const settings = loadGlobalSettings(); settings.profiles.shared = {models:{orchestrator:'provider/shared'},answers:{}}; settings.activeProfile = 'shared'; saveGlobalSettings(settings);`);
   assert.equal(JSON.parse(run(workspaces[1], 'console.log(JSON.stringify(loadGlobalSettings()));')).activeProfile, 'shared');
-  run(workspaces[1], 'const settings = loadGlobalSettings(); settings.telemetry.enabled = false; saveGlobalSettings(settings);');
-  assert.equal(JSON.parse(run(workspaces[0], 'console.log(JSON.stringify(loadGlobalSettings()));')).telemetry.enabled, false);
+  run(workspaces[1], "const settings = loadGlobalSettings(); settings.profiles.shared.answers.mode = 'interactive'; saveGlobalSettings(settings);");
+  assert.equal(JSON.parse(run(workspaces[0], 'console.log(JSON.stringify(loadGlobalSettings()));')).profiles.shared.answers.mode, 'interactive');
   for (const workspace of workspaces) assert.deepEqual(fs.readdirSync(workspace), []);
   assert.equal(fs.existsSync(env.OPENCODE_CONFIG_DIR), false);
 });

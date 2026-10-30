@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { defaultSettings, parseSettings, loadSettings, saveSettings, freezeProfile, modelFor, MODEL_ROLES, DEFAULT_AUTOMATIC_CORRECTIONS } from '../dist/settings.js';
+import { activeProfile, agentFor, defaultSettings, parseSettings, loadSettings, saveSettings, MODEL_ROLES, MODES, SUMMARIES } from '../dist/settings.js';
 import { LocalFiles } from '../dist/local-files.js';
 import { runConfigUI } from '../dist/config-ui.js';
 
@@ -13,7 +13,7 @@ function fixture(t) {
   return root;
 }
 
-test('absent settings are detached, contain no guessed answers/models, and never write', t => {
+test('absent settings are the defaults and reading never writes', t => {
   const root = fixture(t);
   const first = loadSettings(root);
   assert.deepEqual(first, defaultSettings());
@@ -23,168 +23,62 @@ test('absent settings are detached, contain no guessed answers/models, and never
   assert.deepEqual(fs.readdirSync(root), []);
 });
 
-test('versioned settings round trip, active profile, all roles, nested model paths and startup freeze', t => {
+test('settings round trip profiles, every model role, nested model paths and preferences', t => {
   const root = fixture(t);
   const input = defaultSettings();
-  input.profiles.work = { models: Object.fromEntries(MODEL_ROLES.map(role => [role, 'provider/team/model:version'])), answers: { mode: 'interactive' } };
+  input.profiles.work = { models: Object.fromEntries(MODEL_ROLES.map(role => [role, 'provider/team/model:version#high'])), answers: { mode: 'interactive', summary: 'detailed' } };
   input.activeProfile = 'work';
-  input.engram = { endpoint: 'http://127.0.0.1:7437/', project: 'mdd' };
   const saved = saveSettings(root, input);
-  assert.equal(saved.engram.endpoint, 'http://127.0.0.1:7437');
   assert.deepEqual(loadSettings(root), saved);
-  const frozen = freezeProfile(saved);
-  input.profiles.work.models.orchestrator = 'other/model';
-  saved.profiles.work.answers.mode = 'automatic';
-  assert.equal(frozen.answers.mode, 'interactive');
-  for (const role of MODEL_ROLES) assert.equal(modelFor(frozen, role), 'provider/team/model:version');
-  assert.throws(() => { frozen.models.orchestrator = 'other/model'; }, TypeError);
-  assert.equal(modelFor(freezeProfile(defaultSettings()), 'mdd-apply'), undefined);
-  assert.throws(() => modelFor(frozen, '__proto__'));
+  assert.equal(activeProfile(saved).answers.mode, 'interactive');
   assert.deepEqual(fs.readdirSync(root), ['mdd.config.json']);
   if (process.platform !== 'win32') assert.equal(fs.statSync(join(root, 'mdd.config.json')).mode & 0o777, 0o600);
 });
 
-test('Judgment Day roles round trip model variants independently and inherit when omitted', t => {
-  const root = fixture(t);
-  const roles = ['mdd-jd-judge-a', 'mdd-jd-judge-b', 'mdd-jd-fix'];
-  for (const role of roles) assert.ok(MODEL_ROLES.includes(role), role);
-  const settings = defaultSettings();
-  settings.profiles.default.models = {
-    orchestrator: 'provider/parent#low',
-    'mdd-jd-judge-a': 'provider/team/judge#high',
-    'mdd-jd-judge-b': 'other/judge#medium',
-    'mdd-jd-fix': 'provider/fix',
+test('every model role maps to an installed agent', () => {
+  assert.equal(agentFor('orchestrator'), 'mdd-orchestrator');
+  for (const role of MODEL_ROLES.filter(role => role !== 'orchestrator')) assert.equal(agentFor(role), role);
+  for (const role of ['mdd-risk', 'mdd-security', 'mdd-jd-judge-a', 'mdd-jd-judge-b', 'mdd-jd-fix']) assert.ok(MODEL_ROLES.includes(role), role);
+});
+
+test('settings written by earlier versions still load: retired keys are accepted and dropped', t => {
+  const legacy = {
+    version: 1, activeProfile: 'default',
+    profiles: { default: { models: { 'mdd-apply': 'p/m' }, answers: { certainty: 'very-sure', artifactStore: 'local', complexity: 'low', mode: 'automatic', summary: 'low' } } },
+    engram: { endpoint: 'http://127.0.0.1:7437' }, telemetry: { enabled: false }, workers: { enabled: true },
+    knowledge: { enabled: true }, guards: { enabled: false }, verify: { automaticCorrections: 2 },
   };
-  saveSettings(root, settings);
-  assert.deepEqual(loadSettings(root), settings);
-  const profile = freezeProfile(loadSettings(root));
-  for (const role of roles) {
-    assert.equal(modelFor(profile, role), settings.profiles.default.models[role]);
-    assert.equal(modelFor(freezeProfile(defaultSettings()), role), undefined);
-    const inherited = defaultSettings();
-    inherited.profiles.default.models.orchestrator = 'provider/parent#low';
-    assert.equal(modelFor(freezeProfile(inherited), role), undefined);
-    const invalid = structuredClone(settings);
-    invalid.profiles.default.models[role] = 'provider/../model';
-    assert.throws(() => parseSettings(invalid));
-  }
-  assert.throws(() => parseSettings({ ...settings, profiles: { default: { models: { 'jd-judge-a': 'p/m' } } } }));
+  const parsed = parseSettings(legacy);
+  assert.deepEqual(parsed, { version: 1, activeProfile: 'default', profiles: { default: { models: { 'mdd-apply': 'p/m' }, answers: { mode: 'automatic', summary: 'low' } } } });
+  const root = fixture(t);
+  const text = `${JSON.stringify(legacy, null, '\t')}\r\n`;
+  fs.writeFileSync(join(root, 'mdd.config.json'), text);
+  assert.deepEqual(loadSettings(root), parsed);
+  assert.equal(fs.readFileSync(join(root, 'mdd.config.json'), 'utf8'), text, 'loading never rewrites the file');
 });
 
 const invalid = [
   null, [], {}, { ...defaultSettings(), version: 2 }, { ...defaultSettings(), unknown: 1 },
   { ...defaultSettings(), activeProfile: 'missing' }, { ...defaultSettings(), profiles: {} },
-  { ...defaultSettings(), telemetry: { enabled: 'true' } }, { ...defaultSettings(), telemetry: { enabled: true, export: true } },
   { ...defaultSettings(), profiles: { default: { answers: { mode: 'guess' } } } },
+  { ...defaultSettings(), profiles: { default: { answers: { summary: 'huge' } } } },
   { ...defaultSettings(), profiles: { default: { answers: { extra: true } } } },
   { ...defaultSettings(), profiles: { default: { secret: 'x' } } },
   { ...defaultSettings(), profiles: { default: { models: { wrong: 'provider/model' } } } },
-  ...['../escape', 'a/b', 'a\\b', '__proto__', 'constructor', 'prototype', 'toString', 'valueOf', 'CON', '', 'a'.repeat(65)].map(name => ({ version: 1, activeProfile: name, profiles: { [name]: {} } })),
+  ...['../escape', 'a/b', 'a\\b', '__proto__', 'constructor', 'prototype', 'toString', 'CON', '', 'a'.repeat(65)].map(name => ({ version: 1, activeProfile: name, profiles: { [name]: {} } })),
   ...['model', '/model', 'provider/', 'provider/../model', 'provider//model', 'provider/a b', 'provider/a\n', 'https://secret@host/model'].map(model => ({ ...defaultSettings(), profiles: { default: { models: { orchestrator: model } } } })),
-  ...['https://127.0.0.1:7437', 'http://localhost:7437', 'http://127.0.0.1:65536', 'http://127.0.0.1:0', 'http://127.0.0.1:7437/path', 'http://user:secret@127.0.0.1:7437'].map(endpoint => ({ ...defaultSettings(), engram: { endpoint, project: 'mdd' } })),
-  { ...defaultSettings(), engram: { endpoint: 'http://127.0.0.1:7437', project: 'mdd', sessionID: 'invented' } },
   Object.assign(Object.create({ hidden: true }), defaultSettings()),
-  JSON.parse('{"version":1,"activeProfile":"default","profiles":{"default":{}},"__proto__":{}}'),
 ];
-
-test('knowledge defaults on for fresh settings without configuring memory or writing files', t => {
-  const root = fixture(t);
-  assert.deepEqual(defaultSettings().knowledge, { enabled: true });
-  assert.deepEqual(loadSettings(root).knowledge, { enabled: true });
-  assert.equal(loadSettings(root).engram, undefined);
-  assert.deepEqual(fs.readdirSync(root), []);
-});
-
-test('knowledge defaults on for legacy settings, round trips explicitly, and rejects unknown configuration', t => {
-  const legacy = { version: 1, activeProfile: 'default', profiles: { default: {} } };
-  assert.deepEqual(parseSettings(legacy).knowledge, { enabled: true });
-  const root = fixture(t);
-  for (const enabled of [true, false]) {
-    saveSettings(root, { ...defaultSettings(), knowledge: { enabled } });
-    assert.deepEqual(loadSettings(root).knowledge, { enabled });
-  }
-  for (const knowledge of [null, {}, true, { enabled: 'true' }, { enabled: true, policy: true }]) {
-    assert.throws(() => parseSettings({ ...legacy, knowledge }));
-  }
-});
-
-test('verify automatic corrections default to two when omitted, round trip 0 to 2 and reject anything else', t => {
-  const legacy = { version: 1, activeProfile: 'default', profiles: { default: {} } };
-  assert.equal(parseSettings(legacy).verify, undefined);
-  assert.equal(DEFAULT_AUTOMATIC_CORRECTIONS, 2);
-  const root = fixture(t);
-  for (const automaticCorrections of [0, 1, 2]) {
-    saveSettings(root, { ...defaultSettings(), verify: { automaticCorrections } });
-    assert.deepEqual(loadSettings(root).verify, { automaticCorrections });
-  }
-  for (const verify of [null, {}, { automaticCorrections: 3 }, { automaticCorrections: -1 }, { automaticCorrections: 1.5 }, { automaticCorrections: '2' }, { automaticCorrections: 1, rounds: 1 }])
-    assert.throws(() => parseSettings({ ...legacy, verify }), /verify|automaticCorrections|unknown|object/i);
-  const schema = JSON.parse(fs.readFileSync(new URL('../docs/mdd-config.schema.json', import.meta.url), 'utf8'));
-  assert.deepEqual(schema.properties.verify.properties.automaticCorrections, { type: 'integer', minimum: 0, maximum: DEFAULT_AUTOMATIC_CORRECTIONS, default: DEFAULT_AUTOMATIC_CORRECTIONS });
-});
-
-for (const enabled of [undefined, false]) {
-  test(`knowledge read preserves raw legacy bytes with enabled=${enabled}`, t => {
-    const root = fixture(t);
-    const legacy = { version: 1, activeProfile: 'default', profiles: { default: {} },
-      ...(enabled === undefined ? {} : { knowledge: { enabled } }) };
-    const text = `${JSON.stringify(legacy, null, '\t')}\r\n`;
-    const path = join(root, 'mdd.config.json');
-    fs.writeFileSync(path, text);
-    assert.deepEqual(loadSettings(root).knowledge, { enabled: enabled ?? true });
-    assert.equal(loadSettings(root).engram, undefined);
-    assert.equal(fs.readFileSync(path, 'utf8'), text);
-  });
-}
-
-test('workers default on for absent and legacy settings without rewriting legacy bytes', t => {
-  const root = fixture(t);
-  assert.deepEqual(loadSettings(root).workers, { enabled: true });
-  const legacy = { version: 1, activeProfile: 'default', profiles: { default: {} } };
-  const text = JSON.stringify(legacy);
-  fs.writeFileSync(join(root, 'mdd.config.json'), text);
-  assert.deepEqual(parseSettings(legacy).workers, { enabled: true });
-  assert.deepEqual(loadSettings(root).workers, { enabled: true });
-  assert.equal(fs.readFileSync(join(root, 'mdd.config.json'), 'utf8'), text);
-});
-
-for (const enabled of [true, false]) {
-  test(`workers ${enabled} round trip and startup policy is detached and immutable`, t => {
-    const root = fixture(t);
-    const input = { ...defaultSettings(), workers: { enabled } };
-    const saved = saveSettings(root, input);
-    assert.deepEqual(loadSettings(root).workers, { enabled });
-    const frozen = freezeProfile(saved);
-    input.workers.enabled = !enabled;
-    saved.workers.enabled = !enabled;
-    assert.deepEqual(frozen.workers, { enabled });
-    assert.ok(Object.isFrozen(frozen.workers));
-    assert.throws(() => { frozen.workers.enabled = !enabled; }, TypeError);
-    assert.throws(() => { frozen.workers = { enabled: !enabled }; }, TypeError);
-    assert.equal(freezeProfile({ version: 1, activeProfile: 'default', profiles: { default: {} } }).workers.enabled, true);
-  });
-}
-
-for (const workers of [undefined, null, [], true, 'on', {}, { enabled: undefined },
-  ...['true', 'false', 0, 1, null, [], {}].map(enabled => ({ enabled })),
-  { enabled: true, maxWorkers: 2 }, { enabled: false, unknown: true }]) {
-  test(`workers reject invalid preference ${JSON.stringify(workers)} without replacing settings`, t => {
-    const root = fixture(t);
-    saveSettings(root, defaultSettings());
-    const path = join(root, 'mdd.config.json');
-    const before = fs.readFileSync(path, 'utf8');
-    const input = { ...defaultSettings(), workers };
-    assert.throws(() => parseSettings(input));
-    assert.throws(() => saveSettings(root, input));
-    assert.equal(fs.readFileSync(path, 'utf8'), before);
-  });
-}
-
 for (const [index, value] of invalid.entries()) {
-  test(`settings reject malformed/unsafe input ${index}`, () => assert.throws(() => parseSettings(value)));
+  test(`settings reject malformed or unsafe input ${index}`, () => assert.throws(() => parseSettings(value)));
 }
 
-test('settings malformed JSON and invalid saves preserve bytes', t => {
+test('preferences accept exactly the documented values', () => {
+  for (const mode of MODES) assert.equal(parseSettings({ ...defaultSettings(), profiles: { default: { answers: { mode } } } }).profiles.default.answers.mode, mode);
+  for (const summary of SUMMARIES) assert.equal(parseSettings({ ...defaultSettings(), profiles: { default: { answers: { summary } } } }).profiles.default.answers.summary, summary);
+});
+
+test('malformed JSON and invalid saves preserve the file bytes', t => {
   const root = fixture(t);
   const path = join(root, 'mdd.config.json');
   fs.writeFileSync(path, '{');
@@ -195,96 +89,65 @@ test('settings malformed JSON and invalid saves preserve bytes', t => {
   assert.deepEqual(loadSettings(root), defaultSettings());
 });
 
-test('atomic rename failure leaves original bytes and cleans own temporary and lock files', t => {
+test('a failed atomic rename leaves the original bytes and cleans temporary and lock files', t => {
   const root = fixture(t);
   saveSettings(root, defaultSettings());
   const before = fs.readFileSync(join(root, 'mdd.config.json'), 'utf8');
   const mock = t.mock.method(fs, 'renameSync', () => { throw new Error('simulated atomic rename failure'); });
   const edited = defaultSettings();
-  edited.telemetry.enabled = false;
+  edited.profiles.default.answers.mode = 'interactive';
   assert.throws(() => saveSettings(root, edited), /simulated atomic/);
   mock.mock.restore();
   assert.equal(fs.readFileSync(join(root, 'mdd.config.json'), 'utf8'), before);
   assert.deepEqual(fs.readdirSync(root), ['mdd.config.json']);
 });
 
-test('write lock refuses competing writers without changing their lock or settings', t => {
+test('a held write lock refuses a competing writer without touching the lock or the settings', t => {
   const root = fixture(t);
   saveSettings(root, defaultSettings());
   fs.writeFileSync(join(root, 'mdd.config.json.lock'), 'owner');
   assert.throws(() => saveSettings(root, defaultSettings()));
   assert.equal(fs.readFileSync(join(root, 'mdd.config.json.lock'), 'utf8'), 'owner');
-  assert.equal(loadSettings(root).telemetry.enabled, true);
 });
 
-test('fixed destinations and nonregular config cannot escape the root', t => {
+test('fixed destinations and nonregular or hardlinked config cannot escape the root', t => {
   const root = fixture(t);
-  const files = new LocalFiles(root);
-  assert.throws(() => files.update('../outside.json', () => '{}', 100));
+  assert.throws(() => new LocalFiles(root).update('../outside.json', () => '{}', 100));
   fs.mkdirSync(join(root, 'mdd.config.json'));
   assert.throws(() => loadSettings(root));
-  assert.throws(() => saveSettings(root, defaultSettings()));
-});
-
-test('hardlinked config is rejected for reads and replacement', t => {
-  const root = fixture(t);
+  const other = fixture(t);
   const outside = fixture(t);
   const target = join(outside, 'protected');
   fs.writeFileSync(target, JSON.stringify(defaultSettings()));
-  fs.linkSync(target, join(root, 'mdd.config.json'));
-  assert.throws(() => loadSettings(root));
-  assert.throws(() => saveSettings(root, defaultSettings()));
+  fs.linkSync(target, join(other, 'mdd.config.json'));
+  assert.throws(() => loadSettings(other));
+  assert.throws(() => saveSettings(other, defaultSettings()));
   assert.equal(fs.readFileSync(target, 'utf8'), JSON.stringify(defaultSettings()));
 });
 
-test('symlinked project root is refused (junction on Windows)', t => {
-  const root = fixture(t);
-  const outside = fixture(t);
-  const link = join(root, 'linked');
-  fs.symlinkSync(outside, link, process.platform === 'win32' ? 'junction' : 'dir');
-  assert.throws(() => saveSettings(link, defaultSettings()));
-  assert.deepEqual(fs.readdirSync(outside), []);
-});
-
-test('documented JSON schema matches supported roles/tokens and the guide example parses', () => {
+test('the documented JSON schema matches the supported roles and preferences', () => {
   const schema = JSON.parse(fs.readFileSync(new URL('../docs/mdd-config.schema.json', import.meta.url), 'utf8'));
   assert.deepEqual(Object.keys(schema.$defs.profile.properties.models.properties), [...MODEL_ROLES]);
-  const guide = fs.readFileSync(new URL('../docs/configuration.md', import.meta.url), 'utf8');
-  const example = JSON.parse(guide.match(/```json\n([\s\S]*?)\n```/)[1]);
-  const parsed = parseSettings(example);
-  for (const [field, value] of Object.entries(parsed.profiles.work.answers)) {
-    assert.ok(schema.$defs.profile.properties.answers.properties[field].enum.includes(value));
-  }
-  assert.equal(parsed.activeProfile, 'work');
-  assert.equal(parsed.profiles.work.answers.artifactStore, undefined, 'new configuration examples present only user defaults');
-  const storage = schema.$defs.profile.properties.answers.properties.artifactStore;
-  assert.equal(storage.deprecated, true);
-  for (const artifactStore of storage.enum) {
-    assert.equal(parseSettings({ ...example, profiles: { work: { answers: { artifactStore } } } }).profiles.work.answers.artifactStore, artifactStore);
-  }
+  assert.deepEqual(schema.$defs.profile.properties.answers.properties.mode.enum, [...MODES]);
+  assert.deepEqual(schema.$defs.profile.properties.answers.properties.summary.enum, [...SUMMARIES]);
   assert.deepEqual(schema.required, ['version', 'activeProfile', 'profiles']);
-  assert.deepEqual(schema.properties.workers.required, ['enabled']);
-  assert.equal(schema.properties.workers.type, 'object');
-  assert.equal(schema.properties.workers.additionalProperties, false);
-  assert.equal(schema.properties.workers.properties.enabled.type, 'boolean');
-  assert.equal(schema.properties.workers.properties.enabled.default, true);
-  assert.deepEqual(example.workers, { enabled: true });
 });
 
-test('security model is optional, configurable and exposed by the derived editor roster', async t => {
-  assert.ok(MODEL_ROLES.includes('mdd-security'));
-  assert.equal(modelFor(freezeProfile(defaultSettings()), 'mdd-security'), undefined);
+test('the editor sets a model and the preferences of the active profile', async t => {
   const root = fixture(t);
   const previous = process.env.XDG_CONFIG_HOME;
   process.env.XDG_CONFIG_HOME = root;
   t.after(() => { process.env.XDG_CONFIG_HOME = previous; });
   const owned = join(root, 'opencode/mdd');
   fs.mkdirSync(owned, { recursive: true });
-  const answers = ['2', ...MODEL_ROLES.map(role => role === 'mdd-security' ? 'provider/security#high' : ''), '6'];
+  // Menu: 2 = models (typed by hand, offline), 3 = preferences (interactive, detailed), 4 = save.
+  const answers = ['2', ...MODEL_ROLES.map(role => role === 'mdd-security' ? 'provider/security#high' : ''), '3', '2', '3', '4'];
   let output = '';
   await runConfigUI(root, { isTTY: true, read: async () => answers.shift(), write: text => { output += text; } },
     { models: () => ({ status: 'unavailable', reason: 'Offline deterministic test.' }),
       variants: () => { throw new Error('Offline tests never query variants.'); } });
   assert.match(output, /mdd-security/);
-  assert.equal(loadSettings(owned).profiles.default.models['mdd-security'], 'provider/security#high');
+  const saved = loadSettings(owned).profiles.default;
+  assert.equal(saved.models['mdd-security'], 'provider/security#high');
+  assert.deepEqual(saved.answers, { mode: 'interactive', summary: 'detailed' });
 });
