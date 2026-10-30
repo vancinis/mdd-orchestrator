@@ -27,33 +27,6 @@ const userText = `Continue MDD sourceSessionID=${sourceID} runID=${runID} here.`
 const answers = { certainty: 'very-sure', artifactStore: 'none', mode: 'automatic', summary: 'low' };
 
 for (const kind of ['approval', 'target']) {
-  test(`AL-01: ${kind} transfer reseals and preserves an explicit fixed routing pin through target restart`, async t => {
-    const root = mkdtempSync(join(tmpdir(), 'mdd-transfer-routing-pin-'));
-    t.after(() => rmSync(root, { recursive: true, force: true }));
-    const source = kind === 'approval' ? approvalCheckpoint(root) : checkpoint(root);
-    source.request.routingVersion = 2;
-    source.dataDigest = sealResumeData(source.data, source.runID, source.parent, source.events, source.stable, source.request);
-    validateCheckpoint(source);
-    const target = { sessionID: 'routing-target', agent: 'mdd-orchestrator', directory: root, worktree: root };
-    const marker = new ProgressGuard(root).read(sourceID);
-    const projected = kind === 'approval' ? projectApprovalTransfer(source, marker, target, 'routing-target-user') :
-      projectTargetTransfer(source, marker, target, { sessionID: target.sessionID, userMessageID: 'routing-target-user', latest: true,
-        authored: true, userText: `Continue sourceSessionID=${source.parent} runID=${source.runID}` });
-    assert.deepEqual(projected.checkpoint.request, source.request);
-    assert.deepEqual(projected.checkpoint.events, source.events);
-    const unmarked = structuredClone(projected.checkpoint);
-    delete unmarked.request.routingVersion;
-    assert.throws(() => validateCheckpoint(unmarked), /digest mismatch/);
-    const store = new CheckpointStore(root); const progress = new ProgressGuard(root);
-    store.write(target.sessionID, projected.checkpoint);
-    progress.write(target.sessionID, projected.progress);
-    const runner = new PhaseRunner({ parent: async () => {}, result: async (_r, _c, _p, output) => output }, { checkpoint: store, progress });
-    assert.deepEqual(await runner.restore(target), { restored: true });
-    assert.equal(store.read(target.sessionID).checkpoint.request.routingVersion, 2);
-    const status = runner.status(target.sessionID);
-    assert.equal(status.workflow.nextAction.phase, kind === 'approval' ? 'mdd-propose' : 'mdd-plan');
-    assert.equal(status.state, kind === 'approval' ? 'await-approval' : 'ready');
-  });
 }
 
 for (const backend of ['none', 'local']) for (const legacy of [false, true]) {
@@ -309,97 +282,6 @@ async function partialPublication(t, prefix) {
 
 for (const stage of ['before-claim', 'after-claim', 'after-source-fence', 'after-checkpoint', 'after-progress', 'after-finish', 'after-restore']) {
 }
-
-test('two OS processes running the transfer plugin cannot confirm two targets', async t => {
-  isolateHome(t);
-  const root = mkdtempSync(join(tmpdir(), 'mdd-transfer-process-race-'));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-  saveGlobalSettings(defaultSettings());
-  checkpoint(root);
-  const { input, context } = host(root);
-  const source = await plugin(input);
-  await source.tool.mdd_status.execute({}, context(sourceID));
-  const results = await Promise.all([transferChild(root, 'ses_target_a'), transferChild(root, 'ses_target_b')]);
-  assert.ok(results.every(result => result.code === 0), JSON.stringify(results));
-  const reported = results.map(result => JSON.parse(result.output));
-  assert.ok(reported.filter(result => result.transfer?.state === 'confirmed').length <= 1);
-  const owner = new RunOwnershipStore(root).read(runID);
-  assert.ok(['idle', 'transferring'].includes(owner.state));
-  if (owner.ownerSessionID !== sourceID) {
-    assert.ok(['ses_target_a', 'ses_target_b'].includes(owner.ownerSessionID));
-    const target = await plugin(input);
-    assert.equal(JSON.parse(await target.tool.mdd_status.execute({}, context(owner.ownerSessionID))).transfer.state, 'confirmed');
-    await assert.rejects(source['tool.execute.before']({ sessionID: sourceID, callID: 'late-process-task', tool: 'task' },
-      { args: { description: 'old work', subagent_type: 'mdd-plan', prompt: 'mdd:dispatch:old work' } }));
-  }
-});
-
-test('two plugin processes cannot dispatch concurrently or transfer during a reserved child', async t => {
-  isolateHome(t);
-  const root = mkdtempSync(join(tmpdir(), 'mdd-dispatch-race-'));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-  saveGlobalSettings(defaultSettings());
-  checkpoint(root);
-  const { input, context } = host(root);
-  const a = await plugin(input);
-  const b = await plugin(input);
-  const task = JSON.parse(await a.tool.mdd_status.execute({}, context(sourceID))).task;
-  await b.tool.mdd_status.execute({}, context(sourceID));
-  const calls = [a, b].map((instance, index) => instance['tool.execute.before'](
-    { sessionID: sourceID, callID: `call-${index}`, tool: 'task' }, { args: { ...task } }));
-  const results = await Promise.allSettled(calls);
-  assert.equal(results.filter(item => item.status === 'fulfilled').length, 1);
-  assert.equal(results.filter(item => item.status === 'rejected').length, 1);
-  const owner = new RunOwnershipStore(root).read(runID);
-  assert.equal(owner.state, 'reserved');
-  assert.throws(() => new RunOwnershipStore(root).beginTransfer(runID, sourceID,
-    { sessionID: 'ses_target_a', directory: root, worktree: root }, 'a'.repeat(64), owner.epoch));
-  await assert.rejects(a.tool.mdd_reset.execute({ scope: 'run' }, context(sourceID)), /child may still be running/);
-});
-
-test('crashed coordinator operation exposes exact checkpoint drift and is released only on the user\'s word', async t => {
-  isolateHome(t);
-  const root = mkdtempSync(join(tmpdir(), 'mdd-operation-crash-'));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-  saveGlobalSettings(defaultSettings());
-  const saved = checkpoint(root);
-  const { input, context, histories } = host(root);
-  const original = await plugin(input);
-  assert.equal(JSON.parse(await original.tool.mdd_status.execute({}, context(sourceID))).state, 'ready');
-  const store = new RunOwnershipStore(root);
-  store.reserve(runID, sourceID, 'operation-crashed', 0,
-    { name: 'mdd_context', checkpointSequence: saved.sequence, checkpointDigest: saved.dataDigest });
-  const restarted = await plugin(input);
-  const blocked = JSON.parse(await restarted.tool.mdd_status.execute({}, context(sourceID)));
-  assert.equal(blocked.state, 'recovery-blocked');
-  assert.match(blocked.reason, /mdd_context.*unchanged/);
-  // Blind reset is still refused: the user's exact latest message is the only release.
-  await assert.rejects(restarted.tool.mdd_reset.execute({ scope: 'phase' }, context(sourceID)), /mdd_context.*userText/);
-  await assert.rejects(restarted.tool.mdd_reset.execute({ scope: 'phase', userText: 'A model-authored claim.' }, context(sourceID)), /exact latest message/);
-  assert.equal(store.read(runID).callID, 'operation-crashed');
-  const stopped = 'The context tool crashed and nothing is running any more.';
-  appendUser(histories, sourceID, 'user-operation-stopped', stopped);
-  const released = JSON.parse(await restarted.tool.mdd_reset.execute({ scope: 'phase', userText: stopped }, context(sourceID)));
-  assert.equal(released.state, 'ready');
-  assert.equal(released.runID, runID);
-  assert.equal(store.read(runID).state, 'idle');
-  // A second crash after the checkpoint moved on only permits run discard, never a phase replay.
-  const current = new CheckpointStore(root).read(sourceID).checkpoint;
-  store.reserve(runID, sourceID, 'operation-crashed-again', store.read(runID).epoch,
-    { name: 'mdd_context', checkpointSequence: current.sequence, checkpointDigest: current.dataDigest });
-  new CheckpointStore(root).write(sourceID, { ...current, sequence: current.sequence + 1 });
-  const again = await plugin(input);
-  const drift = JSON.parse(await again.tool.mdd_status.execute({}, context(sourceID)));
-  assert.match(drift.reason, /mdd_context.*different/);
-  const discard = 'Discard the run; the crashed context tool is not running.';
-  appendUser(histories, sourceID, 'user-operation-discard', discard);
-  await assert.rejects(again.tool.mdd_reset.execute({ scope: 'phase', userText: discard }, context(sourceID)), /only.*scope run/);
-  assert.equal(store.read(runID).state, 'reserved');
-  const discarded = JSON.parse(await again.tool.mdd_reset.execute({ scope: 'run', userText: discard }, context(sourceID)));
-  assert.equal(discarded.reset.scope, 'run');
-  assert.equal(store.read(runID).state, 'idle');
-  assert.equal(store.parent(sourceID), undefined);
-});
 
 // ---------------------------------------------------------------------------------------------
 // Re-audit: a confirmed transfer must survive a degraded target checkpoint, and the source

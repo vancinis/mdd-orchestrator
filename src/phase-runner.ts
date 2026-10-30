@@ -32,7 +32,7 @@ import { openQuestions } from './open-questions.js';
 import type { OpenQuestion } from './open-questions.js';
 import type { ProgressGuard } from './progress.js';
 import { CHANGED_LIST_MAX, CheckpointConflictError, CheckpointStorageError, CONCERNS_MAX, EXPLANATION_MAX_BYTES, REJECTED_TEXT_MAX_BYTES,
-  STABLE_CHECKPOINT_VERSION, reconcileProgress, sealResumeData } from './checkpoint.js';
+  STABLE_CHECKPOINT_VERSION, sealResumeData } from './checkpoint.js';
 import type { CheckpointStore, StableCheckpoint, StableRunnerState, ResumeData } from './checkpoint.js';
 import { DOSSIER_VERSION, priorRunView } from './run-dossier.js';
 import type { PriorReceipt, RunDossier, RunDossierStore } from './run-dossier.js';
@@ -197,16 +197,6 @@ function dispatchMismatchMessage(verdict: DispatchVerdict, noun: 'task' | 'inves
  */
 const DISPATCH_NOTE = 'The prompt in task is a single-use MDD dispatch handle, not a truncated prompt: MDD expands it inside the hook. Pass description, subagent_type and prompt unchanged; never ask for the full text.';
 type State = 'starting' | 'ready' | 'persisting-intent' | 'await-result' | 'persisting-result' | 'blocked' | 'await-approval' | 'complete';
-/**
- * The risk-* stable labels name the same Run-level states a phase occupies: `risk-ready` is a
- * ready task (mdd-risk's, not a phase's), `risk-await-result` is an unconfirmed attempt, and
- * `risk-blocked` is a block with no selected route. `stage` is what tells the two apart once
- * restored, never the State value itself.
- */
-const STABLE_TO_STATE: Record<StableRunnerState['state'], State> = {
-  ready: 'ready', 'await-approval': 'await-approval', 'await-result': 'await-result', blocked: 'blocked', complete: 'complete',
-  'risk-ready': 'ready', 'risk-await-result': 'await-result', 'risk-blocked': 'blocked',
-};
 type Run = {
   explorationItems?: ExplorationWorkItem[];
   workerPolicy?: WorkerPolicy; workerState?: WorkerState;
@@ -1926,161 +1916,13 @@ export class PhaseRunner {
     if (this.#continuedRetirement(runtime.sessionID)) return { restored: false };
     if (!this.#explorations.has(runtime.sessionID) && this.#explorationBlocked(runtime.sessionID))
       return { restored: false, reason: 'Exploration progress authority was lost; retained member evidence must not automatically replay.' };
-    if (this.#runs.has(runtime.sessionID)) { this.owner(runtime.sessionID); return { restored: true }; }
     if (!this.options.checkpoint) return { restored: false };
     // Its run moved to another conversation: nothing here is restorable, and nothing is blocked.
     if (this.movedAway(runtime.sessionID)) return { restored: false };
-    try {
-      const saved = this.options.checkpoint.read(runtime.sessionID);
-      if (!saved) return { restored: false };
-      if (saved.checkpoint.version !== STABLE_CHECKPOINT_VERSION) return { restored: false, reason: 'Only a v3 checkpoint may restore a run; older records remain data only.' };
-      const { checkpoint, workflow } = saved;
-      const { data, stable } = checkpoint;
-      if (runtime.agent !== 'mdd-orchestrator' || runtime.directory !== data.directory || runtime.worktree !== data.worktree ||
-          checkpoint.parent !== runtime.sessionID) throw new Error('Checkpoint parent or workspace differs from the native parent.');
-      if (this.options.ownership) {
-        const owner = this.options.ownership.read(checkpoint.runID) ?? this.options.ownership.claim({ runID: checkpoint.runID,
-          sessionID: runtime.sessionID, directory: runtime.directory, worktree: runtime.worktree });
-        if (owner.originSessionID && owner.originSessionID !== owner.ownerSessionID) {
-          const receipt = this.options.ownership.confirmReceipt(checkpoint.runID, runtime.sessionID);
-          // Restoring bytes (not just owning the run) needs them to descend from the published target.
-          this.options.ownership.confirmReceiptLineage(checkpoint.runID, runtime.sessionID, checkpoint);
-          if (!this.inspect.confirmTransfer || !receipt) throw new Error('Native transfer request cannot be confirmed.');
-          await this.inspect.confirmTransfer(runtime, receipt, checkpoint.runID);
-        }
-        const reset = this.#operation.getStore();
-        const resetOwns = owner.state === 'reserved' && owner.callID === reset?.callID && reset?.sessionID === runtime.sessionID &&
-          (owner.recovery !== undefined || owner.operation?.name === 'mdd_reset');
-        if (owner.ownerSessionID !== runtime.sessionID || owner.directory !== runtime.directory || owner.worktree !== runtime.worktree || (owner.state !== 'idle' && !resetOwns))
-          throw new Error('The durable run owner is not idle in this parent.');
-        this.options.ownership.bindParent(runtime.sessionID, checkpoint.runID);
-      }
-      let marker = this.options.progress?.read(runtime.sessionID);
-      if (marker?.state === 'pending') {
-        if (reconcileProgress(marker, checkpoint) !== 'clear') return { restored: false, reason: 'A pending phase attempt is unconfirmed. Confirm its child stopped or provide explicit user attestation; no task was reissued.' };
-        this.options.progress?.write(runtime.sessionID, { ...marker, state: 'settled' });
-        marker = this.options.progress?.read(runtime.sessionID);
-      }
-      // risk-await-result is the risk stop's own unconfirmed attempt: it is released by exactly
-      // the same correlation and liveness rule as an ordinary phase attempt, never redispatched.
-      const riskAwait = stable.state === 'risk-await-result';
-      const releasedAttempt = (stable.state === 'await-result' || riskAwait) &&
-        workflow.nextAction().kind === (riskAwait ? 'await-risk-result' : 'await-result') &&
-        checkpoint.attempt?.state === 'pending' && marker?.state === 'settled' && !!marker.callID &&
-        marker.callID === checkpoint.attempt.id && marker.attemptID === checkpoint.attempt.id;
-      if (!releasedAttempt && (([ 'ready', 'risk-ready'].includes(stable.state) && ((!!stable.rejected) !== (stable.mode === 'inline'))) ||
-          !['ready', 'await-approval', 'blocked', 'complete', 'risk-ready', 'risk-await-result', 'risk-blocked'].includes(stable.state))) {
-        return { restored: false, reason: 'This checkpoint is not a settled phase state that can be safely restored; no task was reissued.' };
-      }
-      if (workflow.snapshot().results.length && (!marker || marker.runID !== checkpoint.runID || marker.userMessageID !== data.userMessageID ||
-          marker.state !== (stable.state === 'complete' ? 'complete' : 'settled'))) {
-        throw new Error('Checkpoint and progress marker disagree.');
-      }
-      if (releasedAttempt && (!marker || marker.runID !== checkpoint.runID || marker.userMessageID !== data.userMessageID)) throw new Error('Released attempt belongs to a different run.');
-      if (marker?.state === 'settled' && !marker.callID && !['settled', 'released'].includes(checkpoint.attempt?.state ?? '')) return { restored: false, reason: 'An inline attempt has no child identity. Inspect partial work and explicitly discard or recover it; no task was reissued.' };
-      if (marker && (marker.runID !== checkpoint.runID || marker.userMessageID !== data.userMessageID ||
-          (marker.state === 'complete' && stable.state !== 'complete') ||
-          (['settled', 'released'].includes(checkpoint.attempt?.state ?? '') && marker.attemptID !== checkpoint.attempt!.id) ||
-          (['settled', 'released'].includes(checkpoint.attempt?.state ?? '') && marker.callID !== undefined && marker.callID !== checkpoint.attempt!.id))) throw new Error('Checkpoint and progress correlation disagree.');
-      const store = workflow.snapshot().answers.artifactStore;
-      if (data.memoryProject && !bindMemory) return { restored: false, reason: 'A fresh Engram session binding is required before restoration; no task was reissued.' };
-      const memory = data.memoryProject ? await bindMemory!(data.memoryProject) : undefined;
-      if (memory && memory.project !== data.memoryProject) throw new Error('Engram project binding changed.');
-      const task = store === 'local' ? TaskStore.open(data.task, { runID: checkpoint.runID, directory: runtime.directory,
-        worktree: runtime.worktree, ...(memory ? { project: memory.project } : {}) }) : undefined;
-      const localPhases = task ? data.taskArtifacts!.phases.map(ref => ({ ref: structuredClone(ref), content: task.readArtifact(ref) })) : undefined;
-      const localContexts = task ? data.taskArtifacts!.contexts.map(ref => ({ ref: structuredClone(ref), content: task.readArtifact(ref) })) : undefined;
-      const riskHistory = task ? data.taskArtifacts!.risks.map(ref => ({ ref: structuredClone(ref), content: task.readArtifact(ref) })) : undefined;
-      const retained = task?.latest();
-      const artifacts = new ArtifactStore(runtime.directory, store, memory, task);
-      // These synthetic identifiers are diagnostic data only. ArtifactStore.read will reject them
-      // because this new store instance never issued the serialized historical references.
-      const historical = (phase: Phase, content: string, digest: string, index: number, explorationID?: string, batchID?: string): ArtifactResult => ({
-        content, ref: { runID: checkpoint.runID, phase, ...(explorationID ? { explorationID } : {}), ...(batchID ? { batchID } : {}),
-          recordID: `restored-${index}`, digest, bytes: Buffer.byteLength(content), store: 'none' },
-      });
-      const risking = ['risk-ready', 'risk-await-result', 'risk-blocked'].includes(stable.state);
-      // The one passed risk-result in this history, if any; its evidenceSummary is never trusted
-      // from the stored report, only from the replayed event that actually settled the risk stop.
-      const lastRisk = workflow.history().find((event): event is { kind: 'risk-result'; result: { outcome: 'passed' | 'failed'; evidenceSummary: string; route?: 'low' | 'high' } } =>
-        event.kind === 'risk-result' && event.result.outcome === 'passed');
-      const run: Run = {
-        ...(data.workerPolicy ? { workerPolicy: Object.freeze({ ...data.workerPolicy }) } : {}),
-        ...(data.workerState ? { workerState: structuredClone(data.workerState) } : {}),
-        id: checkpoint.runID, runtime: { ...runtime }, workflow,
-        phase: stable.state === 'await-approval' ? workflow.snapshot().results.at(-1)!.phase
-          : stable.report.status === 'passed' && ['ready', 'risk-ready'].includes(stable.state) ? stable.report.phase : stable.phase, requirements: data.requirements,
-        memory, artifacts, ...(task ? { task, riskHistory: riskHistory!, retainedReceipts: retained?.dossier.questionReceipts ?? [] } : {}),
-        args: { description: '', subagent_type: stable.phase, prompt: '' },
-        state: releasedAttempt ? 'blocked' : STABLE_TO_STATE[stable.state],
-        ...(risking ? { stage: RISK_ACTOR } : {}),
-        ...(data.risk && lastRisk ? { riskVerdict: structuredClone(data.risk.verdict), riskSummary: lastRisk.result.evidenceSummary,
-          riskArtifact: riskHistory?.at(-1) ?? { ref: structuredClone(data.risk.ref), content: '' } } : {}),
-        ...(!data.risk && riskHistory?.length ? { riskArtifact: riskHistory.at(-1)! } : {}),
-        checkpointRequest: structuredClone(checkpoint.request), checkpointSequence: checkpoint.sequence,
-        history: localPhases ?? data.dependencies.map((item, index) => historical(item.phase, item.content, item.digest, index, undefined, item.batchID)),
-        contexts: data.contexts.map((item, index) => ({ explorationID: item.explorationID, outcome: item.outcome,
-          summary: item.summary, concerns: structuredClone(item.concerns), artifact: localContexts?.[index] ?? historical('mdd-explore', item.content, item.digest, index, item.explorationID) })),
-        calls: new Set(data.calls), planned: structuredClone(data.planned), evidence: { ...data.evidence },
-        ...(data.acceptance ? { acceptance: structuredClone(data.acceptance) } : {}),
-        decisions: structuredClone(data.decisions), ...(data.verification ? { verification: structuredClone(data.verification) } : {}),
-        executedChecks: structuredClone(data.executedChecks), changedFiles: data.changedFiles,
-        ...(data.verificationVersion ? { verificationVersion: data.verificationVersion } : {}),
-        changedList: structuredClone(stable.changedList), ...(stable.delivered ? { delivered: { ...stable.delivered } } : {}),
-        concerns: structuredClone(stable.concerns), context: structuredClone(data.context),
-        ...(data.rework ? { rework: { ...data.rework } } : {}),
-        userMessageID: data.userMessageID, uncertain: false, attempts: stable.attempts, spent: stable.spent,
-        mode: stable.mode, ...(stable.nativeUsed ? { nativeUsed: true } : {}),
-        ...(stable.lastFailure ? { lastFailure: stable.lastFailure } : {}),
-        ...(stable.fallbackExhausted ? { fallbackExhausted: true } : {}),
-        ...(stable.reportRepairExhausted ? { reportRepairExhausted: true } : {}),
-        malformed: stable.malformed, ...(stable.rejected ? { rejected: { ...stable.rejected } } : {}),
-        ...(stable.openQuestions ? { openQuestions: structuredClone(stable.openQuestions) } : {}),
-        brief: '', report: structuredClone(stable.report),
-        ...(checkpoint.attempt?.state === 'settled' ? { attemptID: checkpoint.attempt.id,
-          ...(marker?.callID ? { lastCallID: marker.callID } : {}), settledCheckpoint: true } : {}),
-      };
-      // Explicit Verify rework is a new implementation pass, not recovery of an incomplete batch.
-      if (data.rework && workflow.history().at(-1)?.kind === 'rework') delete run.workerState;
-      if (releasedAttempt) {
-        run.evidence = invalidateEvidence(run.evidence, this.#affected(run.phase));
-        run.report = { phase: run.phase, summary: 'La ejecución se detuvo; la evidencia afectada quedó retirada.', how: [], status: 'blocked', evidence: run.evidence };
-        run.reason = 'The prior child was released without a recorded result. Inspect partial changes, then explicitly reset this phase to retry it.';
-        run.attemptID = checkpoint.attempt!.id;
-        run.lastCallID = marker!.callID!;
-        if (run.workerState) {
-          run.evidence = invalidateEvidence(run.evidence, this.#affected(run.phase));
-          run.report = { ...run.report, status: 'blocked', evidence: run.evidence };
-        }
-      } else if (stable.state === 'ready' || stable.state === 'risk-ready') {
-        if (stable.rejected) {
-          const prompts = stable.state === 'risk-ready' ? this.#riskPrompts(run) : this.#phasePrompts(run, run.phase);
-          run.args = prompts.args;
-          run.brief = prompts.brief;
-          this.#arm(run);
-        } else if (stable.state === 'risk-ready') {
-          // Re-prepares the risk stop from replayed requirements and exploration alone, never
-          // from the stored task: the ready prompt is rebuilt, not resent, and nothing dispatches.
-          this.#advance(run);
-          if (run.workflow.nextAction().kind !== 'execute-risk') throw new Error('Prepared risk stop differs from checkpoint.');
-        } else {
-          const before = workflow.history().length;
-          // A phase readied straight after a recorded result keeps that result's report, exactly
-          // as it did before the restart; any other ready phase gets its ordinary ready report.
-          this.#advance(run);
-          if ((run.state === 'ready' && run.phase !== stable.phase) || run.workflow.nextAction().kind !== 'execute') throw new Error('Prepared phase differs from checkpoint.');
-          if (run.workflow.history().length !== before) {
-            if (checkpoint.attempt) run.attemptID = checkpoint.attempt.id;
-            this.#checkpoint(run, checkpoint.attempt?.state === 'settled' ? 'settled' : undefined);
-          }
-        }
-      }
-      if (task && retained?.checkpoint.parent !== runtime.sessionID) this.#checkpoint(run, checkpoint.attempt?.state);
-      this.#runs.set(runtime.sessionID, run);
-      this.owner(runtime.sessionID);
-      return { restored: true };
-    } catch (error) { return { restored: false, reason: error instanceof Error && error.message.startsWith('Exact native message lookup')
-      ? error.message : 'Checkpoint or progress cannot be validated for this parent. No task was reissued; inspect local files and explicitly discard the run if needed.' }; }
+    // The fixed (version-2) route was retired: its checkpoints remain read-only data, never a live run.
+    try { if (!this.options.checkpoint.read(runtime.sessionID)) return { restored: false }; }
+    catch { /* An unreadable record is reported the same way: data only, discardable with mdd_reset scope run. */ }
+    return { restored: false, reason: 'This conversation holds a fixed-route (version-2) run record. That route was retired, so the record is read-only data: start a fresh mdd_adapt entry, or discard it with mdd_reset scope run.' };
   }
 
   status(sessionID: string) {
