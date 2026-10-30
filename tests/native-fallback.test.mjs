@@ -121,25 +121,6 @@ test('unknown liveness keeps the writer slot; stale results do not release or de
   assert.equal(runner.status(call.sessionID).workflow.results.length, 1);
 });
 
-test('direct submission selects native work; rejected reports remain report-only repairs', async t => {
-  const { runner, events } = await fixture(t);
-  await throughRisk(runner);
-  const selected = await runner.submit({ result: 'This must not be accepted as phase work.' }, runtime);
-  assert.equal(selected.task.subagent_type, 'general');
-  // One result (mdd-explore) is already settled by throughRisk before this direct submission.
-  assert.equal(selected.workflow.results.length, 1);
-  const call = { sessionID: runtime.sessionID, callID: 'repair' };
-  const args = await runner.before(call, selected.task);
-  await assert.rejects(runner.after(call, args, 'A malformed but completed report'), /no attempt was spent/);
-  const rejected = runner.status(runtime.sessionID);
-  assert.equal(rejected.task, undefined);
-  assert.equal(nextAction(rejected).tool, 'mdd_phase_result');
-  await assert.rejects(runner.before({ ...call, callID: 'rerun' }, args), /restatement/);
-  await runner.submit({ result: result(selected) }, runtime);
-  assert.equal(runner.status(runtime.sessionID).workflow.results.length, 2);
-  assert.equal(events.findLast(event => event.event === 'phase-end').executor, 'general', 'restating the report does not transfer execution provenance to the coordinator');
-});
-
 test('context investigation gets its own budget and restores an exhausted main phase', async t => {
   const { runner } = await fixture(t);
   for (let i = 0; i < 4; i++) await fail(runner, i);
@@ -157,20 +138,6 @@ test('context investigation gets its own budget and restores an exhausted main p
   assert.equal(restored.reason, main.reason);
   assert.equal(restored.attempts, main.attempts);
   assert.deepEqual(restored.workflow, main.workflow);
-});
-
-test('standalone investigation has a bounded native explore fallback and report-only repair', async () => {
-  const runner = new PhaseRunner({ parent: async () => {}, result: async (_r, _c, _p, output) => output, stopped: async () => true });
-  await runner.explore({ purpose: 'Inspect the CLI' }, runtime);
-  for (let i = 0; i < 3; i++) await fail(runner, i);
-  const ready = runner.status(runtime.sessionID);
-  assert.equal(ready.task.subagent_type, 'explore');
-  const call = { sessionID: runtime.sessionID, callID: 'solo' };
-  const args = await runner.before(call, ready.task);
-  await assert.rejects(runner.after(call, args, 'Unreadable'), /restatement/);
-  assert.equal(nextAction(runner.status(runtime.sessionID)).tool, 'mdd_phase_result');
-  await runner.submit({ result: result({ phase: 'mdd-explore' }) }, runtime);
-  assert.equal(runner.status(runtime.sessionID).state, 'not-started');
 });
 
 test('SA-1: standalone fallback preserves its JSON envelope and omits inaccessible skills', async () => {

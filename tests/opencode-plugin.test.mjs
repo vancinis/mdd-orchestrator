@@ -263,118 +263,12 @@ test('native instance disposal closes only its matching memory owner; startup re
   await assert.rejects(readFile(join(f.root, 'memory/engram.db')), /ENOENT/);
 });
 
-test('setup_continuation_preserves_native_origin_across_restart', async t => {
-  const f = await setupFixture(t);
-  const first = JSON.stringify(legacySetup(f));
-  const part = f.parentMessages.at(-1).parts[0];
-  part.state = { ...part.state, status: 'completed', output: first, time: { start: 1, end: 2 } };
-  f.parentMessages.push({ info: { id: 'followup', role: 'user', sessionID: f.runtime.sessionID }, parts: [{ type: 'text', text: 'Intenta continuar, reinicie opencode', sessionID: f.runtime.sessionID, messageID: 'followup' }] });
-  f.parentMessages.push({ info: { ...f.parentMessages[1].info, id: 'later', parentID: 'followup' }, parts: [] });
-  const restarted = await plugin(f.input);
-  const context = { ...f.context, messageID: 'later' };
-  const status = JSON.parse(await restarted.tool.mdd_status.execute({}, context));
-  assert.deepEqual(status.pendingStart, { requirements: f.requirements });
-  await assert.rejects(createInspector(f.input).setupPending(f.runtime, f.requirements, 'forged-caller'), /caller/);
-  await assert.rejects(restarted.tool.mdd_start.execute({ requirements: 'Intenta continuar, reinicie opencode' }, context), /pending|original/i);
-  const recovered = JSON.parse(await restarted.tool.mdd_start.execute(status.pendingStart, context));
-  assert.equal(recovered.state, 'question-ready');
-  assert.equal(recovered.memory, 'off');
-  await assert.rejects(createInspector(f.input).intake(f.runtime, f.requirements, 'later'), /latest/);
-  const configured = defaultSettings();
-  configured.profiles.default.answers = { ...answers };
-  const requests = [];
-  t.mock.method(globalThis, 'fetch', async (url, options) => {
-    requests.push([url, options.method]);
-    throw new Error('Memory off must not fetch.');
-  });
-  const starts = [];
-  const gate = new NativeIntake({ status: () => ({ state: 'not-started' }), async start(input) { starts.push(input); } }, createInspector(f.input), configured);
-  await gate.start(status.pendingStart, context, context.messageID);
-  assert.equal(starts[0].requirements, f.requirements);
-  assert.deepEqual(requests, []);
-});
-
 // Recovery of a setup-only objective is a convenience, not a guard: what keeps a start honest is
 // that its requirements must equal the actual latest native user text. So history that cannot
 // prove a pending setup means there is none to offer, and only two things still interrupt: a
 // conversation that is not this coordinator's, and two candidates that cannot be told apart.
 for (const fault of ['forged', 'legacy-error', 'execution', 'child', 'workspace', 'project', 'incomplete', 'compacted', 'compacted-tool', 'duplicate', 'synthetic', 'ownership', 'ambiguous']) {
-  test(`setup_recovery_never_invents_or_guesses_an_objective: ${fault}`, async t => {
-    const f = await setupFixture(t);
-    const output = legacySetup(f);
-    const part = f.parentMessages[1].parts[0];
-    part.state = { ...part.state, status: 'completed', output: JSON.stringify(output), time: { start: 1, end: 2 } };
-    if (fault === 'forged') { output.setupOrigin.userMessageID = 'forged'; part.state.output = JSON.stringify(output); }
-    if (fault === 'legacy-error') part.state = { status: 'error', error: 'Configure Engram and restart', input: { requirements: f.requirements } };
-    if (fault === 'execution') f.parentMessages[1].parts.push({ ...part, callID: 'execution', tool: 'task' });
-    if (fault === 'child') f.parent.parentID = 'another-parent';
-    if (fault === 'workspace') f.parentMessages[1].info.path.cwd = 'another-workspace';
-    if (fault === 'project') { f.input.project.id = 'another-project'; f.parent.projectID = 'another-project'; }
-    if (fault === 'incomplete') while (f.parentMessages.length < 100) f.parentMessages.push(structuredClone(f.parentMessages[0]));
-    if (fault === 'compacted') f.parentMessages[0].parts.push({ type: 'compaction' });
-    if (fault === 'compacted-tool') part.state.time.compacted = 3;
-    if (fault === 'duplicate') f.parentMessages[1].parts.push(structuredClone(part));
-    if (fault === 'synthetic') f.parentMessages[0].parts[0].synthetic = true;
-    if (fault === 'ownership') part.messageID = 'forged';
-    if (fault === 'ambiguous') {
-      const user = structuredClone(f.parentMessages[0]); user.info.id = 'second-user'; user.parts[0].messageID = 'second-user'; user.parts[0].text = 'A different objective';
-      const assistant = structuredClone(f.parentMessages[1]); assistant.info.id = 'second-assistant'; assistant.info.parentID = 'second-user';
-      const second = assistant.parts[0]; second.callID = 'second-start'; second.messageID = 'second-assistant'; second.state.input.requirements = user.parts[0].text;
-      output.setupOrigin.userMessageID = 'second-user'; output.pendingStart.requirements = user.parts[0].text; second.state.output = JSON.stringify(output);
-      f.parentMessages.push(user, assistant);
-    }
-    const inspector = createInspector(f.input);
-    // A conversation that is not this coordinator's, and an ambiguous pair of real candidates,
-    // are the only faults worth stopping for. Everything else simply proves no pending setup.
-    const interrupts = ['child', 'ambiguous'].includes(fault);
-    if (interrupts) await assert.rejects(inspector.setupPending(f.runtime));
-    else assert.equal(await inspector.setupPending(f.runtime), undefined);
-    const restarted = await plugin(f.input);
-    const status = JSON.parse(await restarted.tool.mdd_status.execute({}, f.context));
-    assert.equal(status.recovery, interrupts ? 'unavailable' : undefined);
-    assert.equal(status.pendingStart, undefined);
-    // Continuation text is never an objective, whatever the history around it looks like.
-    await assert.rejects(restarted.tool.mdd_start.execute({ requirements: 'Continue' }, f.context));
-  });
 }
-
-// One successful start used to poison its own conversation: every later mdd_start failed on an
-// unreadable structure error, so mdd_reset with scope run promised a restart it could not deliver
-// and the only way to keep working was abandoning the conversation with its evidence in it.
-test('a conversation that already ran can start a second objective after a reset', async t => {
-  const f = await setupFixture(t);
-  const first = JSON.parse(await f.hooks.tool.mdd_start.execute({ requirements: f.requirements }, f.context));
-  assert.equal(first.state, 'question-ready');
-  const caller = f.parentMessages.at(-1);
-  caller.parts[0].state = { ...caller.parts[0].state, status: 'completed', output: JSON.stringify(first), time: { start: 1, end: 2 } };
-  caller.parts.push({ type: 'tool', tool: 'task', callID: 'phase-call', sessionID: f.runtime.sessionID, messageID: caller.info.id,
-    state: { status: 'completed', output: 'phase output', time: { start: 3, end: 4 } } });
-  assert.equal(await createInspector(f.input).setupPending(f.runtime), undefined);
-  assert.deepEqual(JSON.parse(await f.hooks.tool.mdd_reset.execute({ scope: 'run' }, f.context)).reset, { scope: 'run' });
-  const second = 'Ahora el aviso tiene que quedar siempre centrado';
-  f.parentMessages.splice(-1, 0, { info: { id: 'msg_user_2', sessionID: f.runtime.sessionID, role: 'user' },
-    parts: [{ type: 'text', text: second, sessionID: f.runtime.sessionID, messageID: 'msg_user_2' }] });
-  const restarted = JSON.parse(await f.hooks.tool.mdd_start.execute({ requirements: second }, f.context));
-  assert.equal(restarted.state, 'question-ready');
-});
-
-// A pending question is a healthy run: probing native history there once told the user that a
-// perfectly recoverable objective could not be recovered, which is the opposite of the truth.
-test('a live intake is never reported as unrecoverable', async t => {
-  const f = await setupFixture(t);
-  const started = JSON.parse(await f.hooks.tool.mdd_start.execute({ requirements: f.requirements }, f.context));
-  assert.equal(started.state, 'question-ready');
-  const message = f.parentMessages.at(-1);
-  const part = message.parts[0];
-  part.state = { ...part.state, status: 'completed', output: JSON.stringify(started), time: { start: 1, end: 2 } };
-  message.parts.push({ type: 'tool', tool: 'question', callID: 'question-1', sessionID: f.runtime.sessionID, messageID: message.info.id, state: { status: 'running', input: started.question } });
-  assert.equal(await createInspector(f.input).setupPending(f.runtime), undefined);
-  const status = JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context));
-  assert.equal(status.state, 'question-ready');
-  assert.ok(status.question);
-  assert.equal(Object.hasOwn(status, 'recovery'), false);
-  assert.equal(status.pendingStart, undefined);
-});
 
 test('invalid setup names actual file without exposing values or claiming tools are available', async t => {
   const f = await setupFixture(t);
@@ -388,11 +282,11 @@ test('informational_request_does_not_start_implementation: shipped instruction c
   // Free by default: an information-only request needs no run; strict mode forbids starting one.
   assert.match(asset, /Information-only requests need no run/);
   const { STRICT_COORDINATOR } = await import('../dist/guards.js');
-  assert.match(STRICT_COORDINATOR, /Information-only requests MUST NOT use mdd_start/);
+  assert.match(STRICT_COORDINATOR, /Information-only requests MUST NOT use mdd_adapt/);
   assert.match(asset, /Follow the available safe step; when MDD is blocked, say so and keep helping the user directly/);
   assert.match(asset, /works\s+with\s+or\s+without\s+an\s+accepted\s+run/);
   assert.doesNotMatch(asset, /no standalone read-only investigation route/);
-  assert.match(asset, /Never end a phase report with an approval question of your own/);
+  assert.match(asset, /Never end an actor report with an approval question of your own/);
   assert.match(asset, /mdd_pr_body[\s\S]*do not hand-write one/);
   // This checks shipped instructions, not model adherence or a native E2E run.
 });
@@ -469,9 +363,8 @@ test('OpenCode SDK contract: bounded callback even if injected client ignores ab
 test('plugin contract: scoped tools, in-place native args, result gating, no native override', async t => {
   const f = await pluginFixture(t);
   const { hooks, context, writes } = f;
-  assert.deepEqual(Object.keys(hooks.tool).sort(), ['mdd_adapt', 'mdd_answer', 'mdd_artifact_read', 'mdd_change_request', 'mdd_check_report', 'mdd_context', 'mdd_contextual_explore', 'mdd_improve', 'mdd_improvements', 'mdd_jd_inspect', 'mdd_knowledge', 'mdd_knowledge_record', 'mdd_phase_result', 'mdd_pr_body', 'mdd_prepare_advance', 'mdd_reset', 'mdd_revisit', 'mdd_security', 'mdd_start', 'mdd_status', 'mdd_transfer', 'mdd_transfer_recover']);
+  assert.deepEqual(Object.keys(hooks.tool).sort(), ['mdd_adapt', 'mdd_artifact_read', 'mdd_check_report', 'mdd_contextual_explore', 'mdd_improve', 'mdd_improvements', 'mdd_jd_inspect', 'mdd_knowledge', 'mdd_knowledge_record', 'mdd_pr_body', 'mdd_reset', 'mdd_security', 'mdd_status']);
   assert.deepEqual(Object.keys(hooks.tool.mdd_adapt.args), ['payload']);
-  assert.deepEqual(Object.keys(hooks.tool.mdd_start.args), ['requirements', 'context', 'exploration', 'questions']);
   assert.deepEqual(Object.keys(hooks.tool.mdd_contextual_explore.args), ['purpose', 'workItems']);
   const contextSchema = hooks.tool.mdd_pr_body.args.additionalContext;
   assert.ok(contextSchema, 'PR tool exposes bounded discriminated context');
@@ -484,54 +377,7 @@ test('plugin contract: scoped tools, in-place native args, result gating, no nat
     { section: 'risks', source: 'interpretation', text: 'a'.repeat(1001) },
   ]) assert.equal(contextSchema.safeParse([entry]).success, false);
   assert.equal(contextSchema.safeParse(Array(25).fill({ section: 'review', source: 'user', text: 'Nota.' })).success, false);
-  const ready = JSON.parse(await hooks.tool.mdd_start.execute({ requirements: f.requirements }, context));
-  const nativeArgs = ready.task;
-  const output = { args: nativeArgs };
-  await hooks['tool.execute.before']({ ...call, tool: 'task' }, output);
-  assert.equal(output.args, nativeArgs);
-  assert.match(nativeArgs.prompt, /Native callID=/);
-  const text = result(ready);
-  f.childMessages[0].parts[0].text = text;
-  f.output.output = `<task id="ses_child" state="completed">\n<task_result>\n${text}\n</task_result>\n</task>`;
-  await hooks['tool.execute.after']({ ...call, tool: 'task', args: nativeArgs }, f.output);
-  const status = JSON.parse(await hooks.tool.mdd_status.execute({}, context));
-  assert.equal(status.state, 'ready');
-  assert.equal(status.workflow.results.length, 1);
-  assert.equal(writes.length, 3, 'automatic Engram saves the artifact as well as startup/result evidence');
   await hooks['tool.execute.before']({ tool: 'read', sessionID: 'other', callID: 'other' }, { args: {} });
-});
-
-for (const publication of ['success', 'failure']) test(`PK4 actual plugin ${publication} keeps catalog delivery metrics honest and bodies child-only`, async t => {
-  const f = await pluginFixture(t);
-  f.settings.knowledge.enabled = true;
-  f.settings.telemetry.enabled = false;
-  saveGlobalSettings(f.settings);
-  await mkdir(join(f.root, 'mdd'));
-  await mkdir(join(f.root, 'skills'));
-  await writeFile(join(f.root, 'skills/SKILL.md'), '---\nname: cli\n---\nPRIVATE_PLUGIN_SKILL inspect the CLI.');
-  await writeFile(join(f.root, 'mdd/knowledge.json'), JSON.stringify({ version: 1, skills: [{ id: 'cli', approved: true,
-    path: 'skills/SKILL.md', phases: ['mdd-explore'], terms: ['cli'], paths: [], tools: ['read', 'bash'] }] }));
-  const hooks = await plugin(f.input);
-  const ready = JSON.parse(await hooks.tool.mdd_start.execute({ requirements: f.requirements }, f.context));
-  assert.equal(JSON.stringify(ready).includes('PRIVATE_PLUGIN_SKILL'), false);
-  const output = { args: structuredClone(ready.task) };
-  if (publication === 'failure') {
-    Object.freeze(output.args);
-    await assert.rejects(hooks['tool.execute.before']({ ...call, tool: 'task' }, output), /read only|read-only|extensible|assign/i);
-    assert.equal(JSON.parse(await hooks.tool.mdd_status.execute({}, f.context)).knowledge, undefined);
-    return;
-  }
-  await hooks['tool.execute.before']({ ...call, tool: 'task' }, output);
-  assert.ok(output.args.prompt.includes('PRIVATE_PLUGIN_SKILL'));
-  const status = JSON.parse(await hooks.tool.mdd_status.execute({}, f.context));
-  assert.deepEqual(status.knowledge.selectedSkillIDs, ['cli']);
-  assert.equal(JSON.stringify(status).includes('PRIVATE_PLUGIN_SKILL'), false);
-  const transcript = { messages: [{ info: { role: 'assistant', sessionID: f.runtime.sessionID }, parts: [{
-    type: 'tool', tool: 'task', callID: call.callID, state: { status: 'completed', input: output.args, output: 'Inspected' },
-  }] }] };
-  await hooks['experimental.chat.messages.transform']({}, transcript);
-  assert.equal(JSON.stringify(transcript).includes('PRIVATE_PLUGIN_SKILL'), false);
-  assert.ok(output.args.prompt.includes('PRIVATE_PLUGIN_SKILL'), 'child arguments remain immutable');
 });
 
 test('plugin contract: a phase actor may check its own report, and nobody else may call in', async t => {
@@ -585,34 +431,6 @@ test('standalone judges are admitted concurrently without phase before/after or 
   assert.deepEqual(JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context)), initial);
 });
 
-test('standalone fix dispatch refuses an unfinished workflow and judges refuse in-flight phases', async t => {
-  const f = await pluginFixture(t);
-  const ready = JSON.parse(await f.hooks.tool.mdd_start.execute({ requirements: f.requirements }, f.context));
-  await assert.rejects(f.hooks['tool.execute.before']({ ...call, tool: 'task' }, { args: jdTask('mdd-jd-fix') }), /implementation|unfinished|workflow/);
-  await f.hooks['tool.execute.before']({ ...call, tool: 'task' }, { args: ready.task });
-  await assert.rejects(f.hooks['tool.execute.before']({ ...call, callID: 'judge', tool: 'task' }, { args: jdTask('mdd-jd-judge-a') }), /flight|writer|owner/);
-});
-
-test('standalone dispatch refuses preflight interactions, extra capabilities and actor-name lookalikes', async t => {
-  const f = await setupFixture(t);
-  await f.hooks.tool.mdd_start.execute({ requirements: f.requirements }, f.context);
-  await assert.rejects(f.hooks['tool.execute.before']({ ...call, tool: 'task' }, { args: jdTask('mdd-jd-judge-a') }), /interaction|question|preflight/);
-  const fresh = await pluginFixture(t);
-  for (const extra of [{ background: true }, { session_id: 'child' }, { model: 'p/m' }]) {
-    await assert.rejects(fresh.hooks['tool.execute.before']({ ...call, tool: 'task' }, { args: { ...jdTask('mdd-jd-judge-a'), ...extra } }), /exact|foreground/);
-  }
-  // An actor-name lookalike never gets standalone handling. Strict mode refuses it as a stray
-  // dispatch during the run; free mode runs it untouched as the coordinator's own task.
-  for (const guards of [true, false]) {
-    const run = await modeFixture(t, guards);
-    await run.hooks.tool.mdd_start.execute({ requirements: run.requirements }, run.context);
-    const lookalike = { args: jdTask('mdd-jd-judge-a-extra') };
-    const sent = run.hooks['tool.execute.before']({ ...call, tool: 'task' }, lookalike);
-    if (guards) await assert.rejects(sent, /dispatch|subagent|match/);
-    else { await sent; assert.deepEqual(lookalike.args, jdTask('mdd-jd-judge-a-extra')); }
-  }
-});
-
 test('judges deny arbitrary native/MCP tools live even when native permission is overridden', async t => {
   const f = await pluginFixture(t);
   f.child.agent = 'mdd-jd-judge-a'; f.childMessages[0].info.agent = f.child.agent;
@@ -661,47 +479,11 @@ test('native actor identity does not replace a nameless latest assistant with st
     /native actor identity/i);
 });
 
-test('standalone judges preserve ready workflow bytes and do not record error callbacks as phases', async t => {
-  const f = await pluginFixture(t);
-  const ready = JSON.parse(await f.hooks.tool.mdd_start.execute({ requirements: f.requirements }, f.context));
-  const snapshot = JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context));
-  const before = t.mock.method(PhaseRunner.prototype, 'before', () => assert.fail('not a phase'));
-  const recorded = t.mock.method(NativeIntake.prototype, 'phaseRecorded', () => assert.fail('not a phase'));
-  const nativeError = t.mock.method(PhaseRunner.prototype, 'nativeError', () => assert.fail('not a phase error'));
-  const args = jdTask('mdd-jd-judge-a');
-  await f.hooks['tool.execute.before']({ ...call, tool: 'task' }, { args });
-  const failure = { event: { type: 'message.part.updated', properties: { part: {
-    type: 'tool', tool: 'task', sessionID: f.runtime.sessionID, callID: call.callID, state: { status: 'error' },
-  } } } };
-  await f.hooks.event(failure);
-  await f.hooks.event(failure);
-  assert.equal(before.mock.callCount(), 0); assert.equal(recorded.mock.callCount(), 0);
-  assert.equal(nativeError.mock.callCount(), 0);
-  assert.deepEqual(JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context)), snapshot);
-  assert.equal(ready.runID, snapshot.runID);
-});
-
-test('standalone admission still rejects a reserved owner, transfer fence and moved parent', async t => {
-  const f = await pluginFixture(t);
-  const ready = JSON.parse(await f.hooks.tool.mdd_start.execute({ requirements: f.requirements }, f.context));
-  const owners = new RunOwnershipStore(f.root);
-  const original = owners.read(ready.runID);
-  const reserved = owners.reserve(ready.runID, f.runtime.sessionID, 'other-writer', original.epoch);
-  const dispatch = () => f.hooks['tool.execute.before']({ ...call, tool: 'task' }, { args: jdTask('mdd-jd-judge-a') });
-  await assert.rejects(dispatch(), /writer|owner/);
-  owners.release(ready.runID, f.runtime.sessionID, 'other-writer', reserved.epoch);
-  owners.beginTransfer(ready.runID, f.runtime.sessionID, { sessionID: 'target', directory: f.root, worktree: f.root },
-    'a'.repeat(64), owners.read(ready.runID).epoch);
-  await assert.rejects(dispatch(), /owner|transfer/);
-  t.mock.method(PhaseRunner.prototype, 'movedAway', () => ({ runID: ready.runID, targetSessionID: 'moved-target' }));
-  await assert.rejects(dispatch(), /moved|another conversation|transferred/);
-});
-
 test('standalone correction holds parent mutations until completion and cannot recurse through tools', async t => {
   const f = await pluginFixture(t);
   const args = jdTask('mdd-jd-fix');
   await f.hooks['tool.execute.before']({ ...call, tool: 'task' }, { args });
-  await assert.rejects(f.hooks.tool.mdd_start.execute({ requirements: f.requirements }, f.context), /correction.*flight/);
+  await assert.rejects(f.hooks.tool.mdd_contextual_explore.execute({ purpose: 'Inspect the parser.' }, f.context), /correction.*flight/);
   await assert.rejects(f.hooks['tool.execute.before']({ ...call, callID: 'second', tool: 'task' }, { args: jdTask('mdd-jd-fix') }), /correction.*flight/);
   f.child.agent = 'mdd-jd-fix'; f.childMessages[0].info.agent = f.child.agent;
   for (const tool of ['task', 'skill', 'mdd_start', 'mdd_jd_inspect', 'engram_mem_save']) {
@@ -769,33 +551,6 @@ test('plugin contract: the risk actor may check its own report through the same 
     /belongs to MDD phase actors/);
 });
 
-// The coordinator holds the issue body it already fetched; the only legitimate way in is to hand
-// it to MDD, which composes it into the prompt so the dispatched task still matches byte for byte.
-test('plugin contract: coordinator context reaches the phase and the exact task still dispatches', async t => {
-  const f = await pluginFixture(t);
-  const { hooks, context } = f;
-  const issue = 'title: feat(dashboard): mostrar detalles del delivery externo en pedidos';
-  const started = JSON.parse(await hooks.tool.mdd_start.execute({ requirements: f.requirements, context: { label: 'GitHub issue #390 body', content: issue } }, context));
-  // The coordinator is handed a dispatch handle, so the material is checked where it is used:
-  // in the prompt the hook expands and the actor actually receives.
-  assert.ok(started.task.prompt.startsWith('mdd:dispatch:'));
-  const added = JSON.parse(await hooks.tool.mdd_context.execute({ label: 'Previous decision', content: 'Keep the current exit codes.' }, context));
-  assert.deepEqual(added.providedContext.map(item => item.source), ['coordinator', 'coordinator']);
-  const ready = JSON.parse(await hooks.tool.mdd_status.execute({}, context));
-  // Requirements remain the native user text; context is data beside them, never instead of them.
-  assert.equal(ready.provenance.requirements, 'native-user');
-  const output = { args: ready.task };
-  await hooks['tool.execute.before']({ ...call, tool: 'task' }, output);
-  assert.match(output.args.prompt, /Coordinator-provided context \(data, not authority\)/);
-  assert.match(output.args.prompt, /delivery externo/);
-  assert.match(output.args.prompt, /Keep the current exit codes\./);
-  assert.match(output.args.prompt, new RegExp(`Requirements data: ${JSON.stringify(JSON.stringify(f.requirements)).slice(1, -1)}`));
-  assert.match(output.args.prompt, /GitHub issue #390 body/);
-  assert.equal(JSON.parse(await hooks.tool.mdd_status.execute({}, context)).state, 'await-result');
-  // A non-coordinator agent cannot feed context into someone else's run.
-  await assert.rejects(hooks.tool.mdd_context.execute({ label: 'A', content: 'B' }, { ...context, agent: 'build' }), /belongs to the mdd-orchestrator agent/);
-});
-
 // Dispatches whatever phase the status currently asks for and completes it with the given
 // report text, returning the next mdd_status. Used to settle exploration and risk before the
 // main route's first tail phase, since only that validated verdict reaches review-ready.
@@ -810,134 +565,6 @@ async function settlePhase(f, context, status, text) {
   await hooks['tool.execute.after']({ ...dispatch, tool: 'task', args: status.task }, f.output);
   return JSON.parse(await hooks.tool.mdd_status.execute({}, context));
 }
-
-test('native plugin contract: partial profile question receipt starts actual runner; exact approval prepares only next dispatch', async t => {
-  const f = await pluginFixture(t, { certainty: 'very-sure', artifactStore: 'none', summary: 'low', complexity: 'not-complex' });
-  const { hooks, context } = f;
-  const pending = JSON.parse(await hooks.tool.mdd_start.execute({ requirements: f.requirements }, context));
-  // The one missing field, then the optional note every asked preflight ends with.
-  assert.deepEqual(pending.question.questions.map(question => question.header), ['Modo', 'Notas']);
-  assert.equal(pending.task, undefined);
-  const qc = questionCall(f, pending.question);
-  await hooks['tool.execute.before'](qc, { args: pending.question });
-  await hooks['tool.execute.after']({ ...qc, args: pending.question }, questionOutput(pending.question, [['Interactivo'], ['Nada que agregar']]));
-  const ready = JSON.parse(await hooks.tool.mdd_status.execute({}, context));
-  assert.equal(ready.state, 'ready');
-  assert.equal(ready.provenance.preflight, 'native-question');
-  assert.equal(ready.questionReceipts.length, 1);
-  assert.equal(ready.task.subagent_type, 'mdd-explore');
-  // Every run opens with exploration, then the mdd-risk stop; only the validated low verdict
-  // after both of them reaches review-ready for the first tail phase, mdd-plan.
-  const afterExplore = await settlePhase(f, context, ready, result(ready));
-  assert.equal(afterExplore.stage, 'mdd-risk');
-  // The validated low verdict reaches review-ready immediately: interactive mode asks for
-  // approval before the first tail phase, mdd-plan, rather than before dispatching it.
-  const approval = await settlePhase(f, context, afterExplore, riskReport('low', 'passed'));
-  assert.equal(approval.state, 'review-ready');
-  assert.equal(approval.question, undefined);
-  const pendingApproval = JSON.parse(await hooks.tool.mdd_prepare_advance.execute({ questions: [] }, context));
-  assert.equal(approval.workflow.nextAction.phase, 'mdd-plan');
-  assert.equal(approval.task, undefined);
-  // This boundary is the one native route question (3a), not a generic approval: it replaces
-  // the plain "Continuar" approval with continue/force/stop, so the matching label differs here.
-  const ac = questionCall(f, pendingApproval.question, 'approval_one');
-  await hooks['tool.execute.before'](ac, { args: pendingApproval.question });
-  await hooks['tool.execute.after']({ ...ac, args: pendingApproval.question }, questionOutput(pendingApproval.question, [['Continuar con la ruta sugerida']]));
-  const approved = JSON.parse(await hooks.tool.mdd_status.execute({}, context));
-  assert.deepEqual(approved.workflow.nextAction, { kind: 'execute', phase: 'mdd-plan' });
-  assert.equal(approved.task.subagent_type, 'mdd-plan');
-  assert.equal(approved.next.kind, 'execute');
-  assert.equal(approved.questionReceipts.length, 2);
-  // Settling mdd-plan reaches review-ready again, this time gating mdd-apply: only the exact
-  // approval answer unlocks it, never the dispatch of mdd-plan reported above.
-  const afterPlan = await settlePhase(f, context, approved, result(approved));
-  assert.equal(afterPlan.state, 'review-ready');
-  assert.equal(afterPlan.workflow.nextAction.phase, 'mdd-apply');
-  assert.equal(afterPlan.task, undefined);
-  const pendingApply = JSON.parse(await hooks.tool.mdd_prepare_advance.execute({ questions: [] }, context));
-  const applyCall = questionCall(f, pendingApply.question, 'approval_two');
-  await hooks['tool.execute.before'](applyCall, { args: pendingApply.question });
-  // A non-approval answer leaves mdd-apply undispatched: only the exact approval text unlocks it.
-  await hooks['tool.execute.after']({ ...applyCall, args: pendingApply.question }, questionOutput(pendingApply.question, [['Pausar']]));
-  const afterWrongAnswer = JSON.parse(await hooks.tool.mdd_status.execute({}, context));
-  assert.notEqual(afterWrongAnswer.task?.subagent_type, 'mdd-apply');
-  const pendingApplyRetry = JSON.parse(await hooks.tool.mdd_prepare_advance.execute({ questions: [] }, context));
-  const applyRetryCall = questionCall(f, pendingApplyRetry.question, 'approval_three');
-  await hooks['tool.execute.before'](applyRetryCall, { args: pendingApplyRetry.question });
-  await hooks['tool.execute.after']({ ...applyRetryCall, args: pendingApplyRetry.question }, questionOutput(pendingApplyRetry.question, [['Continuar']]));
-  const approvedApply = JSON.parse(await hooks.tool.mdd_status.execute({}, context));
-  assert.deepEqual(approvedApply.workflow.nextAction, { kind: 'execute', phase: 'mdd-apply' });
-  assert.equal(approvedApply.task.subagent_type, 'mdd-apply');
-  assert.equal(approvedApply.next.kind, 'execute');
-});
-
-// D3/S2,S3: the force choice reaches the runner through the real plugin hooks (question tool,
-// not the native-intake mock), overriding the suggested low route to high and dispatching the
-// other tail's first phase while the original low verdict is retained.
-test('native plugin contract: forcing the route through plugin hooks switches the tail and keeps the original verdict', async t => {
-  const f = await pluginFixture(t, { certainty: 'very-sure', artifactStore: 'none', summary: 'low', complexity: 'not-complex' });
-  const { hooks, context } = f;
-  const pending = JSON.parse(await hooks.tool.mdd_start.execute({ requirements: f.requirements }, context));
-  const qc = questionCall(f, pending.question);
-  await hooks['tool.execute.before'](qc, { args: pending.question });
-  await hooks['tool.execute.after']({ ...qc, args: pending.question }, questionOutput(pending.question, [['Interactivo'], ['Nada que agregar']]));
-  const ready = JSON.parse(await hooks.tool.mdd_status.execute({}, context));
-  const afterExplore = await settlePhase(f, context, ready, result(ready));
-  const afterRisk = await settlePhase(f, context, afterExplore, riskReport('low', 'passed'));
-  const pendingApproval = JSON.parse(await hooks.tool.mdd_prepare_advance.execute({ questions: [] }, context));
-  assert.equal(afterRisk.workflow.nextAction.phase, 'mdd-plan');
-  const ac = questionCall(f, pendingApproval.question, 'force_one');
-  await hooks['tool.execute.before'](ac, { args: pendingApproval.question });
-  await hooks['tool.execute.after']({ ...ac, args: pendingApproval.question }, questionOutput(pendingApproval.question, [['Forzar la otra ruta']]));
-  const forced = JSON.parse(await hooks.tool.mdd_status.execute({}, context));
-  // The high tail's first phase is now ready to dispatch; the low verdict mdd-risk reported is
-  // unchanged, only routeOrigin names the override.
-  assert.equal(forced.workflow.routeOrigin, 'override');
-  assert.notEqual(forced.workflow.nextAction.phase, 'mdd-plan');
-  assert.equal(forced.risk.route, 'low');
-  assert.equal(forced.risk.routeOrigin, 'override');
-  assert.equal(forced.task.subagent_type, forced.workflow.nextAction.phase);
-});
-
-// D3/S4: the stop choice through plugin hooks pauses the run, recoverable, without dispatching
-// or rejecting either tail.
-test('native plugin contract: stopping the route through plugin hooks pauses without authorizing a tail', async t => {
-  const f = await pluginFixture(t, { certainty: 'very-sure', artifactStore: 'none', summary: 'low', complexity: 'not-complex' });
-  const { hooks, context } = f;
-  const pending = JSON.parse(await hooks.tool.mdd_start.execute({ requirements: f.requirements }, context));
-  const qc = questionCall(f, pending.question);
-  await hooks['tool.execute.before'](qc, { args: pending.question });
-  await hooks['tool.execute.after']({ ...qc, args: pending.question }, questionOutput(pending.question, [['Interactivo'], ['Nada que agregar']]));
-  const ready = JSON.parse(await hooks.tool.mdd_status.execute({}, context));
-  const afterExplore = await settlePhase(f, context, ready, result(ready));
-  const afterRisk = await settlePhase(f, context, afterExplore, riskReport('low', 'passed'));
-  const pendingApproval = JSON.parse(await hooks.tool.mdd_prepare_advance.execute({ questions: [] }, context));
-  assert.equal(afterRisk.workflow.nextAction.phase, 'mdd-plan');
-  const sc = questionCall(f, pendingApproval.question, 'stop_one');
-  await hooks['tool.execute.before'](sc, { args: pendingApproval.question });
-  await hooks['tool.execute.after']({ ...sc, args: pendingApproval.question }, questionOutput(pendingApproval.question, [['Detener']]));
-  const stopped = JSON.parse(await hooks.tool.mdd_status.execute({}, context));
-  assert.equal(stopped.workflow.nextAction.kind, 'approve');
-  assert.equal(stopped.workflow.nextAction.phase, 'mdd-plan');
-  assert.equal(stopped.workflow.routeOrigin, 'suggested');
-  assert.notEqual(stopped.task?.subagent_type, 'mdd-plan');
-});
-
-test('native plugin contract: question error event blocks only matching intake without memory writes', async t => {
-  const f = await pluginFixture(t, {});
-  const pending = JSON.parse(await f.hooks.tool.mdd_start.execute({ requirements: f.requirements }, f.context));
-  const call = questionCall(f, pending.question);
-  await f.hooks['tool.execute.before'](call, { args: pending.question });
-  const event = { type: 'message.part.updated', properties: { part: { ...call, type: 'tool', state: { status: 'error' } } } };
-  await f.hooks.event({ event: { ...event, properties: { part: { ...event.properties.part, callID: 'unrelated' } } } });
-  assert.equal(JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context)).state, 'await-answer');
-  await f.hooks.event({ event });
-  const status = JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context));
-  assert.equal(status.state, 'stopped');
-  assert.equal(status.provenance, undefined);
-  assert.equal(status.task, undefined);
-  assert.equal(f.writes.length, 0);
-});
 
 // The history after an interrupted question: the assistant message that showed it, then what the
 // user wrote, then the current caller. `beforeQuestion` placed the call in the caller; it moves
@@ -954,46 +581,6 @@ function answeredAfterQuestion(f, text, { before = false } = {}) {
 
 const PREFLIGHT_TEXT = '1. algo seguro 2. automatico 3. medio 4. nada que agregar.';
 const PREFLIGHT_READING = [{ labels: ['Algo seguro'] }, { labels: ['Automático'] }, { labels: ['Medio'] }, { labels: ['Nada que agregar'] }];
-
-// 2026-10-08: the preflight form was interrupted, OpenCode restarted, and the user typed the
-// answers. The new process refused to start again ("Native intake reservation is unconfirmed")
-// because the ended question still held its durable claim, and the typed answers were refused.
-test('native plugin contract: an interrupted preflight survives a restart and is answered in the user\'s own words', async t => {
-  const f = await pluginFixture(t, {});
-  const pending = JSON.parse(await f.hooks.tool.mdd_start.execute({ requirements: f.requirements }, f.context));
-  const call = questionCall(f, pending.question);
-  await f.hooks['tool.execute.before'](call, { args: pending.question });
-  await f.hooks.event({ event: { type: 'message.part.updated', properties: { part: { ...call, type: 'tool', state: { status: 'error' } } } } });
-  assert.equal(JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context)).state, 'stopped');
-  assert.equal(new RunOwnershipStore(f.root).intake(f.runtime.sessionID).state, 'retired', 'an ended preflight holds no claim');
-  answeredAfterQuestion(f, PREFLIGHT_TEXT);
-  const restarted = await plugin(f.input);
-  const again = JSON.parse(await restarted.tool.mdd_start.execute({ requirements: f.requirements }, f.context));
-  assert.equal(again.state, 'question-ready');
-  const started = JSON.parse(await restarted.tool.mdd_answer.execute({ userText: PREFLIGHT_TEXT, answers: PREFLIGHT_READING }, f.context));
-  assert.equal(started.provenance.preflight, 'typed-answer');
-  assert.deepEqual(started.questionReceipts.at(-1).typed, { source: 'chat', userMessageID: 'msg_user_answer' });
-  assert.equal(started.workflow.answers.mode, 'automatic');
-  assert.equal(started.workflow.answers.summary, 'medium');
-  assert.equal(new RunOwnershipStore(f.root).intake(f.runtime.sessionID).state, 'settled');
-});
-
-test('native plugin contract: a written answer must be the user\'s exact latest message, written after the question', async t => {
-  const f = await pluginFixture(t, {});
-  const pending = JSON.parse(await f.hooks.tool.mdd_start.execute({ requirements: f.requirements }, f.context));
-  const call = questionCall(f, pending.question);
-  await f.hooks['tool.execute.before'](call, { args: pending.question });
-  await f.hooks.event({ event: { type: 'message.part.updated', properties: { part: { ...call, type: 'tool', state: { status: 'error' } } } } });
-  answeredAfterQuestion(f, PREFLIGHT_TEXT, { before: true });
-  await assert.rejects(f.hooks.tool.mdd_answer.execute({ userText: PREFLIGHT_TEXT, answers: PREFLIGHT_READING }, f.context), /before the question was shown/);
-  // Moved after the question, but not what the user wrote.
-  const user = f.parentMessages.splice(f.parentMessages.findIndex(message => message.info.id === 'msg_user_answer'), 1)[0];
-  f.parentMessages.splice(-1, 0, user);
-  await assert.rejects(f.hooks.tool.mdd_answer.execute({ userText: `${PREFLIGHT_TEXT} (sic)`, answers: PREFLIGHT_READING }, f.context), /exact latest message/);
-  assert.equal(JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context)).state, 'stopped');
-  const started = JSON.parse(await f.hooks.tool.mdd_answer.execute({ userText: PREFLIGHT_TEXT, answers: PREFLIGHT_READING }, f.context));
-  assert.equal(started.provenance.preflight, 'typed-answer');
-});
 
 // Drives a fresh run (already past preflight) through exploration and a mdd-risk assessment that
 // settles at blocked-risk, through the real plugin hooks, in whichever mode `ready` was started
@@ -1023,177 +610,10 @@ async function startInteractive(t) {
 // R1/A1, R4/A8: a settled blocked-risk (a valid failed verdict) offers exactly one native
 // recovery question in both modes, and status explains the failed assessment without a verdict.
 for (const [mode, start] of [['automatic', startAutomatic], ['interactive', startInteractive]]) {
-  test(`native plugin contract (${mode}): a failed risk assessment arms exactly one recovery question`, async t => {
-    const f = await start(t);
-    const ready = JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context));
-    const blocked = await driveToBlockedRisk(f, f.context, ready);
-    assert.equal(blocked.workflow.nextAction.kind, 'blocked-risk');
-    assert.equal(blocked.risk, undefined, 'a failed assessment never carries a fabricated verdict');
-    assert.equal(blocked.task, undefined);
-    assert.ok(blocked.question, 'the recovery question is armed in both modes');
-    assert.equal(blocked.question.questions[0].header, 'Recuperación');
-    assert.deepEqual(blocked.question.questions[0].options.map(option => option.label),
-      ['Reintentar evaluación de riesgo', 'Ruta low', 'Ruta high', 'Detener']);
-    // S10: the rendered report names the failure, carries its reason, states plainly that no
-    // route was selected, and lists the same four recovery options as the native question.
-    assert.match(blocked.report, /La evaluación de riesgo de mdd-risk falló/);
-    assert.match(blocked.report, /Razón:/);
-    assert.match(blocked.report, /No se seleccionó ninguna ruta\./);
-    assert.match(blocked.report, /"Reintentar evaluación de riesgo", "Ruta low", "Ruta high", "Detener"/);
-  });
-
-  // R2/A2: Reintentar evaluación de riesgo dispatches a fresh mdd-risk assessment, in both modes.
-  test(`native plugin contract (${mode}): Reintentar evaluación de riesgo dispatches a fresh mdd-risk task`, async t => {
-    const f = await start(t);
-    const ready = JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context));
-    const blocked = await driveToBlockedRisk(f, f.context, ready);
-    const rc = questionCall(f, blocked.question, 'recover_retry');
-    await f.hooks['tool.execute.before'](rc, { args: blocked.question });
-    await f.hooks['tool.execute.after']({ ...rc, args: blocked.question }, questionOutput(blocked.question, [['Reintentar evaluación de riesgo']]));
-    const retried = JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context));
-    assert.equal(retried.state, 'ready');
-    assert.equal(retried.stage, 'mdd-risk');
-    assert.equal(retried.task.subagent_type, 'mdd-risk');
-    assert.equal(retried.risk, undefined, 'no old verdict survives the retry');
-  });
-
   // R2/A3,A4: Ruta low / Ruta high start the chosen tail once, with manual origin, no verdict.
   for (const [label, route, firstPhase] of [['Ruta low', 'low', 'mdd-plan'], ['Ruta high', 'high', 'mdd-propose']]) {
-    test(`native plugin contract (${mode}): '${label}' starts the ${route} tail with manual origin and no verdict`, async t => {
-      const f = await start(t);
-      const ready = JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context));
-      const blocked = await driveToBlockedRisk(f, f.context, ready);
-      const rc = questionCall(f, blocked.question, `recover_${route}`);
-      await f.hooks['tool.execute.before'](rc, { args: blocked.question });
-      await f.hooks['tool.execute.after']({ ...rc, args: blocked.question }, questionOutput(blocked.question, [[label]]));
-      const chosen = JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context));
-      assert.equal(chosen.state, 'ready');
-      assert.equal(chosen.workflow.routeOrigin, 'manual');
-      assert.equal(chosen.workflow.evaluation.route, route);
-      assert.equal(chosen.task.subagent_type, firstPhase);
-      assert.equal(chosen.risk, undefined, 'a manual choice never carries a fabricated verdict');
-      // S10: the rendered report attributes the manual route choice to the user, not to mdd-risk.
-      assert.match(chosen.report, new RegExp(`El usuario eligió manualmente la ruta ${route}`));
-      assert.match(chosen.report, /no hay un veredicto de riesgo registrado/);
-    });
   }
 
-  // R1/A5: Detener leaves the run recoverably blocked-risk, with no route or retry authorized.
-  test(`native plugin contract (${mode}): Detener leaves the run blocked-risk without authorizing anything`, async t => {
-    const f = await start(t);
-    const ready = JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context));
-    const blocked = await driveToBlockedRisk(f, f.context, ready);
-    const rc = questionCall(f, blocked.question, 'recover_stop');
-    await f.hooks['tool.execute.before'](rc, { args: blocked.question });
-    await f.hooks['tool.execute.after']({ ...rc, args: blocked.question }, questionOutput(blocked.question, [['Detener']]));
-    const stopped = JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context));
-    assert.equal(stopped.workflow.nextAction.kind, 'blocked-risk');
-    assert.equal(stopped.task, undefined);
-  });
-
-  // R3/A6: an exhausted invalid risk report (never a valid failed verdict) settles at blocked-risk
-  // exactly like a valid failed one, and arms the same one recovery question, in both modes.
-  test(`native plugin contract (${mode}): an exhausted invalid risk report arms the same recovery question`, async t => {
-    const f = await start(t);
-    const ready = JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context));
-    const afterExplore = await settlePhase(f, f.context, ready, result(ready));
-    const malformed = riskReport('low').replace(/## MDD Data[\s\S]*$/, '');
-    // The first malformed report is the dispatched attempt itself; each further one is an
-    // unchanged restatement of the same call, through the same `mdd_phase_result` tool the
-    // rejection names, and that is what the runner's restatement budget actually bounds.
-    await assert.rejects(settlePhase(f, f.context, afterExplore, malformed));
-    let last = JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context));
-    for (let attempt = 0; attempt < 6 && !last.reportRepairExhausted; attempt += 1) {
-      await assert.rejects(f.hooks.tool.mdd_phase_result.execute({ result: malformed }, f.context));
-      last = JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context));
-    }
-    assert.equal(last.reportRepairExhausted, true);
-    assert.ok(last.question, 'the recovery question is armed once the malformed fallback exhausts');
-    assert.deepEqual(last.question.questions[0].options.map(option => option.label),
-      ['Reintentar evaluación de riesgo', 'Ruta low', 'Ruta high', 'Detener']);
-  });
-
-  // R3/A6: an envelope altered before answering is refused through the real plugin hooks, in
-  // both modes, exactly like every other native question kind — options are MDD's to issue.
-  test(`native plugin contract (${mode}): an altered recovery envelope is refused`, async t => {
-    const f = await start(t);
-    const ready = JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context));
-    const blocked = await driveToBlockedRisk(f, f.context, ready);
-    const altered = structuredClone(blocked.question);
-    altered.questions[0].options[0].label = 'Forged';
-    const rc = questionCall(f, altered, 'recover_altered');
-    if (f.settings.guards.enabled) await assert.rejects(f.hooks['tool.execute.before'](rc, { args: altered }));
-    else {
-      // Free mode: an altered envelope is no longer MDD's question. It runs as the coordinator's
-      // own, and its answer, whatever it says, reaches nothing MDD holds.
-      await f.hooks['tool.execute.before'](rc, { args: altered });
-      await f.hooks['tool.execute.after']({ ...rc, args: altered }, questionOutput(altered, [['Forged']]));
-    }
-    const after = JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context));
-    assert.equal(after.workflow.nextAction.kind, 'blocked-risk');
-    assert.equal(after.task, undefined);
-  });
-
-  // R3/A6: a native call for the recovery question that errors or is dismissed authorizes
-  // nothing — no retry, no route — and the question is not silently re-issued as if answered.
-  test(`native plugin contract (${mode}): a cancelled recovery call authorizes nothing`, async t => {
-    const f = await start(t);
-    const ready = JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context));
-    const blocked = await driveToBlockedRisk(f, f.context, ready);
-    const rc = questionCall(f, blocked.question, 'recover_cancel');
-    await f.hooks['tool.execute.before'](rc, { args: blocked.question });
-    await f.hooks.event({ event: { type: 'message.part.updated', properties: { part: { ...rc, type: 'tool', tool: 'question', state: { status: 'error' } } } } });
-    const after = JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context));
-    assert.equal(after.workflow.nextAction.kind, 'blocked-risk');
-    assert.equal(after.task, undefined);
-  });
-
-  // R3/A7: once a call already answered the recovery slot, that exact call ID cannot answer it
-  // a second time with a different selection — only its first, exact answer ever applies.
-  test(`native plugin contract (${mode}): a duplicate answer for the same call ID is refused`, async t => {
-    const f = await start(t);
-    const ready = JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context));
-    const blocked = await driveToBlockedRisk(f, f.context, ready);
-    const rc = questionCall(f, blocked.question, 'recover_dup');
-    await f.hooks['tool.execute.before'](rc, { args: blocked.question });
-    await f.hooks['tool.execute.after']({ ...rc, args: blocked.question }, questionOutput(blocked.question, [['Reintentar evaluación de riesgo']]));
-    await assert.rejects(f.hooks['tool.execute.after']({ ...rc, args: blocked.question }, questionOutput(blocked.question, [['Ruta low']])));
-    const after = JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context));
-    assert.equal(after.stage, 'mdd-risk', 'the retry from the first, exact answer is the only one that took effect');
-    assert.notEqual(after.workflow.routeOrigin, 'manual');
-  });
-
-  // R3/A7: a retired call (its free-text answer re-armed the same question under a fresh call)
-  // cannot replay a selection once a genuinely new call has already resolved the re-armed one.
-  test(`native plugin contract (${mode}): a retired call cannot replay once a fresh call resolved the re-armed question`, async t => {
-    const f = await start(t);
-    const ready = JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context));
-    const blocked = await driveToBlockedRisk(f, f.context, ready);
-    const stale = questionCall(f, blocked.question, 'recover_stale');
-    await f.hooks['tool.execute.before'](stale, { args: blocked.question });
-    await f.hooks['tool.execute.after']({ ...stale, args: blocked.question }, questionOutput(blocked.question, [['No decido todavía']]));
-    const reArmed = JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context));
-    assert.ok(reArmed.question, 'the same recovery question is re-armed after free text');
-    const fresh = questionCall(f, reArmed.question, 'recover_fresh');
-    await f.hooks['tool.execute.before'](fresh, { args: reArmed.question });
-    await f.hooks['tool.execute.after']({ ...fresh, args: reArmed.question }, questionOutput(reArmed.question, [['Ruta low']]));
-    const chosen = JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context));
-    assert.equal(chosen.workflow.routeOrigin, 'manual');
-    await assert.rejects(f.hooks['tool.execute.after']({ ...stale, args: blocked.question }, questionOutput(blocked.question, [['Ruta high']])));
-    const after = JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context));
-    assert.equal(after.workflow.evaluation.route, 'low', 'the stale, retired call never replays its own answer');
-  });
-
-  // The recovery question is specific to a settled blocked-risk; an unrelated ordinary blocked
-  // phase (an explore attempt that failed outright) never arms it, in either plugin mode.
-  test(`native plugin contract (${mode}): an unrelated ordinary blocked phase does not arm the recovery question`, async t => {
-    const f = await start(t);
-    const ready = JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context));
-    const blocked = await settlePhase(f, f.context, ready, result(ready, 'failed'));
-    assert.equal(blocked.workflow.nextAction.kind, 'blocked');
-    assert.notEqual(blocked.workflow.nextAction.kind, 'blocked-risk');
-    assert.equal(blocked.question, undefined, 'an unrelated block offers no native recovery question');
-  });
 }
 
 // A storage fault alone degrades a run to non-resumable rather than stopping it (PhaseRunner's
@@ -1208,57 +628,6 @@ function faultCheckpoint(t) {
   ];
   return () => { for (const mark of marks) mark.mock.restore(); };
 }
-
-// S11: combined plugin + real PhaseRunner coverage. The native answer for a manual recovery
-// route is durably persisted by the real `QuestionCheckpointStore` first (the choice itself is
-// never lost), but once the real runner's own checkpoint durability cannot be confirmed by any
-// fallback, `chooseManualRoute()` stops the run instead of silently continuing: no task may be
-// exposed, and the intake must never read this run as active, for work the runner itself refused
-// to commit to.
-test('native plugin contract: a real runner checkpoint fault after a persisted manual recovery answer exposes no task and never marks the run active', async t => {
-  const f = await startInteractive(t);
-  const ready = JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context));
-  const blocked = await driveToBlockedRisk(f, f.context, ready);
-  const rc = questionCall(f, blocked.question, 'recover_fault_low');
-  await f.hooks['tool.execute.before'](rc, { args: blocked.question });
-  const restore = faultCheckpoint(t);
-  try {
-    await assert.rejects(f.hooks['tool.execute.after']({ ...rc, args: blocked.question }, questionOutput(blocked.question, [['Ruta low']])),
-      /MDD stopped this run/);
-  } finally { restore(); }
-  const after = JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context));
-  assert.notEqual(after.state, 'active', 'a runner checkpoint fault must never leave the run marked active');
-  assert.equal(after.task, undefined, 'no task is exposed for a manual route the runner never confirmed');
-  assert.equal(after.uncertain, true, 'the run is left explicitly uncertain, never silently resumed');
-});
-
-// S11: the same combined coverage for a route-override answer (3a), the other decision this
-// requirement names: the native answer persists, but `forceRoute()`'s own checkpoint failure,
-// with every fallback also broken, stops the run before the overridden tail is ever exposed.
-test('native plugin contract: a real runner checkpoint fault after a persisted route-override answer exposes no task and never marks the run active', async t => {
-  const f = await pluginFixture(t, { certainty: 'very-sure', artifactStore: 'none', summary: 'low', complexity: 'not-complex' });
-  const { hooks, context } = f;
-  const pending = JSON.parse(await hooks.tool.mdd_start.execute({ requirements: f.requirements }, context));
-  const qc = questionCall(f, pending.question);
-  await hooks['tool.execute.before'](qc, { args: pending.question });
-  await hooks['tool.execute.after']({ ...qc, args: pending.question }, questionOutput(pending.question, [['Interactivo'], ['Nada que agregar']]));
-  const ready = JSON.parse(await hooks.tool.mdd_status.execute({}, context));
-  const afterExplore = await settlePhase(f, context, ready, result(ready));
-  const afterRisk = await settlePhase(f, context, afterExplore, riskReport('low', 'passed'));
-  const pendingApproval = JSON.parse(await hooks.tool.mdd_prepare_advance.execute({ questions: [] }, context));
-  assert.equal(afterRisk.workflow.nextAction.phase, 'mdd-plan');
-  const ac = questionCall(f, pendingApproval.question, 'force_fault_one');
-  await hooks['tool.execute.before'](ac, { args: pendingApproval.question });
-  const restore = faultCheckpoint(t);
-  try {
-    await assert.rejects(hooks['tool.execute.after']({ ...ac, args: pendingApproval.question }, questionOutput(pendingApproval.question, [['Forzar la otra ruta']])),
-      /MDD stopped this run/);
-  } finally { restore(); }
-  const after = JSON.parse(await hooks.tool.mdd_status.execute({}, context));
-  assert.notEqual(after.state, 'active', 'a runner checkpoint fault must never leave the run marked active');
-  assert.equal(after.task, undefined, 'no task is exposed for an override the runner never confirmed');
-  assert.equal(after.uncertain, true, 'the run is left explicitly uncertain, never silently resumed');
-});
 
 // An objective is the request the user made, not necessarily the last thing they said: a
 // continuation message must not bury it. Consent is the opposite and still needs the latest text.
@@ -1397,7 +766,7 @@ test('plugin config contract: settings frozen at startup; only explicit model ov
   await hooks.config(config);
   // Every agent but the coordinator loses the MDD tools: they are registered app-wide but are
   // meaningless, and misleading, anywhere else.
-  const denied = { mdd_adapt: false, mdd_security: false, mdd_start: false, mdd_status: false, mdd_prepare_advance: false, mdd_revisit: false, mdd_answer: false, mdd_phase_result: false, mdd_reset: false, mdd_change_request: false, mdd_contextual_explore: false, mdd_context: false, mdd_pr_body: false, mdd_improve: false, mdd_improvements: false, mdd_knowledge: false, mdd_knowledge_record: false, mdd_transfer: false, mdd_transfer_recover: false, 'mdd_*': false, mdd_jd_inspect: false };
+  const denied = { mdd_adapt: false, mdd_security: false, mdd_status: false, mdd_reset: false, mdd_contextual_explore: false, mdd_pr_body: false, mdd_improve: false, mdd_improvements: false, mdd_knowledge: false, mdd_knowledge_record: false, 'mdd_*': false, mdd_jd_inspect: false };
   // And every phase actor loses `task` and `skill`: it is the actor, and the skills it needs are
   // already inlined in its prompt by value, so a name lookup can only reach someone else's. It
   // gains the report checker and execution-bound reader, never workflow controls.
@@ -1482,60 +851,6 @@ async function modeFixture(t, guards, known = answers) {
 }
 
 for (const guards of [false, true]) {
-  test(`${guards ? 'strict' : 'free'} mode: a task the coordinator wrote during a ready run ${guards ? 'is refused' : 'runs untouched and leaves the run as it was'}`, async t => {
-    const f = await modeFixture(t, guards);
-    const ready = JSON.parse(await f.hooks.tool.mdd_start.execute({ requirements: f.requirements }, f.context));
-    assert.equal(ready.state, 'ready');
-    const own = { subagent_type: 'general', description: 'Initialize the project', prompt: 'Initialize the Expo project with Supabase auth.' };
-    const dispatch = { ...call, callID: 'own_task', tool: 'task' };
-    f.parentMessages.at(-1).parts = [{ type: 'tool', tool: 'task', callID: dispatch.callID, state: { status: 'running' } }];
-    const output = { args: structuredClone(own) };
-    if (guards) {
-      await assert.rejects(f.hooks['tool.execute.before'](dispatch, output), /differ from the ready task/);
-      return;
-    }
-    await f.hooks['tool.execute.before'](dispatch, output);
-    assert.deepEqual(output.args, own);
-    const done = { title: 'Initialize the project', metadata: {}, output: 'Project initialized.' };
-    await f.hooks['tool.execute.after']({ ...dispatch, args: own }, done);
-    assert.equal(done.output, 'Project initialized.');
-    // A failed own task is just as foreign: its error never reaches the run.
-    const failed = { ...call, callID: 'own_failed', tool: 'task' };
-    await f.hooks['tool.execute.before'](failed, { args: structuredClone(own) });
-    await f.hooks.event({ event: { type: 'message.part.updated', properties: { part: { type: 'tool', tool: 'task',
-      sessionID: failed.sessionID, callID: failed.callID, state: { status: 'error' } } } } });
-    const after = JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context));
-    assert.equal(after.state, 'ready');
-    assert.equal(after.task.subagent_type, ready.task.subagent_type);
-    // MDD's own dispatch still works, and its actor is told its written limits are guidance.
-    const issued = { ...call, callID: 'mdd_task', tool: 'task' };
-    f.parentMessages.at(-1).parts = [{ type: 'tool', tool: 'task', callID: issued.callID, state: { status: 'running' } }];
-    const sent = { args: structuredClone(after.task) };
-    await f.hooks['tool.execute.before'](issued, sent);
-    assert.match(sent.args.prompt, /MDD guards: off: tool and scope limits/);
-    assert.equal(JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context)).state, 'await-result');
-  });
-
-  test(`${guards ? 'strict' : 'free'} mode: the coordinator's own question while MDD's is pending ${guards ? 'is refused' : 'runs and leaves MDD\'s question intact'}`, async t => {
-    const f = await modeFixture(t, guards, { certainty: 'very-sure', artifactStore: 'none', summary: 'low', complexity: 'not-complex' });
-    const pending = JSON.parse(await f.hooks.tool.mdd_start.execute({ requirements: f.requirements }, f.context));
-    assert.ok(pending.question);
-    const own = { questions: [{ question: '¿Usamos Expo Router?', header: 'Navegación', options: [{ label: 'Sí', description: 'Rutas basadas en archivos.' }] }] };
-    const qc = questionCall(f, own, 'own_question');
-    if (guards) {
-      await assert.rejects(f.hooks['tool.execute.before'](qc, { args: own }), /pending/);
-      return;
-    }
-    await f.hooks['tool.execute.before'](qc, { args: own });
-    await f.hooks['tool.execute.after']({ ...qc, args: own }, questionOutput(own, [['Sí']]));
-    const mdd = questionCall(f, pending.question, 'mdd_question');
-    await f.hooks['tool.execute.before'](mdd, { args: pending.question });
-    await f.hooks['tool.execute.after']({ ...mdd, args: pending.question }, questionOutput(pending.question, [['Interactivo'], ['Nada que agregar']]));
-    const ready = JSON.parse(await f.hooks.tool.mdd_status.execute({}, f.context));
-    assert.equal(ready.state, 'ready');
-    assert.equal(ready.questionReceipts.length, 1);
-  });
-
   test(`${guards ? 'strict' : 'free'} mode: the config hook ${guards ? 'pins phase actors and appends the strict rules' : 'leaves phase actors their tools and the coordinator free'}`, async t => {
     const f = await modeFixture(t, guards);
     const config = { agent: { 'mdd-orchestrator': { prompt: 'The user decides.' }, 'mdd-apply': {} } };
@@ -1543,6 +858,6 @@ for (const guards of [false, true]) {
     assert.equal(config.agent['mdd-apply'].tools.task, guards ? false : undefined);
     assert.equal(config.agent['mdd-apply'].tools.skill, guards ? false : undefined);
     assert.equal(config.agent['mdd-orchestrator'].prompt.includes('STRICT MODE'), guards);
-    assert.equal(f.hooks.tool.mdd_adapt.description.includes('the default for every new implementation'), guards);
+    assert.equal(f.hooks.tool.mdd_adapt.description.includes('the only route for every new implementation'), guards);
   });
 }

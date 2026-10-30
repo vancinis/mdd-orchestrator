@@ -98,7 +98,7 @@ test('an idle conversation is told to recall recorded work before starting', () 
   assert.equal(plain.tool, 'mdd_adapt');
   assert.deepEqual(plain.args, { payload: JSON.stringify({ routingVersion: 3, kind: 'status', args: {} }) });
   assert.match(plain.why, /search project memory/);
-  assert.match(plain.why, /continues recorded work, it is not a new objective: do not call mdd_start/);
+  assert.match(plain.why, /continues recorded work, it is not a new objective: do not start a fresh entry/);
   assert.doesNotMatch(plain.why, /workspaceRuns/);
   const recorded = nextAction({ state: 'not-started', workspaceRuns: [{ runID: 'run-one' }] });
   assert.match(recorded.why, /workspaceRuns lists earlier runs/);

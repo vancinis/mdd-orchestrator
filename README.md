@@ -25,7 +25,7 @@ reinicio o desde otra conversación.
 - [Arquitectura general](#arquitectura-general)
 - [Rutas de trabajo](#rutas-de-trabajo)
 - [Actores (agentes)](#actores-agentes)
-- [Preflight, modos y aprobaciones](#preflight-modos-y-aprobaciones)
+- [Modos y aprobaciones](#modos-y-aprobaciones)
 - [Verificación y retrabajo](#verificación-y-retrabajo)
 - [Workers paralelos y lotes de Apply](#workers-paralelos-y-lotes-de-apply)
 - [Almacenamiento, memoria y el directorio `.mdd`](#almacenamiento-memoria-y-el-directorio-mdd)
@@ -94,14 +94,13 @@ chat es la fuente de verdad: MDD exige el texto nativo exacto del usuario y no a
 | "Quiero un módulo de facturación nuevo, pero preguntame todo antes de empezar" | [Sesión de preguntas](#sesión-de-preguntas-antes-de-la-admisión) por rondas (skill `mdd-grill`) antes de armar el contrato. Se ofrece sola cuando el pedido es grande y tiene muchas decisiones abiertas |
 | "¿Cómo funciona el módulo de pagos?" | Pedido informativo → responde desde el contexto o con una investigación de solo lectura (`mdd_contextual_explore`). **Nunca** inicia una ejecución |
 | "Continuá con el issue 42" | Primero busca ejecuciones previas (`mdd_status.workspaceRuns` y, si existe, la memoria Engram) y te dice dónde quedó y cómo retomarla |
-| `Continue sourceSessionID=<id> runID=<id> here.` | Transfiere una ejecución desde otra conversación (`mdd_transfer`) |
+| `Continue sourceSessionID=<id> runID=<id> here.` | Transfiere una ejecución desde otra conversación (operación `transfer` de `mdd_adapt`) |
 | "Hagamos una revisión de seguridad" / "usa mdd-security" | Auditoría de seguridad de solo lectura (`mdd_security`) |
 | "Run judgment-day on the complete committed change from `<base>` to `<target>`, including its tests and relevant dependencies." | Judgment Day: dos jueces ciegos más un corrector opcional |
 | "Armá el cuerpo del PR" | Borrador del cuerpo del PR en español (`mdd_pr_body`). No hace commit, push ni abre el PR |
-| "Hacé commit y push con ese cuerpo" | Entrega explícita con git/gh bajo tus permisos nativos. No es un objetivo nuevo, así que no repite el preflight |
+| "Hacé commit y push con ese cuerpo" | Entrega explícita con git/gh bajo tus permisos nativos. No es un objetivo nuevo, así que no abre una ejecución |
 | "Anotá que esto salió mal: …" | Registra una mejora (`mdd_improve`). Registrar no es arreglar |
 | "¿Qué mejoras hay anotadas?" | Lista las mejoras registradas (`mdd_improvements`) |
-| Después de un Verify fallido: "seguí igual" | Continuación explícita (`mdd_reset scope=continue`). El fallo queda registrado y **no** cuenta como PASS |
 
 ---
 
@@ -144,7 +143,7 @@ flowchart LR
 
 | Componente | Archivo de entrada | Responsabilidad |
 |---|---|---|
-| Plugin de servidor | `dist/opencode-plugin.js` (export `./opencode-plugin`) | Registra las 22 herramientas `mdd_*`, los hooks de OpenCode, el motor `PhaseRunner`, el intake nativo y el adaptador V2 (`opencode-v2.ts`) |
+| Plugin de servidor | `dist/opencode-plugin.js` (export `./opencode-plugin`) | Registra las 13 herramientas `mdd_*`, los hooks de OpenCode, el motor `PhaseRunner`, el intake nativo y el adaptador V2 (`opencode-v2.ts`) |
 | Plugin visual | `dist/opencode-tui.js` (export `./opencode-tui`, id `mdd.visual`) | Barra lateral de fases (orden 250), avisos de transición y alertas. Solo presenta: no autoriza nada |
 | CLI | `dist/cli.js` (bins `mdd` y `mdd-ai`) | Instalador, actualizador, doctor, editor de configuración, perfiles, telemetría, lecciones, retro y la prueba de ruteo |
 | Kernel | `dist/kernel.js` (export `.`) | Evaluación pura y validada del ruteo (`evaluate`, `preflight`) |
@@ -186,12 +185,10 @@ Para cambiar de modo: `mdd-ai guards on` o `mdd-ai guards off`, y reiniciá Open
 
 ## Rutas de trabajo
 
-MDD conserva dos contratos de ruteo:
-
-| Contrato | Entrada | Cuándo se usa |
-|---|---|---|
-| **Versión 3, adaptativo** (activo) | `mdd_adapt({ payload })` | Toda implementación nueva, incluidas las ediciones precisas |
-| **Versión 2, fijo** (compatibilidad) | `mdd_start({ requirements })` | Entrada explícita de compatibilidad, más las ejecuciones históricas sin marca o fijadas en versión 2, que conservan su semántica original |
+MDD tiene **una sola ruta de trabajo**: la versión 3, adaptativa (`mdd_adapt({ payload })`), para
+toda implementación nueva, incluidas las ediciones precisas. La ruta fija de la versión 2
+(`mdd_start`) se retiró junto con sus herramientas propias; las ejecuciones v2 guardadas ya no se
+retoman.
 
 ### Versión 3: low, medium y high adaptativos
 
@@ -269,7 +266,7 @@ Reglas clave de la versión 3:
   `Aprobar operación` lo admite; `Pausar`, `Rechazar` o descartarla no admiten nada.
 - **Guía de entrada:** el estado que ofrece `entry` trae `entryGuide`, con un contrato mínimo
   válido y las reglas que más rechazos causan. Un rechazo nombra qué corregir (campo, ruta o clave
-  de configuración); el coordinador lo corrige y reintenta, nunca cambia a `mdd_start`.
+  de configuración); el coordinador lo corrige y reintenta.
 - **Configuración de OpenCode:** los prompts y descripciones de tus agentes no se tratan como rutas.
   Solo las referencias que pueden llegar a un archivo que se va a escribir (`{file:…}`, `{env:…}`,
   URLs `file:`, valores con forma de ruta, patrones de `instructions`) frenan la admisión, y el
@@ -380,34 +377,6 @@ flowchart TD
 `mdd-grill` es una adaptación MIT de las skills `grilling` y `domain-modeling` de
 mattpocock/skills, y su `NOTICE` viaja con ella.
 
-### Versión 2: ruta fija de compatibilidad (`mdd_start`)
-
-La política es `mdd-routing-v2`, **sin puntaje**: toda ejecución empieza con exactamente un
-`mdd-explore`, se detiene en `mdd-risk`, y un veredicto validado de riesgo elige la continuación.
-
-```mermaid
-flowchart LR
-  S["mdd_start"] --> PF["Preflight nativo"] --> EX["mdd-explore"] --> RK{"mdd-risk"}
-  RK -- low --> PL["mdd-plan"] --> AP1["mdd-apply"] --> VE1["mdd-verify"]
-  RK -- high --> PP["mdd-propose"] --> SP["mdd-spec"] --> DE["mdd-design"] --> TA["mdd-tasks"] --> AP2["mdd-apply"] --> VE2["mdd-verify"]
-  RK -- "falla" --> BR["blocked-risk<br/>reintentar o elegir ruta manual"]
-```
-
-| Ruta | Fases en orden |
-|---|---|
-| Low | `mdd-explore`, `mdd-plan`, `mdd-apply`, `mdd-verify` |
-| High | `mdd-explore`, `mdd-propose`, `mdd-spec`, `mdd-design`, `mdd-tasks`, `mdd-apply`, `mdd-verify` |
-| Low legado (solo ejecuciones viejas registradas) | `mdd-plan`, `mdd-apply`, `mdd-verify` |
-
-- `mdd-risk` es un actor configurable, **no una fase**. Su veredicto trae `route` y `complexity`
-  (`low` o `high`, y deben coincidir), un `reason`, de 1 a 32 evidencias y hasta 32 riesgos. Si no
-  reporta riesgos, tiene que justificarlo.
-- La respuesta de certeza del preflight le llega a `mdd-risk` como lo que el usuario dice sobre la
-  claridad de los requisitos: **se sopesa, nunca se obedece**.
-- Antes de la primera aprobación de la cola, el usuario puede forzar la otra ruta. El origen de la
-  ruta queda registrado como `suggested`, `override` o `manual`.
-- Una ejecución conserva la ruta con la que arrancó. Al reanudarla no se reevalúa con la política actual.
-
 ---
 
 ## Actores (agentes)
@@ -499,59 +468,23 @@ El entregable completo de la fase.
 ```
 ~~~
 
-Secciones opcionales: `## MDD Concerns` y `## MDD Questions` (como máximo 8 preguntas). Si el
-reporte se rechaza solo por la forma, el orquestador lo reescribe con `mdd_phase_result` sin
-repetir el trabajo ni gastar un intento. Hay hasta 3 reescrituras de reportes malformados.
+Secciones opcionales: `## MDD Concerns` y `## MDD Questions` (como máximo 8 preguntas).
 
 ---
 
-## Preflight, modos y aprobaciones
+## Modos y aprobaciones
 
-### Preflight
-
-Los nuevos runs nativos preguntan **solo los campos que faltan**, todos en una única pregunta nativa
-agrupada, más una nota opcional (**Notas**) en tus propias palabras. El almacenamiento **nunca** se
-pregunta: se resuelve solo.
-
-| Campo | Opciones (etiqueta → token) | Para qué sirve |
-|---|---|---|
-| `certainty` (Certeza) | Muy seguro → `very-sure` · Algo seguro → `somewhat-sure` · Poco seguro → `not-sure` | `mdd-risk` lo sopesa junto con la exploración; por sí solo nunca elige la ruta |
-| `mode` (Modo) | Interactivo → `interactive` · Automático → `automatic` | Si las fases siguientes esperan aprobación |
-| `summary` (Resumen) | Detallado → `detailed` · Medio → `medium` · Bajo → `low` | Qué secciones del reporte se muestran |
-| `artifactStore` | Solo resuelto: `engram` o `local` en runs nuevos; `openspec`, `both` y `none` son legado | Backend congelado de artefactos y progreso |
-| `complexity` | Legado | Se acepta y se ignora: el riesgo juzga la complejidad después de explorar |
-
-- **Perfil completo:** si el perfil tiene todas las respuestas, no se pregunta nada. Las dudas
-  genuinas del coordinador igual se preguntan antes de la primera fase.
-- **Precedencia:** elección actual → preferencia de la misma conversación → perfil congelado → preguntar.
-  Solo `mode` y `summary` se recuerdan por conversación, en `.mdd/preferences-<sha256>.json`, y
-  nunca equivalen a una aprobación.
-- **Respuestas escritas:** si contestás con tus palabras (dentro del formulario o en el chat después
-  de cerrarlo), el orquestador lo registra con `mdd_answer`. MDD verifica que cada opción elegida
-  aparezca en tu texto y que no aparezca ninguna otra.
-
-### Interactivo frente a automático
-
-```mermaid
-flowchart TD
-  P["La fase pasó"] --> M{"Modo"}
-  M -- interactivo --> Q["Pregunta nativa Continuar / Pausar<br/>para la siguiente fase"]
-  M -- automático --> OQ{"¿La fase dejó<br/>openQuestions?"}
-  OQ -- sí --> R["Se detiene en revisión<br/>hasta que respondas"]
-  OQ -- no --> N["Despacha la siguiente fase<br/>en el mismo turno"]
-  Q -- Continuar --> N
-  Q -- Pausar --> W["Espera tu próximo pedido"]
-  R --> N
-```
-
+- **Modo:** el modo configurado en el perfil se congela al entrar. Si no hay modo configurado, MDD
+  pregunta solo el modo (`Interactivo` o `Automático`). El almacenamiento nunca se pregunta: se
+  resuelve solo (Engram si está configurado, si no local).
+- **Interactivo:** cada operación de `mdd_adapt` necesita su propia aprobación nativa, de un solo
+  uso (`Aprobación de operación`). Solo `Aprobar operación` la autoriza.
+- **Automático:** un contrato admitido sigue adelante sin preguntas de continuación.
 - **Permisos nativos en ambos modos:** ninguno de los dos suprime los pedidos de permiso de
-  edición o shell.
-- **Lotes de Apply:** solo se aprueba al entrar a Apply y al entrar a Verify, no lote por lote.
-- **Aprobación solo por pregunta nativa:** tu prosa no es un canal de consentimiento. Un mensaje
-  escrito antes de que se muestre la pregunta no aprueba nada.
-- **Aclaraciones:** se juntan en una sola interacción (`mdd_prepare_advance`).
-  - Cada una lleva `header` (máx. 30 caracteres), `why`, de 0 a 6 opciones, `multiple` y `deferrable`.
-  - Siempre están disponibles "Que decida el agente" y el texto libre.
+  edición o shell de OpenCode.
+- **Aprobación solo por pregunta nativa:** tu prosa no es un canal de consentimiento. Si contestás
+  con tus palabras en lugar de usar el formulario, el orquestador te muestra el mismo formulario
+  otra vez.
 
 ### Nivel de detalle del reporte
 
@@ -594,64 +527,10 @@ puede cerrarse como completa, pero **no** es una probabilidad de corrección ni 
   dependencias y los IDs sí se siguen rechazando.
 - **Requisitos no cumplibles:** Plan, Design y Tasks deben declararlos (`unmet`). Un reporte que
   pasa y nombra un requisito no cumplido se rechaza (`UNMET_PASS`).
-- **`mdd_check_report` revisa también los vínculos:** cuando la ejecución (ruta fija) está en la
-  fase del reporte, el actor ve en su propia sesión los mismos errores de vínculos que vería el
-  runner al recibirlo (un vínculo inventado, un escenario sin cubrir), antes de devolverlo.
 
-### Qué pasa cuando Verify falla (ruta fija)
+### Qué pasa cuando Verify falla
 
-**En modo automático, MDD corrige solo, con un límite.** Cuando Verify encuentra fallas de la
-implementación, MDD manda la ruta a una única pasada de corrección de `mdd-apply` para todos los
-hallazgos. El Verify siguiente revisa **solo esos hallazgos**: conserva las filas que ya estaban
-verificadas y las vuelve a atar a los checks nuevos, que se corren igual completos para detectar
-regresiones. Un problema nuevo fuera de los hallazgos queda como seguimiento en los límites y no
-gana otra pasada. Hay una segunda pasada solo si la primera cerró hallazgos sin abrir otros.
-Después, o si la causa es de diseño o de requisitos, o en modo interactivo, la ejecución se detiene
-y decidís vos. El límite se configura con `verify.automaticCorrections` (de 0 a 2, por defecto 2).
-Con 0 se vuelve al comportamiento manual.
-
-Cuando la ejecución se detiene, el orquestador te presenta los destinos de retrabajo
-(`status.reworkTargets`), la recomendación de MDD (`status.reworkable` y `status.reworkReason`) y
-vos elegís. Una corrección que elegís vos también termina en un Verify que revisa solo sus hallazgos.
-
-```mermaid
-flowchart TD
-  VF["mdd-verify falla"] --> AUTO{"¿Modo automático, causa de implementación<br/>y quedan pasadas?"}
-  AUTO -->|"sí"| FIX["Corrección automática<br/>una pasada de mdd-apply"] --> RECHECK["mdd-verify revisa<br/>solo esos hallazgos"]
-  RECHECK -->|"pasa"| DONE["Completa"]
-  RECHECK -->|"falla"| AUTO
-  AUTO -->|"no"| STOP["La ejecución se detiene"]
-  STOP --> Q{"¿Qué querés hacer?"}
-  Q -->|"Corregir la implementación"| RA["mdd_reset scope=rework<br/>una única pasada de mdd-apply"]
-  Q -->|"Revisar diseño o requisitos"| RP["mdd_reset scope=rework + phase<br/>mdd-design · mdd-spec · mdd-plan"]
-  Q -->|"Repetir los checks"| RV["mdd_reset scope=phase<br/>reintenta Verify"]
-  Q -->|"Seguir pese al fallo"| RC["mdd_reset scope=continue<br/>continued-with-failed-verification"]
-  Q -->|"Objetivo nuevo"| NS["mdd_start<br/>conserva el fallo previo"]
-  RA --> V2["Nuevo mdd-verify"]
-  RP --> RE["Se replanifica desde esa fase"] --> V2
-```
-
-| Causa que atribuye Verify | Destino recomendado (high) | Destino recomendado (low) |
-|---|---|---|
-| `implementation` (o sin causa) | `mdd-apply` | `mdd-apply` |
-| `design` | `mdd-design` | `mdd-plan` |
-| `requirements` | `mdd-spec` | `mdd-plan` |
-| El mismo requisito vuelve a fallar después de una corrección | Rediseño | `mdd-plan` |
-
-Reglas de la corrección:
-
-- **Una sola pasada:** después de un Verify fallido, un único actor Apply (nunca workers) completa
-  todos los entregables restantes en el orden del plan.
-- **Sondas de reproducción:** Verify guarda sus sondas con el comando exacto en
-  `.mdd/probes/<runID>/`. La corrección tiene que ver fallar cada sonda antes de tocar código.
-- **Cierre de hallazgos:** la corrección reporta `closure=[{id,status,evidence}]` para cada hallazgo
-  estructurado. Si queda alguno abierto, no puede pasar (`OPEN_CLOSURE_PASS`).
-- **Retrabajo de planificación:** libera el plan retenido y la evidencia de checks, y conserva
-  resultados, artefactos y archivos cambiados.
-- **Continuar pese al fallo:** `continued-with-failed-verification` **no es PASS**. Se archiva en
-  `.mdd/run-<hash>.continued.json`, y `mdd_pr_body({ runID })` lo sigue mostrando con `verified: false`.
-
-En la versión 3 el equivalente es una **reparación explícita** (`select` con `repairOf`) que apunta
+Se corrige con una **reparación explícita** (`select` con `repairOf`) que apunta
 al último recibo de Apply, seguida de un nuevo Verify estructurado. Cuando la evidencia falla sobre
 trabajo completo, `mdd_status` publica `correction` con las asignaciones reparables, cuántas
 reparaciones lleva cada una y una instrucción con el mismo límite: en modo automático el
@@ -774,7 +653,7 @@ flowchart TD
   S --> C{"Checkpoint, marcador<br/>y dueño válidos"}
   C -- Asentada --> OK["Se restaura<br/>fase lista: handle nuevo<br/>aprobación pendiente: se pregunta de nuevo<br/>nada se re-ejecuta"]
   C -- "Tarea en vuelo" --> RB["recovery-blocked<br/>esperar a que OpenCode confirme que el hijo paró<br/>o mdd_reset con tu mensaje exacto"]
-  C -- Inutilizable --> DO["data-only<br/>mdd_start nuevo o mdd_reset scope=run"]
+  C -- Inutilizable --> DO["data-only<br/>entry nuevo de mdd_adapt o mdd_reset scope=run"]
 ```
 
 - **Estado del hijo:** `status.liveness` informa lo que ve OpenCode: `stopped`, `running` o
@@ -797,15 +676,15 @@ sequenceDiagram
   A->>M: mdd_status
   M-->>A: runtime.sessionID y runID
   U->>B: Continue sourceSessionID=ID runID=ID here.
-  B->>M: mdd_transfer (texto exacto del usuario)
+  B->>M: mdd_adapt transfer (texto exacto del usuario)
   M->>M: Verifica que esté asentada, cerca A y publica el checkpoint
   M-->>B: Ejecución activa aquí, aprobaciones a preguntar de nuevo
   Note over A: state = transferred (queda cercada)
 ```
 
 - **Cadenas:** se soportan transferencias encadenadas (A → B → C); los dueños anteriores quedan cercados.
-- **Transferencia interrumpida:** se resuelve con `mdd_transfer_recover` (`release-claim`,
-  `abort-fenced` o `finish-published`), solo si lo pedís explícitamente.
+- **Transferencia interrumpida:** se resuelve con la operación `transfer-recovery` de `mdd_adapt`,
+  solo si lo pedís explícitamente.
 - **Ejecuciones de otras conversaciones:** si no hay ninguna activa en la tuya,
   `mdd_status.workspaceRuns` lista hasta 6, cada una con su forma de reanudarse: `transfer`,
   `transfer-rework`, `source-conversation` o `finished`.
@@ -972,24 +851,16 @@ nunca autoriza una fase ni una implementación.
 
 ## Herramientas nativas `mdd_*`
 
-El plugin registra **22 herramientas**: 19 son exclusivas del orquestador, `mdd_check_report` y
-`mdd_jd_inspect` son para actores, y `mdd_worker_edit` existe solo en el adaptador V2.
+El plugin registra **13 herramientas**: 10 son exclusivas del orquestador, `mdd_check_report`,
+`mdd_jd_inspect` y `mdd_artifact_read` son para actores, y además `mdd_worker_edit` existe solo en
+el adaptador de OpenCode V2.
 
 | Grupo | Herramienta | Argumentos principales | Qué hace |
 |---|---|---|---|
 | Estado | `mdd_status` | `detail?` (`compact`, `full` o `rejected`) | Estado, `nextAction`, pregunta pendiente, tareas, almacenamiento, `workspaceRuns`. Solo lectura |
 | Versión 3 | `mdd_adapt` | `payload` (JSON `{routingVersion: 3, kind, args}`) | Entrada y operaciones del flujo adaptativo |
-| Versión 2 | `mdd_start` | `requirements`, `context?`, `questions?`, `exploration?` | Inicia una ejecución fija de compatibilidad con el texto exacto del usuario |
-| Flujo | `mdd_prepare_advance` | `questions` (máx. 8) | Aclaraciones agrupadas antes de despachar o aprobar |
-| Flujo | `mdd_revisit` | — | Retira una aprobación o pregunta inactiva para atender una consulta o edición |
-| Flujo | `mdd_answer` | `userText?`, `answers[{labels, quote}]` | Registra respuestas escritas con las palabras del usuario |
-| Flujo | `mdd_phase_result` | `result` (markdown) | Reescribe un reporte rechazado por la forma; sin reporte rechazado, elige el fallback nativo rastreado (nunca acepta trabajo inline) |
-| Flujo | `mdd_reset` | `scope` (`phase`, `run`, `rework` o `continue`), `phase?`, `runID?`, `userText?` | Reintentar, olvidar, retrabajar o continuar tras un fallo |
-| Flujo | `mdd_change_request` | `kind` (`rerun` o `material`), `userText`, `requirements?`, `concerns?` | Repetir el preflight o un cambio material de objetivo, integraciones, datos sensibles o permisos |
-| Flujo | `mdd_context` | `label`, `content` | Agrega material como dato (no como autoridad) para las fases |
+| Flujo | `mdd_reset` | `scope` (`phase` o `run`), `userText?` | Salida de emergencia: libera un agente colgado, una entrada bloqueada o un registro dañado, o descarta la ejecución |
 | Flujo | `mdd_contextual_explore` | `purpose`, `workItems?` (máx. 2) | Investigación de solo lectura |
-| Transferencia | `mdd_transfer` | `sourceSessionID`, `runID`, `userText` | Mueve una ejecución a esta conversación |
-| Transferencia | `mdd_transfer_recover` | `…`, `operationID`, `action` | Resuelve una transferencia interrumpida |
 | Independientes | `mdd_security` | `userText`, `baseRef?` | Auditoría de seguridad de un solo uso |
 | Independientes | `mdd_pr_body` | `userText`, `runID?`, `notes?`, `additionalContext?`, `digest?`, `translations?`, `baseRef?`, `direct?` | Borrador del cuerpo del PR en dos llamadas |
 | Conocimiento | `mdd_knowledge` | `query?`, `phase?`, `paths?`, `limit?` (1–10) | Consulta observaciones con su frescura |
@@ -998,6 +869,7 @@ El plugin registra **22 herramientas**: 19 son exclusivas del orquestador, `mdd_
 | Mejoras | `mdd_improvements` | `query?`, `state?`, `limit?` | Informe de las mejoras registradas |
 | Actores | `mdd_check_report` | `phase`, `result` | Revisión de forma del reporte (consultiva) dentro de la sesión del actor |
 | Actores | `mdd_jd_inspect` | `operation` (`tree`, `blob` o `diff`), `commit`, `base?`, `path?` | Inspección Git inmutable, solo para los jueces |
+| Actores | `mdd_artifact_read` | `document`, `digest`, `offset`, `limit` | Lee por páginas el historial retenido del agente despachado activo |
 | Actores | `mdd_worker_edit` | `operations[1..16]` | Ediciones exactas y acotadas de un worker Apply vivo (solo V2) |
 
 Para mantener chico el transcript del orquestador:
@@ -1470,6 +1342,7 @@ planificación y entrega, está en [`odd/tasks/`](odd/tasks).
 
 | Fecha | Funcionalidad | Qué agrega | Registro |
 |---|---|---|---|
+| 2026-10-30 | Una sola ruta (v3) | Se retira la ruta fija v2: se quitan `mdd_start`, `mdd_prepare_advance`, `mdd_revisit`, `mdd_answer`, `mdd_phase_result`, `mdd_change_request`, `mdd_context`, `mdd_transfer` y `mdd_transfer_recover`; el prompt del coordinador y `nextAction` solo llevan a `mdd_adapt`. El código interno de v2 se elimina en una segunda etapa | — |
 | 2026-10-28 | Preguntas cortas | Cada pregunta nativa de MDD es corta y su contexto va en el chat (`questionBrief`): aprobación de operación, pedido anterior, decisiones de producto, aclaraciones, ruta, recuperación y cambio; el coordinador y `mdd-grill` hacen lo mismo con sus propias preguntas | [short-native-questions.md](odd/tasks/short-native-questions.md) |
 | 2026-10-27 | Verify que termina | Corrección automática acotada con re-verificación solo de los hallazgos; checks `environmental` y escenarios `external` que no bloquean; vínculos de decisiones derivados; `mdd_check_report` con los vínculos de la ejecución; tasa de finalización por causa en `mdd-ai retro`; una aprobación interactiva v3 ya no falla con "Start does not match the actual native caller message" en OpenCode 2 | [verify-completion.md](odd/tasks/verify-completion.md) |
 | 2026-10-27 | Entrada adaptativa sin bloqueos | La configuración global de OpenCode ya no frena toda admisión v3; `entry` solo necesita el contrato (vínculo del mensaje, listas vacías y huellas los pone el host); un pedido anterior se confirma con una pregunta nativa; `nextAction` y el coordinador llevan a v3 en vez de `mdd_start` | [adaptive-entry-unblock.md](odd/tasks/adaptive-entry-unblock.md) |

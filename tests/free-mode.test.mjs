@@ -74,8 +74,8 @@ test('shipped coordinator definition is free; the strict rules live in the stric
   assert.match(asset, /MDD never refuses them, even while one of\s+its runs is active/);
   assert.doesNotMatch(asset, /Fresh implementation, including precise edits, uses mdd_adapt, never an untracked quick edit/);
   assert.doesNotMatch(asset, /never pick an arbitrary agent from the shared registry/);
-  assert.doesNotMatch(asset, /MUST NOT use mdd_start/);
-  assert.match(STRICT_COORDINATOR, /MUST NOT use mdd_start/);
+  assert.doesNotMatch(asset, /MUST NOT use mdd_adapt/);
+  assert.match(STRICT_COORDINATOR, /MUST NOT use mdd_adapt/);
   assert.match(STRICT_COORDINATOR, /Never pick an arbitrary agent from the shared registry/);
 });
 

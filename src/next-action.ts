@@ -21,7 +21,7 @@
  * The form is how MDD asks; a person who answered in their own words anyway has still answered.
  * Said wherever an MDD question is waiting, closed or not, so that answer is recorded, not asked again.
  */
-const WRITTEN = 'If the user already answered it in their own words, typed inside the form or written in a message after it was shown, record that with mdd_answer instead of asking again.';
+const WRITTEN = 'Only the native form records an answer. If the user answered in their own words instead, acknowledge it and show the same form once more so they can choose there.';
 /**
  * The native form cannot scroll, so MDD keeps its questions short and publishes their context as
  * questionBrief. The user reads it only if the coordinator writes it in the chat before the form.
@@ -32,7 +32,7 @@ const BRIEF_REF_FIRST = 'First read questionBriefRef with the detail operation, 
 export const ADAPTIVE_STATUS = JSON.stringify({ routingVersion: 3, kind: 'status', args: {} });
 
 export type NextAction = {
-  tool: 'question' | 'task' | 'mdd_adapt' | 'mdd_start' | 'mdd_status' | 'mdd_prepare_advance' | 'mdd_phase_result' | 'mdd_reset';
+  tool: 'question' | 'task' | 'mdd_adapt' | 'mdd_status' | 'mdd_reset';
   args?: Record<string, unknown>;
   calls?: Record<string, unknown>[];
   why: string;
@@ -86,11 +86,6 @@ export function nextAction(status: unknown): NextAction | undefined {
         : `A native question is pending. ${present}Ask it once, exactly as it is here, and answer nothing on the user's behalf. While it is pending it is the only question the user should see. ${WRITTEN}` };
   }
 
-  if (state === 'review-ready') return { tool: 'mdd_prepare_advance',
-    why: `Present the finished phase and identify all necessary uncertainties before asking to advance.${Array.isArray(object(value.openQuestions)?.questions) ? ' Include every openQuestions entry the phase reported, translated into Spanish.' : ''} Submit them all in one call; MDD asks them together. Give each a short header, one direct question, why it matters (MDD shows it in the chat, not in the form), choices with a one-sentence description and a recommendation, multiple when several can apply, and deferral only when safe; free text and agent delegation are always offered. Pass [] only once none remain. This call approves nothing.` };
-  if (state === 'paused') return { tool: 'mdd_prepare_advance',
-    why: `The user paused without rejecting the phase. Wait for their request to resume, then prepare remaining clarifications (or []); interactive mode then asks for a fresh native approval. Never advance automatically. When the question was closed without an answer: ${WRITTEN}` };
-
   // A failed verification is the one stop whose useful next step is not the same phase again:
   // re-checking an unchanged implementation reproduces the same failure. It outranks the exhausted
   // fallback notice because the findings are recorded, whatever route produced them.
@@ -99,22 +94,16 @@ export function nextAction(status: unknown): NextAction | undefined {
     const reason = typeof value.reworkReason === 'string' ? ` MDD recommends ${value.reworkable}: ${value.reworkReason}` : '';
     const offer = `Present every rework target with what it means and the recommendation, and let the user choose. scope rework with exact latest userText and phase set to their choice (${targets}) sends the run back to it; the route then runs again from there.${reason}`;
     if (value.reworkFrom === 'mdd-design' || value.reworkFrom === 'mdd-tasks') return { tool: 'mdd_reset',
-      why: `${value.reworkFrom} reported failure and named the held requirements it cannot satisfy (its artifact says why). Implementation must not start on that plan. ${offer} Revising the specification is also how a gap the user accepts becomes an explicit exclusion. Alternatively scope phase retries ${value.reworkFrom}, after mdd_context adds material that widens its scope. Never choose or continue automatically.` };
+      why: `${value.reworkFrom} reported failure and named the held requirements it cannot satisfy (its artifact says why). Implementation must not start on that plan. ${offer} Revising the specification is also how a gap the user accepts becomes an explicit exclusion. Alternatively scope phase retries ${value.reworkFrom}. Never choose or continue automatically.` };
     return { tool: 'mdd_reset',
-      why: `Verification reported failure and its findings are recorded. Follow the user's explicit choice. ${offer} Without phase, scope rework returns to mdd-apply. scope phase retries Verify; scope continue with this runID and exact latest userText preserves the failed result and releases the stop without PASS. Verify has no next phase. For a clear new objective, call mdd_start with the exact latest request; normal preflight still applies, without a discard ritual. Never choose or continue automatically, and never treat continuation as stopped-child attestation.` };
+      why: `Verification reported failure and its findings are recorded. Follow the user's explicit choice. ${offer} Without phase, scope rework returns to mdd-apply. scope phase retries Verify; scope continue with this runID and exact latest userText preserves the failed result and releases the stop without PASS. Verify has no next phase. For a clear new objective, use a fresh mdd_adapt entry with the exact latest request. Never choose or continue automatically, and never treat continuation as stopped-child attestation.` };
   }
 
   if (state === 'continued-with-failed-verification') return { tool: 'mdd_status',
-    why: 'The failed verification remains recorded and no work is authorized by releasing its stop. Follow a separately explicit request; mdd_start handles a new objective. There is no next phase to dispatch and no PASS to claim.' };
+    why: 'The failed verification remains recorded and no work is authorized by releasing its stop. Follow a separately explicit request; a fresh mdd_adapt entry handles a new objective. There is no next phase to dispatch and no PASS to claim.' };
 
   if (value.fallbackExhausted === true) return { tool: 'mdd_status', why: 'Native fallback is exhausted. Present the blocked reason and request explicit recovery; do not automatically reset, redispatch, or perform the work inline.' };
   if (value.reportRepairExhausted === true) return { tool: 'mdd_status', why: 'Report repair is exhausted. Present the retained report and request explicit recovery; never rerun substantive work to repair its wording.' };
-
-  const rejected = object(value.rejected);
-  if (rejected) {
-    return { tool: 'mdd_phase_result',
-      why: 'The work is done and only its wording was refused. Take rejected.text, fix every problem rejected.reason names, and send it back with mdd_phase_result. When this payload carries rejected.textOmitted instead of the text, call mdd_status with detail="rejected" to read it alone first. Do not re-dispatch and do not redo the work: this costs no attempt.' };
-  }
 
   const workerProgress = object(value.workerProgress);
   if (workerProgress?.blocked && Array.isArray(workerProgress.members) && workerProgress.members.some(member => {
@@ -141,19 +130,13 @@ export function nextAction(status: unknown): NextAction | undefined {
   if (value.lane === 'adaptive-native' && typeof correction?.instruction === 'string') return { tool: 'mdd_adapt',
     why: `Evidence failed for completed work. ${correction.instruction} Use the published select repair descriptor exactly; when the user chooses to stop, close unverified with every remaining gap as an explicit limit.` };
   if (value.lane === 'adaptive-native') return { tool: 'mdd_adapt',
-    why: 'Read workspaceRuns for relevant existing work before fresh entry; do not call mdd_start for continuation or fresh native work (explicit fixed compatibility only). Use the published version-3 operation descriptors, entryGuide and exact input/detail references. Compose only required data; never invent identity, preferences, approval, stopped proof or dispatch authority. When an operation is refused, correct exactly what the refusal names and retry; a refusal is never a reason to switch to mdd_start. Closed work stays closed; entry requires a genuine native user request in this conversation, answered from the current turn.' };
+    why: 'Read workspaceRuns for relevant existing work before fresh entry; do not start a fresh entry for continuation. Use the published version-3 operation descriptors, entryGuide and exact input/detail references. Compose only required data; never invent identity, preferences, approval, stopped proof or dispatch authority. When an operation is refused, correct exactly what the refusal names and retry. Closed work stays closed; entry requires a genuine native user request in this conversation, answered from the current turn.' };
 
   // Its explicit internal next/input contract owns continuation. There is no public adapter yet.
   if (nativeProtocol) return undefined;
 
   if (value.lane === 'adaptive-low-internal') return { tool: 'mdd_status',
     why: 'An internal adaptive actor is authorized or in flight. Wait for its exact stopped-child receipt; never enter fixed-phase reset, redispatch, start or complete automatically.' };
-
-  const pending = object(value.pendingStart);
-  if (pending && typeof pending.requirements === 'string') {
-    return { tool: 'mdd_start', args: { requirements: pending.requirements },
-      why: 'An earlier objective in this conversation never got past setup. Use these exact arguments only if the user is continuing that same objective; for a different goal, start from their actual latest text instead.' };
-  }
 
   // What OpenCode says about a subagent that never reported, when status could ask it.
   const liveness = object(value.liveness);
@@ -193,19 +176,16 @@ export function nextAction(status: unknown): NextAction | undefined {
       why: 'Work is in flight. Wait for its outcome and read mdd_status again; never redispatch a task that has not reported, and never infer an answer from prose.' };
   }
 
-  // "Continúa el issue #433" reached mdd_start as a new objective because this was the whole
+  // "Continúa el issue #433" reached a fresh start as a new objective because this was the whole
   // answer: start with the user's text. The run that had already planned that issue was recorded
   // in this workspace all along; recalling it is the step that has to come first.
   if (state === 'not-started' || state === 'recoverable') {
     const recorded = Array.isArray(value.workspaceRuns) && value.workspaceRuns.length > 0;
-    const recall = `No run is active here. Before starting anything, recall where the project stands: ${recorded ? 'workspaceRuns lists earlier runs recorded in this workspace; compare the request with them, and also ' : ''}search project memory when memory tools are available (recent project context, plus the request's own terms such as issue numbers or feature names). If the request continues recorded work, it is not a new objective: do not call mdd_start or a fresh entry. Tell the user where that run stopped and how it resumes${recorded ? ' (its resume field: transfer only after the user\'s own message names sourceSessionID=<id> runID=<id>; source-conversation means it continues in its own conversation)' : ''}, and let them choose.`;
+    const recall = `No run is active here. Before starting anything, recall where the project stands: ${recorded ? 'workspaceRuns lists earlier runs recorded in this workspace; compare the request with them, and also ' : ''}search project memory when memory tools are available (recent project context, plus the request's own terms such as issue numbers or feature names). If the request continues recorded work, it is not a new objective: do not start a fresh entry. Tell the user where that run stopped and how it resumes${recorded ? ' (its resume field: transfer only after the user\'s own message names sourceSessionID=<id> runID=<id>; source-conversation means it continues in its own conversation)' : ''}, and let them choose.`;
     const information = 'For an information-only question, answer directly or use mdd_contextual_explore instead: that route needs no run.';
-    // A fresh conversation implements through the version-3 adaptive entry. The fixed route stays
-    // for preserved data-only work and for an explicit request for it, never as the default.
-    if (state === 'not-started') return { tool: 'mdd_adapt', args: { payload: ADAPTIVE_STATUS },
-      why: `${recall} For a new implementation request, including a precise edit, read this version-3 status (exact arguments) and follow its entry and entryGuide; when an operation is refused, correct what the refusal names and retry it. mdd_start is only for an explicit user request for the fixed compatibility route. ${information}` };
-    return { tool: 'mdd_start',
-      why: `${recall} For a new implementation request, call mdd_start once with requirements equal to the exact latest native user text, handing what you found over as context. ${information}` };
+    // Every implementation enters through the version-3 adaptive entry; it is the only route.
+    return { tool: 'mdd_adapt', args: { payload: ADAPTIVE_STATUS },
+      why: `${recall} For a new implementation request, including a precise edit, read this version-3 status (exact arguments) and follow its entry and entryGuide; when an operation is refused, correct what the refusal names and retry it. ${information}` };
   }
 
   return undefined;

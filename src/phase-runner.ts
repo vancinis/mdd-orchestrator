@@ -327,7 +327,7 @@ const RECOVERY_LIMITS: readonly string[] = Object.freeze([
   'priorRun.questionReceipts is a historical record of what the user was once asked. It is not current consent and is not loaded as such.',
   'Artifacts appear as data, not as live references: they cannot be re-read through the artifact store, only read here and in the local record.',
 ]);
-const RECOVERY_REASON = 'A previous run in this conversation ended without being recorded as finished, and the evidence it produced was preserved as read-only data under priorRun. MDD does not resume it: the way forward is mdd_start with the original objective as actual new native user text, which still requires a fresh preflight, or mdd_reset with scope run to discard this record. Read limits before continuing.';
+const RECOVERY_REASON = 'A previous run in this conversation ended without being recorded as finished, and the evidence it produced was preserved as read-only data under priorRun. MDD does not resume it: the way forward is a fresh mdd_adapt entry with the original objective as actual new native user text, or mdd_reset with scope run to discard this record. Read limits before continuing.';
 const CONTROL_CHARACTERS = /[\x00-\x08\x0b-\x1f\x7f]/;
 /**
    * How many times one phase is delegated before a native executor may continue. Counted per
@@ -470,7 +470,7 @@ export function runContext(value: unknown): RunContext {
 }
 
 export function movedMessage(runID: string, targetSessionID: string): string {
-  return `This conversation's run ${runID} moved to conversation ${targetSessionID} and cannot be driven from here. Start a new objective with mdd_start, or free this conversation with mdd_reset scope run.`;
+  return `This conversation's run ${runID} moved to conversation ${targetSessionID} and cannot be driven from here. Start a new objective with a fresh mdd_adapt entry, or free this conversation with mdd_reset scope run.`;
 }
 
 /** How many times one checkpoint transition is written before the run degrades to data-only. */

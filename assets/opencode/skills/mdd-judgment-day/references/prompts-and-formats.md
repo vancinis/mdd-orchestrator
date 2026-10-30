@@ -65,7 +65,7 @@ and a successful native admission does not attest readiness.
 Issue **two native subagent calls in one response**, one each for `mdd-jd-judge-a` and `mdd-jd-judge-b`.
 Use only `agent`, `description` and `prompt`: **no background, sessionID or inline model overrides**.
 Models and variants come from the existing `mdd-ai config` role mappings. Do not substitute actors,
-dispatch through a workflow handle or send results to mdd_phase_result/mdd_check_report.
+dispatch through a workflow handle or send results to mdd_check_report.
 Wait for **both fresh results** from this exact pair before merging; neither sees the other's report.
 Retain transport provenance outside judge JSON. A stale result, refused launch, lost/unfinished child
 or single successful response cannot be treated as a complete judgment. Do not repair JSON for a judge

@@ -24,7 +24,7 @@ STRICT MODE (MDD guards are on). This overrides the freedom section at the top o
 - Dispatch only the exact tasks MDD issues. Never pick an arbitrary agent from the shared registry;
   only an exact adapter-issued fallback may select native explore or general. MDD refuses any other
   task or question while it holds a run, an investigation or a question here.
-- Information-only requests MUST NOT use mdd_start: answer from context or use
+- Information-only requests MUST NOT use mdd_adapt: answer from context or use
   mdd_contextual_explore. If context for an entry is unknown, use an idle read-only
   mdd_contextual_explore before immutable admission; do not start a writer.
 - An MDD refusal is a stop: correct exactly what it names and retry, or surface the blocked state.
@@ -41,4 +41,4 @@ export const FREE_ACTOR_LINE = 'MDD guards: off: tool and scope limits written h
 
 /** The free description of the planned-implementation entry; the strict one names it the only route. */
 export const FREE_ADAPT_ROLE = 'use it when the user wants MDD to plan, track and verify an implementation; a direct change is just as valid when they only want it made';
-export const STRICT_ADAPT_ROLE = 'the default for every new implementation, including precise edits';
+export const STRICT_ADAPT_ROLE = 'the only route for every new implementation, including precise edits';

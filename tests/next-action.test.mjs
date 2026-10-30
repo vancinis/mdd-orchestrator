@@ -76,7 +76,7 @@ test('SA-3: failed Verify offers explicit actions without fabricating the next p
   const action = nextAction({ state: 'blocked', reworkable: 'mdd-apply', runID: 'failed' });
   assert.equal(action.tool, 'mdd_reset');
   assert.equal(action.args, undefined);
-  for (const hint of [/scope rework/, /scope phase/, /scope continue/, /runID/, /mdd_start/, /no next phase/i]) assert.match(action.why, hint);
+  for (const hint of [/scope rework/, /scope phase/, /scope continue/, /runID/, /mdd_adapt/, /no next phase/i]) assert.match(action.why, hint);
   const continued = nextAction({ state: 'continued-with-failed-verification' });
   assert.equal(continued.tool, 'mdd_status');
   assert.equal(continued.args, undefined);
@@ -99,24 +99,6 @@ test('next action: a question brief is written in the chat before the exact ques
   const internal = nextAction({ lane: 'adaptive-native-protocol-internal', state: 'question-ready', question, questionBriefRef: { kind: 'detail', args: { cursor: 'held:0' } } });
   assert.deepEqual(internal.args, question);
   assert.match(internal.why, /^First read questionBriefRef with the detail operation, reassemble its JSON-text pages/);
-});
-
-test('next action: review resolves uncertainties first and pause never advances automatically', () => {
-  const review = nextAction({ state: 'review-ready' });
-  assert.equal(review.tool, 'mdd_prepare_advance');
-  assert.equal(review.args, undefined);
-  assert.match(review.why, /before asking to advance/);
-  const paused = nextAction({ state: 'paused' });
-  assert.equal(paused.tool, 'mdd_prepare_advance');
-  assert.match(paused.why, /Wait for their request to resume/);
-});
-
-// The report was refused for its wording, not its work. Dispatching here pays for the phase twice.
-test('next action: a rejected report is restated, never re-dispatched', () => {
-  const action = nextAction({ state: 'ready', task, mode: 'inline', rejected: { reason: 'Missing heading.', text: '## MDD Outcome' } });
-  assert.equal(action.tool, 'mdd_phase_result');
-  assert.equal(action.args, undefined, 'a restatement has to be composed, so no arguments are invented');
-  assert.match(action.why, /costs no attempt/);
 });
 
 test('next action: native fallback dispatches exact child work, never coordinator execution', () => {
@@ -157,20 +139,13 @@ test('next action: work in flight is waited for, never redispatched', () => {
   assert.match(nextAction({ state: 'await-answer' }).why, /never infer an answer from prose/i);
 });
 
-test('next action: a pending objective is offered with its own exact arguments', () => {
-  const action = nextAction({ state: 'not-started', pendingStart: { requirements: 'Ship the thing.' } });
-  assert.equal(action.tool, 'mdd_start');
-  assert.deepEqual(action.args, { requirements: 'Ship the thing.' });
-  assert.match(action.why, /only if the user is continuing that same objective/);
-});
-
 test('next action: an idle conversation is never told to start implementation blindly', () => {
   const action = nextAction({ state: 'not-started' });
   assert.equal(action.tool, 'mdd_adapt');
   assert.deepEqual(action.args, { payload: JSON.stringify({ routingVersion: 3, kind: 'status', args: {} }) },
     'only the read-only version-3 status is dispatchable as written; requirements are never invented here');
   assert.match(action.why, /mdd_contextual_explore/);
-  assert.match(action.why, /mdd_start is only for an explicit user request for the fixed compatibility route/);
+  assert.doesNotMatch(action.why, /mdd_start/);
 });
 
 test('regression: a reset or idle reply without the adaptive projection still leads to version 3, not mdd_start', () => {
@@ -179,9 +154,9 @@ test('regression: a reset or idle reply without the adaptive projection still le
     assert.equal(action.tool, 'mdd_adapt');
     assert.doesNotMatch(action.why, /call mdd_start once/);
   }
-  // Preserved data-only work keeps its fixed recovery path.
-  assert.equal(nextAction({ state: 'recoverable', recoverable: true }).tool, 'mdd_start');
-  assert.match(nextAction({ state: 'not-started', lane: 'adaptive-native' }).why, /never a reason to switch to mdd_start/);
+  // Preserved data-only work also re-enters through version 3: the fixed route is retired.
+  assert.equal(nextAction({ state: 'recoverable', recoverable: true }).tool, 'mdd_adapt');
+  assert.doesNotMatch(nextAction({ state: 'not-started', lane: 'adaptive-native' }).why, /mdd_start/);
 });
 
 test('next action: a finished run proposes nothing, and unknown shapes are left alone', () => {
