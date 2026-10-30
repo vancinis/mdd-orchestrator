@@ -107,6 +107,10 @@ se escribe hasta **Guardar y salir**) o a mano. Esquema:
         "orchestrator": "proveedor/modelo-coordinador",
         "mdd-apply": "proveedor/modelo-codigo#high"
       },
+      "subagentModels": {
+        "explore": "proveedor/modelo-exploracion",
+        "general": "proveedor/modelo-general#high"
+      },
       "answers": { "mode": "automatic", "summary": "medium" }
     }
   }
@@ -116,6 +120,7 @@ se escribe hasta **Guardar y salir**) o a mano. Esquema:
 | Clave | Valores | Si se omite |
 |---|---|---|
 | `profiles.<nombre>.models.<rol>` | `proveedor/modelo[#variante]`; la variante es el esfuerzo de razonamiento | El agente usa el modelo nativo de OpenCode |
+| `profiles.<nombre>.subagentModels.explore` / `.general` | `proveedor/modelo[#variante]`, solo para llamadas nuevas desde `mdd-orchestrator` | OpenCode resuelve el modelo de forma nativa |
 | `profiles.<nombre>.answers.mode` | `automatic` (avanza sin preguntar) o `interactive` (pregunta antes de cada actor) | El orquestador lo pregunta una vez por ejecución |
 | `profiles.<nombre>.answers.summary` | `low`, `medium` o `detailed` | `medium` |
 
@@ -124,6 +129,21 @@ se escribe hasta **Guardar y salir**) o a mano. Esquema:
 `mdd-jd-judge-a`, `mdd-jd-judge-b` y `mdd-jd-fix`.
 
 Perfiles desde la terminal: `mdd-ai profile list | create <nombre> | use <nombre>`.
+
+### Modelos de subagentes nativos
+
+En `mdd-ai config`, **Subagentes nativos** edita `explore` y `general` del perfil activo con el
+mismo selector de modelos y variantes. Ambos son opcionales; crear un perfil nuevo no los fija.
+Guardar conserva los modelos y preferencias de los demás perfiles.
+
+La prioridad en llamadas nuevas es: **modelo explícito de la llamada → `subagentModels` del
+perfil activo → modelo del agente nativo → modelo del padre**. Esto se aplica igual en primer
+plano y en segundo plano. Al reanudar con un `sessionID` no vacío, MDD no inyecta ningún modelo:
+OpenCode conserva el del hijo salvo que la llamada pida un cambio explícito o cambie de agente.
+
+No modifica las definiciones, prompts ni permisos de los agentes nativos. Las llamadas desde
+`build`, `plan` u otros actores MDD, y los destinos distintos de `explore` y `general`, mantienen
+su comportamiento. `mdd-explore` sigue siendo un rol independiente bajo `models`.
 
 Si el archivo no es válido, el plugin sigue funcionando con los valores por defecto y lo informa
 en el log de OpenCode; `mdd-ai doctor` dice qué corregir.

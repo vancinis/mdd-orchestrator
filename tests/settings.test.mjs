@@ -41,6 +41,33 @@ test('every model role maps to an installed agent', () => {
   for (const role of ['mdd-risk', 'mdd-security', 'mdd-jd-judge-a', 'mdd-jd-judge-b', 'mdd-jd-fix']) assert.ok(MODEL_ROLES.includes(role), role);
 });
 
+test('optional native subagent models round trip independently from installed roles', t => {
+  const root = fixture(t);
+  const settings = defaultSettings();
+  settings.profiles.work = { models: { orchestrator: 'p/coordinator' }, answers: { mode: 'automatic' },
+    subagentModels: { explore: 'provider/team/model#high', general: 'p/general' } };
+  settings.activeProfile = 'work';
+  assert.deepEqual(saveSettings(root, settings), settings);
+  assert.deepEqual(loadSettings(root), settings);
+  assert.deepEqual(activeProfile(loadSettings(root)).subagentModels, settings.profiles.work.subagentModels);
+  assert.equal(loadSettings(root).profiles.default.subagentModels, undefined);
+  assert.ok(!MODEL_ROLES.includes('explore') && !MODEL_ROLES.includes('general'));
+});
+
+test('native subagent model maps reject unknown targets and invalid model references', () => {
+  for (const subagentModels of [{ build: 'p/m' }, { 'mdd-explore': 'p/m' }, { explore: 'model' },
+    { general: '' }, { explore: null }, [], null]) {
+    const settings = defaultSettings();
+    settings.profiles.default.subagentModels = subagentModels;
+    assert.throws(() => parseSettings(settings));
+  }
+  const schema = JSON.parse(fs.readFileSync(new URL('../docs/mdd-config.schema.json', import.meta.url), 'utf8'));
+  const map = schema.$defs.profile.properties.subagentModels;
+  assert.deepEqual(Object.keys(map.properties), ['explore', 'general']);
+  assert.equal(map.additionalProperties, false);
+  for (const entry of Object.values(map.properties)) assert.deepEqual(entry, { $ref: '#/$defs/model' });
+});
+
 test('settings written by earlier versions still load: retired keys are accepted and dropped', t => {
   const legacy = {
     version: 1, activeProfile: 'default',

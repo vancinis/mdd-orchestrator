@@ -48,6 +48,19 @@ export function applyAgentPolicy(draft: Draft, settings: Settings | undefined): 
   else draft.permissions.push({ action: JD_INSPECT, resource: '*', effect: 'deny' });
 }
 
+/** Default only fresh native children; never change agent definitions or resumed child models. */
+export function applySubagentModelPolicy(event: { readonly agent: string; readonly tool: string; input: unknown }, settings: Settings | undefined): void {
+  if (!settings || event.agent !== COORDINATOR || event.tool !== 'subagent' ||
+      typeof event.input !== 'object' || event.input === null || Array.isArray(event.input)) return;
+  const input = event.input as Record<string, unknown>;
+  if (input.agent !== 'explore' && input.agent !== 'general') return;
+  // Native OpenCode normalizes empty optional strings to omission in its own before hook.
+  if ((input.model !== undefined && input.model !== '') ||
+      (input.sessionID !== undefined && input.sessionID !== '')) return;
+  const model = activeProfile(settings).subagentModels?.[input.agent];
+  if (model) event.input = { ...input, model };
+}
+
 const inspectInput = z.object({
   operation: z.enum(['tree', 'blob', 'diff']),
   commit: z.string(),
@@ -61,6 +74,8 @@ export default Plugin.define({
     const worktree = ctx.location.project.directory;
     const { settings, problem } = startupSettings();
     if (problem) console.error(`MDD: la configuración global no es válida y se usan los valores por defecto: ${problem}`);
+
+    await ctx.tool.hook('execute.before', event => applySubagentModelPolicy(event, settings));
 
     const policy: Parameters<typeof ctx.agent.transform>[0] = editor => {
       for (const agent of editor.list()) editor.update(String(agent.id), draft => applyAgentPolicy(draft as unknown as Draft, settings));

@@ -1,5 +1,5 @@
-import { defaultSettings, MODEL_ROLES, parseModel, parseSettings, profileName } from './settings.js';
-import type { Mode, Preferences, Summary } from './settings.js';
+import { defaultSettings, MODEL_ROLES, NATIVE_SUBAGENTS, parseModel, parseSettings, profileName } from './settings.js';
+import type { ModelRole, NativeSubagent, Mode, Preferences, Summary } from './settings.js';
 import { loadGlobalSettings, saveGlobalSettings } from './global-settings.js';
 import { installationPaths } from './installation-paths.js';
 import type { Settings } from './settings.js';
@@ -29,6 +29,7 @@ const MENU: readonly Choice[] = [
   { value: 'preferencias', label: 'Preferencias', hint: 'Modo de avance y nivel de detalle' },
   { value: 'guardar', label: 'Guardar y salir', hint: 'Escribe los cambios y cierra' },
   { value: 'cancelar', label: 'Cancelar', hint: 'Sale sin escribir nada' },
+  { value: 'subagentes', label: 'Subagentes nativos', hint: 'Modelos de explore y general solo desde mdd-orchestrator' },
 ];
 const PROFILE_MENU: readonly Choice[] = [
   { value: 'crear', label: 'Crear perfil', hint: 'Empieza desde los valores por defecto' },
@@ -45,6 +46,7 @@ function overview(draft: Settings): string {
     ['Archivo', installationPaths().settingsPath],
     ['Perfil activo', `${draft.activeProfile}  (${Object.keys(draft.profiles).length} en total)`],
     ['Modelos', `${models}/${MODEL_ROLES.length} asignados; el resto hereda el modelo nativo`],
+    ['Subagentes nativos', NATIVE_SUBAGENTS.map(agent => `${agent}: ${profile.subagentModels?.[agent] ?? 'sin fijar'}`).join('; ')],
     ['Modo', label(MODE_CHOICES, profile.answers.mode)],
     ['Detalle', label(SUMMARY_CHOICES, profile.answers.summary)],
   ])}${note('Nada se escribe hasta elegir «Guardar y salir».')}`;
@@ -61,26 +63,30 @@ function splitVariant(model: string | undefined): readonly [string | undefined, 
   return index < 0 ? [model, undefined] : [model.slice(0, index), model.slice(index + 1)];
 }
 
-async function editModels(io: ConfigIO, profile: Settings['profiles'][string], catalog: () => ModelCatalog, variantsOf: (provider: string) => VariantCatalog): Promise<void> {
-  io.write(`${heading('Modelos por agente')}${rows(MODEL_ROLES.map(role =>
-    [role, profile.models[role] ?? 'hereda el modelo nativo'] as const))}`);
+async function editModels(io: ConfigIO, profile: Settings['profiles'][string], catalog: () => ModelCatalog, variantsOf: (provider: string) => VariantCatalog, native = false): Promise<void> {
+  const roles = native ? NATIVE_SUBAGENTS : MODEL_ROLES;
+  const models: Partial<Record<ModelRole | NativeSubagent, string>> = { ...(native ? profile.subagentModels : profile.models) };
+  io.write(`${heading(native ? 'Subagentes nativos' : 'Modelos por agente')}${rows(roles.map(role =>
+    [role, models[role] ?? 'hereda el modelo nativo'] as const))}`);
+  if (native) io.write(note('Solo llamadas nuevas desde mdd-orchestrator. No reemplaza modelos explícitos ni cambia sesiones reanudadas.'));
   io.write(note('Consultando los modelos instalados en OpenCode\u2026'));
   const available = catalog();
-  const models = { ...profile.models };
   if (available.status === 'unavailable') {
-    io.write(`${note(available.reason)}${note('Vas a escribirlos a mano y no se pueden verificar. Un modelo inexistente hace que OpenCode descarte el agente al arrancar.')}`);
-    for (const role of MODEL_ROLES) {
+    io.write(`${note(available.reason)}${note(native
+      ? 'Vas a escribirlos a mano y no se pueden verificar. Un modelo inexistente hará fallar la llamada al subagente.'
+      : 'Vas a escribirlos a mano y no se pueden verificar. Un modelo inexistente hace que OpenCode descarte el agente al arrancar.')}`);
+    for (const role of roles) {
       const value = await ask(io, `Modelo para ${role}`,
         `actual: ${models[role] ?? 'hereda el nativo'}  \u00b7  formato proveedor/modelo[#esfuerzo]  \u00b7  Enter mantiene  \u00b7  «-» lo borra`);
       if (value === '-') delete models[role];
       else if (value) models[role] = parseModel(value);
     }
-    profile.models = models;
+    if (native) profile.subagentModels = models; else profile.models = models;
     return;
   }
-  const unknown = MODEL_ROLES.filter(role => models[role] && !available.models.includes(splitVariant(models[role])[0]!));
+  const unknown = roles.filter(role => models[role] && !available.models.includes(splitVariant(models[role])[0]!));
   io.write(note(`${available.models.length} modelos disponibles en ${providersOf(available.models).length} proveedores.`));
-  if (unknown.length) io.write(note(`Atención: ${unknown.map(role => `${role}=${models[role]}`).join(', ')} no está entre los modelos instalados; OpenCode descartaría ese agente al arrancar.`));
+  if (unknown.length) io.write(note(`Atención: ${unknown.map(role => `${role}=${models[role]}`).join(', ')} no está entre los modelos instalados; ${native ? 'la llamada al subagente fallaría' : 'OpenCode descartaría ese agente al arrancar'}.`));
   const providers = providersOf(available.models);
   // The verbose catalog is one call per provider; fetched at most once each, only when used.
   const variantCache = new Map<string, VariantCatalog>();
@@ -88,7 +94,7 @@ async function editModels(io: ConfigIO, profile: Settings['profiles'][string], c
     if (!variantCache.has(provider)) variantCache.set(provider, variantsOf(provider));
     return variantCache.get(provider)!;
   };
-  for (const role of MODEL_ROLES) {
+  for (const role of roles) {
     const current = models[role];
     const [currentModel, currentVariant] = splitVariant(current);
     const choice = await choose(io, `Modelo para ${role}`, [
@@ -117,7 +123,7 @@ async function editModels(io: ConfigIO, profile: Settings['profiles'][string], c
     }
     models[role] = parseModel(effort ? `${selected}#${effort}` : selected);
   }
-  profile.models = models;
+  if (native) profile.subagentModels = models; else profile.models = models;
 }
 
 async function editPreferences(io: ConfigIO, profile: Settings['profiles'][string]): Promise<void> {
@@ -161,6 +167,7 @@ export async function runConfigUI(root: string, io: ConfigIO, dependencies: { mo
               { initial: Math.max(names.indexOf(draft.activeProfile), 0) });
           }
         } else if (action === 'modelos') await editModels(io, profile, catalog, variantsOf);
+        else if (action === 'subagentes') await editModels(io, profile, catalog, variantsOf, true);
         else if (action === 'preferencias') await editPreferences(io, profile);
         else if (action === 'guardar') {
           saveGlobalSettings(draft);

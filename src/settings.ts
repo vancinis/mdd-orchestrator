@@ -1,13 +1,15 @@
 import { LocalFiles } from './local-files.js';
 import { objectWithKeys, ValidationError } from './validation.js';
 
-/** Every agent whose model can be configured per profile. `orchestrator` maps to `mdd-orchestrator`. */
+/** Installed MDD agents with per-profile models. `orchestrator` maps to `mdd-orchestrator`. */
 export const MODEL_ROLES = Object.freeze([
   'orchestrator', 'mdd-explore', 'mdd-risk', 'mdd-plan', 'mdd-propose', 'mdd-spec',
   'mdd-design', 'mdd-tasks', 'mdd-apply', 'mdd-verify', 'mdd-security',
   'mdd-jd-judge-a', 'mdd-jd-judge-b', 'mdd-jd-fix',
 ] as const);
 export type ModelRole = typeof MODEL_ROLES[number];
+export const NATIVE_SUBAGENTS = Object.freeze(['explore', 'general'] as const);
+export type NativeSubagent = typeof NATIVE_SUBAGENTS[number];
 
 export const MODES = Object.freeze(['automatic', 'interactive'] as const);
 export const SUMMARIES = Object.freeze(['low', 'medium', 'detailed'] as const);
@@ -15,7 +17,11 @@ export const SUMMARIES = Object.freeze(['low', 'medium', 'detailed'] as const);
 export type Mode = typeof MODES[number];
 export type Summary = typeof SUMMARIES[number];
 export type Preferences = { mode?: Mode; summary?: Summary };
-export type NamedProfile = { models: Partial<Record<ModelRole, string>>; answers: Preferences };
+export type NamedProfile = {
+  models: Partial<Record<ModelRole, string>>;
+  answers: Preferences;
+  subagentModels?: Partial<Record<NativeSubagent, string>>;
+};
 export type Settings = { version: 1; activeProfile: string; profiles: Record<string, NamedProfile> };
 
 /**
@@ -69,10 +75,16 @@ export function parseSettings(value: unknown): Settings {
   const profiles = objectWithKeys(input.profiles, 'profiles', names);
   const result: Settings = { version: 1, activeProfile: profileName(input.activeProfile), profiles: {} };
   for (const name of names) {
-    const profile = objectWithKeys(profiles[name], 'profile', ['models', 'answers']);
+    const profile = objectWithKeys(profiles[name], 'profile', ['models', 'answers', 'subagentModels']);
     const models = objectWithKeys(profile.models ?? {}, 'models', MODEL_ROLES);
     const parsed: NamedProfile = { models: {}, answers: parsePreferences(profile.answers ?? {}) };
     for (const role of MODEL_ROLES) if (Object.hasOwn(models, role)) parsed.models[role] = parseModel(models[role]);
+    if (profile.subagentModels !== undefined) {
+      const subagents = objectWithKeys(profile.subagentModels, 'subagentModels', NATIVE_SUBAGENTS);
+      parsed.subagentModels = {};
+      for (const agent of NATIVE_SUBAGENTS)
+        if (Object.hasOwn(subagents, agent)) parsed.subagentModels[agent] = parseModel(subagents[agent]);
+    }
     result.profiles[name] = parsed;
   }
   if (!Object.hasOwn(result.profiles, result.activeProfile)) throw new ValidationError('Active profile does not exist.');

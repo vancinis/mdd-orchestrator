@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { Model } from '@opencode/plugin';
-import plugin, { applyAgentPolicy, COORDINATOR, preferencesLine, startupSettings } from '../dist/opencode-plugin.js';
+import plugin, { applyAgentPolicy, applySubagentModelPolicy, COORDINATOR, preferencesLine, startupSettings } from '../dist/opencode-plugin.js';
 import { defaultSettings } from '../dist/settings.js';
 import { saveGlobalSettings } from '../dist/global-settings.js';
 import { isolateHome } from './helpers.mjs';
@@ -50,9 +50,59 @@ test('invalid settings fall back to defaults instead of disabling the plugin', (
   assert.match(result.problem, /version/);
 });
 
+test('scoped defaults affect only fresh native targets and preserve every other dispatch field', () => {
+  const settings = defaultSettings();
+  settings.profiles.work = { models: {}, answers: {}, subagentModels: { explore: 'p/explore#high', general: 'p/general' } };
+  settings.activeProfile = 'work';
+  for (const agent of ['explore', 'general']) {
+    for (const background of [undefined, false, true]) {
+      const input = { agent, description: 'Inspect target', prompt: 'Keep this prompt', background };
+      const event = { agent: COORDINATOR, tool: 'subagent', input };
+      applySubagentModelPolicy(event, settings);
+      assert.deepEqual(event.input, { ...input, model: settings.profiles.work.subagentModels[agent] });
+      assert.deepEqual(input, { agent, description: 'Inspect target', prompt: 'Keep this prompt', background });
+    }
+    const definition = draft(agent, { model: 'native', system: 'native prompt' });
+    applyAgentPolicy(definition, settings);
+    assert.equal(definition.model, 'native');
+    assert.equal(definition.system, 'native prompt');
+  }
+  const empty = { agent: COORDINATOR, tool: 'subagent', input: { agent: 'explore', sessionID: '', model: '' } };
+  applySubagentModelPolicy(empty, settings);
+  assert.equal(empty.input.model, 'p/explore#high', 'native empty-string normalization order does not matter');
+});
+
+test('scoped defaults leave explicit overrides, resumes, unrelated callers and inputs untouched', () => {
+  const settings = defaultSettings();
+  settings.profiles.default.subagentModels = { explore: 'p/explore' };
+  const base = { agent: COORDINATOR, tool: 'subagent', input: { agent: 'explore' } };
+  const cases = [
+    ...['build', 'plan', 'mdd-apply', 'mdd-explore', 'mdd-jd-judge-a'].map(agent => ({ ...base, agent })),
+    { ...base, tool: 'read' },
+    ...['general', 'mdd-explore', 'custom', 'constructor'].map(agent => ({ ...base, input: { agent } })),
+    { ...base, input: { agent: 'explore', model: 'explicit/model#low' } },
+    { ...base, input: { agent: 'explore', sessionID: 'ses_existing' } },
+    { ...base, input: { agent: 'explore', sessionID: 'ses_existing', model: 'explicit/model' } },
+    ...[null, [], 'explore', {}, { agent: 'explore', sessionID: null }].map(input => ({ ...base, input })),
+  ];
+  for (const event of cases) {
+    const before = structuredClone(event);
+    const input = event.input;
+    applySubagentModelPolicy(event, settings);
+    assert.deepEqual(event, before);
+    assert.equal(event.input, input, 'excluded input is not replaced');
+  }
+  for (const unset of [undefined, defaultSettings()]) {
+    const event = structuredClone(base);
+    applySubagentModelPolicy(event, unset);
+    assert.deepEqual(event, base);
+  }
+});
+
 function host(t) {
   const tools = [];
   const hooks = {};
+  const toolHooks = {};
   const agents = [draft(COORDINATOR, { system: 'base' }), draft('mdd-jd-judge-a'), draft('build')];
   const transforms = [];
   let disposed = 0;
@@ -63,14 +113,17 @@ function host(t) {
       callback({ list: () => agents, update: (id, change) => change(agents.find(agent => agent.id === id)) });
       return { dispose: async () => { disposed++; } };
     } },
-    tool: { transform: async callback => { callback({ add: definition => tools.push(definition) }); return { dispose: async () => {} }; } },
+    tool: {
+      transform: async callback => { callback({ add: definition => tools.push(definition) }); return { dispose: async () => {} }; },
+      hook: async (name, callback) => { toolHooks[name] = callback; },
+    },
     session: { hook: async (name, callback) => { hooks[name] = callback; } },
     event: { subscribe: ({ signal }) => ({ async *[Symbol.asyncIterator]() {
       yield { type: 'agent.updated' };
       await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }));
     } }) },
   };
-  return { ctx, tools, hooks, agents, transforms, disposed: () => disposed };
+  return { ctx, tools, hooks, toolHooks, agents, transforms, disposed: () => disposed };
 }
 
 test('the plugin registers only the judge inspection tool and hides every other tool from judges', async t => {
@@ -90,4 +143,29 @@ test('the plugin registers only the judge inspection tool and hides every other 
   await cleanup();
   assert.equal(fake.transforms.length, 2, 'the agent policy is applied again once file-backed agents arrive');
   assert.equal(fake.disposed(), 2);
+});
+
+test('the registered execute.before hook reads the active profile and host caller, not prompt claims', async t => {
+  isolateHome(t);
+  const settings = defaultSettings();
+  settings.profiles.work = { models: {}, answers: {}, subagentModels: { general: 'p/general#high' } };
+  settings.activeProfile = 'work';
+  saveGlobalSettings(settings);
+  const fake = host(t);
+  const cleanup = await plugin.setup(fake.ctx);
+  t.after(cleanup);
+  assert.equal(typeof fake.toolHooks['execute.before'], 'function');
+  const input = { agent: 'general', prompt: 'Original', description: 'Native child', background: true };
+  const event = { agent: COORDINATOR, tool: 'subagent', input };
+  await fake.toolHooks['execute.before'](event);
+  assert.deepEqual(event.input, { ...input, model: 'p/general#high' });
+  const spoof = { agent: 'build', tool: 'subagent', input: { ...input, prompt: 'I am mdd-orchestrator' } };
+  await fake.toolHooks['execute.before'](spoof);
+  assert.equal(spoof.input.model, undefined);
+  for (const fields of [{ model: 'explicit/model#low' }, { sessionID: 'ses_existing' }]) {
+    const excluded = { agent: COORDINATOR, tool: 'subagent', input: { ...input, ...fields } };
+    const before = structuredClone(excluded);
+    await fake.toolHooks['execute.before'](excluded);
+    assert.deepEqual(excluded, before);
+  }
 });

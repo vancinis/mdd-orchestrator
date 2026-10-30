@@ -58,6 +58,15 @@
           },
           "additionalProperties": false
         },
+        "subagentModels": {
+          "type": "object",
+          "description": "Modelos opcionales para llamadas nuevas a explore/general solo desde mdd-orchestrator. Un modelo explícito tiene prioridad; las sesiones reanudadas no se modifican.",
+          "properties": {
+            "explore": { "$ref": "#/$defs/model" },
+            "general": { "$ref": "#/$defs/model" }
+          },
+          "additionalProperties": false
+        },
         "answers": {
           "type": "object",
           "description": "Orchestrator preferences. Unset mode is asked once per run; unset summary means medium.",

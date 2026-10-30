@@ -5,8 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import { runConfigUI } from '../dist/config-ui.js';
-import { loadSettings, MODEL_ROLES } from '../dist/settings.js';
+import { changeProfile, runConfigUI } from '../dist/config-ui.js';
+import { defaultSettings, loadSettings, saveSettings, MODEL_ROLES } from '../dist/settings.js';
 
 const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
 function fixture(t) {
@@ -21,7 +21,7 @@ function scripted(lines, isTTY = true) {
   const output = [];
   return { prompts, output, io: { isTTY, write: text => output.push(text), read: async prompt => { prompts.push(prompt); return lines.shift(); } } };
 }
-// Menu: 1 Perfiles, 2 Modelos, 3 Preferencias, 4 Guardar y salir, 5 Cancelar.
+// Existing shortcuts stay stable; 6 opens the optional native subagent models.
 const SAVE = '4';
 const CANCEL = '5';
 // The models menu reads the user's installed catalog; tests inject it for determinism.
@@ -52,12 +52,12 @@ function invoke(root, ...args) {
   return result;
 }
 
-test('the main menu offers only profiles, models, preferences, save and cancel', async t => {
+test('the main menu preserves existing shortcuts and offers optional native subagent models', async t => {
   const root = fixture(t);
   const script = scripted([CANCEL]);
   assert.equal(await runConfigUI(root, script.io, noCatalog), 'cancelled');
   const text = script.output.join('');
-  for (const [index, label] of ['Perfiles', 'Modelos', 'Preferencias', 'Guardar y salir', 'Cancelar'].entries()) {
+  for (const [index, label] of ['Perfiles', 'Modelos', 'Preferencias', 'Guardar y salir', 'Cancelar', 'Subagentes nativos'].entries()) {
     assert.match(text, new RegExp(`^.\\s${index + 1}\\s{2}${label}`, 'm'), label);
   }
   assert.doesNotMatch(text, /Engram|Telemetr|Workers|memoria|certeza/i);
@@ -79,6 +79,38 @@ test('scripted terminal creates profile, edits every model and both preferences,
   assert.match(script.output.join(''), /Nivel de detalle de los reportes {2}\(2\/2\)/);
   assert.match(script.output.join(''), /Reiniciá OpenCode/);
   assert.deepEqual(readdirSync(root), ['mdd.config.json']);
+});
+
+test('native model editor creates, selects, preserves and clears scoped profile defaults', async t => {
+  const root = fixture(t);
+  const settings = defaultSettings();
+  settings.profiles.default.models.orchestrator = 'p/coordinator';
+  settings.profiles.default.answers = { mode: 'interactive' };
+  saveSettings(root, settings);
+  const edit = scripted(['Subagentes nativos', 'openai/gpt-a#high', 'p/general', SAVE]);
+  assert.equal(await runConfigUI(root, edit.io, noCatalog), 'saved');
+  const configured = loadSettings(root);
+  assert.deepEqual(configured.profiles.default, { ...settings.profiles.default,
+    subagentModels: { explore: 'openai/gpt-a#high', general: 'p/general' } });
+  assert.match(edit.output.join(''), /solo.*mdd-orchestrator/i);
+  const created = changeProfile(configured, 'create', 'work');
+  assert.equal(created.profiles.work.subagentModels, undefined);
+  assert.deepEqual(changeProfile(created, 'use', 'default'), {
+    ...configured, profiles: { ...configured.profiles, work: { models: {}, answers: {} } },
+  });
+  saveSettings(root, created);
+  const pick = scripted(['Subagentes nativos', '2', '1', '2', '', SAVE]);
+  assert.equal(await runConfigUI(root, pick.io, catalog(sample, { 'openai/gpt-a': ['high'] })), 'saved');
+  assert.deepEqual(loadSettings(root).profiles.work.subagentModels, { explore: 'openai/gpt-a#high' });
+  assert.deepEqual(loadSettings(root).profiles.default, configured.profiles.default);
+  const keep = scripted(['Subagentes nativos', '', '', SAVE]);
+  await runConfigUI(root, keep.io, noCatalog);
+  assert.match(keep.output.join(''), /explore\s+openai\/gpt-a#high/);
+  const before = readFileSync(join(root, 'mdd.config.json'), 'utf8');
+  await runConfigUI(root, scripted(['Subagentes nativos', '-', '', CANCEL]).io, noCatalog);
+  assert.equal(readFileSync(join(root, 'mdd.config.json'), 'utf8'), before);
+  await runConfigUI(root, scripted(['Subagentes nativos', '-', '', SAVE]).io, noCatalog);
+  assert.deepEqual(loadSettings(root).profiles.work.subagentModels, {});
 });
 
 test('terminal edits existing profile, clears a model and a preference, and switches active profile', async t => {

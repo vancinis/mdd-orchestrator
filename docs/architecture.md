@@ -12,7 +12,7 @@ Judgment Day.
 | Contratos | `assets/opencode/contracts/` | Las guías: el flujo de trabajo (`workflow.md`), el formato del archivo de ejecución (`run-file.md`) y las reglas comunes de los actores (`actor.md`). |
 | Agentes | `assets/opencode/agents/` | Un archivo por actor con su rol. Al instalarse, cada marcador `<!-- mdd:include contracts/… -->` se reemplaza por el texto del contrato, así que cada agente instalado se lee completo por sí solo. |
 | Skills | `assets/opencode/skills/` | Procedimientos que se cargan solo cuando se piden: `mdd-grill`, `mdd-pr-body`, `mdd-judgment-day`, `mdd-doc` y `mdd-cleanup`. |
-| Plugin | `src/opencode-plugin.ts` | Asigna el modelo configurado a cada agente, agrega al orquestador una línea con las preferencias (`mode`, `summary`) y registra la única herramienta: `mdd_jd_inspect`, solo para los jueces. |
+| Plugin | `src/opencode-plugin.ts` | Asigna modelos a los agentes MDD y valores por defecto a llamadas nuevas a `explore`/`general` desde el orquestador, agrega las preferencias (`mode`, `summary`) y registra la única herramienta: `mdd_jd_inspect`, solo para los jueces. |
 | Instalador y CLI | `src/cli.ts`, `src/setup*.ts`, `src/config-ui.ts`, `src/doctor.ts` | `mdd-ai setup`, `update`, `link`, `doctor`, `config` y `profile`. |
 
 ```mermaid
@@ -56,6 +56,14 @@ nativos de OpenCode siguen siendo el límite real de lo que un agente puede hace
 | Memoria Engram gestionada por MDD | Si Engram está instalado como MCP, el orquestador lo usa | MDD no instala ni arranca servicios. |
 
 ## Qué se aplica por código y qué es guía
+
+La asignación de modelos sigue siendo responsabilidad del plugin, no un motor de enrutamiento.
+`models` configura definiciones de agentes MDD; `subagentModels` es un mapa opcional por perfil
+solo para `explore` y `general`. Un hook nativo `execute.before` comprueba el agente llamador
+aportado por OpenCode (`mdd-orchestrator`) y el destino de la entrada estructurada de `subagent`.
+Solo agrega un modelo si la llamada es nueva y no tiene uno explícito; no cambia llamadas
+reanudadas, otras entradas, permisos ni definiciones nativas. La precedencia y el uso de perfiles
+están en [configuración](installation.md#modelos-de-subagentes-nativos).
 
 | Regla | Cómo se aplica |
 |---|---|
