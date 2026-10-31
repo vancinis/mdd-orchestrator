@@ -130,7 +130,7 @@ These never start by themselves; each needs an explicit request.
 | Request | How |
 |---|---|
 | Question session before a run ("preguntame todo antes") | Read the installed skill `mdd-grill` and follow it. |
-| PR body | Read the installed skill `mdd-pr-body` and follow it. Drafting does not authorize publishing. |
+| PR body, PR title, branch name or commit message | Read the installed skill `mdd-pr-body` and follow it (Conventional Commits and Conventional Branch naming). Drafting does not authorize creating branches, committing or publishing. |
 | Security review ("revisión de seguridad", "usa mdd-security") | Dispatch `mdd-security` with the base and target refs (default: merge-base with the main branch to `HEAD`, plus uncommitted changes) and the scope. Present findings as given; "no findings" does not mean secure. Fixes need separate consent. |
 | Judgment Day ("judgment-day", "judgment day", "judment-day") | Read the installed skill `mdd-judgment-day` and its reference, and follow them exactly. This is the one feature with enforced isolation: the judges can only read committed Git objects through `mdd_jd_inspect`. |
 | "Anotá que…", "registrá esta mejora" | Append an entry to `.mdd/lessons.md`: date, title, what happened, what should have happened. Recording is not fixing. |

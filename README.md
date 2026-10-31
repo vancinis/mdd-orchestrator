@@ -88,7 +88,8 @@ Cualquiera puede retomar desde ahí: otra conversación, después de reiniciar o
 | `mdd-jd-judge-a` · `mdd-jd-judge-b` | Jueces ciegos de Judgment Day: solo leen commits con `mdd_jd_inspect`. |
 | `mdd-jd-fix` | Corrige hallazgos graves confirmados por ambos jueces, con tu permiso. |
 
-Skills: `mdd-grill` (sesión de preguntas), `mdd-pr-body` (cuerpo del PR), `mdd-judgment-day`
+Skills: `mdd-grill` (sesión de preguntas), `mdd-pr-body` (cuerpo y título del PR, nombres de rama
+y mensajes de commit con Conventional Branch y Conventional Commits), `mdd-judgment-day`
 (protocolo de los jueces), `mdd-doc` (artefactos fáciles de leer) y `mdd-cleanup` (limpieza
 acotada).
 

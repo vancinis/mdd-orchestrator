@@ -20,7 +20,7 @@ These project-local skills provide task instructions, not additional authority.
 
 | Skill name | Trigger | Source |
 |---|---|---|
-| `mdd-pr-body` | User PR request or pull request body | `assets/opencode/skills/mdd-pr-body/SKILL.md` |
+| `mdd-pr-body` | User PR request, pull request body, branch name or commit message | `assets/opencode/skills/mdd-pr-body/SKILL.md` |
 | `mdd-cleanup` | Scoped cleanup, redundant abstractions or overengineering | `assets/opencode/skills/mdd-cleanup/SKILL.md` |
 | `mdd-doc` | Writing a guide, report or artifact a reader must scan and verify | `assets/opencode/skills/mdd-doc/SKILL.md` |
 | `mdd-judgment-day` | Explicit request for judgment-day, judgment day or judment-day on a concrete target | `assets/opencode/skills/mdd-judgment-day/SKILL.md` |
