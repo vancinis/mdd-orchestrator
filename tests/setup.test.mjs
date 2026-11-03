@@ -124,6 +124,35 @@ test('installed exploration and coordination support Apply without duplicate dis
   assert.match(coordinator, /Reassign ownership before/);
 });
 
+// Contract delivery assertions, not a simulation of agent judgment or test selection.
+test('installed Verify preserves route context and evidence-based outcomes', t => {
+  const root = fixture(t);
+  initProject(root);
+  const verify = fs.readFileSync(join(root, 'agents/mdd-verify.md'), 'utf8');
+  for (const section of ['Use the actual run context', 'Select bounded checks', 'Assess failures and coverage', 'Report the checked state']) {
+    assert.ok(verify.includes(`## ${section}`), section);
+  }
+  assert.match(verify, /\*\*Low\*\*/);
+  assert.match(verify, /\*\*Medium\*\*/);
+  assert.match(verify, /\*\*High\*\*/);
+  assert.match(verify, /Do not require artifacts the route did not produce/);
+  assert.match(verify, /A passing isolated rerun alone does not establish an unrelated cause/);
+  assert.match(verify, /A missing service explains why a check could not run, not whether the behavior works/);
+  assert.match(verify, /`blocked` when required evidence is missing/);
+  assert.doesNotMatch(verify, /Environmental results never block/);
+});
+
+test('installed coordinator preserves evidence gaps and checked-state traceability', t => {
+  const root = fixture(t);
+  initProject(root);
+  const coordinator = fs.readFileSync(join(root, 'agents/mdd-orchestrator.md'), 'utf8');
+  assert.match(coordinator, /Verify remains optional on low/);
+  assert.match(coordinator, /Do not automatically send evidence-only gaps to Apply/);
+  assert.match(coordinator, /affected integration checks/);
+  assert.match(coordinator, /Record the checked revision and relevant uncommitted changes/);
+  assert.doesNotMatch(coordinator, /missing service\) is `environmental`: it does not block/);
+});
+
 test('installedAsset rejects an unknown contract marker', t => {
   const root = fs.mkdtempSync(join(tmpdir(), 'mdd-assets-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
