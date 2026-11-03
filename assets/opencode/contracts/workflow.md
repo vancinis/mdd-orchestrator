@@ -59,6 +59,11 @@ prompt that contains:
 Keep prompts short: the actor reads the files itself. Actors return a short report (actor
 contract); the full artifact is on disk.
 
+Reuse existing exploration and task handoffs: pass their paths to Apply with known integration
+dependencies and relevant checks. Do not request another repository survey when that evidence
+already exists; Apply confirms current task-critical facts and fills only the gaps. Exploration
+is not a new prerequisite for direct or small changes.
+
 After each actor:
 
 1. Read its report. If the outcome is `failed` or `blocked`, decide: give it what it was missing
@@ -70,6 +75,13 @@ After each actor:
 **Parallel Apply.** You may dispatch up to three `mdd-apply` actors in one message when their
 tasks have no dependencies between them and write disjoint files. Otherwise run them in sequence.
 Each Apply gets a fresh actor. Verify always runs once, after the last Apply.
+
+Reassign ownership before an Apply edits an additional shared file; serialize any newly
+overlapping work. After an interruption or lost result, confirm the previous actor has stopped
+and inspect its artifact and working-tree changes before redispatching. A missing response is
+not evidence that it stopped. If its state is unknown, pause overlapping edits until resolved.
+Do not use stash, reset or branch switches on the shared tree to isolate one actor's checks;
+coordinate an isolated baseline when needed, preserving all ongoing work.
 
 **Checks.** You may run tests, builds and linters yourself at any point. Record the command and
 its result in the run file. A command you did not run is not evidence.

@@ -96,6 +96,34 @@ test('regression: installed coordinator keeps Spanish user prose and English art
   assert.match(installed, /Write prompts for actors, artifacts and run files in English/);
 });
 
+// These checks protect installed guidance, not an LLM's compliance with that guidance.
+test('installed Apply preserves bounded integration and evidence guidance', t => {
+  const root = fixture(t);
+  initProject(root);
+  const apply = fs.readFileSync(join(root, 'agents/mdd-apply.md'), 'utf8');
+  for (const section of ['Reuse context', 'Implement and integrate', 'Check the affected scope', 'Hand off evidence']) {
+    assert.ok(apply.includes(`## ${section}`), section);
+  }
+  assert.match(apply, /Explore is not a prerequisite/);
+  assert.match(apply, /Do not classify failures by matching test names or\s+error counts/);
+  assert.match(apply, /baseline timeout does not explain a new assertion failure/);
+  assert.match(apply, /Do not stash, reset, switch branches or restore other people's work/);
+  assert.match(apply, /not approval to publish/);
+  assert.ok(apply.includes(assetText(PACKAGE_ROOT, 'assets/opencode/contracts/actor.md').content.trimEnd()));
+});
+
+test('installed exploration and coordination support Apply without duplicate discovery or writers', t => {
+  const root = fixture(t);
+  initProject(root);
+  const explore = fs.readFileSync(join(root, 'agents/mdd-explore.md'), 'utf8');
+  const coordinator = fs.readFileSync(join(root, 'agents/mdd-orchestrator.md'), 'utf8');
+  assert.match(explore, /When preparing an implementation/);
+  assert.match(explore, /Do not run a full suite merely to inventory it/);
+  assert.match(coordinator, /Reuse existing exploration/);
+  assert.match(coordinator, /confirm the previous actor has stopped/);
+  assert.match(coordinator, /Reassign ownership before/);
+});
+
 test('installedAsset rejects an unknown contract marker', t => {
   const root = fs.mkdtempSync(join(tmpdir(), 'mdd-assets-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
