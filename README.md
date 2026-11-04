@@ -12,6 +12,7 @@ OpenCode siguen siendo el único límite.
 | Host | OpenCode V2 **2.0.22** |
 | Node.js | **24.6+ dentro de 24.x**, o **26.4+ dentro de 26.x** |
 | Idioma | El orquestador te habla en español; contratos, artefactos y prompts entre agentes están en inglés |
+| Releases | Etiquetas Git locales `v<versión>` y [CHANGELOG.md](CHANGELOG.md); proceso para mantenedores en [docs/installation.md](docs/installation.md#versiones-y-releases-mantenimiento). Se elige y cambia con `mdd-ai use` ([canales y comandos](docs/installation.md#elegir-y-cambiar-de-versión), [glosario](GLOSSARY.md)). |
 | Estado | Rediseño 0.2 implementado y cubierto por pruebas del instalador y del plugin. **Todavía sin validación end-to-end con modelos reales.** |
 
 ## Puesta en marcha
@@ -23,6 +24,21 @@ opencode service restart      # cuando no haya trabajo en curso
 
 Abrí OpenCode en tu proyecto, elegí el agente **`mdd-orchestrator`** y escribí tu pedido.
 Detalles, actualización y migración desde 0.1: [docs/installation.md](docs/installation.md).
+
+## Elegir versión
+
+Hay tres canales: **stable**, **preview** y **dev** (tu checkout). Un canal se resuelve una sola
+vez al elegirlo; la instalación no lo sigue.
+
+```powershell
+mdd-ai versions                 # qué hay instalado y disponible
+mdd-ai use stable               # o: preview, dev, 0.2.0, v0.3.0-preview.1
+opencode service restart        # cuando no haya trabajo en curso
+```
+
+Antes de cambiar, MDD respalda la configuración y los archivos que reemplaza (se conservan los
+últimos 10). Una instalación 0.2.0 existente se adopta sin reinstalar. Detalle, compatibilidad,
+caché y recuperación: [docs/installation.md](docs/installation.md#elegir-y-cambiar-de-versión).
 
 ## Qué pedirle
 
@@ -116,8 +132,9 @@ Referencia completa: [docs/installation.md](docs/installation.md#configuración)
 
 | Comando | Qué hace |
 |---|---|
-| `mdd-ai` / `mdd-ai setup` | Asistente de instalación |
-| `mdd-ai update` | Actualiza desde el checkout |
+| `mdd-ai` / `mdd-ai setup` / `mdd-ai update` | Asistente de versiones (**Conservar** repara la activa) |
+| `mdd-ai versions` | Versión activa, canales y versiones disponibles (solo lectura) |
+| `mdd-ai use stable \| preview \| dev \| <versión> [--checkout <ruta>] [--yes]` | Cambia de versión con respaldo previo |
 | `mdd-ai link` | Agrega `mdd-ai` al PATH de tu usuario |
 | `mdd-ai doctor` | Diagnóstico de solo lectura |
 | `mdd-ai config` | Editor de perfiles, modelos y preferencias |
@@ -163,6 +180,9 @@ Las pruebas aíslan HOME, XDG y APPDATA en un directorio temporal: nunca tocan t
 |---|---|
 | [docs/architecture.md](docs/architecture.md) | Componentes, por qué contratos y no herramientas, qué se aplica por código, cómo extender |
 | [docs/installation.md](docs/installation.md) | Instalación, actualización, migración desde 0.1, diagnóstico y configuración |
+| [GLOSSARY.md](GLOSSARY.md) | Términos de versiones y canales |
+| [docs/adr/](docs/adr) | Decisiones: etiquetas Git y clon propio, gestor separado, respaldar y reemplazar |
+| [CHANGELOG.md](CHANGELOG.md) | Notas de cada versión; la 0.2.0 es la línea base histórica |
 | [docs/mdd-config.schema.json](docs/mdd-config.schema.json) | Esquema de la configuración |
 | [docs/history/](docs/history) | Registros de la versión 0.1 (motor basado en herramientas) |
 | [AGENTS.md](AGENTS.md) | Guía para agentes que trabajan sobre este repositorio |

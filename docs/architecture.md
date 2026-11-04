@@ -13,7 +13,8 @@ Judgment Day.
 | Agentes | `assets/opencode/agents/` | Un archivo por actor con su rol. Al instalarse, cada marcador `<!-- mdd:include contracts/… -->` se reemplaza por el texto del contrato, así que cada agente instalado se lee completo por sí solo. |
 | Skills | `assets/opencode/skills/` | Procedimientos que se cargan solo cuando se piden: `mdd-grill`, `mdd-pr-body`, `mdd-judgment-day`, `mdd-doc` y `mdd-cleanup`. |
 | Plugin | `src/opencode-plugin.ts` | Asigna modelos a los agentes MDD y valores por defecto a llamadas nuevas a `explore`/`general` desde el orquestador, agrega las preferencias (`mode`, `summary`) y registra la única herramienta: `mdd_jd_inspect`, solo para los jueces. |
-| Instalador y CLI | `src/cli.ts`, `src/setup*.ts`, `src/config-ui.ts`, `src/doctor.ts` | `mdd-ai setup`, `update`, `link`, `doctor`, `config` y `profile`. |
+| Instalador y CLI | `src/cli.ts`, `src/setup*.ts`, `src/config-ui.ts`, `src/doctor.ts` | `mdd-ai setup`, `update`, `link`, `doctor`, `config` y `profile` de la versión activa. |
+| Gestor de versiones | `src/version-*.ts`, `src/versions.ts` | `mdd-ai use` y `versions`, el asistente de versiones, el clon propio del origen, respaldos, caché y recuperación. Vive en `mdd/manager`, fuera del paquete instalado, y atiende `link`; `setup` y `update` abren primero el asistente y solo delegan en la versión activa si se conserva la actual; delega el resto sin cambios a la versión activa. Decisiones: [ADR 0001](adr/0001-git-tags-and-owned-clone.md), [0002](adr/0002-separate-version-manager.md), [0003](adr/0003-backup-and-replace-on-switch.md). |
 
 ```mermaid
 flowchart LR
@@ -28,6 +29,16 @@ flowchart LR
   P["Plugin"] -.->|"modelos, preferencias,<br/>aislamiento de jueces"| O
   P -.-> J
 ```
+
+## Versiones y gestor
+
+El comando `mdd-ai` apunta a `mdd/manager/entry.mjs`, no al paquete instalado. El gestor atiende
+`use`, `versions` y `link`, abre el asistente de versiones y, para todo lo demás (`doctor`,
+`config`, `profile`…), ejecuta la CLI de la versión activa y restaura los lanzadores al terminar.
+Cada versión se obtiene de una etiqueta Git `v<versión>` en un clon propio del origen y se instala
+tras un respaldo. Un diario y un bloqueo permiten revertir o terminar un cambio interrumpido. El
+gestor solo avanza de revisión y nunca lo reemplaza un cambio de versión. Ver
+[instalación](installation.md#elegir-y-cambiar-de-versión) y los ADR en [`adr/`](adr).
 
 ## Por qué contratos y no herramientas
 

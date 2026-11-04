@@ -4,16 +4,19 @@ import fs from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
-import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
-import { runSetupUI, installLocalPackage, pruneOwnedPackages, reconcileOwnedPackage, KEPT_PACKAGES } from '../dist/setup-ui.js';
+import { runSetupUI } from '../dist/setup-ui.js';
 import { initProject, packageState, planProject, LOADER_PATH, RETIRED_TUI_PLUGIN_SPEC, TUI_CONFIG_PATH } from '../dist/setup.js';
 import { MDD_ASSETS, MDD_PACKAGED_ASSETS, PACKAGE_ROOT, installedAsset, installedName } from '../dist/project-assets.js';
 import { loadSettings as readSettings, saveSettings as writeSettings, defaultSettings } from '../dist/settings.js';
 const loadSettings = root => readSettings(join(root, 'mdd'));
 const saveSettings = (root, value) => writeSettings(join(root, 'mdd'), value);
 import { doctor } from '../dist/doctor.js';
+import { installationPaths } from '../dist/installation-paths.js';
+import { launcherKind } from '../dist/command-link.js';
+import { MANAGER_REVISION, readCurrent } from '../dist/version-manager.js';
+import { readState, versionPaths } from '../dist/version-store.js';
 import { needsPreparation, prepareSource } from '../scripts/setup.mjs';
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -43,7 +46,8 @@ function ui(lines) {
 }
 // Setup never edits the user's PATH; only `mdd-ai link` does.
 const noInstall = {
-  installPackage: () => { throw new Error('Unexpected package install'); },
+  // These tests exercise the installed (repair) path; the checkout bootstrap has its own tests below.
+  fromCheckout: () => false,
   registerPath: () => { throw new Error('Setup must not register PATH'); },
 };
 
@@ -102,7 +106,7 @@ for (const lines of [[], [':cancel'], [''], ['no'], ['2']]) {
 }
 test('non-TTY setup refuses before any effect', async t => {
   const root = fixture(t); const io = { ...ui([]), isTTY: false };
-  await assert.rejects(runSetupUI(root, io, { commandPlan: () => { throw new Error('probe'); }, installPackage: () => { throw new Error('install'); } }), /terminal interactiva/);
+  await assert.rejects(runSetupUI(root, io, { commandPlan: () => { throw new Error('probe'); }, handoff: () => { throw new Error('handoff'); } }), /terminal interactiva/);
   assert.deepEqual(io.output, []);
   for (const command of ['setup', 'update']) {
     const cli = spawnSync(process.execPath, [resolve('dist/cli.js'), command], { encoding: 'utf8' });
@@ -132,9 +136,10 @@ test('package reuse checks runtime modules, not only an unchanged plugin entrypo
   const state = packageState(root);
   assert.equal(state.state, 'outdated');
   assert.notEqual(state.installed.digest, state.source.digest);
-  const io = ui([':cancel']);
-  assert.equal(await runSetupUI(root, io, noInstall), 'cancelled');
-  assert.match(io.output.join(''), /desactualizado/);
+  // Setup repairs the active package; it never replaces a package that differs (that is a version switch).
+  const io = ui(['apply']);
+  await assert.rejects(runSetupUI(root, io, noInstall), /mdd-ai use/);
+  assert.equal(io.prompts.length, 0);
   assert.equal(fs.existsSync(join(root, LOADER_PATH)), false);
 });
 test('package reuse also checks the packaged contracts', t => {
@@ -142,35 +147,11 @@ test('package reuse also checks the packaged contracts', t => {
   fs.appendFileSync(join(root, 'mdd/node_modules/my-driven-development/assets/opencode/contracts/workflow.md'), '\nstale\n');
   assert.equal(packageState(root).state, 'outdated');
 });
-test('mdd update reviews, reconciles and reinstalls an outdated owned package without touching settings', async t => {
-  const root = fixture(t);
-  const owned = join(root, 'mdd');
-  const stale = `my-driven-development-${'a'.repeat(64)}.tgz`;
-  fs.mkdirSync(join(owned, 'packages'), { recursive: true });
-  fs.writeFileSync(join(owned, 'packages', stale), 'stale tarball');
-  fs.writeFileSync(join(owned, 'package.json'), JSON.stringify({ private: true, devDependencies: { 'my-driven-development': `file:packages/${stale}` } }));
-  const settings = defaultSettings(); settings.profiles.default.answers = { mode: 'automatic' };
-  saveSettings(root, settings);
-  const config = fs.readFileSync(join(owned, 'mdd.config.json'), 'utf8');
-  fs.appendFileSync(join(owned, 'node_modules/my-driven-development/dist/safe-paths.js'), '\n// stale runtime\n');
-  const io = ui(['apply']);
-  let installs = 0;
-  assert.equal(await runSetupUI(root, io, { ...noInstall, installPackage: target => { assert.equal(target, root); installs++; seedPackage(root); } }, { mode: 'update' }), 'ready');
-  assert.equal(installs, 1);
-  assert.equal(io.prompts.length, 1);
-  assert.match(io.output.join(''), /Paso 1\/3 · Instalación existente[\s\S]*Paso 2\/3[\s\S]*Paso 3\/3/);
-  assert.match(io.output.join(''), /Actualizar el paquete MDD instalado/);
-  assert.equal(packageState(root).state, 'matching');
-  assert.equal(fs.readFileSync(join(owned, 'mdd.config.json'), 'utf8'), config);
-  assert.equal(fs.existsSync(join(root, LOADER_PATH)), true);
-  // The referenced stale tarball is kept until a newer one replaces the reference.
-  assert.equal(fs.existsSync(join(owned, 'packages', stale)), true);
-});
 test('update refuses without an installed package and writes nothing', async t => {
   const root = fixture(t, false);
   const before = fs.readdirSync(root);
   const io = ui(['apply']);
-  await assert.rejects(runSetupUI(root, io, noInstall, { mode: 'update' }), /mdd setup/);
+  await assert.rejects(runSetupUI(root, io, noInstall, { mode: 'update' }), /npm run setup/);
   assert.deepEqual(fs.readdirSync(root), before);
   assert.equal(io.prompts.length, 0);
 });
@@ -187,48 +168,7 @@ test('leftover or unsupported owned package is refused by both setup and update'
   assert.equal(packageState(root).state, 'foreign');
   await assert.rejects(runSetupUI(root, ui(['apply']), noInstall), /broken or unsupported/);
   await assert.rejects(runSetupUI(root, ui(['apply']), noInstall, { mode: 'update' }), /broken or unsupported/);
-  assert.throws(() => reconcileOwnedPackage(root), /outdated/);
   assert.equal(fs.existsSync(join(root, LOADER_PATH)), false);
-});
-test('reconcile removes only the owned package and its dependency entry', async t => {
-  const root = fixture(t);
-  const owned = join(root, 'mdd');
-  fs.writeFileSync(join(owned, 'package.json'), JSON.stringify({ private: true, devDependencies: { 'my-driven-development': 'file:packages/x.tgz', other: '1.0.0' } }));
-  assert.throws(() => reconcileOwnedPackage(root), /outdated/);
-  fs.appendFileSync(join(owned, 'node_modules/my-driven-development/dist/safe-paths.js'), '\n// stale runtime\n');
-  reconcileOwnedPackage(root);
-  assert.equal(fs.existsSync(join(owned, 'node_modules/my-driven-development')), false);
-  assert.deepEqual(JSON.parse(fs.readFileSync(join(owned, 'package.json'), 'utf8')), { private: true, devDependencies: { other: '1.0.0' } });
-  assert.equal(fs.existsSync(join(owned, 'node_modules/@opencode/plugin')), true);
-  assert.equal(fs.existsSync(join(owned, 'node_modules/zod')), true);
-  assert.equal(packageState(root).state, 'absent');
-});
-test('package pruning keeps the referenced tarball and the newest builds', t => {
-  const root = fixture(t, false);
-  const owned = join(root, 'mdd');
-  fs.mkdirSync(join(owned, 'packages'), { recursive: true });
-  const names = Array.from({ length: 6 }, (_, index) => `my-driven-development-${index.toString(16).repeat(64)}.tgz`);
-  names.forEach((name, index) => {
-    const path = join(owned, 'packages', name);
-    fs.writeFileSync(path, 'tarball');
-    fs.utimesSync(path, 1000 + index, 1000 + index);
-  });
-  fs.writeFileSync(join(owned, 'packages', 'unrelated.txt'), 'keep me');
-  fs.writeFileSync(join(owned, 'package.json'), JSON.stringify({ private: true, devDependencies: { 'my-driven-development': `file:packages/${names[0]}` } }));
-  assert.deepEqual(pruneOwnedPackages(root).sort(), [names[1], names[2]].sort());
-  assert.deepEqual(fs.readdirSync(join(owned, 'packages')).sort(),
-    ['unrelated.txt', names[0], ...names.slice(3)].sort());
-  assert.equal(KEPT_PACKAGES, 3);
-  assert.deepEqual(pruneOwnedPackages(root), []);
-  assert.deepEqual(pruneOwnedPackages(fixture(t, false)), [], 'no packages directory');
-});
-test('consumer package install is explicitly reviewed and uses the existing init/doctor boundary', async t => {
-  const root = fixture(t, false); const io = ui(['apply']); let calls = 0;
-  assert.equal(await runSetupUI(root, io, { ...noInstall, installPackage: target => { assert.equal(target, root); calls++; seedPackage(root); } }), 'ready');
-  assert.equal(calls, 1); assert.match(io.output.join(''), /--ignore-scripts/);
-  const report = await doctor(root);
-  assert.equal(report.ready, true, JSON.stringify(report, null, 2));
-  assert.ok(fs.existsSync(join(root, 'mdd/mdd.config.json')), 'a fresh install saves default settings');
 });
 test('wizard has no target prompt and does not change process cwd', async t => {
   fixture(t); const cwd = process.cwd();
@@ -346,87 +286,19 @@ test('source first run without dist builds locally and reaches the same wizard i
   assert.equal(installs, 1); assert.equal(fs.existsSync(join(root, 'dist/cli.js')), true);
   assert.equal(needsPreparation(root), false);
   const isolated = await import(pathToFileURL(join(root, 'dist/setup-ui.js')));
-  assert.equal(await isolated.runSetupUI(root, ui(['apply']), { ...noInstall, installPackage: seedPackage }), 'ready');
+  seedPackage(root);
+  assert.equal(await isolated.runSetupUI(root, ui(['apply']), noInstall), 'ready');
 });
-test('package installer packs local source and installs the artifact without scripts or globals', t => {
-  const root = fixture(t, false); const calls = [];
-  installLocalPackage(root, (binary, args, options) => {
-    calls.push({ binary, args, options });
-    if (args[1] === 'pack') fs.writeFileSync(join(args.at(-1), 'my-driven-development-0.1.0.tgz'), 'mock local tarball');
-    return args[1] === 'pack' ? '[{"filename":"my-driven-development-0.1.0.tgz"}]' : '';
-  });
-  assert.equal(calls.length, 2); assert.ok(calls.every(call => call.binary === process.execPath && call.args.includes('--ignore-scripts')));
-  assert.ok(calls[1].args.includes('--save-dev')); assert.equal(calls[1].options.cwd, join(root, 'mdd'));
-  assert.ok(!calls.some(call => call.args.includes('-g')));
-  const artifact = `my-driven-development-${hash('mock local tarball')}.tgz`;
-  assert.ok(calls[1].args.some(arg => arg.endsWith(artifact)));
-  assert.ok(fs.existsSync(join(root, 'mdd/packages', artifact)));
-  assert.throws(() => installLocalPackage(root, () => '[{"filename":"../evil.tgz"}]'), /Unexpected local package output/);
-});
-test('real offline global install applies once from cwd A and installed wizard reuses it from cwd B', async t => {
-  const root = fixture(t, false);
-  const owned = join(root, 'mdd'); fs.mkdirSync(owned);
-  const home = resolve(root, '..');
-  const a = join(home, 'workspace A'); const b = join(home, 'workspace B'); fs.mkdirSync(a); fs.mkdirSync(b);
-  const legacy = '{"legacy":"keep bytes"}\r\n'; fs.writeFileSync(join(a, 'mdd.config.json'), legacy);
-  fs.writeFileSync(join(root, 'opencode.jsonc'), '// user configuration\n{"default_agent":"build","provider":{"custom":{"name":"keep"}}}');
-  fs.writeFileSync(join(root, 'opencode.json'), '{"default_agent":"plan","provider":{"other":{"name":"unchanged"}}}\r\n');
-  fs.writeFileSync(join(root, 'package-lock.json'), '{"name":"unrelated","lockfileVersion":3}\r\n');
-  fs.mkdirSync(join(root, 'agents')); fs.writeFileSync(join(root, 'agents/custom.md'), 'user actor');
-  const untouched = ['package.json', 'package-lock.json', 'opencode.json', 'opencode.jsonc', 'agents/custom.md'].map(name => [name, fs.readFileSync(join(root, name), 'utf8')]);
-  const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-  delete pkg.exports; delete pkg.bin; delete pkg.scripts; pkg.name = 'isolated-consumer';
-  fs.writeFileSync(join(owned, 'package.json'), JSON.stringify(pkg));
-  fs.copyFileSync('package-lock.json', join(owned, 'package-lock.json'));
-  fs.cpSync('node_modules', join(owned, 'node_modules'), { recursive: true });
-  const env = { ...process.env, npm_config_offline: 'true', npm_config_cache: join(root, 'npm-cache'), npm_config_userconfig: join(root, 'empty.npmrc'), npm_config_update_notifier: 'false' };
-  let installs = 0;
-  const originalCwd = process.cwd();
-  try {
-    process.chdir(a);
-    assert.equal(await runSetupUI(process.cwd(), ui(['apply']), { ...noInstall, installPackage: target => {
-      installs++; installLocalPackage(target, (binary, args, options) => execFileSync(binary, args, { ...options, env }));
-    } }), 'ready');
-  } finally { process.chdir(originalCwd); }
-  const installedUI = pathToFileURL(join(owned, 'node_modules/my-driven-development/dist/setup-ui.js')).href;
-  const repeat = spawnSync(process.execPath, ['--input-type=module', '-e', `
-    const {runSetupUI} = await import(${JSON.stringify(installedUI)});
-    const answers = ['apply'];
-    const result = await runSetupUI(process.cwd(), {isTTY:true, read:async()=>answers.shift(), write(){}}, {
-      installPackage:()=>{throw new Error('must not reinstall')}, registerPath:()=>{throw new Error('must not register PATH')}
-    }); if(result !== 'ready') process.exit(1);
-  `], { cwd: b, env, encoding: 'utf8' });
-  assert.equal(repeat.status, 0, repeat.stderr); assert.equal(installs, 1);
-  for (const [name, text] of untouched) assert.equal(fs.readFileSync(join(root, name), 'utf8'), text);
-  assert.deepEqual(fs.readdirSync(a), ['mdd.config.json']); assert.equal(fs.readFileSync(join(a, 'mdd.config.json'), 'utf8'), legacy);
-  assert.deepEqual(fs.readdirSync(b), []);
-  for (const name of MDD_ASSETS) assert.equal(fs.readFileSync(join(root, installedName(name)), 'utf8'), installedAsset(PACKAGE_ROOT, name).content, name);
-  const cli = join(owned, 'node_modules/my-driven-development/dist/cli.js');
-  const create = spawnSync(process.execPath, [cli, 'profile', 'create', 'shared'], { cwd: a, env, encoding: 'utf8' });
-  assert.equal(create.status, 0, create.stderr);
-  const list = spawnSync(process.execPath, [cli, 'profile', 'list'], { cwd: b, env, encoding: 'utf8' });
-  assert.equal(list.status, 0, list.stderr); assert.match(list.stdout, /\* shared/);
-  const report = spawnSync(process.execPath, [cli, 'doctor'], { cwd: b, env, encoding: 'utf8' });
-  assert.equal(report.status, 0, report.stdout + report.stderr); assert.equal(JSON.parse(report.stdout).ready, true);
-  assert.deepEqual(fs.readdirSync(a), ['mdd.config.json']); assert.deepEqual(fs.readdirSync(b), []);
-  const result = spawnSync(process.execPath, ['--input-type=module', '-e', "console.log(import.meta.resolve('my-driven-development/opencode-plugin'))"], { cwd: owned, encoding: 'utf8', env });
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout.trim(), pathToFileURL(join(owned, 'node_modules/my-driven-development/dist/opencode-plugin.js')).href);
-  const dependency = JSON.parse(fs.readFileSync(join(owned, 'package.json'))).devDependencies['my-driven-development'];
-  assert.equal(dependency.startsWith('file:packages/'), true);
-  assert.equal(fs.existsSync(join(owned, dependency.slice(5))), true);
-  const loader = importLoader(root);
-  assert.equal(loader.status, 0, loader.stderr);
-});
-test('absent global directory stays absent after preview cancellation, even with a workspace config', async t => {
+test('checkout bootstrap cancellation leaves an absent global directory absent, even with a workspace config', async t => {
   const root = fixture(t, false); fs.rmSync(root, { recursive: true });
   const workspace = join(resolve(root, '..'), 'workspace'); fs.mkdirSync(workspace);
   const text = '{"engram":{"endpoint":"http://127.0.0.1:12345","project":"legacy"}}\r\n';
   fs.writeFileSync(join(workspace, 'mdd.config.json'), text);
   const io = ui([':cancel']);
-  assert.equal(await runSetupUI(workspace, io, noInstall), 'cancelled');
+  assert.equal(await runSetupUI(workspace, io, { handoff: () => assert.fail('no hand-off after cancel') }), 'cancelled');
   assert.equal(fs.existsSync(root), false); assert.equal(fs.readFileSync(join(workspace, 'mdd.config.json'), 'utf8'), text);
-  assert.match(io.output.join(''), /create\s+agents\/mdd-orchestrator\.md/);
+  assert.match(io.output.join(''), /Gestor de versiones[\s\S]*instalar el gestor/);
+  assert.match(io.output.join(''), /Cancelado/);
 });
 for (const loader of ["export { default } from 'my-driven-development/opencode-plugin';\n", "export { default } from '../../dist/opencode-plugin.js';\n"]) {
   test(`global known loader migration requires Apply: ${loader.trim()}`, async t => {
@@ -447,3 +319,125 @@ test('an unknown loader is refused before review', async t => {
 function importLoader(root) {
   return spawnSync(process.execPath, ['--input-type=module', '-e', `const plugin = await import(${JSON.stringify(pathToFileURL(join(root, LOADER_PATH)).href)}); if (plugin.default.id !== 'mdd' || typeof plugin.default.setup !== 'function') process.exit(1);`], { encoding: 'utf8' });
 }
+
+// ---------------------------------------------------------------- checkout bootstrap (DD17, D23)
+
+const stateOf = () => readState(versionPaths(installationPaths().ownedRoot));
+function bootstrap(extra = {}) {
+  const calls = [];
+  return {
+    calls,
+    deps: {
+      handoff: (entry, args) => { calls.push({ entry, args }); return 0; },
+      // Local stand-in for git show of the baseline: the checkout's own files are what the seeded install was copied from.
+      readBaselineFile: path => { try { return fs.readFileSync(join(PACKAGE_ROOT, path)); } catch { return undefined; } },
+      ...extra,
+    },
+  };
+}
+const agentName = () => installedName(MDD_ASSETS.find(name => name.includes('/agents/')));
+
+test('checkout setup installs the manager, records the checkout and hands off without activating any package', async t => {
+  const root = fixture(t, false);
+  t.mock.method(globalThis, 'fetch', () => assert.fail('the bootstrap must not use the network'));
+  const { calls, deps } = bootstrap();
+  const io = ui(['apply']);
+  assert.equal(await runSetupUI(root, io, deps), 'ready');
+  const paths = installationPaths();
+  assert.equal(readCurrent(paths).revision, MANAGER_REVISION);
+  assert.ok(fs.existsSync(paths.managerEntry));
+  for (const name of ['mdd-ai', 'mdd-ai.cmd']) assert.equal(launcherKind(fs.readFileSync(join(paths.binRoot, name), 'utf8')), 'manager', name);
+  const state = stateOf();
+  assert.equal(state.devCheckout, resolve(PACKAGE_ROOT));
+  assert.equal(state.active, null);
+  assert.equal(fs.existsSync(paths.installedPackageRoot), false, 'no package is activated by the bootstrap');
+  assert.equal(fs.existsSync(join(root, LOADER_PATH)), false);
+  assert.deepEqual(calls, [{ entry: paths.managerEntry, args: ['setup', '--checkout', resolve(PACKAGE_ROOT)] }]);
+  assert.equal(io.prompts.length, 1);
+  const text = io.output.join('');
+  assert.match(text, /Paso 1\/3[\s\S]*Paso 2\/3[\s\S]*Paso 3\/3/);
+  assert.match(text, /adopción\s+no hay instalación previa/);
+  assert.doesNotMatch(text, /opencode service restart/);
+});
+
+test('checkout update hands the same mode to the manager wizard and a non-zero hand-off is reported as issues', async t => {
+  const root = fixture(t, false);
+  const { calls, deps } = bootstrap({ handoff: (entry, args) => { calls_.push(args); return 1; } });
+  const calls_ = [];
+  assert.equal(await runSetupUI(root, ui(['apply']), deps, { mode: 'update' }), 'issues');
+  assert.deepEqual(calls_, [['update', '--checkout', resolve(PACKAGE_ROOT)]]);
+  assert.deepEqual(calls, []);
+});
+
+test('checkout setup adopts an existing 0.2.0 installation (D23): hand edits and config stay, edits are listed', async t => {
+  const root = fixture(t); initProject(root, true);
+  const agent = join(root, agentName());
+  fs.appendFileSync(agent, '\nmy local note\n');
+  const edited = fs.readFileSync(agent, 'utf8');
+  const config = `${JSON.stringify(defaultSettings(), null, 2)}\n`;
+  fs.writeFileSync(join(root, 'mdd/mdd.config.json'), config);
+  const pkgFile = join(root, 'mdd/node_modules/my-driven-development/package.json');
+  const packageBefore = fs.readFileSync(pkgFile, 'utf8');
+  const { calls, deps } = bootstrap();
+  const io = ui(['apply']);
+  assert.equal(await runSetupUI(root, io, deps), 'ready');
+  const state = stateOf();
+  assert.equal(state.active.provenance, 'adopted');
+  assert.equal(state.active.version, '0.2.0');
+  assert.equal(state.active.channel, 'stable');
+  assert.notEqual(state.active.kind, 'dev');
+  assert.deepEqual(state.active.editedAssets, [agentName()]);
+  assert.equal(state.adoption.status, 'adopted');
+  assert.match(io.output.join(''), /estable 0\.2\.0 \(adoptada\)/);
+  assert.match(io.output.join(''), new RegExp(agentName().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.equal(fs.readFileSync(agent, 'utf8'), edited);
+  assert.equal(fs.readFileSync(join(root, 'mdd/mdd.config.json'), 'utf8'), config);
+  assert.equal(fs.readFileSync(pkgFile, 'utf8'), packageBefore);
+  assert.equal(calls.length, 1);
+  // Repeat: everything is current, so no consent is asked and no state is rewritten.
+  const stateBytes = fs.readFileSync(versionPaths(installationPaths().ownedRoot).statePath, 'utf8');
+  const again = ui([]);
+  assert.equal(await runSetupUI(root, again, deps), 'ready');
+  assert.equal(again.prompts.length, 0);
+  assert.equal(fs.readFileSync(versionPaths(installationPaths().ownedRoot).statePath, 'utf8'), stateBytes);
+  assert.equal(calls.length, 2);
+});
+
+test('adoption is refused with guidance for a different version or a packaged-content difference, and is re-evaluated later', async t => {
+  const root = fixture(t);
+  const pkgFile = join(root, 'mdd/node_modules/my-driven-development/package.json');
+  const original = fs.readFileSync(pkgFile, 'utf8');
+  fs.writeFileSync(pkgFile, original.replace('"version": "0.2.0"', '"version": "0.2.1"'));
+  const { deps } = bootstrap();
+  const io = ui(['apply']);
+  assert.equal(await runSetupUI(root, io, deps), 'ready');
+  let state = stateOf();
+  assert.equal(state.active, null);
+  assert.equal(state.adoption.status, 'refused');
+  assert.match(state.adoption.reason, /0\.2\.1/);
+  assert.match(state.adoption.reason, /mdd-ai use 0\.2\.0/);
+  assert.ok(readCurrent(installationPaths()), 'the manager is installed even when adoption is refused');
+  assert.equal(fs.existsSync(join(root, LOADER_PATH)), false, 'nothing else was written');
+  // A packaged-content difference is refused too.
+  fs.writeFileSync(pkgFile, original);
+  const differing = MDD_PACKAGED_ASSETS[0];
+  const differ = bootstrap({ readBaselineFile: path => (path === differing ? Buffer.from('different baseline bytes') : fs.readFileSync(join(PACKAGE_ROOT, path))) });
+  assert.equal(await runSetupUI(root, ui(['apply']), differ.deps), 'ready');
+  state = stateOf();
+  assert.equal(state.active, null);
+  assert.match(state.adoption.reason, /difieren de la línea base/);
+  assert.match(state.adoption.reason, new RegExp(differing.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  // The refusal is re-evaluated on the next run and can now succeed.
+  assert.equal(await runSetupUI(root, ui(['apply']), bootstrap().deps), 'ready');
+  assert.equal(stateOf().active.provenance, 'adopted');
+});
+
+test('leftovers that do not resolve are never adopted', async t => {
+  const root = fixture(t, false);
+  fs.mkdirSync(join(root, 'mdd'), { recursive: true });
+  fs.writeFileSync(join(root, 'mdd/package.json'), JSON.stringify({ private: true, devDependencies: { 'my-driven-development': 'file:packages/old.tgz' } }));
+  assert.equal(await runSetupUI(root, ui(['apply']), bootstrap().deps), 'ready');
+  const state = stateOf();
+  assert.equal(state.active, null);
+  assert.match(state.adoption.reason, /Hay restos de un paquete MDD/);
+});

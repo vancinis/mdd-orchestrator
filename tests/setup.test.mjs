@@ -319,6 +319,18 @@ test('doctor is ready after install, runs only the retained checks and changes n
   assert.deepEqual(snapshot(root), before);
 });
 
+test('doctor points an installed package that differs from the running one at mdd-ai use, not at the retired in-place update', async t => {
+  const root = fixture(t); initProject(root);
+  fs.appendFileSync(join(root, 'mdd/node_modules/my-driven-development/dist/safe-paths.js'), '\n// stale runtime\n');
+  const before = snapshot(root); const report = await doctor(root);
+  const freshness = report.checks.find(check => check.check === 'package-freshness');
+  assert.equal(freshness.status, 'info');
+  assert.match(freshness.message, /mdd-ai use dev/);
+  assert.match(freshness.message, /mdd-ai use <versión>/);
+  assert.doesNotMatch(freshness.message, /mdd-ai update/);
+  assert.deepEqual(snapshot(root), before);
+});
+
 test('doctor reports the active preferences from the global settings', async t => {
   const root = fixture(t); initProject(root);
   const settings = defaultSettings(); settings.profiles.default.answers = { mode: 'automatic', summary: 'detailed' }; saveSettings(root, settings);
