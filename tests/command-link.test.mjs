@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import fs from 'node:fs';
 import { delimiter, join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { COMMAND, commandPlan, launcherFiles, registerPath, writeLaunchers } from '../dist/command-link.js';
+import { COMMAND, ENTRY_TEXT, commandPlan, launcherFiles, launcherKind, registerPath, writeEntry, writeLaunchers } from '../dist/command-link.js';
 import { installationPaths } from '../dist/installation-paths.js';
 import { isolateHome } from './helpers.mjs';
 
@@ -14,16 +14,55 @@ function fixture(t) {
   return { home, paths };
 }
 
-test('the launcher resolves the CLI relative to itself, not to a pinned interpreter', () => {
+test('the launcher resolves the manager entry relative to itself, not to a pinned interpreter', () => {
   const files = launcherFiles();
   assert.deepEqual(files.map(file => file.name).sort(), [COMMAND, `${COMMAND}.cmd`].sort());
   for (const file of files) {
-    assert.match(file.content, /node_modules[\\/]my-driven-development[\\/]dist[\\/]cli\.js/);
+    assert.match(file.content, /manager[\\/]entry\.mjs/);
+    assert.doesNotMatch(file.content, /node_modules|dist[\\/]cli\.js/, 'launchers no longer target the replaceable package');
     assert.doesNotMatch(file.content, /[A-Za-z]:\\/, 'no absolute install path is baked in');
     assert.ok(file.content.endsWith('\n') || file.content.endsWith('\r\n'));
+    assert.equal(launcherKind(file.content), 'manager');
   }
-  assert.match(files.find(file => file.name.endsWith('.cmd')).content, /%\*/);
-  assert.match(files.find(file => file.name === COMMAND).content, /^#!\/bin\/sh/);
+  const cmd = files.find(file => file.name.endsWith('.cmd')).content;
+  const sh = files.find(file => file.name === COMMAND).content;
+  assert.match(cmd, /node "%~dp0\.\.\\manager\\entry\.mjs" %\*/);
+  assert.match(sh, /^#!\/bin\/sh/);
+  assert.match(sh, /exec node "\$\(dirname "\$0"\)\/\.\.\/manager\/entry\.mjs" "\$@"/);
+});
+
+test('launcher kinds tell the manager text from the 0.2.0 text and from foreign text', () => {
+  const legacyCmd = ['@echo off', 'setlocal', 'node "%~dp0..\\node_modules\\my-driven-development\\dist\\cli.js" %*', ''].join('\r\n');
+  const legacySh = ['#!/bin/sh', 'set -e', 'exec node "$(dirname "$0")/../node_modules/my-driven-development/dist/cli.js" "$@"', ''].join('\n');
+  assert.equal(launcherKind(legacyCmd), 'legacy');
+  assert.equal(launcherKind(legacySh), 'legacy');
+  assert.equal(launcherKind('echo hi\n'), 'other');
+});
+
+test('writing launchers also writes the stable entry, and only a newer entry text replaces an installed one', t => {
+  const { paths } = fixture(t);
+  writeLaunchers(paths);
+  assert.equal(fs.readFileSync(paths.managerEntry, 'utf8'), ENTRY_TEXT);
+  assert.equal(writeEntry(paths), 'keep');
+  // An older entry is upgraded; a newer one written by a later version is never downgraded.
+  fs.writeFileSync(paths.managerEntry, '// mdd-entry: 0\nold\n');
+  assert.equal(writeEntry(paths), 'updated');
+  assert.equal(fs.readFileSync(paths.managerEntry, 'utf8'), ENTRY_TEXT);
+  const newer = '// mdd-entry: 99\nfuture\n';
+  fs.writeFileSync(paths.managerEntry, newer);
+  assert.equal(writeEntry(paths), 'keep');
+  writeLaunchers(paths);
+  assert.equal(fs.readFileSync(paths.managerEntry, 'utf8'), newer);
+});
+
+test('a launcher rewritten with the 0.2.0 text is reported as update and repaired', t => {
+  const { paths } = fixture(t);
+  writeLaunchers(paths);
+  const sh = join(paths.binRoot, COMMAND);
+  fs.writeFileSync(sh, '#!/bin/sh\nexec node "$(dirname "$0")/../node_modules/my-driven-development/dist/cli.js" "$@"\n');
+  assert.equal(commandPlan(process.env, paths).files.find(file => file.name === COMMAND).action, 'update');
+  writeLaunchers(paths);
+  assert.equal(launcherKind(fs.readFileSync(sh, 'utf8')), 'manager');
 });
 
 test('planning reports what is missing without writing anything', t => {
@@ -94,7 +133,7 @@ test('the wizard installs the launcher and the command runs the real CLI', async
   fs.cpSync('assets', join(pkg, 'assets'), { recursive: true });
   fs.writeFileSync(join(paths.ownedRoot, 'package.json'), '{"private":true}');
   await runSetupUI(root, io, {
-    installPackage: () => { throw new Error('Unexpected package install'); },
+    fromCheckout: () => false,
     check: async () => ({ ready: true, checks: [] }),
     registerPath: () => assert.fail('installing must never edit PATH by itself'),
   });
@@ -107,4 +146,6 @@ test('the wizard installs the launcher and the command runs the real CLI', async
     : execFileSync(launcher, ['--help'], { encoding: 'utf8', timeout: 60000 });
   assert.match(output, /MDD: instalación y configuración/);
   assert.match(output, new RegExp(`${COMMAND} link`));
+  // No manager revision is installed here, so the stable entry falls back to the active package CLI.
+  assert.equal(fs.existsSync(paths.managerCurrentPath), false);
 });

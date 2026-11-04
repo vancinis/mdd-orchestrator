@@ -44,7 +44,7 @@ export async function doctor(cwd: string): Promise<{ ready: boolean; scope: 'glo
   try {
     const state = packageState(root);
     if (state.state === 'foreign') checks.push({ check: 'package-freshness', status: 'action', message: 'Quedaron restos de un paquete de MDD que no resuelven. Reparalos a mano: setup y update no los reemplazan.' });
-    else if (state.state === 'outdated') checks.push({ check: 'package-freshness', status: 'info', message: `El paquete instalado (${state.installed.digest.slice(0, 12)}) difiere de este (${state.source.digest.slice(0, 12)}). Ejecutá mdd-ai update desde este checkout.` });
+    else if (state.state === 'outdated') checks.push({ check: 'package-freshness', status: 'info', message: `El paquete instalado (${state.installed.digest.slice(0, 12)}) difiere de este (${state.source.digest.slice(0, 12)}). Ejecutá mdd-ai use dev para instalar este checkout (o mdd-ai use <versión> para una versión publicada).` });
     else if (state.state === 'matching') checks.push({ check: 'package-freshness', status: 'ok', message: 'El paquete instalado coincide con el paquete desde el que corre este comando.' });
   } catch { /* The installed-package check already reports an unreadable installation. */ }
   try {

@@ -15,6 +15,7 @@ function absolute(path: string): string {
 export function installationPaths({ home = homedir(), env = process.env }: InstallationEnvironment = {}) {
   const configRoot = join(absolute(env.XDG_CONFIG_HOME || join(absolute(home), '.config')), 'opencode');
   const ownedRoot = join(configRoot, 'mdd');
+  const managerRoot = join(ownedRoot, 'manager');
   const installedPackageRoot = join(ownedRoot, 'node_modules', 'my-driven-development');
   return Object.freeze({
     configRoot,
@@ -26,5 +27,11 @@ export function installationPaths({ home = homedir(), env = process.env }: Insta
     manifestPath: join(ownedRoot, 'setup-assets.json'),
     packagesRoot: join(ownedRoot, 'packages'),
     binRoot: join(ownedRoot, 'bin'),
+    /** Version manager: survives replacing the active package (permanent layout contract). */
+    managerRoot,
+    managerEntry: join(managerRoot, 'entry.mjs'),
+    managerCurrentPath: join(managerRoot, 'current.json'),
+    versionsRoot: join(ownedRoot, 'versions'),
+    backupsRoot: join(ownedRoot, 'backups'),
   });
 }

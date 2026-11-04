@@ -15,7 +15,7 @@ export async function settingsCommand(args: string[], root: string, write: (text
     return true;
   }
   if (command === 'update') {
-    if (args.length > 1) throw new ValidationError('Uso: mdd-ai update. Ejecutalo desde el checkout cuyo build querés instalar.');
+    if (args.length > 1) throw new ValidationError('Uso: mdd-ai update. Abre el asistente de versiones; desde un checkout: npm run setup -- update.');
     await runTerminalSetup(root, 'update');
     return true;
   }
