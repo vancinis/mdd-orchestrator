@@ -86,6 +86,13 @@ updated: 2026-11-02
 - Acceptance IDs (`R1`, `S1`), decision IDs (`D1`) and task IDs (`T1`) are stable: never renumber.
   Actors reference them.
 - Quote the user's request exactly. Everything else is written in English.
-- Record only what actually happened. A check you did not run does not go in Verification.
+- Record only what actually happened. Never list an unrun check as executed or passed.
+- Record the checked revision and relevant uncommitted changes under Verification, with command
+  working directories and links to detailed evidence. Distinguish executed checks from explicitly
+  cited reused evidence and explain why reuse is still valid. Reuse is not a new execution.
+  Keep required checks that were not run visible as blocked/omitted, never as passed evidence.
+- After later edits or merges, identify which earlier evidence remains valid and which affected
+  checks must run again. Keep required evidence gaps and approved external checks under Limits;
+  do not let `completed` imply an unchecked later state or silently waive required coverage.
 - Do not delete a finished run. If new work follows, start a new run and link the old one in its
   Request section.

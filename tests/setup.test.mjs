@@ -96,6 +96,63 @@ test('regression: installed coordinator keeps Spanish user prose and English art
   assert.match(installed, /Write prompts for actors, artifacts and run files in English/);
 });
 
+// These checks protect installed guidance, not an LLM's compliance with that guidance.
+test('installed Apply preserves bounded integration and evidence guidance', t => {
+  const root = fixture(t);
+  initProject(root);
+  const apply = fs.readFileSync(join(root, 'agents/mdd-apply.md'), 'utf8');
+  for (const section of ['Reuse context', 'Implement and integrate', 'Check the affected scope', 'Hand off evidence']) {
+    assert.ok(apply.includes(`## ${section}`), section);
+  }
+  assert.match(apply, /Explore is not a prerequisite/);
+  assert.match(apply, /Do not classify failures by matching test names or\s+error counts/);
+  assert.match(apply, /baseline timeout does not explain a new assertion failure/);
+  assert.match(apply, /Do not stash, reset, switch branches or restore other people's work/);
+  assert.match(apply, /not approval to publish/);
+  assert.ok(apply.includes(assetText(PACKAGE_ROOT, 'assets/opencode/contracts/actor.md').content.trimEnd()));
+});
+
+test('installed exploration and coordination support Apply without duplicate discovery or writers', t => {
+  const root = fixture(t);
+  initProject(root);
+  const explore = fs.readFileSync(join(root, 'agents/mdd-explore.md'), 'utf8');
+  const coordinator = fs.readFileSync(join(root, 'agents/mdd-orchestrator.md'), 'utf8');
+  assert.match(explore, /When preparing an implementation/);
+  assert.match(explore, /Do not run a full suite merely to inventory it/);
+  assert.match(coordinator, /Reuse existing exploration/);
+  assert.match(coordinator, /confirm the previous actor has stopped/);
+  assert.match(coordinator, /Reassign ownership before/);
+});
+
+// Contract delivery assertions, not a simulation of agent judgment or test selection.
+test('installed Verify preserves route context and evidence-based outcomes', t => {
+  const root = fixture(t);
+  initProject(root);
+  const verify = fs.readFileSync(join(root, 'agents/mdd-verify.md'), 'utf8');
+  for (const section of ['Use the actual run context', 'Select bounded checks', 'Assess failures and coverage', 'Report the checked state']) {
+    assert.ok(verify.includes(`## ${section}`), section);
+  }
+  assert.match(verify, /\*\*Low\*\*/);
+  assert.match(verify, /\*\*Medium\*\*/);
+  assert.match(verify, /\*\*High\*\*/);
+  assert.match(verify, /Do not require artifacts the route did not produce/);
+  assert.match(verify, /A passing isolated rerun alone does not establish an unrelated cause/);
+  assert.match(verify, /A missing service explains why a check could not run, not whether the behavior works/);
+  assert.match(verify, /`blocked` when required evidence is missing/);
+  assert.doesNotMatch(verify, /Environmental results never block/);
+});
+
+test('installed coordinator preserves evidence gaps and checked-state traceability', t => {
+  const root = fixture(t);
+  initProject(root);
+  const coordinator = fs.readFileSync(join(root, 'agents/mdd-orchestrator.md'), 'utf8');
+  assert.match(coordinator, /Verify remains optional on low/);
+  assert.match(coordinator, /Do not automatically send evidence-only gaps to Apply/);
+  assert.match(coordinator, /affected integration checks/);
+  assert.match(coordinator, /Record the checked revision and relevant uncommitted changes/);
+  assert.doesNotMatch(coordinator, /missing service\) is `environmental`: it does not block/);
+});
+
 test('installedAsset rejects an unknown contract marker', t => {
   const root = fs.mkdtempSync(join(tmpdir(), 'mdd-assets-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
