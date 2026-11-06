@@ -153,6 +153,26 @@ test('installed coordinator preserves evidence gaps and checked-state traceabili
   assert.doesNotMatch(coordinator, /missing service\) is `environmental`: it does not block/);
 });
 
+// Builds and tests rarely notice re-encoded text, so the guidance must reach every writer.
+test('installed writers keep native-write and damaged-text guidance', t => {
+  const root = fixture(t);
+  initProject(root);
+  const installed = path => fs.readFileSync(join(root, path), 'utf8');
+  for (const name of ['mdd-apply', 'mdd-verify', 'mdd-explore']) {
+    const actor = installed(`agents/${name}.md`);
+    assert.ok(actor.includes('## Files and text'), name);
+    assert.match(actor, /Create and edit files with the host's native write and edit tools/, name);
+    assert.match(actor, /Shell output is not file content/, name);
+  }
+  assert.match(installed('agents/mdd-apply.md'), /check your changed files for the\s+damaged-text signatures/);
+  assert.match(installed('agents/mdd-verify.md'), /Always add a text-integrity check of the changed text files/);
+  const coordinator = installed('agents/mdd-orchestrator.md');
+  assert.match(coordinator, /\*\*Files and text\.\*\*/);
+  assert.match(coordinator, /gh pr create --body-file <file>/);
+  assert.match(installed('skills/mdd-pr-body/SKILL.md'), /never redirect a command's output into it/);
+  assert.match(installed('agents/mdd-jd-fix.md'), /not shell rewrites/);
+});
+
 test('installedAsset rejects an unknown contract marker', t => {
   const root = fs.mkdtempSync(join(tmpdir(), 'mdd-assets-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));

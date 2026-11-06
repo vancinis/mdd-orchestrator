@@ -4,7 +4,7 @@ description: "Trigger: user PR request, pull request body, branch name or commit
 license: MIT
 metadata:
   author: "mdd-maintainers"
-  version: "2.1"
+  version: "2.2"
 ---
 
 ## Activation Contract
@@ -79,6 +79,11 @@ separated by blank lines.
   evidence does not support.
 - Optional groups `Contexto y decisiones`, `Riesgos y limitaciones` and `Notas para revisión` may
   follow, in that order, only when they have content. Label interpretation as such.
+- Build the body with the native write tool, or with a script that writes the file itself as UTF-8
+  (for a long `Cambios` table, say); never redirect a command's output into it
+  (`node table.mjs > table.md`). Read the finished file back with the native read tool and check
+  all of it, not a sample, for damaged text such as `�`, `Ã³`, `â€”`, `├│` or `ÔÇö`. Publish it
+  only as a file (`gh pr create --body-file <file>`).
 - Never include secrets, private source excerpts or unrelated work.
 - Drafting does not authorize creating branches, commit, push or opening the PR. Do those only when
   the user asks, using the drafted title, branch name, messages and body unchanged.

@@ -30,6 +30,10 @@ language, framework or directory layout. If a supplied skill helps this task, lo
   merely to make a test pass, or weaken assertions, guards or expected results to hide a defect.
   For a bug fix, reproduce the defect before changing it, then show the same check passing after
   the fix; if reproduction is unavailable, disclose the evidence gap rather than inventing it.
+- Edit with the native write and edit tools, as the actor contract's Files and text section says,
+  also for bulk renames and generated files. Before handoff, check your changed files for the
+  damaged-text signatures and for BOM, UTF-16 or line-ending changes you did not intend; repair
+  damage your change introduced and report damage that was already there.
 - Preserve unrelated work. Inspect the working-tree state before editing and review your own diff
   before handoff. Do not stash, reset, switch branches or restore other people's work to obtain a
   clean baseline in a shared tree. Coordinate an isolated comparison instead. If another writer

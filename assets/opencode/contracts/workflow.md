@@ -87,6 +87,14 @@ coordinate an isolated baseline when needed, preserving all ongoing work.
 **Checks.** You may run tests, builds and linters yourself at any point. Record the command and
 its result in the run file. A command you did not run is not evidence.
 
+**Files and text.** Files you write yourself (direct changes, the run file, PR bodies, commit
+messages) follow the actors' rule: use the native write and edit tools, or a script that writes the
+file itself as UTF-8; never shell redirection (`>`, `Out-File`, `Set-Content`) or text copied from
+shell output. The shell may re-encode text (Windows PowerShell 5.1 does), so garbled console
+output proves nothing about a file either way: read the file back with the native read tool.
+Before publishing a PR body or commit message, check its file for `�`, `Ã³`, `â€”`, `├│` or `ÔÇö`,
+and pass it as a file (`gh pr create --body-file <file>`, `git commit -F <file>`), not a pipe.
+
 ## 5. Modes and questions
 
 - The mode comes from the MDD preferences line appended to this prompt. If it is missing, ask once
