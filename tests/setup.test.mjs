@@ -129,7 +129,7 @@ test('installed Verify preserves route context and evidence-based outcomes', t =
   const root = fixture(t);
   initProject(root);
   const verify = fs.readFileSync(join(root, 'agents/mdd-verify.md'), 'utf8');
-  for (const section of ['Use the actual run context', 'Select bounded checks', 'Assess failures and coverage', 'Report the checked state']) {
+  for (const section of ['Use the actual run context', 'Select bounded checks', 'Try to break the change', 'Assess failures and coverage', 'Report the checked state']) {
     assert.ok(verify.includes(`## ${section}`), section);
   }
   assert.match(verify, /\*\*Low\*\*/);
@@ -140,6 +140,11 @@ test('installed Verify preserves route context and evidence-based outcomes', t =
   assert.match(verify, /A missing service explains why a check could not run, not whether the behavior works/);
   assert.match(verify, /`blocked` when required evidence is missing/);
   assert.doesNotMatch(verify, /Environmental results never block/);
+  assert.match(verify, /Write your own probes from the request, requirements and scenarios, not from Apply's tests/);
+  assert.match(verify, /a rejected or failing operation leaves stored state/);
+  assert.match(verify, /a \*\*blocker\*\* is caused by the change, reproducible with realistic input and absent\s+at the baseline/);
+  assert.match(verify, /probes never modify the shared working tree/);
+  assert.match(verify, /not shell-specific\s+syntax/);
 });
 
 test('installed coordinator preserves evidence gaps and checked-state traceability', t => {
@@ -149,6 +154,7 @@ test('installed coordinator preserves evidence gaps and checked-state traceabili
   assert.match(coordinator, /Verify remains optional on low/);
   assert.match(coordinator, /Do not automatically send evidence-only gaps to Apply/);
   assert.match(coordinator, /affected integration checks/);
+  assert.match(coordinator, /Advisories[^\n]*never start a correction round/);
   assert.match(coordinator, /Record the checked revision and relevant uncommitted changes/);
   assert.doesNotMatch(coordinator, /missing service\) is `environmental`: it does not block/);
 });

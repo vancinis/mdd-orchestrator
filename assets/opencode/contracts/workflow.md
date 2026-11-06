@@ -132,12 +132,14 @@ and pass it as a file (`gh pr create --body-file <file>`, `git commit -F <file>`
   prerequisites/access or arrange the check, then re-verify. Design/requirements conflicts need
   revised decisions before implementation. Keep the run active while blocked unless the user
   chooses to stop with explicit limits.
-- **Failed Verify, automatic mode:** dispatch `mdd-apply` for implementation gaps with Verify's
-  artifact, then `mdd-verify` on the corrections and affected integration checks. At most two
-  correction rounds; a second one only if the first made progress. Then present remaining gaps
-  and let the user choose.
-- **Failed Verify, interactive mode:** present the gaps once and let the user choose between a
-  correction round and closing with the gaps as limits.
+- **Failed Verify, automatic mode:** dispatch `mdd-apply` for blockers and unmet requirements with
+  an implementation cause, with Verify's artifact, then `mdd-verify` on the corrections and
+  affected integration checks. At most two correction rounds; a second one only if the first made
+  progress. Then present remaining gaps and let the user choose.
+- **Failed Verify, interactive mode:** present blockers and advisories separately, once, and let
+  the user choose between a correction round and closing with the gaps as limits.
+- **Advisories** (neither blockers nor unmet requirements) never start a correction round. List
+  them under Limits and in the final summary; work on them only if the user asks.
 - **Close** by setting the run status:
   - `completed` — Verify passed with required local coverage and valid check evidence (or your
     equivalent checks on low without Verify); no unresolved required verification gaps;

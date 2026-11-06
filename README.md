@@ -68,8 +68,10 @@ El orquestador decide el **nivel** según el pedido, y podés pedirle otro:
 - **Modo automático:** avanza de actor en actor y solo pregunta decisiones que son tuyas.
 - **Modo interactivo:** pregunta antes de cada actor (`Continuar`, `Ajustar`, `Pausar`).
 - **Verify** compara el resultado con cada criterio de aceptación y cada paso del plan, no solo
-  con el código de salida de los tests. Si falla, en modo automático hace hasta dos rondas de
-  corrección; después decidís vos.
+  con el código de salida de los tests. También intenta romper el cambio con sus propias pruebas
+  (casos negativos, de borde y entradas inválidas), lo compara con el estado anterior y separa los
+  bloqueantes de las advertencias. Si hay bloqueantes, en modo automático hace hasta dos rondas de
+  corrección; después decidís vos. Las advertencias quedan como límites.
 - **Varios `apply` en paralelo** (hasta 3) cuando las tareas no dependen entre sí y tocan archivos
   distintos.
 

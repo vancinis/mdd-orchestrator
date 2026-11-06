@@ -97,10 +97,13 @@ flowchart TD
   M --> V
   H --> V
   V -- Sí --> OK(["completed"])
-  V -- "No, modo automático" --> FIX["Hasta 2 rondas de corrección:<br/>apply con las brechas → verify"]
+  V -- "No, modo automático" --> FIX["Hasta 2 rondas de corrección:<br/>apply con los bloqueantes → verify"]
   FIX --> V
   V -- "No, decide el usuario" --> CU(["closed-unverified<br/>con las brechas como límites"])
 ```
+
+Verify separa los hallazgos en bloqueantes y advertencias: solo los bloqueantes (y los requisitos
+incumplidos) abren rondas de corrección; las advertencias quedan como límites.
 
 El detalle (cuándo escalar, preguntas, apply en paralelo, reanudación) está en
 [`contracts/workflow.md`](../assets/opencode/contracts/workflow.md).
