@@ -168,6 +168,42 @@ test('installed coordinator preserves evidence gaps and checked-state traceabili
   assert.doesNotMatch(coordinator, /missing service\) is `environmental`: it does not block/);
 });
 
+// The gitignore negation rules are easy to get wrong, so the shipped templates run through git itself.
+test('installed run-file persistence templates keep runs local or shared as documented', t => {
+  const root = fixture(t);
+  initProject(root);
+  const orchestrator = fs.readFileSync(join(root, 'agents/mdd-orchestrator.md'), 'utf8');
+  const templates = [...orchestrator.matchAll(/```gitignore\n([\s\S]*?)```/g)].map(match => match[1]);
+  const local = templates.find(text => text.startsWith('# mdd: local\n'));
+  const versioned = templates.find(text => text.startsWith('# mdd: versioned\n'));
+  assert.ok(local, 'local template is a fenced gitignore block starting with its marker');
+  assert.ok(versioned, 'versioned template is a fenced gitignore block starting with its marker');
+  assert.match(orchestrator, /topic_key`?\s+`mdd\/run\/<id>`/);
+  assert.match(orchestrator, /the\s+local\s+file\s+wins/);
+  assert.match(orchestrator, /Work\s+continues\s+when\s+the\s+memory\s+tools\s+are\s+unavailable/);
+  assert.doesNotMatch(orchestrator, /create it with `\*`/);
+
+  if (spawnSync('git', ['--version']).status !== 0) return t.skip('git is not available');
+  const repo = fs.mkdtempSync(join(tmpdir(), 'mdd-gitignore-'));
+  t.after(() => fs.rmSync(repo, { recursive: true, force: true }));
+  assert.equal(spawnSync('git', ['init', '-q'], { cwd: repo }).status, 0);
+  const files = ['.mdd/.gitignore', '.mdd/lessons.md', '.mdd/telemetry.jsonl', '.mdd/runs/r1.md', '.mdd/runs/r1/01-explore.md',
+    '.mdd/runs/r1/probes/p.mjs', '.mdd/tasks/t.json', '.mdd/checkpoints/c.json'];
+  for (const file of files) { fs.mkdirSync(join(repo, file, '..'), { recursive: true }); fs.writeFileSync(join(repo, file), 'x\n'); }
+  const ignored = path => {
+    const run = spawnSync('git', ['check-ignore', '-q', path], { cwd: repo });
+    assert.ok(run.status === 0 || run.status === 1, `git check-ignore failed for ${path}`);
+    return run.status === 0;
+  };
+  const shared = ['.mdd/.gitignore', '.mdd/runs/r1.md', '.mdd/runs/r1/01-explore.md', '.mdd/runs/r1/probes/p.mjs'];
+  const private_ = ['.mdd/lessons.md', '.mdd/telemetry.jsonl', '.mdd/tasks/t.json', '.mdd/checkpoints/c.json'];
+  fs.writeFileSync(join(repo, '.mdd/.gitignore'), local);
+  for (const path of [...shared, ...private_]) assert.equal(ignored(path), true, `local ignores ${path}`);
+  fs.writeFileSync(join(repo, '.mdd/.gitignore'), versioned);
+  for (const path of shared) assert.equal(ignored(path), false, `versioned tracks ${path}`);
+  for (const path of private_) assert.equal(ignored(path), true, `versioned keeps ${path} local`);
+});
+
 // Builds and tests rarely notice re-encoded text, so the guidance must reach every writer.
 test('installed writers keep native-write and damaged-text guidance', t => {
   const root = fixture(t);

@@ -64,7 +64,7 @@ nativos de OpenCode siguen siendo el límite real de lo que un agente puede hace
 | Reanudar desde un checkpoint sellado | Reanudar leyendo `.mdd/runs/<id>.md` | El archivo es legible por personas y por cualquier conversación; no depende del proceso del plugin. |
 | Alcance de escritura cercado (`mdd_worker_edit`) | Cada Apply recibe las tareas y archivos que le tocan | Los permisos nativos de edición siguen aplicándose; el cerco no era un sandbox real. |
 | Esquema JSON de cada reporte, validado | Reporte corto en Markdown y artefacto en disco | El orquestador lee prosa estructurada; no hay reportes "ilegibles" que rechazar. |
-| Memoria Engram gestionada por MDD | Si Engram está instalado como MCP, el orquestador lo usa | MDD no instala ni arranca servicios. |
+| Memoria Engram gestionada por MDD | Si Engram está instalado como MCP, el orquestador guarda en él una copia de cada ejecución y la usa para reanudar si falta el archivo local | MDD no instala ni arranca servicios; el archivo local sigue siendo la fuente de verdad. |
 
 ## Qué se aplica por código y qué es guía
 
@@ -124,8 +124,17 @@ Ventajas frente a un estado interno:
   artefacto completo queda en disco.
 - **Es auditable:** el registro y la verificación quedan escritos en texto plano.
 
-`.mdd/` es local por defecto: el orquestador crea `.mdd/.gitignore` con `*`. Si querés versionar
-las ejecuciones, borrá ese archivo.
+`.mdd/.gitignore` es el interruptor y su primera línea es la marca. Por defecto es local
+(`# mdd: local`, con `*`): el orquestador lo crea si falta. Cuando pedís versionar las ejecuciones,
+lo reescribe con `# mdd: versioned`, que deja pasar `.gitignore` y `runs/**`; así la decisión viaja
+con el repositorio. `lessons.md` sigue local. Un `.gitignore` con otro contenido se respeta, y si
+un `.gitignore` de la raíz sigue ignorando `.mdd/`, MDD pregunta antes de editarlo. MDD no hace
+`git add` ni commit salvo que se lo pidas. Que falte el archivo nunca significa "versionado".
+
+Cuando Engram está disponible, el orquestador guarda además una copia del archivo de ejecución
+(solo ese, no los artefactos) en cada actualización del registro. Si el archivo local falta,
+retoma desde la copia de Engram de este proyecto; si existe, el local manda. Sin Engram el trabajo
+continúa y la brecha queda en los límites.
 
 ## Cómo extender MDD
 

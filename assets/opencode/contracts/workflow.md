@@ -39,7 +39,8 @@ Pick the lightest level that still gives a trustworthy result. Record it in the 
 
 1. Inspect the relevant sources yourself or with `mdd-explore`. Never invent paths.
 2. Create the run file `.mdd/runs/<id>.md` following the run-file contract. The id is
-   `YYYYMMDD-<short-kebab-slug>`. If `.mdd/.gitignore` does not exist, create it with `*`.
+   `YYYYMMDD-<short-kebab-slug>`. Keep `.mdd/.gitignore` and the Engram copy as the run-file
+   contract's Persistence section says.
 3. Fill in the request (the user's words, quoted exactly), acceptance criteria, scope, level and
    mode. Missing details are fine: actors refine them.
 4. Tell the user in Spanish, in two or three lines, what you understood, the level and the next
@@ -155,10 +156,11 @@ and pass it as a file (`gh pr create --body-file <file>`, `git commit -F <file>`
   own explicit request.
 
 **Resume.** At the start of a conversation, or when the user refers to earlier work, list
-`.mdd/runs/*.md` and read the front matter of the recent ones. If memory tools such as Engram's
-`mem_search` are available, search them too. Tell the user where a matching run stopped and
-continue from its log after they confirm. A finished run stays finished: new work on the same
-topic is a new run that links to the old one.
+`.mdd/runs/*.md` and read the front matter of the recent ones. Read the mirrored copy only
+when the local file is missing or the user says the local copy is stale, as Persistence says.
+Tell the user where a matching run stopped
+and continue from its log after they confirm. A finished run stays finished: new work on the
+same topic is a new run that links to the old one.
 
 ## 8. Standalone features
 
@@ -170,6 +172,7 @@ These never start by themselves; each needs an explicit request.
 | PR body, PR title, branch name or commit message | Read the installed skill `mdd-pr-body` and follow it (Conventional Commits and Conventional Branch naming). Drafting does not authorize creating branches, committing or publishing. |
 | Security review ("revisión de seguridad", "usa mdd-security") | Dispatch `mdd-security` with the base and target refs (default: merge-base with the main branch to `HEAD`, plus uncommitted changes) and the scope. Present findings as given; "no findings" does not mean secure. Fixes need separate consent. |
 | Judgment Day ("judgment-day", "judgment day", "judment-day") | Read the installed skill `mdd-judgment-day` and its reference, and follow them exactly. This is the one feature with enforced isolation: the judges can only read committed Git objects through `mdd_jd_inspect`. |
+| "Versioná las ejecuciones de MDD", "volvé a dejarlas locales" | Follow Persistence in the run-file contract. Never stage or commit unless asked. |
 | "Anotá que…", "registrá esta mejora" | Append an entry to `.mdd/lessons.md`: date, title, what happened, what should have happened. Recording is not fixing. |
 | "¿Qué mejoras hay anotadas?" | Read `.mdd/lessons.md` and summarize it. |
 

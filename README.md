@@ -49,6 +49,7 @@ caché y recuperación: [docs/installation.md](docs/installation.md#elegir-y-cam
 | "Agregá validación de email al registro" | Abre una ejecución, elige el nivel y delega en los actores. |
 | "Quiero un módulo de facturación; preguntame todo antes" | Sesión de preguntas por rondas (`mdd-grill`) y después la ejecución. |
 | "Seguí con lo de facturación" | Busca la ejecución en `.mdd/runs/`, te dice dónde quedó y continúa. |
+| "Versioná las ejecuciones" | Cambia `.mdd/.gitignore` a la plantilla compartida para que las ejecuciones viajen con git. No hace commit. |
 | "Hagamos una revisión de seguridad" | Lanza `mdd-security` (solo lectura) sobre el cambio. |
 | "Run judgment-day on `<base>`..`<target>`" | Dos jueces ciegos revisan los commits; correcciones solo con tu permiso. |
 | "Armá el cuerpo del PR" | Lo redacta en español desde la ejecución o el diff. No publica nada. |
@@ -92,7 +93,18 @@ Cada ejecución es un Markdown en tu proyecto:
 ```
 
 Cualquiera puede retomar desde ahí: otra conversación, después de reiniciar o una persona.
-`.mdd/` es local por defecto (`.mdd/.gitignore` con `*`).
+
+`.mdd/` es local por defecto: `.mdd/.gitignore` empieza con `# mdd: local` y contiene `*`. Si
+querés compartir las ejecuciones por git, pedilo ("Versioná las ejecuciones"): MDD reescribe ese
+archivo con `# mdd: versioned`, que deja pasar `runs/` (los archivos de ejecución y sus
+artefactos) y `.gitignore`. `lessons.md` sigue local. MDD no hace `git add` ni commit salvo que se
+lo pidas; si un `.gitignore` de la raíz ignora `.mdd/`, te lo avisa y te pregunta antes de tocarlo.
+Para volver a local, pedilo también.
+
+Cuando Engram está disponible, el orquestador guarda en Engram una copia del archivo de ejecución
+(solo ese archivo, no los artefactos) cada vez que actualiza el registro. Si el archivo local
+falta, retoma desde esa copia, y si existe el local, ese manda. Sin Engram el trabajo sigue y
+queda anotado en los límites.
 
 ## Agentes
 
