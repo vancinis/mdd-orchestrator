@@ -51,6 +51,7 @@ updated: 2026-11-02
 
 - Reads: `src/forms/signup.tsx`, `src/lib/validation.ts`
 - Writes: `src/forms/signup.tsx`, `src/lib/validation.ts`, `tests/signup.test.ts`
+- Skills: `/home/me/.agents/skills/ts-testing/SKILL.md` (mdd-plan, mdd-apply)   # or: none
 - Out of scope: server-side validation.
 
 ## Decisions

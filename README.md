@@ -132,6 +132,12 @@ y mensajes de commit con Conventional Branch y Conventional Commits), `mdd-judgm
 (protocolo de los jueces), `mdd-doc` (artefactos fáciles de leer) y `mdd-cleanup` (limpieza
 acotada).
 
+Además, el orquestador resuelve una sola vez por ejecución las skills relevantes: las que nombrás,
+las de `AGENTS.md` o `.atl/skill-registry.md` y las que tenga instaladas el host. Las anota en el
+Scope del run file (`- Skills: <ruta> (<actores>)`) y les pasa a los actores la ruta exacta de cada
+`SKILL.md`; cada actor las lee antes de empezar y reporta cuáles cargó. Las skills de las funciones
+aparte (`mdd-grill`, `mdd-pr-body`, `mdd-judgment-day`) las usa solo el orquestador.
+
 ## Contratos y herramientas
 
 MDD tiene **una sola herramienta**, `mdd_jd_inspect`, y existe porque garantiza algo que una guía

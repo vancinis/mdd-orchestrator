@@ -41,8 +41,8 @@ Pick the lightest level that still gives a trustworthy result. Record it in the 
 2. Create the run file `.mdd/runs/<id>.md` following the run-file contract. The id is
    `YYYYMMDD-<short-kebab-slug>`. Keep `.mdd/.gitignore` and the Engram copy as the run-file
    contract's Persistence section says.
-3. Fill in the request (the user's words, quoted exactly), acceptance criteria, scope, level and
-   mode. Missing details are fine: actors refine them.
+3. Fill in the request (the user's words, quoted exactly), acceptance criteria, scope, relevant
+   skills (section 4), level and mode. Missing details are fine: actors refine them.
 4. Tell the user in Spanish, in two or three lines, what you understood, the level and the next
    actor. Then continue according to the mode (section 5).
 
@@ -57,10 +57,19 @@ prompt that contains:
   for unknowable names) and whether other Apply actors run alongside;
 - the artifact path where it writes its full output: `.mdd/runs/<id>/NN-<actor>.md`, where `NN`
   is the next two-digit sequence number (`01-explore.md`, `02-plan.md`, ...);
-- anything the user said that changes the plan.
+- anything the user said that changes the plan;
+- the exact `SKILL.md` paths this actor loads (omitted when none).
 
 Keep prompts short: the actor reads the files itself. Actors return a short report (actor
 contract); the full artifact is on disk.
+
+**Skills.** Sources: skills the user names, project indexes (`AGENTS.md` skill tables,
+`.atl/skill-registry.md`) and skills the host has installed. Match each by its trigger against
+the request, the files and the actor's phase, and resolve them once per run, before the first
+dispatch. Record them under Scope as `- Skills: <path> (<actors>)`, or `- Skills: none`; resolve
+again only when the scope changes or a recorded path is missing. Pass exact `SKILL.md` paths, not
+bare names (a bare name can resolve to another tool's skill), usually zero to three per actor.
+`mdd-grill`, `mdd-pr-body` and `mdd-judgment-day` stay with you (section 8).
 
 Reuse existing exploration and task handoffs: pass their paths to Apply with known integration
 dependencies and relevant checks. Do not request another repository survey when that evidence

@@ -200,6 +200,23 @@ test('installed coordinator and Apply keep Apply inside its edit surface', t => 
   }
 });
 
+test('installed coordinator and actors pass and load skills by path', t => {
+  const root = fixture(t);
+  initProject(root);
+  const coordinator = fs.readFileSync(join(root, 'agents/mdd-orchestrator.md'), 'utf8');
+  assert.match(coordinator, /resolve\s+them\s+once\s+per\s+run/);
+  assert.match(coordinator, /`-\s+Skills:\s+<path>\s+\(<actors>\)`/);
+  assert.match(coordinator, /exact\s+`SKILL\.md`\s+paths/);
+  assert.match(coordinator, /not\s+bare\s+names/);
+  assert.match(coordinator, /`mdd-grill`,\s+`mdd-pr-body`\s+and\s+`mdd-judgment-day`\s+stay\s+with\s+you/);
+  const plan = fs.readFileSync(join(root, 'agents/mdd-plan.md'), 'utf8');
+  assert.match(plan, /read\s+each\s+`SKILL\.md`\s+at\s+its\s+path\s+before\s+other\s+work/);
+  assert.match(plan, /never\s+widen\s+scope\s+or\s+permissions/);
+  assert.match(plan, /-\s+Skills:\s+loaded\s+…\s+\/\s+failed\s+…\s+\(reason\)/);
+  const apply = fs.readFileSync(join(root, 'agents/mdd-apply.md'), 'utf8');
+  assert.doesNotMatch(apply, /If\s+a\s+supplied\s+skill\s+helps\s+this\s+task,\s+load\s+it/);
+});
+
 // The gitignore negation rules are easy to get wrong, so the shipped templates run through git itself.
 test('installed run-file persistence templates keep runs local or shared as documented', t => {
   const root = fixture(t);

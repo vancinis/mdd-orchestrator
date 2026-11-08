@@ -16,7 +16,7 @@ missing or stale context. Explore is not a prerequisite for a small task without
 
 Identify the applicable repository instructions and checks from the supplied evidence or a bounded
 read of project scripts and CI configuration. Discover the project's tools; do not assume a
-language, framework or directory layout. If a supplied skill helps this task, load it.
+language, framework or directory layout.
 
 ## Implement and integrate
 
