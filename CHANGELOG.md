@@ -4,6 +4,19 @@ Las versiones de MDD se publican como etiquetas Git `v<versión>`. Las entradas 
 `npm run release -- <versión>` a partir de Conventional Commits; no las edites a mano dentro de un
 commit de release. Más información en [docs/installation.md](docs/installation.md#versiones-y-releases-mantenimiento).
 
+## [0.3.0] - 2026-11-05
+
+Estable · cambios desde `v0.2.0` (intervalo `v0.2.0..8f55419`, 5 commits).
+
+### Funcionalidades
+- **release:** add release script with changelog and local tags (`664d67f`)
+- **versions:** add version manager to switch between stable, preview and dev (`ec3f164`)
+
+### Correcciones
+- **apply:** strengthen integration and scoped verification guidance (`53a71ea`)
+- **verify:** require scoped evidence and level-aware verification (`03fa8c0`)
+- **contracts:** write files with native tools to keep text intact (`8f55419`)
+
 ## [0.2.0] - 2026-10-30
 
 Estable · línea base histórica en el commit `34a93f6` (`34a93f67ba405aa50850839c7cc3405374e61544`).
