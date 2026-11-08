@@ -17,9 +17,13 @@ import { installationPaths } from '../dist/installation-paths.js';
 import { launcherKind } from '../dist/command-link.js';
 import { MANAGER_REVISION, readCurrent } from '../dist/version-manager.js';
 import { readState, versionPaths } from '../dist/version-store.js';
+import { BASELINE } from '../dist/versions.js';
 import { needsPreparation, prepareSource } from '../scripts/setup.mjs';
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
+// Adoption accepts only the 0.2.0 baseline, while the seeded install copies the checkout's own version.
+const pinVersion = (file, version) =>
+  fs.writeFileSync(file, `${JSON.stringify({ ...JSON.parse(fs.readFileSync(file, 'utf8')), version }, null, 2)}\n`);
 const link = (target, path) => fs.symlinkSync(target, path, process.platform === 'win32' ? 'junction' : 'dir');
 function fixture(t, installed = true) {
   const home = fs.mkdtempSync(join(tmpdir(), 'mdd-wizard-'));
@@ -377,6 +381,7 @@ test('checkout setup adopts an existing 0.2.0 installation (D23): hand edits and
   const config = `${JSON.stringify(defaultSettings(), null, 2)}\n`;
   fs.writeFileSync(join(root, 'mdd/mdd.config.json'), config);
   const pkgFile = join(root, 'mdd/node_modules/my-driven-development/package.json');
+  pinVersion(pkgFile, BASELINE.version);
   const packageBefore = fs.readFileSync(pkgFile, 'utf8');
   const { calls, deps } = bootstrap();
   const io = ui(['apply']);
@@ -406,8 +411,9 @@ test('checkout setup adopts an existing 0.2.0 installation (D23): hand edits and
 test('adoption is refused with guidance for a different version or a packaged-content difference, and is re-evaluated later', async t => {
   const root = fixture(t);
   const pkgFile = join(root, 'mdd/node_modules/my-driven-development/package.json');
+  pinVersion(pkgFile, BASELINE.version);
   const original = fs.readFileSync(pkgFile, 'utf8');
-  fs.writeFileSync(pkgFile, original.replace('"version": "0.2.0"', '"version": "0.2.1"'));
+  pinVersion(pkgFile, '0.2.1');
   const { deps } = bootstrap();
   const io = ui(['apply']);
   assert.equal(await runSetupUI(root, io, deps), 'ready');
