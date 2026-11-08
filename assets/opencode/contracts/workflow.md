@@ -52,7 +52,9 @@ Call the native subagent tool in the foreground with the actor's name, a short d
 prompt that contains:
 
 - the run file path, and the paths of the earlier artifacts the actor needs;
-- what this actor must produce, and for Apply the exact task IDs and files it owns;
+- what this actor must produce, and for Apply the exact task IDs, its edit surface (every file
+  the tasks may change, tests, docs, tracked generated files and new files included; a glob only
+  for unknowable names) and whether other Apply actors run alongside;
 - the artifact path where it writes its full output: `.mdd/runs/<id>/NN-<actor>.md`, where `NN`
   is the next two-digit sequence number (`01-explore.md`, `02-plan.md`, ...);
 - anything the user said that changes the plan.
@@ -85,12 +87,29 @@ tasks have no dependencies between them and write disjoint files. Otherwise run 
 Each Apply gets a fresh actor. When the route includes Verify, run it after the last Apply,
 not once per batch. Verify remains optional on low as described in section 2.
 
+Parallel Apply actors run no repository-wide formatters, generators, installs, lockfile updates
+or checks that rewrite shared outputs (such as a clean build); they name what they need and you
+run it after the batch. After the last returns and its diff check passes, run one integration
+check over the combined change before Verify or the next batch; a failure there is a failed
+Apply for the tasks involved.
+
 Reassign ownership before an Apply edits an additional shared file; serialize any newly
 overlapping work. After an interruption or lost result, confirm the previous actor has stopped
 and inspect its artifact and working-tree changes before redispatching. A missing response is
 not evidence that it stopped. If its state is unknown, pause overlapping edits until resolved.
 Do not use stash, reset or branch switches on the shared tree to isolate one actor's checks;
 coordinate an isolated baseline when needed, preserving all ongoing work.
+
+**Edit surface.** Git-ignored outputs and Apply's own artifact under `.mdd/runs/<id>/` do not
+count; any other file off the list is outside. Note `git status --porcelain` before dispatch; on
+return compare the changed and untracked files (`git status --porcelain --untracked-files=all`,
+minus ignored files) with each Apply's own surface and reported file list, not the batch's union.
+A file already changed before dispatch stays in the comparison; when status cannot show whether
+the Apply touched it, log that limit. A justified change to a file nobody owns: extend, log,
+accept. Otherwise the report is `failed`: the same Apply undoes only
+its own edit, or the user decides if it overlaps others' work; never restore files yourself.
+Without git, rely on Apply's list and log the limit. After `blocked` for an outside file, extend
+the surface unless another active Apply owns it (then serialize), and continue.
 
 **Checks.** You may run tests, builds and linters yourself at any point. Record the command and
 its result in the run file. A command you did not run is not evidence.

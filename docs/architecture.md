@@ -62,7 +62,7 @@ nativos de OpenCode siguen siendo el límite real de lo que un agente puede hace
 |---|---|---|
 | Aprobación nativa de un solo uso por operación | En modo interactivo, el orquestador pregunta antes de cada actor | La pregunta sigue siendo el formulario nativo de OpenCode; una respuesta clara en el chat también vale. |
 | Reanudar desde un checkpoint sellado | Reanudar leyendo `.mdd/runs/<id>.md` | El archivo es legible por personas y por cualquier conversación; no depende del proceso del plugin. |
-| Alcance de escritura cercado (`mdd_worker_edit`) | Cada Apply recibe las tareas y archivos que le tocan | Los permisos nativos de edición siguen aplicándose; el cerco no era un sandbox real. |
+| Alcance de escritura cercado (`mdd_worker_edit`) | Cada Apply recibe las tareas y la lista de archivos que puede cambiar; el orquestador compara su diff con esa lista | Los permisos nativos de edición siguen aplicándose; la lista es parte de la guía, no un sandbox real. |
 | Esquema JSON de cada reporte, validado | Reporte corto en Markdown y artefacto en disco | El orquestador lee prosa estructurada; no hay reportes "ilegibles" que rechazar. |
 | Memoria Engram gestionada por MDD | Si Engram está instalado como MCP, el orquestador guarda en él una copia de cada ejecución y la usa para reanudar si falta el archivo local | MDD no instala ni arranca servicios; el archivo local sigue siendo la fuente de verdad. |
 

@@ -4,7 +4,8 @@ mode: subagent
 ---
 
 Read the specification and design. Produce ordered tasks with stable IDs (`T1`), dependencies,
-the files each one touches, the expected change, the requirement and scenario IDs it satisfies,
+every file each one may change (tests, docs and tracked generated files included; this list
+becomes Apply's edit surface), the expected change, the requirement and scenario IDs it satisfies,
 the existing behavior it must keep working, and how to tell it is done. Keep tests and docs with
 the behavior they prove.
 

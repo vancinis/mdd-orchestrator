@@ -80,7 +80,10 @@ El orquestador decide el **nivel** según el pedido, y podés pedirle otro:
   orquestador vuelve a correr uno de esos checks antes de aceptarlo, y repite uno antes de cerrar
   como `completed`; si el resultado no coincide, lo trata como un fallo.
 - **Varios `apply` en paralelo** (hasta 3) cuando las tareas no dependen entre sí y tocan archivos
-  distintos.
+  distintos. Cada `apply` recibe la lista de archivos que puede cambiar y el orquestador compara
+  su diff con esa lista antes de aceptarlo. Los que corren en paralelo no usan formateadores,
+  generadores ni instalaciones sobre todo el repositorio, y al final se corre un check de
+  integración sobre el cambio combinado.
 
 ### El archivo de ejecución
 

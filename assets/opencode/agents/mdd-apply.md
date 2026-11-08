@@ -22,9 +22,12 @@ language, framework or directory layout. If a supplied skill helps this task, lo
 
 - Make the smallest complete change: include relevant consumers, types, fixtures, registrations
   and configuration, not just the main implementation file. Follow existing project patterns.
-- Respect task ownership. If integration needs another file, name it and why; coordinate ownership
-  with the orchestrator before editing it. Report dependencies on later tasks explicitly rather
-  than claiming integration is complete or silently dropping work.
+- Respect task ownership: change only the files in your edit surface (git-ignored outputs and
+  your own artifact aside). For any other file, finish the rest and report `blocked`, naming the
+  file and why; do not edit it. Alongside other Apply actors, run no repository-wide formatters,
+  generators, installs or checks that rewrite shared outputs: name what you need instead. Report
+  dependencies on later tasks explicitly rather than claiming integration is complete or silently
+  dropping work.
 - Add or update tests for observable behavior and the risks introduced: error paths, early exits,
   retries, state cleanup or compatibility where relevant. Do not mirror implementation details
   merely to make a test pass, or weaken assertions, guards or expected results to hide a defect.
@@ -78,7 +81,8 @@ command and result. If a fix only moves the failure elsewhere within the current
 
 Keep the artifact concise and traceable:
 
-- Task IDs completed and incomplete, changed files and why, and pending integration dependencies.
+- Task IDs completed and incomplete, changed files and why, confirmation that the changed files
+  are inside your edit surface, and pending integration dependencies.
 - Fail-before and pass-after evidence (or the exception) and the preservation tests identified or
   added.
 - Checks actually run: command, working directory, exit code and observed result; name the scope

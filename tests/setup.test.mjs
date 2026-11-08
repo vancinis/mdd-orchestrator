@@ -179,6 +179,27 @@ test('installed coordinator spot-checks reported checks', t => {
   assert.match(coordinator, /do\s+not\s+swap\s+in\s+another\s+check/);
 });
 
+test('installed coordinator and Apply keep Apply inside its edit surface', t => {
+  const root = fixture(t);
+  initProject(root);
+  const coordinator = fs.readFileSync(join(root, 'agents/mdd-orchestrator.md'), 'utf8');
+  const apply = fs.readFileSync(join(root, 'agents/mdd-apply.md'), 'utf8');
+  assert.match(coordinator, /Apply\s+the\s+exact\s+task\s+IDs,\s+its\s+edit\s+surface/);
+  assert.match(coordinator, /tracked\s+generated\s+files/);
+  assert.match(coordinator, /compare\s+the\s+changed\s+and\s+untracked\s+files/);
+  assert.match(coordinator, /git\s+status\s+--porcelain\s+--untracked-files=all/);
+  assert.match(coordinator, /never\s+restore\s+files\s+yourself/);
+  assert.match(coordinator, /run\s+no\s+repository-wide\s+formatters,\s+generators,\s+installs/);
+  assert.match(coordinator, /one\s+integration\s+check\s+over\s+the\s+combined\s+change/);
+  assert.match(apply, /change\s+only\s+the\s+files\s+in\s+your\s+edit\s+surface/);
+  assert.match(apply, /report\s+`blocked`,\s+naming\s+the\s+file\s+and\s+why/);
+  assert.match(apply, /changed\s+files\s+are\s+inside\s+your\s+edit\s+surface/);
+  for (const name of ['mdd-plan', 'mdd-tasks']) {
+    const text = fs.readFileSync(join(root, `agents/${name}.md`), 'utf8');
+    assert.match(text, /every\s+file\s+(?:it|each\s+one)\s+may\s+change/, name);
+  }
+});
+
 // The gitignore negation rules are easy to get wrong, so the shipped templates run through git itself.
 test('installed run-file persistence templates keep runs local or shared as documented', t => {
   const root = fixture(t);

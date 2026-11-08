@@ -14,10 +14,11 @@ The plan contains:
   file; add new ones after them.
 - **Decisions:** the relevant choices and why (`D1`). Flag decisions only the user can make under
   `## Questions` instead of guessing.
-- **Tasks:** ordered, with stable IDs (`T1`), the files each one touches, what it changes, which
-  scenarios it satisfies, the existing behavior it must keep working and what it depends on (`—`
-  when nothing). Keep tests and docs with the behavior they prove. Each task must fit one fresh
-  Apply actor. Mark which tasks are independent and write disjoint files, so they can run in
+- **Tasks:** ordered, with stable IDs (`T1`), every file each one may change (tests, docs and
+  tracked generated files included; this list becomes Apply's edit surface), what it changes,
+  which scenarios it satisfies, the existing behavior it must keep working and what it depends on
+  (`—` when nothing). Keep tests and docs with the behavior they prove. Each task must fit one
+  fresh Apply actor. Mark which tasks are independent and write disjoint files, so they can run in
   parallel.
 - **Checks:** the exact commands Verify must run, and which are required.
 
