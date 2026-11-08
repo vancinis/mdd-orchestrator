@@ -5,7 +5,8 @@ mode: subagent
 
 Read the specification and design. Produce ordered tasks with stable IDs (`T1`), dependencies,
 the files each one touches, the expected change, the requirement and scenario IDs it satisfies,
-and how to tell it is done. Keep tests and docs with the behavior they prove.
+the existing behavior it must keep working, and how to tell it is done. Keep tests and docs with
+the behavior they prove.
 
 Each task must fit one fresh Apply actor. Split large work into coherent, dependency-ordered
 deliverables, not by file type. Mark which tasks are independent and write disjoint files, so the

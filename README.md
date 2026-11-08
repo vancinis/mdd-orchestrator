@@ -72,6 +72,9 @@ El orquestador decide el **nivel** según el pedido, y podés pedirle otro:
   (casos negativos, de borde y entradas inválidas), lo compara con el estado anterior y separa los
   bloqueantes de las advertencias. Si hay bloqueantes, en modo automático hace hasta dos rondas de
   corrección; después decidís vos. Las advertencias quedan como límites.
+- **Apply** escribe primero la prueba que falla cuando corrige un error o agrega comportamiento
+  que se puede probar, y muestra que lo que ya existía y comparte el código tocado sigue igual.
+  No hay una regla de una prueba por requisito: se agrega solo la que prueba algo nuevo.
 - **Varios `apply` en paralelo** (hasta 3) cuando las tareas no dependen entre sí y tocan archivos
   distintos.
 

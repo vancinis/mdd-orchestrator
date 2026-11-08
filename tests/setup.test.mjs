@@ -109,6 +109,15 @@ test('installed Apply preserves bounded integration and evidence guidance', t =>
   assert.match(apply, /baseline timeout does not explain a new assertion failure/);
   assert.match(apply, /Do not stash, reset, switch branches or restore other people's work/);
   assert.match(apply, /not approval to publish/);
+  assert.match(apply, /write\s+it\s+first,\s+see\s+it\s+fail\s+for\s+the\s+expected\s+reason/);
+  assert.match(apply, /state\s+the\s+exception\s+and\s+the\s+evidence\s+that\s+replaces\s+it/);
+  assert.match(apply, /existing\s+behavior\s+that\s+shares\s+the\s+changed\s+code/);
+  assert.match(apply, /there\s+is\s+no\s+rule\s+of\s+one\s+test\s+per\s+requirement/);
+  assert.match(apply, /fail-before\s+and\s+pass-after\s+evidence/i);
+  for (const name of ['mdd-plan', 'mdd-tasks']) {
+    const text = fs.readFileSync(join(root, `agents/${name}.md`), 'utf8');
+    assert.match(text, /existing\s+behavior\s+it\s+must\s+keep\s+working/, name);
+  }
   assert.ok(apply.includes(assetText(PACKAGE_ROOT, 'assets/opencode/contracts/actor.md').content.trimEnd()));
 });
 

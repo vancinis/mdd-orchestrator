@@ -15,9 +15,10 @@ The plan contains:
 - **Decisions:** the relevant choices and why (`D1`). Flag decisions only the user can make under
   `## Questions` instead of guessing.
 - **Tasks:** ordered, with stable IDs (`T1`), the files each one touches, what it changes, which
-  scenarios it satisfies and what it depends on (`—` when nothing). Keep tests and docs with the
-  behavior they prove. Each task must fit one fresh Apply actor. Mark which tasks are independent
-  and write disjoint files, so they can run in parallel.
+  scenarios it satisfies, the existing behavior it must keep working and what it depends on (`—`
+  when nothing). Keep tests and docs with the behavior they prove. Each task must fit one fresh
+  Apply actor. Mark which tasks are independent and write disjoint files, so they can run in
+  parallel.
 - **Checks:** the exact commands Verify must run, and which are required.
 
 Mark a scenario as external only when it can be observed solely outside this workspace (a device,
