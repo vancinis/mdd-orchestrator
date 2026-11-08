@@ -76,6 +76,9 @@ El orquestador decide el **nivel** según el pedido, y podés pedirle otro:
 - **Apply** escribe primero la prueba que falla cuando corrige un error o agrega comportamiento
   que se puede probar, y muestra que lo que ya existía y comparte el código tocado sigue igual.
   No hay una regla de una prueba por requisito: se agrega solo la que prueba algo nuevo.
+- **Control del orquestador:** cuando un actor informa un éxito basado en checks ejecutados, el
+  orquestador vuelve a correr uno de esos checks antes de aceptarlo, y repite uno antes de cerrar
+  como `completed`; si el resultado no coincide, lo trata como un fallo.
 - **Varios `apply` en paralelo** (hasta 3) cuando las tareas no dependen entre sí y tocan archivos
   distintos.
 
@@ -187,7 +190,8 @@ Las pruebas aíslan HOME, XDG y APPDATA en un directorio temporal: nunca tocan t
 - **Sin validación end-to-end con modelos reales.** La calidad depende de cómo el modelo interprete
   los contratos; conviene probarlo con tus modelos y ajustar los contratos.
 - **La evidencia es la que reportan los agentes.** MDD no certifica que un comando se haya
-  ejecutado; Verify lo corre y lo informa.
+  ejecutado; Verify lo corre y lo informa, y el orquestador repite un check antes de aceptar un
+  éxito basado en checks o de cerrar como `completed`, lo que sigue sin ser una certificación.
 - **No hay sandbox.** Los agentes ejecutan código real bajo los permisos nativos de OpenCode.
 - **Entrega explícita.** MDD nunca hace commit, push ni abre un PR sin que lo pidas.
 

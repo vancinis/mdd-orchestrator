@@ -70,8 +70,15 @@ After each actor:
 1. Read its report. If the outcome is `failed` or `blocked`, decide: give it what it was missing
    and dispatch again (at most twice for the same reason), escalate the level, ask the user, or do
    the work directly and note it in the log.
-2. Update the run file: log line, plan status, decisions, open questions.
-3. Show the user a brief Spanish summary at their chosen detail level (section 6), then continue.
+2. Spot check Apply or Verify `passed` that rests on executed checks (others only if they claim
+   executed results): rerun the cheapest reported check exercising the claim, same command and
+   working directory (after parallel Apply, one rerun covers the batch), and record it under
+   Verification. On a mismatch in exit code, result or counts, handle the report as `failed`:
+   record both, then redispatch Apply (step 1) or route the Verify gap (section 7); do not swap
+   in another check until the difference is explained. If you cannot run it, record "not run" and
+   why; that is no match.
+3. Update the run file: log line, plan status, decisions, open questions.
+4. Show the user a brief Spanish summary at their chosen detail level (section 6), then continue.
 
 **Parallel Apply.** You may dispatch up to three `mdd-apply` actors in one message when their
 tasks have no dependencies between them and write disjoint files. Otherwise run them in sequence.
@@ -143,7 +150,8 @@ and pass it as a file (`gh pr create --body-file <file>`, `git commit -F <file>`
   them under Limits and in the final summary; work on them only if the user asks.
 - **Close** by setting the run status:
   - `completed` — Verify passed with required local coverage and valid check evidence (or your
-    equivalent checks on low without Verify); no unresolved required verification gaps;
+    equivalent checks on low without Verify); no unresolved required verification gaps. First rerun
+    one Verify check (medium/high); on low without Verify, one check you ran is required;
   - `closed-unverified` — the user chose to stop with gaps; list every gap under Limits;
   - `abandoned` — the user dropped the work.
   Then give the user a final Spanish summary: what changed, how it matches the request and plan,

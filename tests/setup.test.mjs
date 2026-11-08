@@ -168,6 +168,17 @@ test('installed coordinator preserves evidence gaps and checked-state traceabili
   assert.doesNotMatch(coordinator, /missing service\) is `environmental`: it does not block/);
 });
 
+test('installed coordinator spot-checks reported checks', t => {
+  const root = fixture(t);
+  initProject(root);
+  const coordinator = fs.readFileSync(join(root, 'agents/mdd-orchestrator.md'), 'utf8');
+  assert.match(coordinator, /rerun\s+the\s+cheapest\s+reported\s+check/);
+  assert.match(coordinator, /same\s+command\s+and\s+working\s+directory/);
+  assert.match(coordinator, /on\s+low\s+without\s+Verify,\s+one\s+check\s+you\s+ran\s+is\s+required/);
+  assert.match(coordinator, /mismatch[\s\S]{0,100}handle\s+the\s+report\s+as\s+`failed`/);
+  assert.match(coordinator, /do\s+not\s+swap\s+in\s+another\s+check/);
+});
+
 // The gitignore negation rules are easy to get wrong, so the shipped templates run through git itself.
 test('installed run-file persistence templates keep runs local or shared as documented', t => {
   const root = fixture(t);
