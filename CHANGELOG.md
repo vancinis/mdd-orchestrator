@@ -4,6 +4,18 @@ Las versiones de MDD se publican como etiquetas Git `v<versión>`. Las entradas 
 `npm run release -- <versión>` a partir de Conventional Commits; no las edites a mano dentro de un
 commit de release. Más información en [docs/installation.md](docs/installation.md#versiones-y-releases-mantenimiento).
 
+## [0.4.0-preview.1] - 2026-11-07
+
+Preview · cambios desde `v0.3.0` (intervalo `v0.3.0..8e66bc8`, 7 commits).
+
+### Funcionalidades
+- **verify:** probe edge cases and classify findings by severity (`4092bed`)
+- **apply:** write tests first and prove existing behavior holds (`9725dba`)
+- **runs:** mirror runs to engram and version them only on request (`bdd0b5b`)
+- **workflow:** rerun one reported check before accepting results (`63ccb59`)
+- **workflow:** keep apply inside an explicit edit surface (`a2a0299`)
+- **skills:** resolve skills once per run and pass them by path (`a78df8c`)
+
 ## [0.3.0] - 2026-11-05
 
 Estable · cambios desde `v0.2.0` (intervalo `v0.2.0..8f55419`, 5 commits).
