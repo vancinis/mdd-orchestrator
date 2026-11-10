@@ -114,3 +114,19 @@ test('ADR 0002 and the architecture describe the setup/update dispatch of D27', 
     assert.match(text, /solo delegan en la versión activa si se conserva la (versión )?actual/, `${path}: delegate only when keeping the version`);
   }
 });
+
+test('user docs and AGENTS.md describe explicit mdd-explain usage and its artifact paths', () => {
+  const inventory = ['README.md', 'docs/installation.md', 'docs/architecture.md', 'AGENTS.md'];
+  for (const path of inventory) assert.ok(read(path).includes('mdd-explain'), `${path} lacks mdd-explain`);
+  const readme = read('README.md').replace(/\s+/g, ' ');
+  const architecture = read('docs/architecture.md').replace(/\s+/g, ' ');
+  for (const [name, text] of [['README.md', readme], ['docs/architecture.md', architecture]]) {
+    assert.ok(text.includes('.mdd/artifacts/<tema>/index.html'), `${name} lacks the standalone path`);
+    assert.ok(text.includes('.mdd/runs/<id>/artifacts/<tema>/index.html'), `${name} lacks the run-associated path`);
+  }
+  assert.match(readme, /`general`/);
+  assert.match(readme, /No abre una ejecución\. Una explicación común sigue en el chat/);
+  assert.match(architecture, /no abre una ejecución/);
+  assert.match(architecture, /no la fuente de verdad/);
+  assert.match(read('AGENTS.md'), /ordinary explanations stay in chat/);
+});

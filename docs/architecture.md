@@ -11,7 +11,7 @@ Judgment Day.
 |---|---|---|
 | Contratos | `assets/opencode/contracts/` | Las guías: el flujo de trabajo (`workflow.md`), el formato del archivo de ejecución (`run-file.md`) y las reglas comunes de los actores (`actor.md`). |
 | Agentes | `assets/opencode/agents/` | Un archivo por actor con su rol. Al instalarse, cada marcador `<!-- mdd:include contracts/… -->` se reemplaza por el texto del contrato, así que cada agente instalado se lee completo por sí solo. |
-| Skills | `assets/opencode/skills/` | Procedimientos que se cargan solo cuando se piden: `mdd-grill`, `mdd-pr-body`, `mdd-judgment-day`, `mdd-doc` y `mdd-cleanup`. |
+| Skills | `assets/opencode/skills/` | Procedimientos que se cargan solo cuando se piden: `mdd-grill`, `mdd-pr-body`, `mdd-judgment-day`, `mdd-doc`, `mdd-explain` y `mdd-cleanup`. |
 | Plugin | `src/opencode-plugin.ts` | Asigna modelos a los agentes MDD y valores por defecto a llamadas nuevas a `explore`/`general` desde el orquestador, agrega las preferencias (`mode`, `summary`) y registra la única herramienta: `mdd_jd_inspect`, solo para los jueces. |
 | Instalador y CLI | `src/cli.ts`, `src/setup*.ts`, `src/config-ui.ts`, `src/doctor.ts` | `mdd-ai setup`, `update`, `link`, `doctor`, `config` y `profile` de la versión activa. |
 | Gestor de versiones | `src/version-*.ts`, `src/versions.ts` | `mdd-ai use` y `versions`, el asistente de versiones, el clon propio del origen, respaldos, caché y recuperación. Vive en `mdd/manager`, fuera del paquete instalado, y atiende `link`; `setup` y `update` abren primero el asistente y solo delegan en la versión activa si se conserva la actual; delega el resto sin cambios a la versión activa. Decisiones: [ADR 0001](adr/0001-git-tags-and-owned-clone.md), [0002](adr/0002-separate-version-manager.md), [0003](adr/0003-backup-and-replace-on-switch.md). |
@@ -112,6 +112,11 @@ Toda ejecución vive en el proyecto, en `.mdd/runs/<id>.md`, con sus artefactos 
 decisiones, plan, registro, verificación y límites. El orquestador es el único que lo edita; cada
 actor escribe solo su propio artefacto. Formato completo en
 [`contracts/run-file.md`](../assets/opencode/contracts/run-file.md).
+
+Una explicación en HTML pedida explícitamente con `mdd-explain` no abre una ejecución. Sin
+ejecución se guarda en `.mdd/artifacts/<tema>/index.html`; si se asocia a una existente, en
+`.mdd/runs/<id>/artifacts/<tema>/index.html`. Es material de lectura, no la fuente de verdad: esa
+sigue siendo el archivo de ejecución.
 
 Ventajas frente a un estado interno:
 
