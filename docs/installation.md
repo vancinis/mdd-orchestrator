@@ -48,7 +48,7 @@ sistemas imprime la línea `export` para tu perfil de shell. Abrí una terminal 
 | Ubicación bajo la raíz de OpenCode | Propósito |
 |---|---|
 | `agents/mdd-*.md` | Los 14 agentes, con los contratos ya incluidos |
-| `skills/mdd-cleanup`, `mdd-doc`, `mdd-pr-body`, `mdd-judgment-day`, `mdd-grill` | Skills de MDD |
+| `skills/mdd-cleanup`, `mdd-doc`, `mdd-pr-body`, `mdd-judgment-day`, `mdd-grill`, `mdd-explain` | Skills de MDD |
 | `plugins/mdd.ts` | Cargador del plugin |
 | `mdd/mdd.config.json` | Configuración global |
 | `mdd/package.json`, `mdd/node_modules`, `mdd/packages/` | El paquete instalado (la versión activa) y sus tarballs |
