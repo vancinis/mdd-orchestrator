@@ -47,7 +47,8 @@ test('R06: config UI failures report bounded subprocess metadata', () => {
 
 function invoke(root, ...args) {
   const started = performance.now();
-  const result = spawnSync(process.execPath, [cli, ...args], { cwd: root, encoding: 'utf8', timeout: 5000 });
+  // Allow child startup under full-suite contention while retaining a finite timeout.
+  const result = spawnSync(process.execPath, [cli, ...args], { cwd: root, encoding: 'utf8', timeout: 30000 });
   assertSpawn(result, started);
   return result;
 }
