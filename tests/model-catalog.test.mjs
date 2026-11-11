@@ -2,10 +2,10 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { listModels, listVariants, opencodeBinary, providersOf, MODEL_LIMIT } from '../dist/model-catalog.js';
 
-function pathWith(t, name) {
+function pathWith(t, name = process.platform === 'win32' ? 'opencode.exe' : 'opencode') {
   const root = mkdtempSync(join(tmpdir(), 'mdd-catalog-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   writeFileSync(join(root, name), 'launcher');
@@ -17,7 +17,7 @@ test('the launcher is resolved through PATH only, per platform', t => {
   assert.equal(opencodeBinary(win.env, 'win32'), join(win.root, 'opencode.exe'));
   assert.equal(opencodeBinary(win.env, 'linux'), undefined);
   const posix = pathWith(t, 'opencode');
-  assert.equal(opencodeBinary(posix.env, 'linux'), join(posix.root, 'opencode'));
+  assert.equal(opencodeBinary(posix.env), process.platform === 'win32' ? undefined : join(posix.root, 'opencode'));
   assert.equal(opencodeBinary({ PATH: '' }, 'linux'), undefined);
   assert.equal(opencodeBinary({}, 'linux'), undefined);
 });
@@ -32,17 +32,24 @@ test('an earlier shim never shadows a real executable later in PATH', t => {
   assert.equal(listModels(() => assert.fail('must not execute'), { PATH: shim.root }, 'win32').status, 'unavailable');
 });
 
+test('the launcher searches a later native PATH directory', t => {
+  const unrelated = pathWith(t, 'unrelated');
+  const name = process.platform === 'win32' ? 'opencode.exe' : 'opencode';
+  const real = pathWith(t, name);
+  assert.equal(opencodeBinary({ PATH: [unrelated.root, real.root].join(delimiter) }), join(real.root, name));
+});
+
 test('catalog output is parsed, de-duplicated, sorted and stripped of ANSI', t => {
-  const { env, root } = pathWith(t, 'opencode');
+  const { env, root } = pathWith(t);
   const calls = [];
   const execute = (binary, args, options) => {
     calls.push({ binary, args, options });
     return 'zai/glm-1\n\u001b[32mopenai/gpt-b\u001b[0m\n  openai/gpt-a  \nopenai/gpt-a\n\nnot a model\n';
   };
-  const result = listModels(execute, env, 'linux');
+  const result = listModels(execute, env);
   assert.deepEqual(result, { status: 'ok', models: ['openai/gpt-a', 'openai/gpt-b', 'zai/glm-1'] });
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].binary, join(root, 'opencode'));
+  assert.equal(calls[0].binary, join(root, process.platform === 'win32' ? 'opencode.exe' : 'opencode'));
   assert.deepEqual(calls[0].args, ['models']);
   assert.equal(calls[0].options.timeout, 30000);
   assert.equal(calls[0].options.windowsHide, true);
@@ -57,8 +64,8 @@ for (const [name, execute] of Object.entries({
   'an oversized list': () => Array.from({ length: MODEL_LIMIT + 1 }, (_, i) => `p/m${i}`).join('\n'),
 })) {
   test(`unavailable is a normal outcome: ${name}`, t => {
-    const { env } = pathWith(t, 'opencode');
-    const result = listModels(execute, env, 'linux');
+    const { env } = pathWith(t);
+    const result = listModels(execute, env);
     assert.equal(result.status, 'unavailable');
     assert.ok(result.reason.length > 0);
   });
@@ -89,16 +96,16 @@ const VERBOSE_SAMPLE = [
 ].join('\n');
 
 test('variants are parsed per model, sorted, from the verbose catalog of one provider', t => {
-  const { env, root } = pathWith(t, 'opencode');
+  const { env, root } = pathWith(t);
   const calls = [];
   const execute = (binary, args, options) => { calls.push({ binary, args, options }); return VERBOSE_SAMPLE; };
-  const result = listVariants('anthropic', execute, env, 'linux');
+  const result = listVariants('anthropic', execute, env);
   assert.deepEqual(result, {
     status: 'ok',
     variants: { 'anthropic/claude-sonnet-4-5': ['high', 'low'], 'anthropic/claude-haiku-4-5': [] },
   });
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].binary, join(root, 'opencode'));
+  assert.equal(calls[0].binary, join(root, process.platform === 'win32' ? 'opencode.exe' : 'opencode'));
   assert.deepEqual(calls[0].args, ['api', 'model.list']);
   assert.equal(calls[0].options.timeout, 30000);
 });
@@ -115,8 +122,8 @@ for (const [name, execute] of Object.entries({
   'output with an unparsable block': () => 'zai/glm-1\n{\n  "variants": [\n}\n',
 })) {
   test(`variants tolerate ${name} without throwing`, t => {
-    const { env } = pathWith(t, 'opencode');
-    const result = listVariants('zai', execute, env, 'linux');
+    const { env } = pathWith(t);
+    const result = listVariants('zai', execute, env);
     if (name === 'a failing launcher') { assert.equal(result.status, 'unavailable'); assert.ok(result.reason.length > 0); }
     else assert.deepEqual(result, { status: 'ok', variants: {} });
   });

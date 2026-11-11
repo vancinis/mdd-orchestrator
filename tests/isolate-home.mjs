@@ -2,6 +2,11 @@ import fs from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
+// Resolve system aliases such as macOS /var without weakening the path-safety checks.
+const temporary = fs.realpathSync(tmpdir());
+if (process.platform === 'win32') process.env.TEMP = process.env.TMP = temporary;
+else process.env.TMPDIR = temporary;
+
 const root = fs.mkdtempSync(join(tmpdir(), 'mdd-test-home-'));
 for (const name of ['HOME', 'USERPROFILE', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME', 'APPDATA', 'LOCALAPPDATA']) process.env[name] = root;
 process.env.npm_config_cache = join(root, 'npm-cache');
