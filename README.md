@@ -45,6 +45,7 @@ caché y recuperación: [docs/installation.md](docs/installation.md#elegir-y-cam
 | Lo que escribís | Lo que hace |
 |---|---|
 | "¿Cómo funciona el módulo de pagos?" | Responde o investiga con `mdd-explore`. No abre una ejecución. |
+| "Generá un artefacto HTML que explique cómo funciona el pago" | Usa `mdd-explain`: el subagente `general` escribe un HTML autocontenido en `.mdd/artifacts/<tema>/index.html`. No abre una ejecución. Una explicación común sigue en el chat. |
 | "Cambiá el texto del botón a 'Enviar'" | Lo hace directo. Un cambio chico no necesita proceso. |
 | "Agregá validación de email al registro" | Abre una ejecución, elige el nivel y delega en los actores. |
 | "Quiero un módulo de facturación; preguntame todo antes" | Sesión de preguntas por rondas (`mdd-grill`) y después la ejecución. |
@@ -106,8 +107,9 @@ Cualquiera puede retomar desde ahí: otra conversación, después de reiniciar o
 
 Skills: `mdd-grill` (sesión de preguntas), `mdd-pr-body` (cuerpo y título del PR, nombres de rama
 y mensajes de commit con Conventional Branch y Conventional Commits), `mdd-judgment-day`
-(protocolo de los jueces), `mdd-doc` (artefactos fáciles de leer) y `mdd-cleanup` (limpieza
-acotada).
+(protocolo de los jueces), `mdd-doc` (artefactos fáciles de leer), `mdd-explain` (explicación visual en HTML, solo si la pedís;
+si la asociás a una ejecución, queda en `.mdd/runs/<id>/artifacts/<tema>/index.html`) y
+`mdd-cleanup` (limpieza acotada).
 
 ## Contratos y herramientas
 
@@ -147,7 +149,7 @@ Referencia completa: [docs/installation.md](docs/installation.md#configuración)
 ├── assets/opencode/
 │   ├── contracts/        guías que se insertan en los agentes
 │   ├── agents/           los 14 agentes
-│   └── skills/           mdd-grill, mdd-pr-body, mdd-judgment-day, mdd-doc, mdd-cleanup
+│   └── skills/           mdd-grill, mdd-pr-body, mdd-judgment-day, mdd-doc, mdd-explain, mdd-cleanup
 ├── src/                  plugin, instalador y CLI (TypeScript)
 ├── tests/                pruebas con node:test sobre dist/
 ├── scripts/setup.mjs     prepara el checkout y abre el asistente

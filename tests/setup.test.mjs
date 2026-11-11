@@ -357,6 +357,57 @@ for (const file of ['SKILL.md', 'NOTICE']) {
   });
 }
 
+const EXPLAIN = ['SKILL.md', 'assets/template.html', 'references/authoring.md'];
+
+test('init installs the mdd-explain skill, template and reference verbatim, records them and routes explicit artifact requests only', t => {
+  const root = fixture(t);
+  initProject(root);
+  const ledger = join(root, 'mdd/setup-assets.json'), manifest = JSON.parse(fs.readFileSync(ledger, 'utf8'));
+  for (const file of EXPLAIN) {
+    const source = `assets/opencode/skills/mdd-explain/${file}`, name = `skills/mdd-explain/${file}`;
+    assert.ok(MDD_ASSETS.includes(source), source);
+    assert.equal(fs.readFileSync(join(root, name), 'utf8'), fs.readFileSync(source, 'utf8'), name);
+    assert.equal(manifest[name], assetText(PACKAGE_ROOT, source).digest, name);
+  }
+  const orchestrator = fs.readFileSync(join(root, 'agents/mdd-orchestrator.md'), 'utf8');
+  assert.match(orchestrator, /Read the installed skill `mdd-explain`/);
+  assert.match(orchestrator, /native `general`/);
+  assert.match(orchestrator, /starts no run/);
+  assert.match(orchestrator, /Question, explanation, investigation \| Answer directly\./);
+  assert.equal(fs.existsSync(join(root, 'agents/mdd-explain.md')), false, 'the skill adds no actor');
+  const before = snapshot(root);
+  assert.equal(initProject(root).created, 0); assert.deepEqual(snapshot(root), before);
+});
+
+test('update from a ledger without mdd-explain adds all three files and keeps an unrelated skill', t => {
+  const root = fixture(t);
+  fs.mkdirSync(join(root, 'skills/explain'), { recursive: true }); fs.writeFileSync(join(root, 'skills/explain/SKILL.md'), 'foreign explain skill');
+  initProject(root);
+  const ledger = join(root, 'mdd/setup-assets.json'), manifest = JSON.parse(fs.readFileSync(ledger, 'utf8'));
+  const names = EXPLAIN.map(file => `skills/mdd-explain/${file}`);
+  for (const name of names) { fs.rmSync(join(root, name)); delete manifest[name]; }
+  fs.rmdirSync(join(root, 'skills/mdd-explain/assets')); fs.rmdirSync(join(root, 'skills/mdd-explain/references')); fs.rmdirSync(join(root, 'skills/mdd-explain'));
+  fs.writeFileSync(ledger, JSON.stringify(manifest));
+  const result = initProject(root, true);
+  assert.equal(result.created, names.length);
+  for (const name of names) assert.equal(fs.readFileSync(join(root, name), 'utf8'), fs.readFileSync(`assets/opencode/${name}`, 'utf8'), name);
+  assert.equal(fs.readFileSync(join(root, 'skills/explain/SKILL.md'), 'utf8'), 'foreign explain skill');
+  const recorded = JSON.parse(fs.readFileSync(ledger, 'utf8'));
+  for (const name of names) assert.equal(recorded[name], assetText(root, name).digest, name);
+  assert.ok(Buffer.byteLength(fs.readFileSync(ledger)) < 16384, 'the ledger stays inside its read bound');
+  assert.equal(initProject(root, true).created, 0);
+});
+
+for (const file of EXPLAIN) {
+  test(`init preserves a foreign mdd-explain ${file} before any partial installation`, t => {
+    const root = fixture(t); const path = join(root, `skills/mdd-explain/${file}`);
+    fs.mkdirSync(join(path, '..'), { recursive: true }); fs.writeFileSync(path, 'foreign content');
+    const before = snapshot(root);
+    assert.throws(() => initProject(root), /refuses to overwrite different content: skills\/mdd-explain/);
+    assert.deepEqual(snapshot(root), before);
+  });
+}
+
 test('init refuses linked target directories without writing outside the target', t => {
   const root = fixture(t); const outside = fixture(t, false);
   link(outside, join(root, 'agents'));

@@ -38,6 +38,10 @@ test('package dry-run includes runnable build and exact owned assets without pri
     const file = `assets/opencode/skills/mdd-judgment-day/${suffix}`;
     assert.ok(MDD_ASSETS.includes(file), file); assert.ok(files.includes(file), file);
   }
+  for (const suffix of ['SKILL.md', 'assets/template.html', 'references/authoring.md']) {
+    const file = `assets/opencode/skills/mdd-explain/${suffix}`;
+    assert.ok(MDD_ASSETS.includes(file), file); assert.ok(files.includes(file), file);
+  }
   const setupScripts = ['scripts/setup.mjs'];
   for (const file of [...MDD_PACKAGED_ASSETS, ...setupScripts, 'dist/cli.js', 'dist/opencode-plugin.js', 'dist/judgment-day.js', 'dist/setup.js', 'dist/setup-ui.js', 'dist/doctor.js', 'dist/version-probe.js', 'package.json', 'README.md']) assert.ok(files.includes(file), file);
   assert.ok(files.every(file => file === 'package.json' || file === 'README.md' || MDD_PACKAGED_ASSETS.includes(file) || setupScripts.includes(file) || /^dist\/[^/]+\.(?:js|d\.ts)$/.test(file)), files.join('\n'));

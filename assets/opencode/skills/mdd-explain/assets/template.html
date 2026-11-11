@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">
+<title>{{TITLE}}</title>
+<!--
+  Writer instructions (English). Delete every comment and every unused section before saving.
+  Keep the Content-Security-Policy meta tag verbatim. Replace every {{PLACEHOLDER}}.
+  Visible text follows the user's language (Spanish by default); change lang to match.
+  Keep it self-contained: one style block, no scripts, no external files, nothing loaded remotely.
+  Links: href is #id or a verified external link with a descriptive label; see the reference.
+  Write for a reader with no specialist knowledge: everyday meaning first, short sentences.
+  Labels: Observado = cites a source you read; Propuesto = planned, not implemented;
+  Supuesto = unverified. Label meaningful claims and sections, not every sentence.
+-->
+<style>
+  :root { color-scheme: light; --ink: #1a1a1a; --muted: #4a4a4a; --line: #c8ccd0; --bg: #ffffff; --soft: #f3f5f7; --accent: #0b5cad; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 1.5rem 1rem 3rem; background: var(--bg); color: var(--ink); font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header, nav, main, footer { max-width: 72ch; margin: 0 auto; }
+  h1 { font-size: 1.75rem; line-height: 1.25; margin: 0 0 .5rem; }
+  h2 { font-size: 1.25rem; margin: 2rem 0 .5rem; }
+  a { color: var(--accent); }
+  a:focus-visible, summary:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  .lead { font-size: 1.125rem; }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: .25rem 1rem; margin: 1rem 0; padding: .75rem 1rem; background: var(--soft); border: 1px solid var(--line); border-radius: 6px; font-size: .9rem; }
+  dt { font-weight: 600; color: var(--muted); }
+  dd { margin: 0; }
+  nav ul { display: flex; flex-wrap: wrap; gap: .5rem 1rem; padding: 0; margin: 1rem auto; list-style: none; }
+  figure { margin: 1rem 0; }
+  figure svg { display: block; width: 100%; max-width: 360px; height: auto; margin: 0 auto; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); }
+  figcaption { color: var(--muted); font-size: .9rem; }
+  .tag { display: inline-block; padding: 0 .4rem; border: 1px solid currentColor; border-radius: 4px; font-size: .8rem; font-weight: 600; }
+  .observado { color: #0a5c2e; }
+  .propuesto { color: #7a4b00; }
+  .supuesto { color: #8a1c1c; }
+  ol.steps { padding-left: 1.25rem; } ol.steps > li { margin: 1rem 0; }
+  .note { padding: .5rem 1rem; border-left: 4px solid var(--accent); background: var(--soft); }
+  .compare { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  .compare > div { padding: .75rem 1rem; border: 1px solid var(--line); border-radius: 6px; background: var(--soft); }
+  details { margin: .5rem 0; padding: .5rem 1rem; border: 1px solid var(--line); border-radius: 6px; }
+  summary { cursor: pointer; font-weight: 600; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; overflow-wrap: anywhere; }
+  footer { margin-top: 2rem; color: var(--muted); font-size: .9rem; }
+  @media (max-width: 720px) { .compare { grid-template-columns: 1fr; } dl { grid-template-columns: 1fr; } }
+  @media print { nav { display: none; } details { break-inside: avoid; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>{{TITLE}}</h1>
+  <!-- One sentence that answers the question. State the reader after "Para:". -->
+  <p class="lead">{{ONE_SENTENCE_ANSWER}}</p>
+  <!-- Snapshot. Revision: git rev-parse --short HEAD, or "sin Git". Changes: yes/no from git status --short. -->
+  <dl>
+    <dt>Fecha</dt><dd>{{DATE}}</dd>
+    <dt>Revisión</dt><dd>{{REVISION}}</dd>
+    <dt>Cambios sin confirmar</dt><dd>{{UNCOMMITTED_YES_NO}}</dd>
+    <dt>Ejecución</dt><dd>{{RUN_ID_OR_NINGUNA}}</dd>
+    <dt>Modo</dt><dd>{{MODE}}</dd>
+    <dt>Para</dt><dd>{{AUDIENCE}}</dd>
+  </dl>
+  <p class="note">Etiquetas: <span class="tag observado">Observado</span> lo leí en una fuente; <span class="tag propuesto">Propuesto</span> está planeado, no hecho; <span class="tag supuesto">Supuesto</span> no está verificado.</p>
+</header>
+<nav aria-label="Contenido">
+  <ul>
+    <li><a href="#pasos">Qué hacer</a></li>
+    <li><a href="#resumen">En pocas palabras</a></li>
+    <li><a href="#diagrama">Cómo fluye</a></li>
+    <li><a href="#escenario">Ejemplo</a></li>
+    <li><a href="#comparacion">Antes y ahora</a></li>
+    <li><a href="#detalles">Más detalle</a></li>
+    <li><a href="#incertidumbre">Lo que no se sabe</a></li>
+    <li><a href="#fuentes">De dónde sale</a></li>
+  </ul>
+</nav>
+<main>
+  <!-- Keep #pasos only when the request asks what or how to do something; otherwise delete this
+       section and its nav link. Every field below stays visible; theory goes in the last details.
+       Add "Quién" when someone other than the reader acts. Invent no step, label or link: mark
+       what you could not verify as Supuesto. href must be a verified external link. -->
+  <section id="pasos">
+    <h2>Qué hacer</h2>
+    <p class="note"><strong>Primer paso:</strong> {{FIRST_ACTION_AND_WHERE}}</p>
+    <ol class="steps">
+      <li>
+        <strong>{{STEP_ACTION_TITLE}}</strong>
+        <dl>
+          <dt>Dónde</dt><dd><a href="{{VERIFIED_HTTPS_URL}}" target="_blank" rel="noopener noreferrer">{{LINK_LABEL_NAMING_DESTINATION}}</a></dd>
+          <dt>Qué hacer</dt><dd>{{ACTION}}</dd>
+          <dt>Listo cuando</dt><dd>{{VISIBLE_SUCCESS_SIGNAL}}</dd>
+          <dt>Después</dt><dd>{{NEXT_STEP_OR_WHEN_TO_STOP}}</dd>
+        </dl>
+      </li>
+    </ol>
+    <p>Los enlaces externos abren otra página: necesitan conexión y pueden pedir acceso. Este documento se lee completo sin abrirlos.</p>
+    <details>
+      <summary>{{TECHNICAL_DETAIL_TITLE}}</summary>
+      <p>{{PERMISSIONS_HASHES_OR_THEORY}}</p>
+    </details>
+  </section>
+
+  <section id="resumen">
+    <h2>En pocas palabras</h2>
+    <!-- Answer first, in plain words for the stated audience. 3 to 5 short points. -->
+    <ul>
+      <li><span class="tag observado">Observado</span> {{CLAIM_WITH_SOURCE}} <a href="#f1">[1]</a></li>
+      <li><span class="tag propuesto">Propuesto</span> {{PLANNED_ITEM_NOT_IMPLEMENTED}}</li>
+    </ul>
+  </section>
+
+  <section id="diagrama">
+    <h2>Cómo fluye</h2>
+    <!-- Hand-written inline SVG: keep role, title, desc and a narrow vertical viewBox (360 units wide)
+         with short labels, so a phone at 390px shows text of 14px or more. Always follow it with the
+         ordered text equivalent. Add boxes by repeating the pattern downward. -->
+    <figure>
+      <svg viewBox="0 0 360 230" role="img" aria-labelledby="svg-t svg-d">
+        <title id="svg-t">{{DIAGRAM_TITLE}}</title>
+        <desc id="svg-d">{{DIAGRAM_DESCRIPTION}}</desc>
+        <defs>
+          <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+            <path d="M0 0L10 5L0 10z" fill="#1a1a1a"/>
+          </marker>
+        </defs>
+        <rect x="30" y="10" width="300" height="50" rx="8" fill="#f3f5f7" stroke="#1a1a1a"/>
+        <text x="180" y="41" text-anchor="middle" font-size="16" fill="#1a1a1a">{{STEP_1}}</text>
+        <line x1="180" y1="60" x2="180" y2="90" stroke="#1a1a1a" stroke-width="2" marker-end="url(#arrow)"/>
+        <rect x="30" y="90" width="300" height="50" rx="8" fill="#f3f5f7" stroke="#1a1a1a"/>
+        <text x="180" y="121" text-anchor="middle" font-size="16" fill="#1a1a1a">{{STEP_2}}</text>
+        <line x1="180" y1="140" x2="180" y2="170" stroke="#1a1a1a" stroke-width="2" marker-end="url(#arrow)"/>
+        <rect x="30" y="170" width="300" height="50" rx="8" fill="#f3f5f7" stroke="#1a1a1a"/>
+        <text x="180" y="201" text-anchor="middle" font-size="16" fill="#1a1a1a">{{STEP_3}}</text>
+      </svg>
+      <figcaption>{{DIAGRAM_CAPTION}}</figcaption>
+    </figure>
+    <ol>
+      <li>{{STEP_1_IN_WORDS}}</li>
+      <li>{{STEP_2_IN_WORDS}}</li>
+      <li>{{STEP_3_IN_WORDS}}</li>
+    </ol>
+  </section>
+
+  <section id="escenario">
+    <h2>Ejemplo</h2>
+    <!-- One concrete example that follows the diagram step by step. -->
+    <p>{{CONCRETE_SCENARIO}}</p>
+  </section>
+
+  <!-- Keep #comparacion only for mode antes-despues, and use the same scenario and steps in both columns. -->
+  <section id="comparacion">
+    <h2>Antes y ahora</h2>
+    <div class="compare">
+      <div><h3>Antes</h3><p>{{BEFORE_WITH_SOURCE_AT_REVISION}}</p></div>
+      <div><h3>Ahora</h3><p>{{NOW_WITH_SOURCE}}</p></div>
+    </div>
+  </section>
+
+  <section id="detalles">
+    <h2>Más detalle</h2>
+    <!-- Depth goes here, one details block per topic. -->
+    <details>
+      <summary>{{DETAIL_TITLE}}</summary>
+      <p>{{DETAIL_BODY}}</p>
+    </details>
+  </section>
+
+  <section id="incertidumbre">
+    <h2>Lo que no se sabe</h2>
+    <!-- Always keep this section. List each Supuesto and what would settle it, or say none. -->
+    <ul>
+      <li><span class="tag supuesto">Supuesto</span> {{ASSUMPTION_AND_HOW_TO_SETTLE_IT}}</li>
+    </ul>
+  </section>
+
+  <section id="fuentes">
+    <h2>De dónde sale</h2>
+    <!-- Always keep this section. Cite as code text: path:line or the command that was run. -->
+    <ol>
+      <li id="f1"><code>{{PATH_LINE_OR_COMMAND}}</code></li>
+    </ol>
+  </section>
+</main>
+<footer>
+  <p>Este artefacto es material de lectura generado el {{DATE}}; no es la fuente de verdad. Ante una diferencia, mandan el código y los archivos de la ejecución.</p>
+</footer>
+</body>
+</html>
