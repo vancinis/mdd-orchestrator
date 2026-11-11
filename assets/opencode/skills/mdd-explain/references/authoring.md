@@ -12,7 +12,7 @@ question: <the user's words, verbatim>
 mode: actual | propuesta | antes-despues
 audience: <reader and depth>
 root: <absolute workspace root>
-output: <relative path that does not exist>
+output: <relative target path: free for fresh output, or the exact approved file when replace: yes>
 replace: no | yes
 run: .mdd/runs/<run-id>.md | none
 leads: <paths or commands to verify before citing>
@@ -25,6 +25,20 @@ Add a closing line: "You are the writer. Follow the skill, write the file yourse
 With `style:` set to an approved artifact, copy its `<style>` element byte for byte and use only its classes. Keep the template's Content-Security-Policy tag.
 
 The writer returns: path, mode, sources read, `Supuesto` claims, self-checks run, links verified, `delegated: no`.
+
+## Roles and write permissions
+
+| Role | May write | Never |
+|---|---|---|
+| Caller | Only when `.mdd/` does not exist yet: `.mdd/` and `.mdd/.gitignore` containing `*` (an optional final newline is fine), before dispatch. This is the sole exception to the HTML-only rule. | Recreate an absent ignore file or change any existing one when `.mdd/` already exists; create a run; write through a symlink. |
+| Writer | The selected HTML file and the child directories it needs (`artifacts`, topic). | Create or change `.mdd/.gitignore`, run files, sources or configuration; delegate again. |
+| Run owner | One optional Log line in its own run file linking an artifact of that run. | Grant that edit to the writer. |
+
+- A named run must already exist (`.mdd/runs/<run-id>.md`); neither role creates one.
+- A writer that finds `.mdd/` missing or uninitialized stops and reports it to the caller; it does not
+  initialize anything itself.
+- Without a subagent tool, the caller initializes first, then writes under the same writer limits.
+- If initialization is denied or any existing component is a symlink, stop without writing and report.
 
 ## Modes
 
@@ -76,7 +90,7 @@ The caller (not the writer) checks the file with every `<details>` closed:
 3. Unexplained jargon, long paragraphs or invented labels count as findings; do not accept them as exceptions.
 4. Claims cite consulted evidence; links are verified; no placeholder or remote load remains.
 
-On a finding, send it to the same writer session; it fixes only the file it wrote for this request. A command run for research is read-only; writing or revising the artifact is allowed. List any gap that remains in the reply.
+On a finding, send it to the same writer session with the exact output path; it fixes only the file it wrote for this request (a repair, see Path), in place, without a new name or new consent. A command run for research is read-only; writing or revising the artifact is allowed. List any gap that remains in the reply.
 
 ## Claims
 
@@ -92,10 +106,21 @@ On a finding, send it to the same writer session; it fixes only the file it wrot
 2. Root: `.mdd/artifacts/<topic>/index.html`. Use `.mdd/runs/<run-id>/artifacts/<topic>/index.html`
    only when the user names that run or clearly means it and `.mdd/runs/<run-id>.md` exists.
    When unsure, use the standalone root.
-3. If `.mdd/` is new, create `.mdd/.gitignore` containing `*`.
-4. Inspect every existing component (`.mdd`, `artifacts`, run directory, topic); stop on a symlink and never write through one.
-5. Recheck the target immediately before writing. If it exists, use `<topic>-2`, `-3`, and so on.
-   Replace only that exact file when the user explicitly consented (`replace: yes`).
+3. Inspect every existing component (`.mdd`, `artifacts`, run directory, topic) before creating
+   anything; stop on a symlink and never write through one.
+4. Caller only: if `.mdd/` is new, create it with `.mdd/.gitignore` containing `*` before dispatch
+   (see Roles). If `.mdd/` exists, leave it and every ignore file as they are.
+5. Choose the case below. Recheck the target and its components immediately before every write,
+   including a replacement or a repair.
+
+| Case | When | Target | Limits |
+|---|---|---|---|
+| Fresh output | Default (`replace: no`) | The first free path among `<topic>`, `<topic>-2`, `-3`, and so on. If the recheck finds it taken, move to the next free one. Report the path actually written. | Never overwrite an existing file. |
+| Approved replacement | `replace: yes`: the user explicitly asked to replace that exact file | That exact path, kept even if it is now absent; never add a suffix. | Grants nothing over sibling or other files. |
+| Repair | The caller sends findings about this request's output to the same writer | The same file the writer reported for this request (in the fallback, the file the caller wrote for it), edited in place without renaming or new consent. | Only that file. If its origin cannot be traced to this request, or it changed outside this request, stop and report. |
+
+Missing or ambiguous consent, another request's artifact, uncertain ownership, a symlink, a read
+error or a denied write is never permission to replace: stop and report the gap.
 
 ## Diagrams on narrow screens
 
@@ -103,7 +128,9 @@ Do not trust the raw `font-size` attribute: an SVG scales with its box. A wide v
 390px phone makes 16-unit text unreadable. Use a vertical flow in a narrow viewBox (about 360 units
 wide, boxes about 300 wide) with short labels, and cap the SVG width so it never scales up. Split a
 long label over lines instead of shrinking it. Measure the final rendered size (font size times the
-scale) at a 390px viewport; every label should render at 14px or more. Adapt the layout when it does
+scale) at a 390px viewport; every label should render at 14px or more. The scale is the SVG's
+actual content width (the smaller of the space the page leaves and its CSS `max-width`, minus
+borders) divided by the viewBox width, not the viewport width alone. Adapt the layout when it does
 not, for example by stacking the flows of a comparison one above the other.
 
 ## Self-check before returning
