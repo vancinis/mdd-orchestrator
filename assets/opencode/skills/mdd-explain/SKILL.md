@@ -16,9 +16,10 @@ You are the **caller** unless your prompt has a handoff with `skill:` and `outpu
 ## Hard Rules
 
 - Write only `.mdd/artifacts/<topic>/index.html`, or `.mdd/runs/<run-id>/artifacts/<topic>/index.html`
-  when the user names that run or clearly means it and `.mdd/runs/<run-id>.md` exists. Never edit sources, run files, other artifacts or configuration.
-- Never overwrite: if the target exists, use `<topic>-2`, `-3`. Use `replace` only when the user asked
-  to replace that exact file. The writer rechecks the target right before writing. Inspect every
+  when the user names that run or clearly means it and `.mdd/runs/<run-id>.md` exists. Never edit sources, run files, other artifacts or configuration;
+  sole exception: the caller creates a new `.mdd/` with `.mdd/.gitignore` (`*`) before dispatch.
+- Fresh output takes a free `<topic>`, `<topic>-2`, `-3`; `replace: yes` keeps the exact file the user
+  asked to replace; a fix edits this request's own output. Overwrite nothing else. The writer rechecks the target right before writing. Inspect every
   existing path component (`.mdd`, `artifacts`, run, topic); stop on a symlink and never write through one.
 - A writer never delegates again; only the caller dispatches.
 - Ground claims in sources read this session. Label them `Observado`, `Propuesto` or `Supuesto`; never present a proposal as implemented.
@@ -40,27 +41,28 @@ You are the **caller** unless your prompt has a handoff with `skill:` and `outpu
 | Explains how it works now | mode `actual` |
 | Explains a plan or proposal | mode `propuesta` |
 | Compares two states | mode `antes-despues`: one scenario, same steps |
-| Audience not stated | A reader with no specialist knowledge of the project |
+| No audience stated | Reader with no specialist knowledge |
 | Asks what or how to do | Action guide: first action on top; each step gives where, action, visible success and next or stop; invent none |
 | Asks how it works or why | No step list; use a short example walkthrough |
 | Handoff has `style:` | Copy that approved file's `<style>` byte for byte; use its classes |
 | Sources contradict the premise | Explain the verified correction; mark only what stays uncertain `Supuesto` |
-| No subagent tool | Write it yourself; say so |
+| No subagent tool | Do both roles; say so |
+| Unclear consent, ownership or setup | Stop; report it |
 
 ## Execution Steps
 
-1. **Caller:** settle mode, audience, a topic slug and a free path. Check that the path does not exist.
-2. **Caller:** dispatch native `general` with the handoff fields in `references/authoring.md`.
-3. **Writer:** read this skill, `references/authoring.md` and `assets/template.html`, then the leads.
+1. **Caller:** settle mode, audience, a topic slug and the target. Initialize `.mdd/` only if new.
+2. **Caller:** dispatch native `general` with the handoff fields in the reference.
+3. **Writer:** read this skill, the reference and the template, then the leads.
 4. **Writer:** run `git rev-parse --short HEAD` and `git status --short` for the snapshot (`sin Git` if absent).
-5. **Writer:** write the file with the native write tool, then read it back and apply the self-check there.
-6. **Caller:** review the HTML with the reader checks in the reference. Existence alone is not enough. If a check fails, send the findings to the same writer. Then reply.
+5. **Writer:** write with the native write tool, read the file back and apply the self-check.
+6. **Caller:** review the HTML with the reader checks in the reference. Existence alone is not enough. If a check fails, send the findings and path to the same writer. Then reply.
 
 ## Output Contract
 
 - Writer returns: path, mode, sources read, `Supuesto` claims, self-checks run, links verified, `delegated: no`.
 - Caller replies in at most 3 lines: the path and the limits, not the explanation.
-- A run owner may add one Log line linking an artifact of its run.
+- Only a run owner may add one Log line linking its run's artifact.
 
 ## References
 
