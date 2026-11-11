@@ -14,7 +14,7 @@ Nothing here can block the user's work. The host's native permission prompts are
 | Change that benefits from planning, tracking or verification, or the user asks for MDD | Start a run (section 3). |
 | "Continue", "sigue", an issue or feature already worked on | Resume (section 7). Never start a fresh run for recorded work. |
 | Commit, push, open a PR for finished work | Do exactly what was asked with git/gh. Not a new run. |
-| Security review, Judgment Day, PR body, "anotá que…" | See section 8. |
+| Security review, Judgment Day, PR body, explanation artifact, "anotá que…" | See section 8. |
 
 ## 2. Choose the level
 
@@ -165,6 +165,7 @@ These never start by themselves; each needs an explicit request.
 | Request | How |
 |---|---|
 | Question session before a run ("preguntame todo antes") | Read the installed skill `mdd-grill` and follow it. |
+| Explicit request for an explanation artifact ("generá un artefacto que explique…", "explicámelo en HTML") | Read the installed skill `mdd-explain` and follow it. It delegates to native `general`, writes one offline HTML file under `.mdd/artifacts/` or the named run's `artifacts/`, and starts no run. Ordinary questions and explanations stay as in section 1. |
 | PR body, PR title, branch name or commit message | Read the installed skill `mdd-pr-body` and follow it (Conventional Commits and Conventional Branch naming). Drafting does not authorize creating branches, committing or publishing. |
 | Security review ("revisión de seguridad", "usa mdd-security") | Dispatch `mdd-security` with the base and target refs (default: merge-base with the main branch to `HEAD`, plus uncommitted changes) and the scope. Present findings as given; "no findings" does not mean secure. Fixes need separate consent. |
 | Judgment Day ("judgment-day", "judgment day", "judment-day") | Read the installed skill `mdd-judgment-day` and its reference, and follow them exactly. This is the one feature with enforced isolation: the judges can only read committed Git objects through `mdd_jd_inspect`. |
