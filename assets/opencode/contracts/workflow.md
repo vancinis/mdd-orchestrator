@@ -70,7 +70,11 @@ After each actor:
    and dispatch again (at most twice for the same reason), escalate the level, ask the user, or do
    the work directly and note it in the log.
 2. Update the run file: log line, plan status, decisions, open questions.
-3. Show the user a brief Spanish summary at their chosen detail level (section 6), then continue.
+3. Explain the result to the user (section 6), then continue in the same turn: in automatic mode
+   with the next applicable action (actor, check or closure), in interactive mode with the usual
+   question before the next actor (section 5). The explanation never waits for acknowledgement.
+   When the result leads to closure with no other actor in between, skip this step: the closing
+   reply covers it (section 7).
 
 **Parallel Apply.** You may dispatch up to three `mdd-apply` actors in one message when their
 tasks have no dependencies between them and write disjoint files. Otherwise run them in sequence.
@@ -116,7 +120,18 @@ and pass it as a file (`gh pr create --body-file <file>`, `git commit -F <file>`
   English. Quote requirements, errors, commands, paths and identifiers verbatim.
 - Detail level comes from the preferences line (`summary`): `low` = one short paragraph per
   actor; `medium` = adds purpose and key learnings; `detailed` = adds approach, open items,
-  confidence and status. Default to `medium`.
+  confidence and status. Default to `medium`. Every level states the substantive result.
+- Explain results, not activity. Say what the phase produced and why it matters, not just the
+  actor name, outcome or artifact link:
+  - Explore, Risk: the findings or recommended level that shape the work, and notable risks.
+  - Plan, Propose, Spec, Design, Tasks: what it proposes or decides and why.
+  - Apply: what actually changed and the checks it ran, with their real results.
+  - Verify: what was checked, the real result and any gaps.
+  - `failed` or `blocked`: what is wrong or missing, and what happens next.
+- Build the explanation from the actor's report and the run file. Open an artifact only when the
+  report lacks something the user needs; do not reread full artifacts just to summarize.
+- Length follows the substance (decisions, changes, results, limits), not the artifact's length.
+  Stay concise; do not repeat what the user already saw.
 - Never present an unrun check as passed or a failure as success. Keep limits visible.
 
 ## 7. Verify, correct and close
@@ -143,8 +158,16 @@ and pass it as a file (`gh pr create --body-file <file>`, `git commit -F <file>`
     equivalent checks on low without Verify); no unresolved required verification gaps;
   - `closed-unverified` — the user chose to stop with gaps; list every gap under Limits;
   - `abandoned` — the user dropped the work.
-  Then give the user a final Spanish summary: what changed, how it matches the request and plan,
-  what was checked, and what remains.
+  Then give the user one closing reply in Spanish about the whole run, following the route
+  actually taken: what was delivered, the approach and key decisions with their reason, what was
+  actually verified (Verify's result, or on low without Verify your own checks, saying no
+  independent Verify ran) and what remains. Use the reports and run file you already have. When
+  the last actor's result leads to closure with no other actor in between (Verify passed, or a
+  low Apply followed only by your checks), close in the same turn with this one reply instead of
+  a separate progress explanation and final summary, covering that actor's result.
+  `closed-unverified` and `abandoned` replies say what was and was not done and never read as
+  success. A blocked or failed Verify is not itself closure: explain it and continue as above,
+  unless the user chooses `closed-unverified`.
 - Preserve the checked revision/local-change context and external limits in the run. After later
   edits or merges, recheck affected behavior and integration before presenting earlier results
   as evidence for the new state. Retain still-valid evidence for unaffected scope; do not rerun

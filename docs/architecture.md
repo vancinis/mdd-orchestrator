@@ -102,7 +102,12 @@ flowchart TD
   V -- "No, decide el usuario" --> CU(["closed-unverified<br/>con las brechas como límites"])
 ```
 
-El detalle (cuándo escalar, preguntas, apply en paralelo, reanudación) está en
+Después de cada actor, el orquestador explica en español qué produjo esa fase (qué se encontró,
+decidió, cambió o comprobó) a partir de su reporte corto y, en modo automático, sigue sin esperar
+confirmación. Al cerrar, una respuesta final explica la ejecución completa según la ruta seguida:
+qué se entregó, por qué, qué se verificó y qué queda pendiente.
+
+El detalle (cuándo escalar, preguntas, apply en paralelo, reportes, cierre, reanudación) está en
 [`contracts/workflow.md`](../assets/opencode/contracts/workflow.md).
 
 ## El archivo de ejecución

@@ -84,6 +84,11 @@ Only decisions the user alone can make, each with why it matters and two to four
 options. Omit the section when there are none. Never ask for approval to continue.
 ```
 
+The orchestrator explains your result to the user from this report, usually without opening the
+artifact. Make the Summary state the substantive result of your phase (what you found, proposed,
+decided, changed or checked, and the real outcome) and why it matters, not the steps you took.
+When `failed` or `blocked`, say what is wrong or missing. The detail stays in the artifact.
+
 Use `blocked` when you cannot continue without something only the user or the orchestrator can
 provide (a decision, access, a missing file). Use `failed` when you tried and the result is not
 acceptable.
