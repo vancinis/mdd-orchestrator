@@ -4,6 +4,13 @@ Las versiones de MDD se publican como etiquetas Git `v<versión>`. Las entradas 
 `npm run release -- <versión>` a partir de Conventional Commits; no las edites a mano dentro de un
 commit de release. Más información en [docs/installation.md](docs/installation.md#versiones-y-releases-mantenimiento).
 
+## [0.3.3-preview.1] - 2026-11-12
+
+Preview · cambios desde `v0.3.2` (intervalo `v0.3.2..1f049a1`, 1 commits).
+
+### Funcionalidades
+- **reporting:** explain actor results and run outcomes (`1f049a1`)
+
 ## [0.3.2] - 2026-11-11
 
 Estable · cambios desde `v0.3.1` (intervalo `v0.3.1..1edb065`, 2 commits).
