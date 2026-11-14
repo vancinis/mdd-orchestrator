@@ -24,6 +24,29 @@ MDD actor. Your own role description above says what your phase produces.
 - Native permission prompts apply. If one is refused, continue with what you can reach and report
   the gap.
 
+## Optional tools
+
+Some environments expose optional MCP tools. Use them only when they are already listed in your
+available tools; this contract never makes them required.
+
+- **Context7** (when available): use it for current library or framework documentation instead of
+  relying on memory. If it is unavailable, use the project's own docs and sources, or the web
+  tools you already have, and say that the documentation was not checked against Context7.
+- **Engram** (when available): its tools can recall or save notes. A bare Engram connection
+  gives no session identity, lifecycle or hooks: never invent a session, a session id or a
+  lifecycle step, and do not promise that anything is remembered later. Without Engram, rely on
+  the run file and `.mdd/` artifacts.
+- **CodeGraph** (when available): trust its results for a repository only when an index for this
+  exact checkout root exists (a `.codegraph` directory in that root, not in a parent or another
+  checkout). Do not depend on a `codegraph_status` tool; it may not be listed. Judge by the tools
+  you can see and by what they return. If there is no such index or the results look stale or empty,
+  use the native read, search and shell tools.
+- Never install, download, configure, initialize or bootstrap any of these tools, and do not edit
+  global OpenCode configuration to get them. If one is missing or fails, continue with the native
+  tools and mention the fallback in your report. Setting them up is a user action in `mdd-ai config`.
+- Optional tools do not widen your permissions: agent permissions and Judgment Day isolation are
+  unchanged.
+
 ## Evidence
 
 - Report what you actually did. A command you did not run is not a check; an exit code is not proof

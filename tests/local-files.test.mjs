@@ -17,7 +17,7 @@ function seed(t, content = '{"state":"committed"}') {
 
 test('only the fixed MDD files are reachable', t => {
   const { files } = seed(t, null);
-  assert.deepEqual([...LOCAL_NAMES], ['mdd.config.json', 'mdd/setup-assets.json']);
+  assert.deepEqual([...LOCAL_NAMES], ['mdd.config.json', 'mdd/setup-assets.json', 'mdd/integrations/manifest.json']);
   for (const name of ['../outside.json', '.mdd/telemetry.jsonl', 'mdd/other.json', 'package.json']) {
     assert.throws(() => files.read(name, 100), name);
     assert.throws(() => files.update(name, () => '{}', 100), name);
@@ -38,6 +38,21 @@ test('returning undefined removes the file; reading a missing file gives undefin
   files.update(NAME, () => undefined, 4096);
   assert.equal(fs.existsSync(path), false);
   assert.equal(files.read(NAME, 4096), undefined);
+});
+
+test('the integrations manifest is reachable at its nested path, atomically and without a leftover lock', t => {
+  const { directory, files } = seed(t, null);
+  const name = 'mdd/integrations/manifest.json';
+  assert.equal(files.read(name, 4096), undefined);
+  files.update(name, previous => `${previous ?? ''}{"schema":1}`, 4096);
+  assert.equal(files.read(name, 4096), '{"schema":1}');
+  assert.deepEqual(fs.readdirSync(join(directory, 'mdd', 'integrations')), ['manifest.json']);
+  fs.rmSync(join(directory, 'mdd', 'integrations'), { recursive: true });
+  fs.mkdirSync(join(directory, 'elsewhere'));
+  try { fs.symlinkSync(join(directory, 'elsewhere'), join(directory, 'mdd', 'integrations'), 'junction'); }
+  catch { return; }
+  assert.throws(() => files.update(name, () => '{}', 4096), 'a linked parent directory is refused');
+  assert.deepEqual(fs.readdirSync(join(directory, 'elsewhere')), []);
 });
 
 test('size limits are enforced on read and write without touching the file', t => {
