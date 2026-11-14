@@ -109,6 +109,15 @@ test('installed Apply preserves bounded integration and evidence guidance', t =>
   assert.match(apply, /baseline timeout does not explain a new assertion failure/);
   assert.match(apply, /Do not stash, reset, switch branches or restore other people's work/);
   assert.match(apply, /not approval to publish/);
+  assert.match(apply, /write\s+it\s+first,\s+see\s+it\s+fail\s+for\s+the\s+expected\s+reason/);
+  assert.match(apply, /state\s+the\s+exception\s+and\s+the\s+evidence\s+that\s+replaces\s+it/);
+  assert.match(apply, /existing\s+behavior\s+that\s+shares\s+the\s+changed\s+code/);
+  assert.match(apply, /there\s+is\s+no\s+rule\s+of\s+one\s+test\s+per\s+requirement/);
+  assert.match(apply, /fail-before\s+and\s+pass-after\s+evidence/i);
+  for (const name of ['mdd-plan', 'mdd-tasks']) {
+    const text = fs.readFileSync(join(root, `agents/${name}.md`), 'utf8');
+    assert.match(text, /existing\s+behavior\s+it\s+must\s+keep\s+working/, name);
+  }
   assert.ok(apply.includes(assetText(PACKAGE_ROOT, 'assets/opencode/contracts/actor.md').content.trimEnd()));
 });
 
@@ -129,7 +138,7 @@ test('installed Verify preserves route context and evidence-based outcomes', t =
   const root = fixture(t);
   initProject(root);
   const verify = fs.readFileSync(join(root, 'agents/mdd-verify.md'), 'utf8');
-  for (const section of ['Use the actual run context', 'Select bounded checks', 'Assess failures and coverage', 'Report the checked state']) {
+  for (const section of ['Use the actual run context', 'Select bounded checks', 'Try to break the change', 'Assess failures and coverage', 'Report the checked state']) {
     assert.ok(verify.includes(`## ${section}`), section);
   }
   assert.match(verify, /\*\*Low\*\*/);
@@ -140,6 +149,11 @@ test('installed Verify preserves route context and evidence-based outcomes', t =
   assert.match(verify, /A missing service explains why a check could not run, not whether the behavior works/);
   assert.match(verify, /`blocked` when required evidence is missing/);
   assert.doesNotMatch(verify, /Environmental results never block/);
+  assert.match(verify, /Write your own probes from the request, requirements and scenarios, not from Apply's tests/);
+  assert.match(verify, /a rejected or failing operation leaves stored state/);
+  assert.match(verify, /a \*\*blocker\*\* is caused by the change, reproducible with realistic input and absent\s+at the baseline/);
+  assert.match(verify, /probes never modify the shared working tree/);
+  assert.match(verify, /not shell-specific\s+syntax/);
 });
 
 test('installed coordinator preserves evidence gaps and checked-state traceability', t => {
@@ -149,8 +163,94 @@ test('installed coordinator preserves evidence gaps and checked-state traceabili
   assert.match(coordinator, /Verify remains optional on low/);
   assert.match(coordinator, /Do not automatically send evidence-only gaps to Apply/);
   assert.match(coordinator, /affected integration checks/);
+  assert.match(coordinator, /Advisories[^\n]*never start a correction round/);
   assert.match(coordinator, /Record the checked revision and relevant uncommitted changes/);
   assert.doesNotMatch(coordinator, /missing service\) is `environmental`: it does not block/);
+});
+
+test('installed coordinator spot-checks reported checks', t => {
+  const root = fixture(t);
+  initProject(root);
+  const coordinator = fs.readFileSync(join(root, 'agents/mdd-orchestrator.md'), 'utf8');
+  assert.match(coordinator, /rerun\s+the\s+cheapest\s+reported\s+check/);
+  assert.match(coordinator, /same\s+command\s+and\s+working\s+directory/);
+  assert.match(coordinator, /on\s+low\s+without\s+Verify,\s+one\s+check\s+you\s+ran\s+is\s+required/);
+  assert.match(coordinator, /mismatch[\s\S]{0,100}handle\s+the\s+report\s+as\s+`failed`/);
+  assert.match(coordinator, /do\s+not\s+swap\s+in\s+another\s+check/);
+});
+
+test('installed coordinator and Apply keep Apply inside its edit surface', t => {
+  const root = fixture(t);
+  initProject(root);
+  const coordinator = fs.readFileSync(join(root, 'agents/mdd-orchestrator.md'), 'utf8');
+  const apply = fs.readFileSync(join(root, 'agents/mdd-apply.md'), 'utf8');
+  assert.match(coordinator, /Apply\s+the\s+exact\s+task\s+IDs,\s+its\s+edit\s+surface/);
+  assert.match(coordinator, /tracked\s+generated\s+files/);
+  assert.match(coordinator, /compare\s+the\s+changed\s+and\s+untracked\s+files/);
+  assert.match(coordinator, /git\s+status\s+--porcelain\s+--untracked-files=all/);
+  assert.match(coordinator, /never\s+restore\s+files\s+yourself/);
+  assert.match(coordinator, /run\s+no\s+repository-wide\s+formatters,\s+generators,\s+installs/);
+  assert.match(coordinator, /one\s+integration\s+check\s+over\s+the\s+combined\s+change/);
+  assert.match(apply, /change\s+only\s+the\s+files\s+in\s+your\s+edit\s+surface/);
+  assert.match(apply, /report\s+`blocked`,\s+naming\s+the\s+file\s+and\s+why/);
+  assert.match(apply, /changed\s+files\s+are\s+inside\s+your\s+edit\s+surface/);
+  for (const name of ['mdd-plan', 'mdd-tasks']) {
+    const text = fs.readFileSync(join(root, `agents/${name}.md`), 'utf8');
+    assert.match(text, /every\s+file\s+(?:it|each\s+one)\s+may\s+change/, name);
+  }
+});
+
+test('installed coordinator and actors pass and load skills by path', t => {
+  const root = fixture(t);
+  initProject(root);
+  const coordinator = fs.readFileSync(join(root, 'agents/mdd-orchestrator.md'), 'utf8');
+  assert.match(coordinator, /resolve\s+them\s+once\s+per\s+run/);
+  assert.match(coordinator, /`-\s+Skills:\s+<path>\s+\(<actors>\)`/);
+  assert.match(coordinator, /exact\s+`SKILL\.md`\s+paths/);
+  assert.match(coordinator, /not\s+bare\s+names/);
+  assert.match(coordinator, /`mdd-grill`,\s+`mdd-pr-body`\s+and\s+`mdd-judgment-day`\s+stay\s+with\s+you/);
+  const plan = fs.readFileSync(join(root, 'agents/mdd-plan.md'), 'utf8');
+  assert.match(plan, /read\s+each\s+`SKILL\.md`\s+at\s+its\s+path\s+before\s+other\s+work/);
+  assert.match(plan, /never\s+widen\s+scope\s+or\s+permissions/);
+  assert.match(plan, /-\s+Skills:\s+loaded\s+…\s+\/\s+failed\s+…\s+\(reason\)/);
+  const apply = fs.readFileSync(join(root, 'agents/mdd-apply.md'), 'utf8');
+  assert.doesNotMatch(apply, /If\s+a\s+supplied\s+skill\s+helps\s+this\s+task,\s+load\s+it/);
+});
+
+// The gitignore negation rules are easy to get wrong, so the shipped templates run through git itself.
+test('installed run-file persistence templates keep runs local or shared as documented', t => {
+  const root = fixture(t);
+  initProject(root);
+  const orchestrator = fs.readFileSync(join(root, 'agents/mdd-orchestrator.md'), 'utf8');
+  const templates = [...orchestrator.matchAll(/```gitignore\n([\s\S]*?)```/g)].map(match => match[1]);
+  const local = templates.find(text => text.startsWith('# mdd: local\n'));
+  const versioned = templates.find(text => text.startsWith('# mdd: versioned\n'));
+  assert.ok(local, 'local template is a fenced gitignore block starting with its marker');
+  assert.ok(versioned, 'versioned template is a fenced gitignore block starting with its marker');
+  assert.match(orchestrator, /topic_key`?\s+`mdd\/run\/<id>`/);
+  assert.match(orchestrator, /the\s+local\s+file\s+wins/);
+  assert.match(orchestrator, /Work\s+continues\s+when\s+the\s+memory\s+tools\s+are\s+unavailable/);
+  assert.doesNotMatch(orchestrator, /create it with `\*`/);
+
+  if (spawnSync('git', ['--version']).status !== 0) return t.skip('git is not available');
+  const repo = fs.mkdtempSync(join(tmpdir(), 'mdd-gitignore-'));
+  t.after(() => fs.rmSync(repo, { recursive: true, force: true }));
+  assert.equal(spawnSync('git', ['init', '-q'], { cwd: repo }).status, 0);
+  const files = ['.mdd/.gitignore', '.mdd/lessons.md', '.mdd/telemetry.jsonl', '.mdd/runs/r1.md', '.mdd/runs/r1/01-explore.md',
+    '.mdd/runs/r1/probes/p.mjs', '.mdd/tasks/t.json', '.mdd/checkpoints/c.json'];
+  for (const file of files) { fs.mkdirSync(join(repo, file, '..'), { recursive: true }); fs.writeFileSync(join(repo, file), 'x\n'); }
+  const ignored = path => {
+    const run = spawnSync('git', ['check-ignore', '-q', path], { cwd: repo });
+    assert.ok(run.status === 0 || run.status === 1, `git check-ignore failed for ${path}`);
+    return run.status === 0;
+  };
+  const shared = ['.mdd/.gitignore', '.mdd/runs/r1.md', '.mdd/runs/r1/01-explore.md', '.mdd/runs/r1/probes/p.mjs'];
+  const private_ = ['.mdd/lessons.md', '.mdd/telemetry.jsonl', '.mdd/tasks/t.json', '.mdd/checkpoints/c.json'];
+  fs.writeFileSync(join(repo, '.mdd/.gitignore'), local);
+  for (const path of [...shared, ...private_]) assert.equal(ignored(path), true, `local ignores ${path}`);
+  fs.writeFileSync(join(repo, '.mdd/.gitignore'), versioned);
+  for (const path of shared) assert.equal(ignored(path), false, `versioned tracks ${path}`);
+  for (const path of private_) assert.equal(ignored(path), true, `versioned keeps ${path} local`);
 });
 
 // Guards that the reporting guidance is installed and the boundaries are preserved, not that a model follows it.

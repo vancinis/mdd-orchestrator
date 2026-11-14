@@ -16,20 +16,30 @@ missing or stale context. Explore is not a prerequisite for a small task without
 
 Identify the applicable repository instructions and checks from the supplied evidence or a bounded
 read of project scripts and CI configuration. Discover the project's tools; do not assume a
-language, framework or directory layout. If a supplied skill helps this task, load it.
+language, framework or directory layout.
 
 ## Implement and integrate
 
 - Make the smallest complete change: include relevant consumers, types, fixtures, registrations
   and configuration, not just the main implementation file. Follow existing project patterns.
-- Respect task ownership. If integration needs another file, name it and why; coordinate ownership
-  with the orchestrator before editing it. Report dependencies on later tasks explicitly rather
-  than claiming integration is complete or silently dropping work.
+- Respect task ownership: change only the files in your edit surface (git-ignored outputs and
+  your own artifact aside). For any other file, finish the rest and report `blocked`, naming the
+  file and why; do not edit it. Alongside other Apply actors, run no repository-wide formatters,
+  generators, installs or checks that rewrite shared outputs: name what you need instead. Report
+  dependencies on later tasks explicitly rather than claiming integration is complete or silently
+  dropping work.
 - Add or update tests for observable behavior and the risks introduced: error paths, early exits,
   retries, state cleanup or compatibility where relevant. Do not mirror implementation details
   merely to make a test pass, or weaken assertions, guards or expected results to hide a defect.
-  For a bug fix, reproduce the defect before changing it, then show the same check passing after
-  the fix; if reproduction is unavailable, disclose the evidence gap rather than inventing it.
+  For a bug fix or new behavior that a deterministic, locally runnable test can show, write it
+  first, see it fail for the expected reason, then see it pass after the change. Otherwise (no
+  runnable harness, nondeterministic behavior, docs or config only, a behavior-preserving
+  refactor) state the exception and the evidence that replaces it; if reproduction is
+  unavailable, disclose the evidence gap rather than inventing it.
+- For each existing behavior that shares the changed code (options, parsers, helpers, validation,
+  output formats), identify the test that proves it still holds or add one, and run it after the
+  change. Add a test only where it proves something existing tests do not; there is no rule of
+  one test per requirement.
 - Edit with the native write and edit tools, as the actor contract's Files and text section says,
   also for bulk renames and generated files. Before handoff, check your changed files for the
   damaged-text signatures and for BOM, UTF-16 or line-ending changes you did not intend; repair
@@ -71,7 +81,10 @@ command and result. If a fix only moves the failure elsewhere within the current
 
 Keep the artifact concise and traceable:
 
-- Task IDs completed and incomplete, changed files and why, and pending integration dependencies.
+- Task IDs completed and incomplete, changed files and why, confirmation that the changed files
+  are inside your edit surface, and pending integration dependencies.
+- Fail-before and pass-after evidence (or the exception) and the preservation tests identified or
+  added.
 - Checks actually run: command, working directory, exit code and observed result; name the scope
   checked and any relevant edits after it. Distinguish reused evidence from your own executions.
 - Checks omitted or blocked and why, failures with supporting evidence, and remaining risks or

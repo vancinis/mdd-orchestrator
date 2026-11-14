@@ -11,7 +11,7 @@ Judgment Day.
 |---|---|---|
 | Contratos | `assets/opencode/contracts/` | Las guías: el flujo de trabajo (`workflow.md`), el formato del archivo de ejecución (`run-file.md`) y las reglas comunes de los actores (`actor.md`). |
 | Agentes | `assets/opencode/agents/` | Un archivo por actor con su rol. Al instalarse, cada marcador `<!-- mdd:include contracts/… -->` se reemplaza por el texto del contrato, así que cada agente instalado se lee completo por sí solo. |
-| Skills | `assets/opencode/skills/` | Procedimientos que se cargan solo cuando se piden: `mdd-grill`, `mdd-pr-body`, `mdd-judgment-day`, `mdd-doc`, `mdd-explain` y `mdd-cleanup`. |
+| Skills | `assets/opencode/skills/` | Procedimientos que se cargan solo cuando se piden: `mdd-grill`, `mdd-pr-body`, `mdd-judgment-day`, `mdd-doc`, `mdd-explain` y `mdd-cleanup`. Las skills relevantes del proyecto o del host se resuelven una vez por ejecución, se anotan en el Scope del run file y se pasan a los actores por la ruta exacta de su `SKILL.md`. |
 | Plugin | `src/opencode-plugin.ts` | Asigna modelos a los agentes MDD y valores por defecto a llamadas nuevas a `explore`/`general` desde el orquestador, agrega las preferencias (`mode`, `summary`) y registra la única herramienta: `mdd_jd_inspect`, solo para los jueces. |
 | Instalador y CLI | `src/cli.ts`, `src/setup*.ts`, `src/config-ui.ts`, `src/doctor.ts` | `mdd-ai setup`, `update`, `link`, `doctor`, `config` y `profile` de la versión activa. |
 | Gestor de versiones | `src/version-*.ts`, `src/versions.ts` | `mdd-ai use` y `versions`, el asistente de versiones, el clon propio del origen, respaldos, caché y recuperación. Vive en `mdd/manager`, fuera del paquete instalado, y atiende `link`; `setup` y `update` abren primero el asistente y solo delegan en la versión activa si se conserva la actual; delega el resto sin cambios a la versión activa. Decisiones: [ADR 0001](adr/0001-git-tags-and-owned-clone.md), [0002](adr/0002-separate-version-manager.md), [0003](adr/0003-backup-and-replace-on-switch.md). |
@@ -73,9 +73,9 @@ nativos de OpenCode siguen siendo el límite real de lo que un agente puede hace
 |---|---|---|
 | Aprobación nativa de un solo uso por operación | En modo interactivo, el orquestador pregunta antes de cada actor | La pregunta sigue siendo el formulario nativo de OpenCode; una respuesta clara en el chat también vale. |
 | Reanudar desde un checkpoint sellado | Reanudar leyendo `.mdd/runs/<id>.md` | El archivo es legible por personas y por cualquier conversación; no depende del proceso del plugin. |
-| Alcance de escritura cercado (`mdd_worker_edit`) | Cada Apply recibe las tareas y archivos que le tocan | Los permisos nativos de edición siguen aplicándose; el cerco no era un sandbox real. |
+| Alcance de escritura cercado (`mdd_worker_edit`) | Cada Apply recibe las tareas y la lista de archivos que puede cambiar; el orquestador compara su diff con esa lista | Los permisos nativos de edición siguen aplicándose; la lista es parte de la guía, no un sandbox real. |
 | Esquema JSON de cada reporte, validado | Reporte corto en Markdown y artefacto en disco | El orquestador lee prosa estructurada; no hay reportes "ilegibles" que rechazar. |
-| Memoria Engram gestionada por MDD | Si Engram está instalado como MCP, el orquestador lo usa | MDD no instala ni arranca servicios. |
+| Memoria Engram gestionada por MDD | Si Engram está instalado como MCP, el orquestador guarda en él una copia de cada ejecución y la usa para reanudar si falta el archivo local | MDD no instala ni arranca servicios; el archivo local sigue siendo la fuente de verdad. |
 
 ## Qué se aplica por código y qué es guía
 
@@ -108,10 +108,13 @@ flowchart TD
   M --> V
   H --> V
   V -- Sí --> OK(["completed"])
-  V -- "No, modo automático" --> FIX["Hasta 2 rondas de corrección:<br/>apply con las brechas → verify"]
+  V -- "No, modo automático" --> FIX["Hasta 2 rondas de corrección:<br/>apply con los bloqueantes → verify"]
   FIX --> V
   V -- "No, decide el usuario" --> CU(["closed-unverified<br/>con las brechas como límites"])
 ```
+
+Verify separa los hallazgos en bloqueantes y advertencias: solo los bloqueantes (y los requisitos
+incumplidos) abren rondas de corrección; las advertencias quedan como límites.
 
 Después de cada actor, el orquestador explica en español qué produjo esa fase (qué se encontró,
 decidió, cambió o comprobó) a partir de su reporte corto y, en modo automático, sigue sin esperar
@@ -142,8 +145,17 @@ Ventajas frente a un estado interno:
   artefacto completo queda en disco.
 - **Es auditable:** el registro y la verificación quedan escritos en texto plano.
 
-`.mdd/` es local por defecto: el orquestador crea `.mdd/.gitignore` con `*`. Si querés versionar
-las ejecuciones, borrá ese archivo.
+`.mdd/.gitignore` es el interruptor y su primera línea es la marca. Por defecto es local
+(`# mdd: local`, con `*`): el orquestador lo crea si falta. Cuando pedís versionar las ejecuciones,
+lo reescribe con `# mdd: versioned`, que deja pasar `.gitignore` y `runs/**`; así la decisión viaja
+con el repositorio. `lessons.md` sigue local. Un `.gitignore` con otro contenido se respeta, y si
+un `.gitignore` de la raíz sigue ignorando `.mdd/`, MDD pregunta antes de editarlo. MDD no hace
+`git add` ni commit salvo que se lo pidas. Que falte el archivo nunca significa "versionado".
+
+Cuando Engram está disponible, el orquestador guarda además una copia del archivo de ejecución
+(solo ese, no los artefactos) en cada actualización del registro. Si el archivo local falta,
+retoma desde la copia de Engram de este proyecto; si existe, el local manda. Sin Engram el trabajo
+continúa y la brecha queda en los límites.
 
 ## Cómo extender MDD
 

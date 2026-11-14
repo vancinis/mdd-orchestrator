@@ -1,6 +1,6 @@
 {
   "name": "my-driven-development",
-  "version": "0.3.3-preview.1",
+  "version": "0.4.0-preview.1",
   "private": true,
   "description": "OpenCode agents and contracts for planned, tracked and verified development",
   "type": "module",

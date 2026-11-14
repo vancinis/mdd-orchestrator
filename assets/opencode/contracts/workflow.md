@@ -39,9 +39,10 @@ Pick the lightest level that still gives a trustworthy result. Record it in the 
 
 1. Inspect the relevant sources yourself or with `mdd-explore`. Never invent paths.
 2. Create the run file `.mdd/runs/<id>.md` following the run-file contract. The id is
-   `YYYYMMDD-<short-kebab-slug>`. If `.mdd/.gitignore` does not exist, create it with `*`.
-3. Fill in the request (the user's words, quoted exactly), acceptance criteria, scope, level and
-   mode. Missing details are fine: actors refine them.
+   `YYYYMMDD-<short-kebab-slug>`. Keep `.mdd/.gitignore` and the Engram copy as the run-file
+   contract's Persistence section says.
+3. Fill in the request (the user's words, quoted exactly), acceptance criteria, scope, relevant
+   skills (section 4), level and mode. Missing details are fine: actors refine them.
 4. Tell the user in Spanish, in two or three lines, what you understood, the level and the next
    actor. Then continue according to the mode (section 5).
 
@@ -51,13 +52,24 @@ Call the native subagent tool in the foreground with the actor's name, a short d
 prompt that contains:
 
 - the run file path, and the paths of the earlier artifacts the actor needs;
-- what this actor must produce, and for Apply the exact task IDs and files it owns;
+- what this actor must produce, and for Apply the exact task IDs, its edit surface (every file
+  the tasks may change, tests, docs, tracked generated files and new files included; a glob only
+  for unknowable names) and whether other Apply actors run alongside;
 - the artifact path where it writes its full output: `.mdd/runs/<id>/NN-<actor>.md`, where `NN`
   is the next two-digit sequence number (`01-explore.md`, `02-plan.md`, ...);
-- anything the user said that changes the plan.
+- anything the user said that changes the plan;
+- the exact `SKILL.md` paths this actor loads (omitted when none).
 
 Keep prompts short: the actor reads the files itself. Actors return a short report (actor
 contract); the full artifact is on disk.
+
+**Skills.** Sources: skills the user names, project indexes (`AGENTS.md` skill tables,
+`.atl/skill-registry.md`) and skills the host has installed. Match each by its trigger against
+the request, the files and the actor's phase, and resolve them once per run, before the first
+dispatch. Record them under Scope as `- Skills: <path> (<actors>)`, or `- Skills: none`; resolve
+again only when the scope changes or a recorded path is missing. Pass exact `SKILL.md` paths, not
+bare names (a bare name can resolve to another tool's skill), usually zero to three per actor.
+`mdd-grill`, `mdd-pr-body` and `mdd-judgment-day` stay with you (section 8).
 
 Reuse existing exploration and task handoffs: pass their paths to Apply with known integration
 dependencies and relevant checks. Do not request another repository survey when that evidence
@@ -69,8 +81,15 @@ After each actor:
 1. Read its report. If the outcome is `failed` or `blocked`, decide: give it what it was missing
    and dispatch again (at most twice for the same reason), escalate the level, ask the user, or do
    the work directly and note it in the log.
-2. Update the run file: log line, plan status, decisions, open questions.
-3. Explain the result to the user (section 6), then continue in the same turn: in automatic mode
+2. Spot check Apply or Verify `passed` that rests on executed checks (others only if they claim
+   executed results): rerun the cheapest reported check exercising the claim, same command and
+   working directory (after parallel Apply, one rerun covers the batch), and record it under
+   Verification. On a mismatch in exit code, result or counts, handle the report as `failed`:
+   record both, then redispatch Apply (step 1) or route the Verify gap (section 7); do not swap
+   in another check until the difference is explained. If you cannot run it, record "not run" and
+   why; that is no match.
+3. Update the run file: log line, plan status, decisions, open questions.
+4. Explain the result to the user (section 6), then continue in the same turn: in automatic mode
    with the next applicable action (actor, check or closure), in interactive mode with the usual
    question before the next actor (section 5). The explanation never waits for acknowledgement.
    When the result leads to closure with no other actor in between, skip this step: the closing
@@ -81,12 +100,29 @@ tasks have no dependencies between them and write disjoint files. Otherwise run 
 Each Apply gets a fresh actor. When the route includes Verify, run it after the last Apply,
 not once per batch. Verify remains optional on low as described in section 2.
 
+Parallel Apply actors run no repository-wide formatters, generators, installs, lockfile updates
+or checks that rewrite shared outputs (such as a clean build); they name what they need and you
+run it after the batch. After the last returns and its diff check passes, run one integration
+check over the combined change before Verify or the next batch; a failure there is a failed
+Apply for the tasks involved.
+
 Reassign ownership before an Apply edits an additional shared file; serialize any newly
 overlapping work. After an interruption or lost result, confirm the previous actor has stopped
 and inspect its artifact and working-tree changes before redispatching. A missing response is
 not evidence that it stopped. If its state is unknown, pause overlapping edits until resolved.
 Do not use stash, reset or branch switches on the shared tree to isolate one actor's checks;
 coordinate an isolated baseline when needed, preserving all ongoing work.
+
+**Edit surface.** Git-ignored outputs and Apply's own artifact under `.mdd/runs/<id>/` do not
+count; any other file off the list is outside. Note `git status --porcelain` before dispatch; on
+return compare the changed and untracked files (`git status --porcelain --untracked-files=all`,
+minus ignored files) with each Apply's own surface and reported file list, not the batch's union.
+A file already changed before dispatch stays in the comparison; when status cannot show whether
+the Apply touched it, log that limit. A justified change to a file nobody owns: extend, log,
+accept. Otherwise the report is `failed`: the same Apply undoes only
+its own edit, or the user decides if it overlaps others' work; never restore files yourself.
+Without git, rely on Apply's list and log the limit. After `blocked` for an outside file, extend
+the surface unless another active Apply owns it (then serialize), and continue.
 
 **Checks.** You may run tests, builds and linters yourself at any point. Record the command and
 its result in the run file. A command you did not run is not evidence.
@@ -147,15 +183,18 @@ and pass it as a file (`gh pr create --body-file <file>`, `git commit -F <file>`
   prerequisites/access or arrange the check, then re-verify. Design/requirements conflicts need
   revised decisions before implementation. Keep the run active while blocked unless the user
   chooses to stop with explicit limits.
-- **Failed Verify, automatic mode:** dispatch `mdd-apply` for implementation gaps with Verify's
-  artifact, then `mdd-verify` on the corrections and affected integration checks. At most two
-  correction rounds; a second one only if the first made progress. Then present remaining gaps
-  and let the user choose.
-- **Failed Verify, interactive mode:** present the gaps once and let the user choose between a
-  correction round and closing with the gaps as limits.
+- **Failed Verify, automatic mode:** dispatch `mdd-apply` for blockers and unmet requirements with
+  an implementation cause, with Verify's artifact, then `mdd-verify` on the corrections and
+  affected integration checks. At most two correction rounds; a second one only if the first made
+  progress. Then present remaining gaps and let the user choose.
+- **Failed Verify, interactive mode:** present blockers and advisories separately, once, and let
+  the user choose between a correction round and closing with the gaps as limits.
+- **Advisories** (neither blockers nor unmet requirements) never start a correction round. List
+  them under Limits and in the final summary; work on them only if the user asks.
 - **Close** by setting the run status:
   - `completed` — Verify passed with required local coverage and valid check evidence (or your
-    equivalent checks on low without Verify); no unresolved required verification gaps;
+    equivalent checks on low without Verify); no unresolved required verification gaps. First rerun
+    one Verify check (medium/high); on low without Verify, one check you ran is required;
   - `closed-unverified` — the user chose to stop with gaps; list every gap under Limits;
   - `abandoned` — the user dropped the work.
   Then give the user one closing reply in Spanish about the whole run, following the route
@@ -176,10 +215,11 @@ and pass it as a file (`gh pr create --body-file <file>`, `git commit -F <file>`
   own explicit request.
 
 **Resume.** At the start of a conversation, or when the user refers to earlier work, list
-`.mdd/runs/*.md` and read the front matter of the recent ones. If memory tools such as Engram's
-`mem_search` are available, search them too. Tell the user where a matching run stopped and
-continue from its log after they confirm. A finished run stays finished: new work on the same
-topic is a new run that links to the old one.
+`.mdd/runs/*.md` and read the front matter of the recent ones. Read the mirrored copy only
+when the local file is missing or the user says the local copy is stale, as Persistence says.
+Tell the user where a matching run stopped
+and continue from its log after they confirm. A finished run stays finished: new work on the
+same topic is a new run that links to the old one.
 
 ## 8. Standalone features
 
@@ -192,6 +232,7 @@ These never start by themselves; each needs an explicit request.
 | PR body, PR title, branch name or commit message | Read the installed skill `mdd-pr-body` and follow it (Conventional Commits and Conventional Branch naming). Drafting does not authorize creating branches, committing or publishing. |
 | Security review ("revisión de seguridad", "usa mdd-security") | Dispatch `mdd-security` with the base and target refs (default: merge-base with the main branch to `HEAD`, plus uncommitted changes) and the scope. Present findings as given; "no findings" does not mean secure. Fixes need separate consent. |
 | Judgment Day ("judgment-day", "judgment day", "judment-day") | Read the installed skill `mdd-judgment-day` and its reference, and follow them exactly. This is the one feature with enforced isolation: the judges can only read committed Git objects through `mdd_jd_inspect`. |
+| "Versioná las ejecuciones de MDD", "volvé a dejarlas locales" | Follow Persistence in the run-file contract. Never stage or commit unless asked. |
 | "Anotá que…", "registrá esta mejora" | Append an entry to `.mdd/lessons.md`: date, title, what happened, what should have happened. Recording is not fixing. |
 | "¿Qué mejoras hay anotadas?" | Read `.mdd/lessons.md` and summarize it. |
 
