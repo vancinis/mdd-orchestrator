@@ -11,12 +11,14 @@ import { createInterface } from 'node:readline/promises';
 
 export const BASELINE = Object.freeze({ version: '0.2.0', commit: '34a93f67ba405aa50850839c7cc3405374e61544' });
 const PACKAGE_NAME = 'my-driven-development';
-const RELEASE_FILES = ['package.json', 'package-lock.json', 'CHANGELOG.md'];
+// The only files a release commit may change (shared with the automatic engine).
+export const RELEASE_FILES = Object.freeze(['package.json', 'package-lock.json', 'CHANGELOG.md']);
+const FULL_SHA = /^[0-9a-f]{40}$/;
 const GRAMMAR = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-preview\.(0|[1-9]\d*))?$/;
 const CONVENTIONAL = /^(?<type>[a-z]+)(?:\((?<scope>[^()\r\n]+)\))?(?<bang>!)?: (?<desc>.+)$/;
 const PREAMBLE = '# Changelog\n\nTodas las novedades relevantes de MDD. Las entradas se generan a partir de Conventional Commits con `npm run release`.\n\n';
 
-class Refusal extends Error {
+export class Refusal extends Error {
   constructor(message, code = 2) { super(message); this.code = code; }
 }
 
@@ -129,8 +131,8 @@ function tagExists(git, version) {
   return git(['tag', '--list', `v${version}`]).split(/\r?\n/).some(line => line.trim() === `v${version}`);
 }
 
-function eligibleTags(git, merged) {
-  const out = git(merged ? ['tag', '--merged', 'HEAD', '--list', 'v*'] : ['tag', '--list', 'v*']);
+function eligibleTags(git) {
+  const out = git(['tag', '--list', 'v*']);
   return out.split(/\r?\n/).map(line => line.trim()).filter(Boolean)
     .map(name => name.startsWith('v') ? parseVersion(name) : undefined)
     .filter(version => version && compareVersions(version, parseVersion(BASELINE.version)) >= 0);
@@ -140,8 +142,60 @@ function currentBranch(git) {
   try { return git(['symbolic-ref', '--short', '-q', 'HEAD']).trim() || undefined; } catch { return undefined; }
 }
 
-function parseCommits(git, base) {
-  const raw = git(['log', '--no-merges', '--reverse', '--format=%H%x00%s%x00%b%x1e', `${base}..HEAD`]);
+const isAncestor = (git, ancestor, descendant) => {
+  try { git(['merge-base', '--is-ancestor', ancestor, descendant]); return true; } catch { return false; }
+};
+
+// Validates the structure of a release commit: its only parent is `source` and it changes exactly RELEASE_FILES.
+// Throws a plain Error describing the first violation.
+function assertReleaseCommit(git, commit, source) {
+  const parents = git(['rev-list', '--parents', '-n', '1', commit]).trim().split(/\s+/).slice(1);
+  if (parents.length !== 1 || parents[0] !== source) {
+    throw new Error(`el commit de release ${commit.slice(0, 7)} debe tener como único padre a ${source.slice(0, 7)}`);
+  }
+  const changed = git(['diff-tree', '--no-commit-id', '--no-renames', '--no-ext-diff', '--name-only', '-r', commit]).split(/\r?\n/).filter(Boolean).sort();
+  if (JSON.stringify(changed) !== JSON.stringify([...RELEASE_FILES].sort())) {
+    throw new Error(`el commit de release ${commit.slice(0, 7)} debe cambiar exactamente ${RELEASE_FILES.join(', ')} (cambia: ${changed.join(', ') || 'nada'})`);
+  }
+}
+
+/**
+ * Source commit recorded by a published release tag (`vX.Y.Z[-preview.N]`, name only).
+ * - Annotated tag with exactly one valid `Source-Commit: <40 hex>` line: that commit, after checking that it is the
+ *   tag commit's only parent and that the tag commit changes exactly RELEASE_FILES.
+ * - No trailer (legacy or lightweight tag): the tag commit itself.
+ * - Malformed, duplicate or mismatched provenance, or a missing tag: throws an Error (fail closed).
+ */
+export function releaseSource(git, tag) {
+  const ref = `refs/tags/${tag}`;
+  let commit;
+  try { commit = git(['rev-parse', '-q', '--verify', `${ref}^{commit}`]).trim(); } catch { throw new Error(`La etiqueta ${tag} no existe o no apunta a un commit.`); }
+  let message = '';
+  if (git(['cat-file', '-t', ref]).trim() === 'tag') message = git(['for-each-ref', '--format=%(contents)', ref]);
+  const lines = message.split(/\r?\n/).filter(line => /^Source-Commit:/.test(line));
+  if (lines.length === 0) return commit;
+  if (lines.length > 1) throw new Error(`La etiqueta ${tag} tiene más de un Source-Commit.`);
+  const value = lines[0].slice('Source-Commit:'.length).trim();
+  if (!FULL_SHA.test(value)) throw new Error(`La etiqueta ${tag} tiene un Source-Commit inválido: ${value || '(vacío)'}.`);
+  try { assertReleaseCommit(git, commit, value); } catch (error) { throw new Error(`La etiqueta ${tag} tiene un Source-Commit que no coincide: ${error.message}.`); }
+  return value;
+}
+
+/**
+ * Text that a new CHANGELOG entry must be inserted into. When the previous published tag `baseTag` is an ancestor of
+ * `head`, the working-tree text already carries its entries. When it is not (tag-only release off main), the tag's own
+ * CHANGELOG.md is the cumulative baseline; if that tag has none, `workingText` is returned.
+ */
+export function changelogBaseline(git, baseTag, head, workingText) {
+  let commit;
+  try { commit = git(['rev-parse', '-q', '--verify', `refs/tags/${baseTag}^{commit}`]).trim(); } catch { throw new Refusal(`La etiqueta base ${baseTag} no existe.`); }
+  if (isAncestor(git, commit, head)) return workingText;
+  try { return git(['show', `${commit}:CHANGELOG.md`]); } catch { return workingText; }
+}
+
+/** Non-merge, non-release commits in `base..head`, oldest first (`sha` is 7 chars, `hash` is the full object name). */
+export function parseCommits(git, base, head = 'HEAD') {
+  const raw = git(['log', '--no-merges', '--reverse', '--format=%H%x00%s%x00%b%x1e', `${base}..${head}`]);
   const commits = [];
   for (const chunk of raw.split('\x1e')) {
     const record = chunk.replace(/^\r?\n/, '');
@@ -152,14 +206,14 @@ function parseCommits(git, base) {
     const match = CONVENTIONAL.exec(subject);
     const breaking = Boolean(match?.groups.bang || footer);
     commits.push({
-      sha: hash.slice(0, 7), subject, type: match?.groups.type, scope: match?.groups.scope,
+      sha: hash.slice(0, 7), hash, subject, type: match?.groups.type, scope: match?.groups.scope,
       description: breaking && footer ? footer[1].trim() : (match ? match.groups.desc : subject), breaking, conventional: Boolean(match),
     });
   }
   return commits;
 }
 
-function renderEntry({ version, date, channel, baseTag, headShort, commits }) {
+export function renderEntry({ version, date, channel, baseTag, headShort, commits }) {
   const groups = [
     ['Cambios incompatibles', commits.filter(c => c.breaking)],
     ['Funcionalidades', commits.filter(c => !c.breaking && c.type === 'feat')],
@@ -182,7 +236,7 @@ function renderEntry({ version, date, channel, baseTag, headShort, commits }) {
   return lines.join('\n');
 }
 
-function insertEntry(existing, entry) {
+export function insertEntry(existing, entry) {
   if (existing === undefined) return `${PREAMBLE}${entry}`;
   const eol = existing.includes('\r\n') ? '\r\n' : '\n';
   const text = eol === '\r\n' ? entry.replace(/\n/g, '\r\n') : entry;
@@ -191,23 +245,40 @@ function insertEntry(existing, entry) {
   return existing + (existing.endsWith('\n') || existing === '' ? '' : eol) + (existing === '' ? '' : eol) + text;
 }
 
-const headingCount = (text, version) => text.split(/\r?\n/).filter(line => line.startsWith(`## [${version}]`)).length;
+export const headingCount = (text, version) => text.split(/\r?\n/).filter(line => line.startsWith(`## [${version}]`)).length;
 
-function readLockInfo(root, version) {
+/**
+ * Pure: rewrites package.json/package-lock.json texts to `version`. Throws Refusal on a non-grammar version, a wrong
+ * package name, unexpected formatting or a lockfile that disagrees with package.json. With `requireLower` the current
+ * version must be lower than `version` (manual releases); the automatic engine passes false (tags are authoritative).
+ * Returns { current, packageText, lockText }.
+ */
+export function releaseMetadata(pkgText, lockText, version, { requireLower = true } = {}) {
   const unexpected = 'package.json/package-lock.json tienen un formato inesperado; no se reformatean.';
-  let pkgRaw, lockRaw, pkg, lock;
-  try {
-    pkgRaw = fs.readFileSync(join(root, 'package.json'), 'utf8');
-    lockRaw = fs.readFileSync(join(root, 'package-lock.json'), 'utf8');
-    pkg = JSON.parse(pkgRaw); lock = JSON.parse(lockRaw);
-  } catch (error) { throw new Refusal(`Formato inesperado: ${error.message}`); }
-  if (JSON.stringify(pkg, null, 2) + '\n' !== pkgRaw || JSON.stringify(lock, null, 2) + '\n' !== lockRaw) throw new Refusal(`Formato inesperado: ${unexpected}`);
+  const target = parseVersion(version);
+  if (!target || target.text !== version) throw new Refusal(`Versión no soportada: ${version}.`);
+  let pkg, lock;
+  try { pkg = JSON.parse(pkgText); lock = JSON.parse(lockText); } catch (error) { throw new Refusal(`Formato inesperado: ${error.message}`); }
+  if (JSON.stringify(pkg, null, 2) + '\n' !== pkgText || JSON.stringify(lock, null, 2) + '\n' !== lockText) throw new Refusal(`Formato inesperado: ${unexpected}`);
+  if (pkg.name !== PACKAGE_NAME || (lock.name !== undefined && lock.name !== PACKAGE_NAME) || (lock.packages?.['']?.name !== undefined && lock.packages[''].name !== PACKAGE_NAME)) {
+    throw new Refusal(`Formato inesperado: el nombre del paquete no es ${PACKAGE_NAME}.`);
+  }
   if (lock.version !== pkg.version || lock.packages?.[''] === undefined || lock.packages[''].version !== pkg.version) {
     throw new Refusal(`Formato inesperado: package-lock.json no coincide con la versión ${pkg.version} de package.json.`);
   }
+  if (requireLower && compareVersions(parseVersion(pkg.version) ?? target, target) >= 0) throw new Refusal(`package.json ya está en ${pkg.version}, que no es menor que ${version}.`);
   const next = structuredClone(pkg); next.version = version;
   const nextLock = structuredClone(lock); nextLock.version = version; nextLock.packages[''].version = version;
   return { current: pkg.version, packageText: JSON.stringify(next, null, 2) + '\n', lockText: JSON.stringify(nextLock, null, 2) + '\n' };
+}
+
+function readLockInfo(root, version) {
+  let pkgRaw, lockRaw;
+  try {
+    pkgRaw = fs.readFileSync(join(root, 'package.json'), 'utf8');
+    lockRaw = fs.readFileSync(join(root, 'package-lock.json'), 'utf8');
+  } catch (error) { throw new Refusal(`Formato inesperado: ${error.message}`); }
+  return releaseMetadata(pkgRaw, lockRaw, version, { requireLower: true });
 }
 
 async function confirm(io, yes, word) {
@@ -267,7 +338,7 @@ async function routine({ root, io, git, baseline, writeFile, raw, yes, dryRun })
   const dirty = git(['status', '--porcelain=v1', '--untracked-files=all']).split(/\r?\n/).filter(Boolean);
   if (dirty.length) throw new Refusal(`El árbol de trabajo no está limpio; confirmá o descartá estos cambios primero:\n${dirty.map(line => `  ${line}`).join('\n')}`);
 
-  const all = eligibleTags(git, false);
+  const all = eligibleTags(git);
   const stables = all.filter(v => v.preview === null);
   const highestStable = stables.sort(compareVersions).at(-1);
   if (channel === 'stable') {
@@ -278,7 +349,8 @@ async function routine({ root, io, git, baseline, writeFile, raw, yes, dryRun })
     if (previews.length && compareVersions(target, previews.at(-1)) <= 0) throw new Refusal(`El preview debe ser mayor que el último de su base (v${previews.at(-1).text}).`);
   }
 
-  const headShort = git(['rev-parse', '--short=7', 'HEAD']).trim();
+  const headCommit = git(['rev-parse', 'HEAD']).trim();
+  const headShort = headCommit.slice(0, 7);
   const push = `git push origin ${branch} refs/tags/${tag}`;
   if (resume) {
     io.out([`Reanudación: el commit de release de ${tag} ya existe en ${headShort}; solo falta la etiqueta.`, `Se creará la etiqueta ${tag} (anotada) en HEAD. No se hace push.`].join('\n'));
@@ -288,18 +360,28 @@ async function routine({ root, io, git, baseline, writeFile, raw, yes, dryRun })
   }
 
   const info = readLockInfo(root, version);
-  if (compareVersions(parseVersion(info.current) ?? target, target) >= 0) throw new Refusal(`package.json ya está en ${info.current}, que no es menor que ${version}.`);
   const changelogPath = join(root, 'CHANGELOG.md');
   const originalChangelog = fs.existsSync(changelogPath) ? fs.readFileSync(changelogPath, 'utf8') : undefined;
   if (originalChangelog !== undefined && headingCount(originalChangelog, version) > 0) throw new Refusal(`CHANGELOG.md ya tiene una sección ${version} sin commit de release; revisala.`);
 
-  const candidates = eligibleTags(git, true).filter(v => compareVersions(v, target) < 0 && (channel === 'preview' || v.preview === null));
-  const baseVersion = candidates.sort(compareVersions).at(-1);
-  if (!baseVersion) throw new Refusal('No hay una etiqueta de versión anterior alcanzable desde HEAD para calcular el intervalo.');
-  const baseTag = `v${baseVersion.text}`;
-  const commits = parseCommits(git, baseTag);
+  // Base = highest earlier release whose recorded source is HEAD or one of its ancestors (not `--merged HEAD`, so
+  // tag-only releases that live off the branch still count). Invalid provenance is refused.
+  const candidates = [];
+  for (const v of all.filter(v => compareVersions(v, target) < 0 && (channel === 'preview' || v.preview === null))) {
+    let source;
+    try { source = releaseSource(git, `v${v.text}`); } catch (error) { throw new Refusal(`Procedencia inválida: ${error.message}\nNo se hizo ningún cambio.`); }
+    if (source === headCommit || isAncestor(git, source, 'HEAD')) candidates.push({ version: v, source });
+  }
+  candidates.sort((a, b) => compareVersions(a.version, b.version));
+  const chosen = candidates.at(-1);
+  if (!chosen) throw new Refusal('No hay una etiqueta de versión anterior alcanzable desde HEAD para calcular el intervalo.');
+  const baseTag = `v${chosen.version.text}`;
+  const commits = parseCommits(git, chosen.source);
   const date = git(['log', '-1', '--format=%cs', 'HEAD']).trim();
   const entry = renderEntry({ version, date, channel, baseTag, headShort, commits });
+  // Cumulative changelog: after a tag-only release the working copy lacks the base tag's entries.
+  const baselineChangelog = changelogBaseline(git, baseTag, 'HEAD', originalChangelog);
+  if (baselineChangelog !== undefined && headingCount(baselineChangelog, version) > 0) throw new Refusal(`El CHANGELOG.md de ${baseTag} ya tiene una sección ${version}; revisala.`);
 
   io.out([
     `Release ${version} (${channel === 'stable' ? 'estable' : 'preview'}) en la rama ${branch}, HEAD ${headShort}`,
@@ -318,7 +400,7 @@ async function routine({ root, io, git, baseline, writeFile, raw, yes, dryRun })
   try {
     writeFile(join(root, 'package.json'), info.packageText);
     writeFile(join(root, 'package-lock.json'), info.lockText);
-    writeFile(changelogPath, insertEntry(originalChangelog, entry));
+    writeFile(changelogPath, insertEntry(baselineChangelog, entry));
     git(['add', '--', ...RELEASE_FILES]);
     git(['commit', '-m', `chore(release): ${tag}`, '--', ...RELEASE_FILES]);
   } catch (error) {
@@ -347,8 +429,13 @@ async function routine({ root, io, git, baseline, writeFile, raw, yes, dryRun })
 function createTag({ io, git, version, tag, headShort, push, onFailure }) {
   const fail = reason => { throw onFailure ? onFailure(reason) : new Refusal(`${reason}\nNo se creó la etiqueta; repetí el comando.`, 1); };
   try {
-    git(['tag', '-a', tag, '-m', `MDD ${version}`, 'HEAD']);
-    if (tagCommit(git, version) !== git(['rev-parse', 'HEAD']).trim()) fail(`La etiqueta ${tag} no apunta a HEAD.`);
+    // Provenance: the release commit's only parent is the source the release was cut from.
+    const head = git(['rev-parse', 'HEAD']).trim();
+    const source = git(['rev-parse', '--verify', 'HEAD^']).trim();
+    assertReleaseCommit(git, head, source);
+    const channel = parseVersion(version).preview === null ? 'stable' : 'preview';
+    git(['tag', '-a', tag, '-m', `MDD ${version}\n\nChannel: ${channel}\nSource-Commit: ${source}`, 'HEAD']);
+    if (tagCommit(git, version) !== head) fail(`La etiqueta ${tag} no apunta a HEAD.`);
   } catch (error) {
     if (error instanceof Refusal) throw error;
     fail(`Falló la creación de la etiqueta: ${error.message}`);

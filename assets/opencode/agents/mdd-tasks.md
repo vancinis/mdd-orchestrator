@@ -13,6 +13,10 @@ Each task must fit one fresh Apply actor. Split large work into coherent, depend
 deliverables, not by file type. Mark which tasks are independent and write disjoint files, so the
 orchestrator can run them in parallel. Map every scenario and relevant decision to some task.
 
+Task boundaries follow the selected solution. Do not add modules, interfaces or intermediate
+states just to create disjoint ownership or parallel work; use sequential tasks when the simpler
+design needs them.
+
 List the exact checks Verify must run across the whole change, and which are required.
 
 If the decisions cannot satisfy a requirement, report `failed` with the reason instead of planning

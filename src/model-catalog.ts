@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { delimiter, join } from 'node:path';
+import { join } from 'node:path';
 
 export type ModelCatalog =
   | { status: 'ok'; models: string[] }
@@ -16,7 +16,7 @@ const MODEL_PATTERN = /^[A-Za-z0-9][\w.:-]*(\/[A-Za-z0-9][\w.:-]*)+$/;
  * shell, and this adapter does not use shell wrappers.
  */
 export function opencodeBinary(env: NodeJS.ProcessEnv = process.env, platform = process.platform): string | undefined {
-  const directories = (env.PATH ?? env.Path ?? '').split(delimiter).filter(directory => directory.trim());
+  const directories = (env.PATH ?? env.Path ?? '').split(platform === 'win32' ? ';' : ':').filter(directory => directory.trim());
   for (const name of platform === 'win32' ? ['opencode.exe'] : ['opencode']) {
     for (const directory of directories) {
       const candidate = join(directory, name);

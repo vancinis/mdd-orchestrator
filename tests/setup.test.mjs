@@ -253,6 +253,49 @@ test('installed run-file persistence templates keep runs local or shared as docu
   for (const path of private_) assert.equal(ignored(path), true, `versioned keeps ${path} local`);
 });
 
+// Guards that the reporting guidance is installed and the boundaries are preserved, not that a model follows it.
+test('installed reporting guidance explains results, continues without pausing and closes by route', t => {
+  const root = fixture(t);
+  initProject(root);
+  const flat = path => fs.readFileSync(join(root, path), 'utf8').replace(/\s+/g, ' ');
+  const has = (text, anchor, id) => assert.ok(text.includes(anchor), `${id}: ${anchor}`);
+  const orchestrator = flat('agents/mdd-orchestrator.md');
+  const anchors = {
+    A1: 'continue in the same turn', A2: 'never waits for acknowledgement',
+    A3: 'not just the actor name, outcome or artifact link', A4: 'what it proposes or decides and why',
+    A5: 'what actually changed', A6: 'what was checked, the real result',
+    A7: '`failed` or `blocked`: what is wrong or missing', A8: 'do not reread full artifacts just to summarize',
+    A9: 'Every level states the substantive result', A10: 'Length follows the substance',
+    A11: 'route actually taken', A12: 'no independent Verify ran', A13: 'close in the same turn',
+    A14: 'instead of a separate progress explanation and final summary', A15: 'never read as success',
+    A16: 'A blocked or failed Verify is not itself closure', A16b: 'unless the user chooses `closed-unverified`',
+    P1: '**Automatic:** continue from actor to actor without asking',
+    P2: 'Ask only decisions the user alone can make',
+    P3: '(`Continuar`, `Ajustar`, `Pausar`)',
+    P4: '`low` = one short paragraph per actor; `medium` = adds purpose and key learnings; `detailed` = adds approach, open items, confidence and status. Default to `medium`.',
+    P5: "Closing with gaps requires the user's choice, not inferred consent",
+    P6: 'Artifacts, prompts to actors and the run file stay in English',
+    P7: 'Never present an unrun check as passed or a failure as success',
+    P8: 'Closing never authorizes commit, push, PR', P9: 'Verify remains optional on low',
+    P13: 'independently checks requirements, scenarios, tasks',
+  };
+  for (const [id, anchor] of Object.entries(anchors)) has(orchestrator, anchor, id);
+  assert.doesNotMatch(orchestrator, /zero token|no token cost|prevents? compaction/i, 'N2');
+  assert.equal(AGENTS.some(name => /report/.test(name)), false, 'N1: no reporting agent');
+  const routeActors = ['explore', 'risk', 'plan', 'propose', 'spec', 'design', 'tasks', 'apply', 'verify'];
+  for (const name of routeActors) {
+    const actor = flat(`agents/mdd-${name}.md`);
+    has(actor, 'explains your result to the user from this report', `A17 ${name}`);
+    has(actor, 'substantive result of your phase', `A18 ${name}`);
+    has(actor, 'Two to five sentences a person reads first', `P10 ${name}`);
+    has(actor, 'Write the report and the artifact in English', `P12 ${name}`);
+  }
+  const apply = fs.readFileSync(join(root, 'agents/mdd-apply.md'), 'utf8');
+  for (const heading of ['## Outcome', '## Summary', '## Details', '## Open items', '## Questions']) {
+    assert.ok(apply.includes(`\n${heading}\n`), `P11: ${heading}`);
+  }
+});
+
 // Builds and tests rarely notice re-encoded text, so the guidance must reach every writer.
 test('installed writers keep native-write and damaged-text guidance', t => {
   const root = fixture(t);
@@ -453,6 +496,57 @@ for (const file of ['SKILL.md', 'NOTICE']) {
     fs.mkdirSync(join(path, '..'), { recursive: true }); fs.writeFileSync(path, 'foreign content');
     const before = snapshot(root);
     assert.throws(() => initProject(root), /refuses to overwrite different content: skills\/mdd-grill/);
+    assert.deepEqual(snapshot(root), before);
+  });
+}
+
+const EXPLAIN = ['SKILL.md', 'assets/template.html', 'references/authoring.md'];
+
+test('init installs the mdd-explain skill, template and reference verbatim, records them and routes explicit artifact requests only', t => {
+  const root = fixture(t);
+  initProject(root);
+  const ledger = join(root, 'mdd/setup-assets.json'), manifest = JSON.parse(fs.readFileSync(ledger, 'utf8'));
+  for (const file of EXPLAIN) {
+    const source = `assets/opencode/skills/mdd-explain/${file}`, name = `skills/mdd-explain/${file}`;
+    assert.ok(MDD_ASSETS.includes(source), source);
+    assert.equal(fs.readFileSync(join(root, name), 'utf8'), fs.readFileSync(source, 'utf8'), name);
+    assert.equal(manifest[name], assetText(PACKAGE_ROOT, source).digest, name);
+  }
+  const orchestrator = fs.readFileSync(join(root, 'agents/mdd-orchestrator.md'), 'utf8');
+  assert.match(orchestrator, /Read the installed skill `mdd-explain`/);
+  assert.match(orchestrator, /native `general`/);
+  assert.match(orchestrator, /starts no run/);
+  assert.match(orchestrator, /Question, explanation, investigation \| Answer directly\./);
+  assert.equal(fs.existsSync(join(root, 'agents/mdd-explain.md')), false, 'the skill adds no actor');
+  const before = snapshot(root);
+  assert.equal(initProject(root).created, 0); assert.deepEqual(snapshot(root), before);
+});
+
+test('update from a ledger without mdd-explain adds all three files and keeps an unrelated skill', t => {
+  const root = fixture(t);
+  fs.mkdirSync(join(root, 'skills/explain'), { recursive: true }); fs.writeFileSync(join(root, 'skills/explain/SKILL.md'), 'foreign explain skill');
+  initProject(root);
+  const ledger = join(root, 'mdd/setup-assets.json'), manifest = JSON.parse(fs.readFileSync(ledger, 'utf8'));
+  const names = EXPLAIN.map(file => `skills/mdd-explain/${file}`);
+  for (const name of names) { fs.rmSync(join(root, name)); delete manifest[name]; }
+  fs.rmdirSync(join(root, 'skills/mdd-explain/assets')); fs.rmdirSync(join(root, 'skills/mdd-explain/references')); fs.rmdirSync(join(root, 'skills/mdd-explain'));
+  fs.writeFileSync(ledger, JSON.stringify(manifest));
+  const result = initProject(root, true);
+  assert.equal(result.created, names.length);
+  for (const name of names) assert.equal(fs.readFileSync(join(root, name), 'utf8'), fs.readFileSync(`assets/opencode/${name}`, 'utf8'), name);
+  assert.equal(fs.readFileSync(join(root, 'skills/explain/SKILL.md'), 'utf8'), 'foreign explain skill');
+  const recorded = JSON.parse(fs.readFileSync(ledger, 'utf8'));
+  for (const name of names) assert.equal(recorded[name], assetText(root, name).digest, name);
+  assert.ok(Buffer.byteLength(fs.readFileSync(ledger)) < 16384, 'the ledger stays inside its read bound');
+  assert.equal(initProject(root, true).created, 0);
+});
+
+for (const file of EXPLAIN) {
+  test(`init preserves a foreign mdd-explain ${file} before any partial installation`, t => {
+    const root = fixture(t); const path = join(root, `skills/mdd-explain/${file}`);
+    fs.mkdirSync(join(path, '..'), { recursive: true }); fs.writeFileSync(path, 'foreign content');
+    const before = snapshot(root);
+    assert.throws(() => initProject(root), /refuses to overwrite different content: skills\/mdd-explain/);
     assert.deepEqual(snapshot(root), before);
   });
 }

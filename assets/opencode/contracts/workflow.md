@@ -14,7 +14,7 @@ Nothing here can block the user's work. The host's native permission prompts are
 | Change that benefits from planning, tracking or verification, or the user asks for MDD | Start a run (section 3). |
 | "Continue", "sigue", an issue or feature already worked on | Resume (section 7). Never start a fresh run for recorded work. |
 | Commit, push, open a PR for finished work | Do exactly what was asked with git/gh. Not a new run. |
-| Security review, Judgment Day, PR body, "anotá que…" | See section 8. |
+| Security review, Judgment Day, PR body, explanation artifact, "anotá que…" | See section 8. |
 
 ## 2. Choose the level
 
@@ -89,7 +89,11 @@ After each actor:
    in another check until the difference is explained. If you cannot run it, record "not run" and
    why; that is no match.
 3. Update the run file: log line, plan status, decisions, open questions.
-4. Show the user a brief Spanish summary at their chosen detail level (section 6), then continue.
+4. Explain the result to the user (section 6), then continue in the same turn: in automatic mode
+   with the next applicable action (actor, check or closure), in interactive mode with the usual
+   question before the next actor (section 5). The explanation never waits for acknowledgement.
+   When the result leads to closure with no other actor in between, skip this step: the closing
+   reply covers it (section 7).
 
 **Parallel Apply.** You may dispatch up to three `mdd-apply` actors in one message when their
 tasks have no dependencies between them and write disjoint files. Otherwise run them in sequence.
@@ -152,7 +156,18 @@ and pass it as a file (`gh pr create --body-file <file>`, `git commit -F <file>`
   English. Quote requirements, errors, commands, paths and identifiers verbatim.
 - Detail level comes from the preferences line (`summary`): `low` = one short paragraph per
   actor; `medium` = adds purpose and key learnings; `detailed` = adds approach, open items,
-  confidence and status. Default to `medium`.
+  confidence and status. Default to `medium`. Every level states the substantive result.
+- Explain results, not activity. Say what the phase produced and why it matters, not just the
+  actor name, outcome or artifact link:
+  - Explore, Risk: the findings or recommended level that shape the work, and notable risks.
+  - Plan, Propose, Spec, Design, Tasks: what it proposes or decides and why.
+  - Apply: what actually changed and the checks it ran, with their real results.
+  - Verify: what was checked, the real result and any gaps.
+  - `failed` or `blocked`: what is wrong or missing, and what happens next.
+- Build the explanation from the actor's report and the run file. Open an artifact only when the
+  report lacks something the user needs; do not reread full artifacts just to summarize.
+- Length follows the substance (decisions, changes, results, limits), not the artifact's length.
+  Stay concise; do not repeat what the user already saw.
 - Never present an unrun check as passed or a failure as success. Keep limits visible.
 
 ## 7. Verify, correct and close
@@ -182,8 +197,16 @@ and pass it as a file (`gh pr create --body-file <file>`, `git commit -F <file>`
     one Verify check (medium/high); on low without Verify, one check you ran is required;
   - `closed-unverified` — the user chose to stop with gaps; list every gap under Limits;
   - `abandoned` — the user dropped the work.
-  Then give the user a final Spanish summary: what changed, how it matches the request and plan,
-  what was checked, and what remains.
+  Then give the user one closing reply in Spanish about the whole run, following the route
+  actually taken: what was delivered, the approach and key decisions with their reason, what was
+  actually verified (Verify's result, or on low without Verify your own checks, saying no
+  independent Verify ran) and what remains. Use the reports and run file you already have. When
+  the last actor's result leads to closure with no other actor in between (Verify passed, or a
+  low Apply followed only by your checks), close in the same turn with this one reply instead of
+  a separate progress explanation and final summary, covering that actor's result.
+  `closed-unverified` and `abandoned` replies say what was and was not done and never read as
+  success. A blocked or failed Verify is not itself closure: explain it and continue as above,
+  unless the user chooses `closed-unverified`.
 - Preserve the checked revision/local-change context and external limits in the run. After later
   edits or merges, recheck affected behavior and integration before presenting earlier results
   as evidence for the new state. Retain still-valid evidence for unaffected scope; do not rerun
@@ -205,6 +228,7 @@ These never start by themselves; each needs an explicit request.
 | Request | How |
 |---|---|
 | Question session before a run ("preguntame todo antes") | Read the installed skill `mdd-grill` and follow it. |
+| Explicit request for an explanation artifact ("generá un artefacto que explique…", "explicámelo en HTML") | Read the installed skill `mdd-explain` and follow it. It delegates to native `general`, writes one offline HTML file under `.mdd/artifacts/` or the named run's `artifacts/`, and starts no run. Ordinary questions and explanations stay as in section 1. |
 | PR body, PR title, branch name or commit message | Read the installed skill `mdd-pr-body` and follow it (Conventional Commits and Conventional Branch naming). Drafting does not authorize creating branches, committing or publishing. |
 | Security review ("revisión de seguridad", "usa mdd-security") | Dispatch `mdd-security` with the base and target refs (default: merge-base with the main branch to `HEAD`, plus uncommitted changes) and the scope. Present findings as given; "no findings" does not mean secure. Fixes need separate consent. |
 | Judgment Day ("judgment-day", "judgment day", "judment-day") | Read the installed skill `mdd-judgment-day` and its reference, and follow them exactly. This is the one feature with enforced isolation: the judges can only read committed Git objects through `mdd_jd_inspect`. |

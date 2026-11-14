@@ -16,6 +16,31 @@ Preview · cambios desde `v0.3.0` (intervalo `v0.3.0..8e66bc8`, 7 commits).
 - **workflow:** keep apply inside an explicit edit surface (`a2a0299`)
 - **skills:** resolve skills once per run and pass them by path (`a78df8c`)
 
+## [0.3.3-preview.1] - 2026-11-12
+
+Preview · cambios desde `v0.3.2` (intervalo `v0.3.2..1f049a1`, 1 commits).
+
+### Funcionalidades
+- **reporting:** explain actor results and run outcomes (`1f049a1`)
+
+## [0.3.2] - 2026-11-11
+
+Estable · cambios desde `v0.3.1` (intervalo `v0.3.1..1edb065`, 2 commits).
+
+### Correcciones
+- **agents:** keep planning proportional to approved scope (`549d696`)
+- **tests:** restore cross-platform suite reliability (`1edb065`)
+
+## [0.3.1] - 2026-11-10
+
+Estable · cambios desde `v0.3.0` (intervalo `v0.3.0..1c57831`, 2 commits).
+
+### Funcionalidades
+- **skills:** add visual explanation artifacts (`48fabce`)
+
+### Correcciones
+- **explain:** clarify output ownership and guard mobile readability (`2cb05ee`)
+
 ## [0.3.0] - 2026-11-05
 
 Estable · cambios desde `v0.2.0` (intervalo `v0.2.0..8f55419`, 5 commits).

@@ -5,7 +5,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { BASELINE, compareVersions, createGit, parseVersion, release } from '../scripts/release.mjs';
+import {
+  BASELINE, RELEASE_FILES, changelogBaseline, compareVersions, createGit, headingCount, insertEntry, parseCommits, parseVersion,
+  release, releaseMetadata, releaseSource, renderEntry,
+} from '../scripts/release.mjs';
 
 const repoRoot = fileURLToPath(new URL('../', import.meta.url));
 const json = value => JSON.stringify(value, null, 2) + '\n';
@@ -456,4 +459,195 @@ test('S12: a failed tag keeps the commit, reports it truthfully, and retry creat
   assert.equal(sh(context.root, 'rev-parse', 'v0.3.0^{commit}'), head);
   assert.equal(readFileSync(join(context.root, 'CHANGELOG.md'), 'utf8'), changelog, 'changelog not duplicated');
   assert.equal((await run(context, ['0.3.0', '--yes'])).code, 2, 'now the tag exists and is never overwritten');
+});
+
+/**
+ * Simulates an automatic tag-only release: a release commit rooted at `source` (default HEAD) that no branch contains,
+ * plus an annotated tag. `trailers` replaces the default provenance line; `extraFile` also touches work.txt.
+ */
+function tagOnly(context, version, { source, trailers, extraFile = false } = {}) {
+  const { root } = context;
+  const branch = sh(root, 'symbolic-ref', '--short', 'HEAD');
+  const src = source ?? sh(root, 'rev-parse', 'HEAD');
+  sh(root, 'checkout', '-q', '--detach', src);
+  const meta = releaseMetadata(readFileSync(join(root, 'package.json'), 'utf8'), readFileSync(join(root, 'package-lock.json'), 'utf8'), version, { requireLower: false });
+  writeFileSync(join(root, 'package.json'), meta.packageText);
+  writeFileSync(join(root, 'package-lock.json'), meta.lockText);
+  const changelogPath = join(root, 'CHANGELOG.md');
+  const entry = renderEntry({ version, date: '2026-01-02', channel: version.includes('preview') ? 'preview' : 'stable', baseTag: 'v0.2.0', headShort: src.slice(0, 7), commits: [] });
+  writeFileSync(changelogPath, insertEntry(existsSync(changelogPath) ? readFileSync(changelogPath, 'utf8') : undefined, entry));
+  if (extraFile) writeFileSync(join(root, 'work.txt'), 'sneaky\n');
+  sh(root, 'add', '--', ...RELEASE_FILES, ...(extraFile ? ['work.txt'] : []));
+  sh(root, 'commit', '-q', '-m', `chore(release): v${version}`);
+  const lines = trailers ?? [`Source-Commit: ${src}`];
+  sh(root, 'tag', '-a', `v${version}`, '-m', `MDD ${version}\n\nChannel: stable\n${lines.join('\n')}`);
+  sh(root, 'checkout', '-q', branch);
+  return { tag: `v${version}`, source: src, commit: sh(root, 'rev-parse', `v${version}^{commit}`) };
+}
+
+test('S13: a valid tag-only release off main is a base by source ancestry and its CHANGELOG stays cumulative', async t => {
+  const context = await ready(t);
+  const before = originRefs(context);
+  const published = tagOnly(context, '0.3.0');
+  assert.equal(sh(context.root, 'branch', '--contains', published.commit), '', 'the release commit is on no branch');
+  assert.equal(sh(context.root, 'tag', '--merged', 'HEAD', '--list', 'v0.3.0'), '', 'the old --merged HEAD rule would not see it');
+  const git = createGit(context.root);
+  assert.equal(releaseSource(git, 'v0.3.0'), published.source);
+  commit(context.root, 'feat: after the tag-only release');
+  const base = sh(context.root, 'rev-parse', 'HEAD');
+  assert.ok(!existsSync(join(context.root, 'CHANGELOG.md')), 'main stays stale: no CHANGELOG on main');
+
+  const { code, io } = await run(context, ['0.3.1', '--yes']);
+  assert.equal(code, 0, io.errText());
+  const changelog = readFileSync(join(context.root, 'CHANGELOG.md'), 'utf8');
+  assert.ok(changelog.indexOf('## [0.3.1]') >= 0 && changelog.indexOf('## [0.3.1]') < changelog.indexOf('## [0.3.0]'), 'new entry first, published entry kept');
+  assert.equal(headingCount(changelog, '0.3.0'), 1);
+  assert.equal(headingCount(changelog, '0.3.1'), 1);
+  assert.ok(changelog.includes(`Estable · cambios desde \`v0.3.0\` (intervalo \`v0.3.0..${base.slice(0, 7)}\`, 1 commits).`));
+  assert.ok(changelog.includes('after the tag-only release'));
+  assert.ok(!changelog.includes('add profile selector'), 'the interval starts at the recorded source, not at the beginning');
+  assert.equal(JSON.parse(sh(context.root, 'show', 'v0.3.1:package.json')).version, '0.3.1');
+  assert.equal(sh(context.root, 'rev-parse', 'v0.3.1^'), base);
+  assert.equal(releaseSource(git, 'v0.3.1'), base, 'manual tags record their source');
+  const message = sh(context.root, 'for-each-ref', '--format=%(contents)', 'refs/tags/v0.3.1');
+  assert.match(message, new RegExp(`^MDD 0\\.3\\.1\\n\\nChannel: stable\\nSource-Commit: ${base}$`, 'm'));
+  assert.equal(originRefs(context), before, 'origin refs unchanged');
+  assert.equal(sh(context.origin, 'tag', '--list'), '');
+});
+
+test('S13: a tag-only preview is the base of the next preview and a no-trailer legacy tag still resolves to its commit', async t => {
+  const context = await ready(t);
+  tagOnly(context, '0.3.0-preview.1');
+  commit(context.root, 'fix: later fix');
+  const dry = await run(context, ['0.3.0-preview.2', '--dry-run']);
+  assert.equal(dry.code, 0, dry.io.errText());
+  assert.match(dry.io.outText(), /Intervalo v0\.3\.0-preview\.1\.\.[0-9a-f]{7} \(1 commits\)/);
+  const git = createGit(context.root);
+  assert.equal(releaseSource(git, 'v0.2.0'), context.baseline.commit, 'legacy annotated tag: its own commit');
+  sh(context.root, 'tag', 'v0.2.1', 'HEAD');
+  assert.equal(releaseSource(git, 'v0.2.1'), sh(context.root, 'rev-parse', 'HEAD'), 'lightweight tag: its own commit');
+});
+
+test('S13: a release whose source is not an ancestor of HEAD is not chosen as the base', async t => {
+  const context = await ready(t);
+  sh(context.root, 'checkout', '-q', '-b', 'side');
+  commit(context.root, 'feat: only on side');
+  const sideHead = sh(context.root, 'rev-parse', 'HEAD');
+  sh(context.root, 'checkout', '-q', 'main');
+  tagOnly(context, '0.2.5', { source: sideHead });
+  commit(context.root, 'fix: on main');
+  const dry = await run(context, ['0.3.0', '--dry-run']);
+  assert.equal(dry.code, 0, dry.io.errText());
+  assert.match(dry.io.outText(), /Intervalo v0\.2\.0\.\./, 'falls back to the highest release reachable by source');
+  assert.match(dry.io.outText(), /\(6 commits\)/);
+});
+
+test('S13: malformed, duplicate or mismatched Source-Commit provenance is refused before any change', async t => {
+  const cases = [
+    ['malformed', () => ['Source-Commit: not-a-sha']],
+    ['short', ctx => [`Source-Commit: ${sh(ctx.root, 'rev-parse', '--short', 'HEAD')}`]],
+    ['empty', () => ['Source-Commit:']],
+    ['duplicate', ctx => { const head = sh(ctx.root, 'rev-parse', 'HEAD'); return [`Source-Commit: ${head}`, `Source-Commit: ${head}`]; }],
+    ['not the only parent', ctx => [`Source-Commit: ${sh(ctx.root, 'rev-parse', 'HEAD~1')}`]],
+    ['unknown commit', () => [`Source-Commit: ${'f'.repeat(40)}`]],
+  ];
+  for (const [name, trailers] of cases) {
+    const context = await ready(t);
+    tagOnly(context, '0.3.0', { trailers: trailers(context) });
+    const git = createGit(context.root);
+    assert.throws(() => releaseSource(git, 'v0.3.0'), /Source-Commit/, name);
+    const before = snapshot(context); const refs = originRefs(context);
+    const { code, io } = await run(context, ['0.4.0', '--yes']);
+    assert.equal(code, 2, name);
+    assert.match(io.errText(), /Procedencia inválida/, name);
+    assert.deepEqual(snapshot(context), before, name);
+    assert.equal(originRefs(context), refs, name);
+  }
+  const context = await ready(t);
+  tagOnly(context, '0.3.0', { extraFile: true });
+  assert.throws(() => releaseSource(createGit(context.root), 'v0.3.0'), /exactamente package\.json, package-lock\.json, CHANGELOG\.md/);
+  assert.equal((await run(context, ['0.4.0', '--yes'])).code, 2, 'a release commit with an extra file');
+  assert.throws(() => releaseSource(createGit(context.root), 'v9.9.9'), /no existe/);
+});
+
+test('S13: manual safeguards still hold with tag-only releases around: named branch, clean tree, no push', async t => {
+  const context = await ready(t);
+  tagOnly(context, '0.3.0');
+  const refs = originRefs(context);
+  sh(context.root, 'checkout', '-q', '-b', 'feature');
+  let before = snapshot(context);
+  let result = await run(context, ['0.3.1', '--yes']);
+  assert.equal(result.code, 2);
+  assert.match(result.io.errText(), /main/);
+  assert.deepEqual(snapshot(context), before);
+  sh(context.root, 'checkout', '-q', 'main');
+  writeFileSync(join(context.root, 'untracked.txt'), 'x\n');
+  before = snapshot(context);
+  result = await run(context, ['0.3.1', '--yes']);
+  assert.equal(result.code, 2);
+  assert.match(result.io.errText(), /limpio/);
+  assert.deepEqual(snapshot(context), before);
+  rmSync(join(context.root, 'untracked.txt'));
+  assert.equal((await run(context, ['0.3.0', '--yes'])).code, 2, 'the published tag is never overwritten');
+  assert.equal((await run(context, ['0.2.9', '--yes'])).code, 2, 'stable must exceed the published stable');
+  assert.equal(originRefs(context), refs);
+});
+
+test('shared helpers: RELEASE_FILES, parseCommits(head), headingCount, insertEntry', async t => {
+  assert.deepEqual([...RELEASE_FILES], ['package.json', 'package-lock.json', 'CHANGELOG.md']);
+  assert.ok(Object.isFrozen(RELEASE_FILES));
+  const context = await ready(t);
+  const git = createGit(context.root);
+  const all = parseCommits(git, 'v0.2.0');
+  assert.equal(all.length, 5);
+  assert.equal(all[0].hash.length, 40);
+  assert.equal(all[0].sha, all[0].hash.slice(0, 7));
+  assert.deepEqual(parseCommits(git, 'v0.2.0', 'HEAD~3').map(c => c.type), ['feat', 'fix']);
+  assert.deepEqual(parseCommits(git, 'HEAD', 'HEAD'), []);
+  assert.equal(headingCount('## [1.0.0] - x\n## [1.0.0-preview.1] - y\n', '1.0.0'), 1);
+  const entry = renderEntry({ version: '1.0.0', date: '2026-01-01', channel: 'stable', baseTag: 'v0.2.0', headShort: 'abcdef0', commits: [] });
+  assert.match(entry, /Sin cambios relevantes/);
+  const text = insertEntry('# T\r\n\r\n## [0.9.0] - a\r\n', entry);
+  assert.ok(text.indexOf('## [1.0.0]') < text.indexOf('## [0.9.0]'));
+  assert.ok(!/[^\r]\n/.test(text), 'CRLF preserved');
+});
+
+test('releaseMetadata is pure and strict', () => {
+  const pkg = { name: 'my-driven-development', version: '0.3.0', private: true };
+  const lock = { name: 'my-driven-development', version: '0.3.0', lockfileVersion: 3, packages: { '': { name: 'my-driven-development', version: '0.3.0' } } };
+  const result = releaseMetadata(json(pkg), json(lock), '0.4.0');
+  assert.equal(result.current, '0.3.0');
+  assert.equal(JSON.parse(result.packageText).version, '0.4.0');
+  assert.equal(JSON.parse(result.lockText).packages[''].version, '0.4.0');
+  assert.throws(() => releaseMetadata(json(pkg), json(lock), '0.3.0'), /no es menor/);
+  assert.throws(() => releaseMetadata(json(pkg), json(lock), '0.2.0'), /no es menor/);
+  assert.equal(JSON.parse(releaseMetadata(json(pkg), json(lock), '0.2.0', { requireLower: false }).packageText).version, '0.2.0', 'automatic engine: no lower-version rule');
+  assert.throws(() => releaseMetadata(json(pkg), json(lock), 'v0.4.0'), /no soportada/);
+  assert.throws(() => releaseMetadata(json(pkg), json(lock), '0.4.0-rc.1'), /no soportada/);
+  assert.throws(() => releaseMetadata(json({ ...pkg, name: 'other' }), json(lock), '0.4.0'), /nombre del paquete/);
+  assert.throws(() => releaseMetadata(json(pkg), json({ ...lock, name: 'other' }), '0.4.0'), /nombre del paquete/);
+  assert.throws(() => releaseMetadata(json(pkg), json({ ...lock, version: '0.1.0' }), '0.4.0'), /no coincide/);
+  assert.throws(() => releaseMetadata(JSON.stringify(pkg), json(lock), '0.4.0'), /formato inesperado/i);
+  assert.throws(() => releaseMetadata('{', json(lock), '0.4.0'), /Formato inesperado/);
+});
+
+test('changelogBaseline: working text when the base tag is an ancestor, the tag copy when it is not', async t => {
+  const context = await ready(t);
+  const git = createGit(context.root);
+  assert.equal(changelogBaseline(git, 'v0.2.0', 'HEAD', 'working'), 'working', 'ancestor tag');
+  assert.equal(changelogBaseline(git, 'v0.2.0', 'HEAD', undefined), undefined);
+  tagOnly(context, '0.3.0');
+  const tagCopy = execFileSync('git', ['show', 'v0.3.0:CHANGELOG.md'], { cwd: context.root, encoding: 'utf8' }); // untrimmed
+  assert.match(tagCopy, /## \[0\.3\.0\]/);
+  assert.equal(changelogBaseline(git, 'v0.3.0', 'HEAD', 'stale working'), tagCopy);
+  assert.equal(changelogBaseline(git, 'v0.3.0', 'HEAD', undefined), tagCopy);
+  assert.throws(() => changelogBaseline(git, 'v7.7.7', 'HEAD', 'x'), /no existe/);
+  // An off-main tag whose tree has no CHANGELOG falls back to the working copy.
+  sh(context.root, 'checkout', '-q', '-b', 'side');
+  commit(context.root, 'fix: side only');
+  sh(context.root, 'tag', 'v0.2.2');
+  sh(context.root, 'checkout', '-q', 'main');
+  commit(context.root, 'fix: advance main');
+  assert.equal(changelogBaseline(git, 'v0.2.2', 'HEAD', 'w'), 'w');
+  assert.equal(changelogBaseline(git, 'v0.3.0', 'HEAD', 'w'), tagCopy);
 });

@@ -8,6 +8,11 @@ observable behavior, success, failure and boundary scenarios (`S1`, given/when/t
 and exclusions. Keep them concrete enough to compare actual behavior with the request, not just
 test exit codes.
 
+Specify the observable guarantee, not a preferred implementation. Derive requirements from the
+approved scope, existing constraints or concrete evidence-backed risks; do not turn optional ideas
+or design mechanisms into mandatory requirements. Preserve technical invariants when the contract
+requires them; leave other mechanism choices to Design. Surface scope changes for a decision.
+
 Check completeness against the original request, not only the proposal: account for every
 requested behavior and constraint, and name anything omitted or assumed instead of silently
 narrowing the scope.
