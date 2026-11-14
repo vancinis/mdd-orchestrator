@@ -12,7 +12,7 @@ OpenCode siguen siendo el único límite.
 | Host | OpenCode V2 **2.0.22** |
 | Node.js | **24.6+ dentro de 24.x**, o **26.4+ dentro de 26.x** |
 | Idioma | El orquestador te habla en español; contratos, artefactos y prompts entre agentes están en inglés |
-| Releases | Etiquetas Git locales `v<versión>` y [CHANGELOG.md](CHANGELOG.md); proceso para mantenedores en [docs/installation.md](docs/installation.md#versiones-y-releases-mantenimiento). Se elige y cambia con `mdd-ai use` ([canales y comandos](docs/installation.md#elegir-y-cambiar-de-versión), [glosario](GLOSSARY.md)). |
+| Releases | Etiquetas Git `v<versión>` y [CHANGELOG.md](CHANGELOG.md). Release manual sin push (vigente) y [release automático de preview y stable](docs/installation.md#releases-automáticos-preview-y-stable) (diseñado; se activa solo tras fusionarlo y verificar ajustes y permisos, [ADR 0004](docs/adr/0004-automatic-releases.md)); proceso para mantenedores en [docs/installation.md](docs/installation.md#versiones-y-releases-mantenimiento). Se elige y cambia con `mdd-ai use` ([canales y comandos](docs/installation.md#elegir-y-cambiar-de-versión), [glosario](GLOSSARY.md)). |
 | Estado | Rediseño 0.2 implementado y cubierto por pruebas del instalador y del plugin. **Todavía sin validación end-to-end con modelos reales.** |
 
 ## Puesta en marcha
@@ -183,7 +183,7 @@ Las pruebas aíslan HOME, XDG y APPDATA en un directorio temporal: nunca tocan t
 | [docs/architecture.md](docs/architecture.md) | Componentes, por qué contratos y no herramientas, qué se aplica por código, cómo extender |
 | [docs/installation.md](docs/installation.md) | Instalación, actualización, migración desde 0.1, diagnóstico y configuración |
 | [GLOSSARY.md](GLOSSARY.md) | Términos de versiones y canales |
-| [docs/adr/](docs/adr) | Decisiones: etiquetas Git y clon propio, gestor separado, respaldar y reemplazar |
+| [docs/adr/](docs/adr) | Decisiones: etiquetas Git y clon propio, gestor separado, respaldar y reemplazar, releases automáticos |
 | [CHANGELOG.md](CHANGELOG.md) | Notas de cada versión; la 0.2.0 es la línea base histórica |
 | [docs/mdd-config.schema.json](docs/mdd-config.schema.json) | Esquema de la configuración |
 | [docs/history/](docs/history) | Registros de la versión 0.1 (motor basado en herramientas) |

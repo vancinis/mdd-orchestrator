@@ -1,0 +1,185 @@
+name: Release
+
+# Every run reconciles the release state from the repository itself. The triggering event only wakes it up and its
+# payload is never read. All jobs use ONE immutable revision of this workflow's default-branch checkout
+# (github.workflow_sha), so the trusted scripts cannot change between jobs. Pull request code runs only in the
+# read-only validate and smoke jobs; the publish job never executes anything from a candidate.
+on:
+  push:
+    branches: [main]
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+  workflow_dispatch:
+  schedule:
+    - cron: '17 * * * *'
+
+permissions: {}
+
+concurrency:
+  group: mdd-release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: prepare
+    if: github.repository == 'vancinis/mdd-orchestrator' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # actions: read lets `plan` read this run's own record (its run counter), which rotates the fair preview window.
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+    outputs:
+      has_work: ${{ steps.plan.outputs.has_work }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      stable_count: ${{ steps.plan.outputs.stable_count }}
+      preview_count: ${{ steps.plan.outputs.preview_count }}
+      stable_remaining: ${{ steps.plan.outputs.stable_remaining }}
+      preview_remaining: ${{ steps.plan.outputs.preview_remaining }}
+    steps:
+      - name: Check out the trusted workflow revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Plan the validation matrix
+        id: plan
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/release-auto.mjs plan
+
+  validate:
+    name: validate ${{ matrix.source }}
+    needs: [prepare]
+    if: needs.prepare.result == 'success' && needs.prepare.outputs.has_work == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - name: Check out the exact candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ matrix.source }}
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Install dependencies
+        run: npm ci
+      - name: Type check
+        run: npm run typecheck
+      - name: Test
+        run: npm test
+      - name: Check the package contents
+        run: npm pack --dry-run --ignore-scripts
+
+  publish:
+    name: publish
+    needs: [prepare, validate]
+    if: ${{ !cancelled() && needs.prepare.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      actions: read
+      pull-requests: read
+    outputs:
+      published: ${{ steps.publish.outputs.published }}
+      published_count: ${{ steps.publish.outputs.published_count }}
+      smoke_matrix: ${{ steps.publish.outputs.smoke_matrix }}
+      backlog: ${{ steps.publish.outputs.backlog }}
+      progress: ${{ steps.publish.outputs.progress }}
+      blocked: ${{ steps.publish.outputs.blocked }}
+      continue: ${{ steps.publish.outputs.continue }}
+      exit_code: ${{ steps.publish.outputs.exit_code }}
+    steps:
+      - name: Check out the trusted workflow revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: true
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Publish the validated releases
+        id: publish
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/release-auto.mjs publish
+
+  smoke:
+    name: smoke ${{ matrix.tag }}
+    needs: [prepare, publish]
+    if: ${{ !cancelled() && needs.publish.outputs.published_count != '' && needs.publish.outputs.published_count != '0' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.publish.outputs.smoke_matrix) }}
+    steps:
+      - name: Check out the trusted workflow revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Install dependencies
+        run: npm ci
+      - name: Build the version manager
+        run: npm run build
+      - name: Smoke the published tag through a fresh remote snapshot
+        env:
+          TAG: ${{ matrix.tag }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-preview\.[0-9]+)?$ ]]; then
+            echo "Unexpected tag: $TAG" >&2
+            exit 1
+          fi
+          origin="$RUNNER_TEMP/origin-$TAG.git"
+          owned="$RUNNER_TEMP/owned-$TAG"
+          git clone --bare --quiet "https://github.com/$GITHUB_REPOSITORY.git" "$origin"
+          git -C "$origin" fetch --quiet --no-recurse-submodules origin '+refs/tags/*:refs/tags/*'
+          node scripts/release-smoke.mjs --origin "$origin" --tag "$TAG" --owned-root "$owned"
+
+  continue:
+    name: continue
+    needs: [prepare, publish]
+    if: ${{ !cancelled() && needs.publish.result == 'success' && needs.publish.outputs.progress == 'true' && needs.publish.outputs.backlog != '' && needs.publish.outputs.backlog != '0' && needs.publish.outputs.blocked != 'true' && needs.publish.outputs.continue == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch the next reconciliation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh workflow run release.yml --ref main
