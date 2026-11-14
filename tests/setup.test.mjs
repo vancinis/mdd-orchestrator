@@ -153,6 +153,49 @@ test('installed coordinator preserves evidence gaps and checked-state traceabili
   assert.doesNotMatch(coordinator, /missing service\) is `environmental`: it does not block/);
 });
 
+// Guards that the reporting guidance is installed and the boundaries are preserved, not that a model follows it.
+test('installed reporting guidance explains results, continues without pausing and closes by route', t => {
+  const root = fixture(t);
+  initProject(root);
+  const flat = path => fs.readFileSync(join(root, path), 'utf8').replace(/\s+/g, ' ');
+  const has = (text, anchor, id) => assert.ok(text.includes(anchor), `${id}: ${anchor}`);
+  const orchestrator = flat('agents/mdd-orchestrator.md');
+  const anchors = {
+    A1: 'continue in the same turn', A2: 'never waits for acknowledgement',
+    A3: 'not just the actor name, outcome or artifact link', A4: 'what it proposes or decides and why',
+    A5: 'what actually changed', A6: 'what was checked, the real result',
+    A7: '`failed` or `blocked`: what is wrong or missing', A8: 'do not reread full artifacts just to summarize',
+    A9: 'Every level states the substantive result', A10: 'Length follows the substance',
+    A11: 'route actually taken', A12: 'no independent Verify ran', A13: 'close in the same turn',
+    A14: 'instead of a separate progress explanation and final summary', A15: 'never read as success',
+    A16: 'A blocked or failed Verify is not itself closure', A16b: 'unless the user chooses `closed-unverified`',
+    P1: '**Automatic:** continue from actor to actor without asking',
+    P2: 'Ask only decisions the user alone can make',
+    P3: '(`Continuar`, `Ajustar`, `Pausar`)',
+    P4: '`low` = one short paragraph per actor; `medium` = adds purpose and key learnings; `detailed` = adds approach, open items, confidence and status. Default to `medium`.',
+    P5: "Closing with gaps requires the user's choice, not inferred consent",
+    P6: 'Artifacts, prompts to actors and the run file stay in English',
+    P7: 'Never present an unrun check as passed or a failure as success',
+    P8: 'Closing never authorizes commit, push, PR', P9: 'Verify remains optional on low',
+    P13: 'independently checks requirements, scenarios, tasks',
+  };
+  for (const [id, anchor] of Object.entries(anchors)) has(orchestrator, anchor, id);
+  assert.doesNotMatch(orchestrator, /zero token|no token cost|prevents? compaction/i, 'N2');
+  assert.equal(AGENTS.some(name => /report/.test(name)), false, 'N1: no reporting agent');
+  const routeActors = ['explore', 'risk', 'plan', 'propose', 'spec', 'design', 'tasks', 'apply', 'verify'];
+  for (const name of routeActors) {
+    const actor = flat(`agents/mdd-${name}.md`);
+    has(actor, 'explains your result to the user from this report', `A17 ${name}`);
+    has(actor, 'substantive result of your phase', `A18 ${name}`);
+    has(actor, 'Two to five sentences a person reads first', `P10 ${name}`);
+    has(actor, 'Write the report and the artifact in English', `P12 ${name}`);
+  }
+  const apply = fs.readFileSync(join(root, 'agents/mdd-apply.md'), 'utf8');
+  for (const heading of ['## Outcome', '## Summary', '## Details', '## Open items', '## Questions']) {
+    assert.ok(apply.includes(`\n${heading}\n`), `P11: ${heading}`);
+  }
+});
+
 // Builds and tests rarely notice re-encoded text, so the guidance must reach every writer.
 test('installed writers keep native-write and damaged-text guidance', t => {
   const root = fixture(t);
