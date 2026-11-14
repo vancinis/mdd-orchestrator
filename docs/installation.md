@@ -227,7 +227,9 @@ los datos guardados como desactualizados sin cambiar nada. Imprime JSON con `{re
 
 Esta sección es para quien publica versiones de MDD desde el checkout. Quien las instala las elige
 con `mdd-ai use` (ver [Elegir y cambiar de versión](#elegir-y-cambiar-de-versión)); las versiones
-que `use` y `versions` ven son las etiquetas que este proceso crea y que publicás con `git push`.
+que `use` y `versions` ven son etiquetas Git `v<versión>`. Hay dos formas de crearlas: el
+[release automático](#releases-automáticos-preview-y-stable) (cuando esté activado) y el
+[release manual](#release-rutinario), que sigue disponible y que publicás vos con `git push`.
 
 ### Bootstrap de `v0.2.0` (una sola vez, histórico)
 
@@ -273,6 +275,164 @@ Cada entrada lleva `## [versión] - fecha` (la fecha del commit publicado) e ind
 commits usado. Agrupa Conventional Commits en cambios incompatibles, funcionalidades, correcciones y
 otros cambios. Una versión estable incluye todo lo ocurrido desde la estable anterior, también lo ya
 incluido en previews; un preview cubre el intervalo desde el preview o la estable anterior.
+
+### Release manual tras releases automáticos (alternativa sin push)
+
+El release manual sigue siendo **interactivo y sin push** (`--dry-run`, `--yes` y `--bootstrap`
+conservan su significado). Si ya hubo releases automáticos, como estos solo existen como etiquetas,
+el release manual toma como base la **fuente registrada** de la etiqueta más alta (no el HEAD de la
+etiqueta) y parte del CHANGELOG **acumulativo** de la última etiqueta publicada, que aporta las
+entradas automáticas y está fuera de `main` (no asumas que ya están en `main`). Antes de usarlo, traé las
+etiquetas (`git fetch origin "refs/tags/v*:refs/tags/v*"`); sigue imprimiendo el `git push` que
+decidís ejecutar.
+
+## Releases automáticos (preview y stable)
+
+> **Estado:** esto describe el diseño y el código ya presentes en el repositorio. El workflow
+> **Release** (`.github/workflows/release.yml`) solo empieza a actuar cuando se fusiona en `main` y
+> el propietario verifica los ajustes y permisos del repositorio (ver [Activación y
+> bootstrap](#activación-y-bootstrap)). Hasta entonces **no hay publicación automática** y este
+> documento no afirma que ya funcione en el repositorio real.
+
+El release automático crea las mismas etiquetas `v<versión>` que el proceso manual, pero desde un
+workflow de GitHub Actions. No cambia el instalador ni la gramática de versiones: `mdd-ai use`
+elige estas etiquetas igual que las manuales.
+
+### Qué publica
+
+| Canal | Cuándo | Versión |
+|---|---|---|
+| **preview** | Una PR **lista para revisión** (no borrador), del propietario, desde una rama del **mismo repositorio** y con base `main`. Vale al marcarla lista, al reabrirla, al cambiar su base a `main` y con cada nuevo head. | `X.Y.Z-preview.N` sobre el head actual validado |
+| **stable** | Cada integración validada en `main` (merge commit o squash). | `X.Y.Z` |
+
+- Las PR en borrador, de otros autores, de forks o con otra base **no publican**. Si el head de una
+  PR cambia antes de publicar, ese head queda obsoleto y no se publica.
+- El tipo de cambio sale de Conventional Commits: un cambio incompatible (`!` o `BREAKING CHANGE`)
+  sube el **major**; `feat`, el **minor**; `fix` y **todo lo demás** (incluidos `docs`, `chore` y
+  los mensajes sin formato) suben el **patch**. Una integración que no sigue el formato igual se
+  publica como patch.
+- La política del repositorio es **merge commit o squash**, con la fusión por **rebase
+  deshabilitada** (lo configura el propietario, ver [Activación y bootstrap](#activación-y-bootstrap)).
+
+### Etiquetas inmutables y publicadas
+
+Cada release es una etiqueta **anotada** creada con Git de bajo nivel sobre un commit cuyo único
+padre es el commit fuente y que solo cambia `package.json`, `package-lock.json` y `CHANGELOG.md`.
+**No se hace push a ninguna rama**: solo se publica `refs/tags/v<versión>` (sin `--force` ni
+`--tags`) y luego se comprueba en el remoto que la etiqueta existe con el mismo objeto. Una etiqueta
+publicada nunca se mueve ni se borra; un reintento con la misma fuente y canal es idempotente, y si
+otra ejecución tomó la versión, se recalcula con un tope de intentos.
+
+### Procedencia y verificación de una versión
+
+La etiqueta guarda su procedencia en el mensaje (`Channel`, `Source-Commit` y, según el caso,
+`Pull-Request`, `Main-Commit`, `Previous-Stable` y `Workflow-Run`). Para verla:
+
+```powershell
+git fetch origin "refs/tags/v*:refs/tags/v*"
+git tag -n20 v0.5.0
+git for-each-ref --format="%(refname:short) %(objecttype) %(*objectname)" "refs/tags/v*"
+```
+
+Para instalar **exactamente** esa versión usá la etiqueta y no un alias:
+`mdd-ai use v0.5.0` o `mdd-ai use v0.5.0-preview.1`. Un alias (`stable`, `preview`) se resuelve
+en el momento y puede apuntar a otra versión más tarde.
+
+### Numeración de previews y alias `preview`
+
+La numeración de previews es **global**: cada preview nuevo supera a todos los previews existentes,
+también los de otras PR. Por eso no hay relación uno a uno entre una PR y su merge: una PR `fix`
+puede dar `v0.4.0-preview.2` y su merge, `v0.3.3`. Con las etiquetas actuales, el preview más alto
+es `v0.4.0-preview.1`; mientras no exista la estable siguiente, `mdd-ai use preview` resuelve a
+ese. Tras una estable `X.Y.Z`, el alias `preview` puede seguir apuntando a un `X.Y.Z-preview.N`
+anterior hasta el próximo preview; es el comportamiento ya existente del instalador.
+
+### Metadatos solo en etiquetas
+
+El release automático **no crea commits en `main`**. Por eso `package.json` y `CHANGELOG.md` de
+`main` y la etiqueta de versión que muestra `dev` pueden quedar **desactualizados**: es un costo
+aceptado. La verdad de cada versión está en su etiqueta (versión, notas y procedencia). GitHub puede
+avisar que el commit de una etiqueta "no pertenece a ninguna rama".
+
+### Orden, fallos y marcadores de recuperación
+
+- Las estables se publican **en orden de fuente** (primer padre de `main`, desde la última estable)
+  y no se reordenan ni se agrupan. Cada ejecución procesa un lote acotado (hasta 5 estables y 5
+  previews); lo que queda se continúa con un reintento, un push, el horario o un despacho manual.
+- El cursor y la numeración confían solo en etiquetas `v*` **verificadas en el remoto**; una etiqueta
+  que existe solo en un clon local nunca cuenta como publicada. Una etiqueta pendiente de ese mismo
+  clon (o de un proceso reiniciado) se reutiliza únicamente tras comprobar de forma estricta sus
+  metadatos (fuente, canal, estable previa y PR). Una etiqueta local ajena en conflicto hace fallar
+  la ejecución de forma visible y **no se mueve ni se borra**.
+- Los previews rotan por lotes con el `run_number` de GitHub de este workflow (no un ID de ejecución
+  arbitrario): una repetición de la misma ejecución usa el mismo número y no se crea ninguna cola
+  nueva. Así, el conjunto estable de PR listas queda cubierto de forma equitativa aunque algunas
+  fallen; un veredicto fallido o ausente nunca autoriza una etiqueta.
+- La validación y la publicación **cierran en falso**: sin una validación exitosa de esa fuente en
+  la ejecución actual, no se publica. Si la validación de una estable **falla**, la cadena se
+  **bloquea** en esa fuente; el sistema no la omite solo.
+- Una corrección fusionada después en `main` **no** hace pasar por sí sola una fuente anterior que
+  falló: esa fuente es inmutable. Si el fallo fue transitorio, se reintenta la misma fuente. Si no,
+  el propietario debe **omitir explícitamente** la fuente bloqueada para liberar una integración
+  correctiva posterior, con una etiqueta **anotada** `release-skip/<sha-completo>` que apunta
+  exactamente a ese commit. Solo el propietario puede crearla (lo impone el ruleset del
+  repositorio, no la identidad del mensaje) y es inmutable. La automatización nunca la crea ni
+  omite nada sola.
+
+```powershell
+git tag -a "release-skip/<sha-completo>" <sha-completo> -m "Omitir release de <sha-completo>: <motivo>"
+git push origin "refs/tags/release-skip/<sha-completo>"
+```
+
+- Para reintentar tras un fallo transitorio, o recuperar una ejecución cancelada, lo preferible es
+  un **`workflow_dispatch`** de Release sobre `main` (o volver a ejecutar los jobs fallidos). No se
+  mueve ni se borra ninguna etiqueta publicada.
+
+### Operador: comandos del motor
+
+Los usa el workflow; el propietario puede consultarlos con permisos de lectura.
+
+```powershell
+node scripts/release-auto.mjs plan --repo <dueño>/<nombre>     # solo lectura; requiere GITHUB_TOKEN
+```
+
+`publish` (`node scripts/release-auto.mjs publish --repo <dueño>/<nombre> --run-id <n> --attempt <n>`)
+**escribe etiquetas en el origen real**: lo ejecuta el job `publish` de Release con los resultados de
+validación de esa ejecución. No lo uses para pruebas locales (las pruebas del repositorio usan
+orígenes `bare` desechables) ni como atajo: para recuperar, despachá el workflow.
+
+### Seguridad: candidato de solo lectura y publicador sin código del candidato
+
+La validación (instalación, `typecheck`, pruebas, empaquetado) y la prueba de instalación corren el
+código del candidato con **permisos de solo lectura**, sin secretos ni caché. El job que publica
+usa la definición de `main`, **no ejecuta nada del candidato** (ni scripts, ni dependencias, ni
+artefactos) y solo autoriza con los registros de trabajos de GitHub del intento actual: hace falta
+el veredicto exacto de esa fuente en la ejecución e intento actuales. La revisión confiable de
+`main` queda fijada con `workflow_sha`, sin cambiar entre jobs. `prepare` lee los metadatos del
+workflow con `actions: read` y sigue siendo de solo lectura. Un cambio
+al workflow o a los scripts de release en una PR se valida como cualquier otro y solo tiene efecto
+tras fusionarse.
+
+### Prueba de instalación en ambos canales
+
+Tras publicar, un job de humo instala y compila en un aislamiento (HOME temporal, sin tocar tu
+instalación) la etiqueta publicada con el gestor real, para **stable** y para **preview**:
+`scripts/release-smoke.mjs`. Un fallo deja el run en rojo, **la etiqueta no se mueve** y se corrige
+hacia adelante.
+
+### Activación y bootstrap
+
+- **La primera PR que agrega la automatización no tiene preview**: el workflow todavía no existe en
+  `main`. Tras fusionarla, el propietario verifica antes de darla por activa: nombres de jobs, que
+  el rebase esté deshabilitado, los **dos** rulesets de etiquetas (distintos, ver abajo), los
+  permisos del workflow y una ejecución real. Esa verificación en vivo es una tarea **externa y
+  posterior**, todavía no realizada.
+  - Etiquetas de versión `v*`: pueden crearlas **el actor de Actions y el propietario**; nadie las
+    actualiza ni las borra.
+  - Marcadores `release-skip/*`: los crea **únicamente el propietario**; **Actions nunca** puede
+    crearlos; nadie los actualiza ni los borra (inmutables). El motor se apoya en este ruleset
+    exclusivo del propietario, no en la identidad del autor de la etiqueta, que se puede falsificar.
+- Hasta entonces, el release manual descrito más arriba sigue siendo la vía vigente.
 
 ## Configuración
 

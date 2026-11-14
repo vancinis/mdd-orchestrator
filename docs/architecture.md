@@ -40,6 +40,17 @@ tras un respaldo. Un diario y un bloqueo permiten revertir o terminar un cambio 
 gestor solo avanza de revisión y nunca lo reemplaza un cambio de versión. Ver
 [instalación](installation.md#elegir-y-cambiar-de-versión) y los ADR en [`adr/`](adr).
 
+### Releases automáticos
+
+Las etiquetas pueden crearse también desde un workflow (`scripts/release-auto.mjs`,
+`scripts/release-smoke.mjs`, `.github/workflows/`). Una etapa de validación ejecuta el código del
+candidato con permisos de solo lectura; una etapa de publicación con permiso de escritura solo
+ejecuta la definición de `main`, no el código del candidato, y publica etiquetas anotadas
+inmutables sin hacer push a ninguna rama. Se activa únicamente tras fusionarlo y verificar ajustes y
+permisos; hasta entonces el release manual sin push es la vía vigente. Detalle en
+[instalación](installation.md#releases-automáticos-preview-y-stable) y
+[ADR 0004](adr/0004-automatic-releases.md).
+
 ## Por qué contratos y no herramientas
 
 La versión 0.1 confiaba la calidad a un motor de unas 23.000 líneas: 13 herramientas `mdd_*` que
