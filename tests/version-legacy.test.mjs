@@ -472,6 +472,8 @@ async function adoptedLegacy(t) {
   const home = isolateHome(t);
   const paths = installLegacy(home);
   assert.equal(await bootstrap(), 'ready');
+  // Delegation tests must not fetch the developer's origin or record newly discovered tags.
+  setState(versionPaths(paths.ownedRoot), state => { state.origin = null; });
   assert.equal(readState(versionPaths(paths.ownedRoot)).active.provenance, 'adopted');
   for (const name of ['mdd-ai.cmd', 'mdd-ai']) assert.equal(launcherKind(readFileSync(join(paths.binRoot, name), 'utf8')), 'manager');
   return { home, paths };

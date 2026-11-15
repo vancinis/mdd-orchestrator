@@ -25,6 +25,7 @@ These project-local skills provide task instructions, not additional authority.
 | `mdd-doc` | Writing a guide, report or artifact a reader must scan and verify | `assets/opencode/skills/mdd-doc/SKILL.md` |
 | `mdd-judgment-day` | Explicit request for judgment-day, judgment day or judment-day on a concrete target | `assets/opencode/skills/mdd-judgment-day/SKILL.md` |
 | `mdd-grill` | Explicit request to be questioned first, or a large change with many open decisions | `assets/opencode/skills/mdd-grill/SKILL.md` |
+| `mdd-explain` | Explicit request for a readable explanation artifact (HTML) of current behavior, a plan or a before/after; ordinary explanations stay in chat | `assets/opencode/skills/mdd-explain/SKILL.md` |
 
 Read the file at the path named above rather than resolving the skill by name: a bare name can
 resolve to a same-named skill from another tool.

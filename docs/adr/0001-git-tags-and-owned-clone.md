@@ -17,3 +17,6 @@ sobre el commit histórico `34a93f6`.
 permiten reconstruir cualquier versión. Un clon propio aísla la compilación de lo que el usuario
 tenga en su checkout (otra rama, cambios locales) y conserva la evidencia de etiquetas movidas, que
 un `fetch` normal de etiquetas sobrescribiría.
+
+**Actualización.** La creación y publicación automática de estas etiquetas se decide en el
+[ADR 0004](0004-automatic-releases.md); el formato de etiqueta y el clon propio no cambian.

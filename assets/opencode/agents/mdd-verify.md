@@ -37,6 +37,13 @@ it when required by the project or justified by the change's impact. Do not sile
 required check because focused tests passed. Command replacements must preserve relevant setup,
 configuration and coverage, with an explanation; otherwise record the missing evidence.
 
+Always add a text-integrity check of the changed text files; builds and tests rarely notice damaged
+comments, docs or messages. Read the files as UTF-8 with the native read tool or a script that
+opens them itself, never through console output. Look for the damaged-text signatures from the
+actor contract and for BOM, UTF-16 or line-ending changes, and compare with each file's base
+version. Damage the change introduced is a defect with an `implementation` cause even when every
+test passes; damage already in the base is reported, not attributed to the change.
+
 After corrections or a merge, rerun the reproductions and affected integration checks, not only
 the original failing test. Retain evidence for unaffected scope when still valid. A later change
 does not inherit earlier success automatically, nor require unrelated checks to be repeated.

@@ -47,6 +47,26 @@ available tools; this contract never makes them required.
 - Optional tools do not widen your permissions: agent permissions and Judgment Day isolation are
   unchanged.
 
+## Files and text
+
+Shells can silently re-encode text. Windows PowerShell 5.1, for example, reads UTF-8 files without
+a BOM as ANSI, decodes other programs' output with the console code page and writes `>` as UTF-16.
+Accents, dashes and box-drawing characters then break without failing any test.
+
+- Create and edit files with the host's native write and edit tools. Do not rewrite files through
+  the shell: no `>` or `>>` redirection, `Out-File`, `Set-Content`, `-replace` or `sed -i`
+  pipelines, and no `WriteAllText` without an explicit UTF-8 encoding.
+- For a mechanical change across many files, or a generated file, use a script that reads and
+  writes the files itself as UTF-8 (for example Node `fs` with `'utf8'`), keeping each file's BOM
+  and line endings. Save logs through a tool's own output-file option or a byte-preserving
+  redirection (`cmd /c "<command> > <file>"` on Windows).
+- Shell output is not file content. Garbled characters in it may come from the console: check the
+  file with the native read tool before concluding anything, and never copy text from shell
+  output into a file.
+- Damaged-text signatures: `U+FFFD` (`�`); UTF-8 read as ANSI, such as `Ã³`, `Ã©`, `Â¿`, `â€”`;
+  UTF-8 read as code page 850, such as `├│`, `├í`, `ÔÇö`. Compare with the file's base version
+  before attributing them to a change.
+
 ## Evidence
 
 - Report what you actually did. A command you did not run is not a check; an exit code is not proof
@@ -86,6 +106,11 @@ Anything uncertain, skipped or left for a later actor. `None.` when empty.
 Only decisions the user alone can make, each with why it matters and two to four concrete
 options. Omit the section when there are none. Never ask for approval to continue.
 ```
+
+The orchestrator explains your result to the user from this report, usually without opening the
+artifact. Make the Summary state the substantive result of your phase (what you found, proposed,
+decided, changed or checked, and the real outcome) and why it matters, not the steps you took.
+When `failed` or `blocked`, say what is wrong or missing. The detail stays in the artifact.
 
 Use `blocked` when you cannot continue without something only the user or the orchestrator can
 provide (a decision, access, a missing file). Use `failed` when you tried and the result is not

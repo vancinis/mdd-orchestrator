@@ -21,19 +21,25 @@ import { needsPreparation, prepareSource } from '../scripts/setup.mjs';
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const link = (target, path) => fs.symlinkSync(target, path, process.platform === 'win32' ? 'junction' : 'dir');
-function fixture(t, installed = true) {
+function fixture(t, installed = true, version) {
   const home = fs.mkdtempSync(join(tmpdir(), 'mdd-wizard-'));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   process.env.HOME = process.env.USERPROFILE = process.env.XDG_CONFIG_HOME = home;
   const root = join(home, 'opencode'); fs.mkdirSync(root);
   fs.writeFileSync(join(root, 'package.json'), '{"name":"consumer","private":true,"type":"module"}\n');
-  if (installed) seedPackage(root);
+  if (installed) seedPackage(root, version);
   return root;
 }
-function seedPackage(root) {
+function seedPackage(root, version) {
   root = join(root, 'mdd'); fs.mkdirSync(root, { recursive: true }); fs.writeFileSync(join(root, 'package.json'), '{"private":true}');
   const pkg = join(root, 'node_modules/my-driven-development'); fs.mkdirSync(pkg, { recursive: true });
   fs.cpSync('dist', join(pkg, 'dist'), { recursive: true }); fs.copyFileSync('package.json', join(pkg, 'package.json'));
+  if (version !== undefined) {
+    const manifest = join(pkg, 'package.json');
+    const metadata = JSON.parse(fs.readFileSync(manifest, 'utf8'));
+    metadata.version = version;
+    fs.writeFileSync(manifest, `${JSON.stringify(metadata, null, 2)}\n`);
+  }
   fs.cpSync('assets', join(pkg, 'assets'), { recursive: true });
   // A reinstall only replaces the MDD package; its declared dependencies stay in place.
   const scope = join(root, 'node_modules/@opencode'); fs.mkdirSync(scope, { recursive: true });
@@ -370,7 +376,7 @@ test('checkout update hands the same mode to the manager wizard and a non-zero h
 });
 
 test('checkout setup adopts an existing 0.2.0 installation (D23): hand edits and config stay, edits are listed', async t => {
-  const root = fixture(t); initProject(root, true);
+  const root = fixture(t, true, '0.2.0'); initProject(root, true);
   const agent = join(root, agentName());
   fs.appendFileSync(agent, '\nmy local note\n');
   const edited = fs.readFileSync(agent, 'utf8');
@@ -404,7 +410,7 @@ test('checkout setup adopts an existing 0.2.0 installation (D23): hand edits and
 });
 
 test('adoption is refused with guidance for a different version or a packaged-content difference, and is re-evaluated later', async t => {
-  const root = fixture(t);
+  const root = fixture(t, true, '0.2.0');
   const pkgFile = join(root, 'mdd/node_modules/my-driven-development/package.json');
   const original = fs.readFileSync(pkgFile, 'utf8');
   fs.writeFileSync(pkgFile, original.replace('"version": "0.2.0"', '"version": "0.2.1"'));
