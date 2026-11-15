@@ -240,10 +240,13 @@ test('pre-push race with the same source and channel: the existing tag is recogn
   const source = commit(context.root, 'fix: shared');
   sh(context.root, 'push', '-q', 'origin', 'main');
   const rival = clone(context, 'rival');
+  // Git timestamps have one-second resolution: two publications within the same second build byte-identical objects and
+  // the rival's tag would be indistinguishable from ours. Distinct dates keep the race deterministic.
+  const dated = (git, date) => wrap(git, (args, options = {}, inner) => inner(args, { ...options, env: { ...options.env, GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date } }));
   let theirTag;
-  const result = await publishRelease(context.git, {
+  const result = await publishRelease(dated(context.git, '2026-01-01T00:00:00Z'), {
     source, channel: 'stable',
-    beforePush: async info => { if (info.attempt === 1) theirTag = await publishRelease(rival.git, { source, channel: 'stable' }); },
+    beforePush: async info => { if (info.attempt === 1) theirTag = await publishRelease(dated(rival.git, '2026-01-01T00:00:01Z'), { source, channel: 'stable' }); },
   });
   assert.equal(result.status, 'exists');
   assert.equal(result.tag, 'v0.3.3');
