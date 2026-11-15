@@ -268,3 +268,29 @@ test('the host launcher executes through the entry to the router (the other laun
   const other = launcherFiles().find(file => file.name === (windows ? COMMAND : `${COMMAND}.cmd`));
   assert.match(other.content, /manager[\\/]entry\.mjs/);
 });
+
+test('the manager import graph never reaches the integration modules or jsonc-parser, and integrations never take the version lock', () => {
+  const src = join(import.meta.dirname, '..', 'src');
+  const imports = file => [...fs.readFileSync(join(src, file), 'utf8').matchAll(/(?:from|import\()\s*['"]([^'"]+)['"]/g)].map(match => match[1]);
+  const reached = new Set();
+  const queue = ['version-cli.ts', 'version-manager.ts', 'command-link.ts'];
+  while (queue.length) {
+    const file = queue.pop();
+    if (reached.has(file)) continue;
+    reached.add(file);
+    for (const spec of imports(file)) {
+      assert.doesNotMatch(spec, /integration|jsonc-parser/, `${file} imports ${spec}`);
+      const next = spec.replace(/^\.\//, '').replace(/\.js$/, '.ts');
+      if (spec.startsWith('./') && fs.existsSync(join(src, next))) queue.push(next);
+    }
+  }
+  assert.ok(reached.has('version-manager.ts') && reached.has('local-files.ts'), 'the walk really reached the manager modules');
+  // jsonc-parser is confined to the config editor; the engine and the store stay clear of the version lock and codegraph_status.
+  const importers = fs.readdirSync(src).filter(file => file.endsWith('.ts') && imports(file).includes('jsonc-parser'));
+  assert.deepEqual(importers, ['integration-config.ts']);
+  for (const file of ['integrations.ts', 'integration-install.ts', 'integration-config.ts']) {
+    const text = fs.readFileSync(join(src, file), 'utf8');
+    assert.doesNotMatch(text, /version-lock|lockPath|versionPaths|codegraph_status|mcp', 'add'/, file);
+    assert.doesNotMatch(text, /from '\.\/version-/, file);
+  }
+});

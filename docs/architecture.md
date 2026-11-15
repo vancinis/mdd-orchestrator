@@ -75,7 +75,7 @@ nativos de OpenCode siguen siendo el límite real de lo que un agente puede hace
 | Reanudar desde un checkpoint sellado | Reanudar leyendo `.mdd/runs/<id>.md` | El archivo es legible por personas y por cualquier conversación; no depende del proceso del plugin. |
 | Alcance de escritura cercado (`mdd_worker_edit`) | Cada Apply recibe las tareas y archivos que le tocan | Los permisos nativos de edición siguen aplicándose; el cerco no era un sandbox real. |
 | Esquema JSON de cada reporte, validado | Reporte corto en Markdown y artefacto en disco | El orquestador lee prosa estructurada; no hay reportes "ilegibles" que rechazar. |
-| Memoria Engram gestionada por MDD | Si Engram está instalado como MCP, el orquestador lo usa | MDD no instala ni arranca servicios. |
+| Memoria Engram gestionada por MDD | Si Engram está instalado como MCP, el orquestador lo usa | Ningún agente instala ni arranca servicios. Solo el usuario, desde `mdd-ai config` → **Integraciones** y tras una revisión, puede registrar Context7, Engram o CodeGraph (ver [integraciones](installation.md#integraciones-opcionales)). |
 
 ## Qué se aplica por código y qué es guía
 
@@ -90,6 +90,7 @@ están en [configuración](installation.md#modelos-de-subagentes-nativos).
 | Regla | Cómo se aplica |
 |---|---|
 | Los jueces de Judgment Day solo leen objetos Git comprometidos | **Código.** El plugin les niega todos los permisos salvo `mdd_jd_inspect` y quita cualquier otra herramienta de su contexto. La herramienta rechaza cualquier otro agente. |
+| Las herramientas opcionales (Context7, Engram, CodeGraph) | **Guía y configuración explícita.** Los contratos las tratan como opcionales con respaldo nativo, sin identidad de sesión inventada ni dependencia de `codegraph_status`; los agentes nunca las instalan ni inicializan. Un módulo de integraciones separado del gestor de versiones (no importa sus bloqueos) hace la instalación solo cuando el usuario la confirma. No amplían permisos. |
 | `mdd-security` no modifica nada | **Permisos del agente** (frontmatter): lectura y unos pocos comandos `git` de solo lectura. |
 | `mdd-jd-fix` pide permiso para editar y ejecutar | **Permisos del agente**: `edit: ask`, `bash: ask`. |
 | Todo lo demás (niveles, orden de actores, formato de reportes, verificación, cierre) | **Guía.** Está en los contratos y el orquestador lo interpreta. |

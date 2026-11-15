@@ -5,6 +5,7 @@ import { assetText, installedAsset, installedName, MDD_ASSETS } from './project-
 import { installedPlugin, LOADER_PATH, LOADER_TEXT, packageState } from './setup.js';
 import { installationPaths } from './installation-paths.js';
 import { loadGlobalSettings } from './global-settings.js';
+import type { IntegrationDeps } from './integrations.js';
 
 type Check = { check: string; status: 'ok' | 'action' | 'info'; message: string };
 export function isSupportedNodeVersion(version: string): boolean {
@@ -12,7 +13,7 @@ export function isSupportedNodeVersion(version: string): boolean {
   return (major === 24 && minor! >= 6) || (major === 26 && minor! >= 4);
 }
 
-export async function doctor(cwd: string): Promise<{ ready: boolean; scope: 'global-installation-only'; checks: Check[] }> {
+export async function doctor(cwd: string, integrationDeps: IntegrationDeps = {}): Promise<{ ready: boolean; scope: 'global-installation-only'; checks: Check[] }> {
   const paths = installationPaths();
   const root = paths.configRoot;
   const checks: Check[] = [];
@@ -53,6 +54,15 @@ export async function doctor(cwd: string): Promise<{ ready: boolean; scope: 'glo
     checks.push({ check: 'settings', status: 'ok', message: `Perfil activo «${settings.activeProfile}». Modo: ${answers.mode ?? 'se pregunta en cada run'}. Detalle: ${answers.summary ?? 'medium'}.` });
   } catch (error) {
     checks.push({ check: 'settings', status: 'action', message: `La configuración en ${paths.settingsPath} no es válida: ${error instanceof Error ? error.message : 'error desconocido'}. Corregila con mdd-ai config o editando el archivo, y reiniciá OpenCode.` });
+  }
+  // Optional integrations are informational and offline: files and PATH only, never core readiness.
+  // The engine is loaded lazily so a broken optional module cannot affect the core checks.
+  try {
+    const { doctorSummary } = await import('./integrations.js');
+    const summary = doctorSummary({ cwd: resolve(cwd), ...integrationDeps });
+    checks.push({ check: summary.check, status: 'info', message: summary.message });
+  } catch {
+    checks.push({ check: 'integrations', status: 'info', message: 'Integraciones opcionales: no se pudo evaluar. El núcleo de MDD no depende de ellas.' });
   }
   return { ready: !checks.some(item => item.status === 'action'), scope: 'global-installation-only', checks };
 }

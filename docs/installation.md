@@ -58,8 +58,11 @@ sistemas imprime la línea `export` para tu perfil de shell. Abrí una terminal 
 | `mdd/versions/` | Clon propio del origen y [caché de versiones](#caché-y-respaldos) |
 | `mdd/backups/` | Respaldos de cada cambio de versión (los últimos 10) |
 
-El instalador no modifica `opencode.json(c)`, proveedores, el agente por defecto, otros agentes,
-skills o plugins, ni el proyecto activo.
+La instalación y las actualizaciones de MDD no modifican `opencode.json(c)`, proveedores, el agente
+por defecto, otros agentes, skills o plugins, ni el proyecto activo. La única excepción es la
+opción opcional **Integraciones** de `mdd-ai config`, que sí puede editar la configuración global de
+OpenCode después de una revisión y una confirmación explícita (ver
+[Integraciones opcionales](#integraciones-opcionales)).
 
 ## Actualizar
 
@@ -217,7 +220,9 @@ mdd-ai doctor
 
 Solo lectura. Revisa Node, el paquete instalado, el build, las dependencias, que los agentes y
 skills instalados coincidan con el paquete, el cargador, si hay una versión más nueva y que la
-configuración sea válida. Suma tres controles del gestor: `version-manager`, `active-version`
+configuración sea válida. Agrega un único control informativo de integraciones opcionales, sin red
+ni subprocesos: no abre bases de datos ni consulta `codegraph_status`, y su estado nunca cambia si el
+núcleo está listo. Suma tres controles del gestor: `version-manager`, `active-version`
 (cambio interrumpido, bloqueo vivo o modificación externa del paquete) y `available-versions`
 (avisa de versiones más nuevas; **no instala nada**). Consulta el origen con un tope de 15 s (las
 consultas normales de `versions` y `use` esperan hasta 60 s) y, si no responde, lo dice y muestra
@@ -490,3 +495,58 @@ su comportamiento. `mdd-explore` sigue siendo un rol independiente bajo `models`
 
 Si el archivo no es válido, el plugin sigue funcionando con los valores por defecto y lo informa
 en el log de OpenCode; `mdd-ai doctor` dice qué corregir.
+
+## Integraciones opcionales
+
+Context7, Engram y CodeGraph son opcionales: MDD funciona igual sin ellos y los agentes recurren a
+sus herramientas nativas si faltan. Se gestionan desde `mdd-ai config`, opción **Integraciones**
+(la 7; las opciones 1 a 6 no cambian). Eligís acciones y quedan en una cola; no pasa nada hasta
+**Guardar**, la **revisión** de cada cambio (archivo, comando y efectos) y la confirmación final. Si
+cancelás, volvés atrás o se cierra la entrada, no se descarga, escribe ni ejecuta nada.
+
+| Integración | Qué configura MDD |
+|---|---|
+| **Context7** | Una entrada MCP **remota** (sin binarios, sin claves). |
+| **Engram** | Un Engram fijado (3.7.2) con `mcp --tools=agent`, **sin** plugins de sesión ni TUI. |
+| **CodeGraph** | Un CodeGraph fijado (1.6.2) con `serve --mcp`. El índice no se crea al instalar. |
+
+- **Instalar y actualizar solo lo gestionado.** Los binarios vienen de versiones fijadas con
+  tamaño y sha256 verificados, bajo `mdd/integrations/<herramienta>/<versión>/`, separados del
+  gestor de versiones de MDD: `mdd-ai use` nunca instala, actualiza ni borra una integración, y
+  las integraciones no toman el bloqueo del gestor. La actualización es una acción explícita, solo
+  para lo que instaló MDD, y cambia únicamente el `command` de la entrada. No hay búsqueda
+  automática de “la última”: la versión de cada release de MDD está fijada. Una búsqueda de la
+  versión estable es explícita y solo informa.
+- **Puerta de formato.** Una actualización se rechaza si cambia el formato de los datos o del
+  índice de la herramienta; se informa como migración y no se hace sola. Se conserva la versión
+  anterior (no se borran datos ni versiones en uso).
+- **No hay reversión de datos.** Volver a una versión anterior del binario no deshace cambios que
+  una versión posterior haya hecho en los datos de Engram o en un índice `.codegraph`. Hacé un respaldo de esos datos antes de actualizar si te importan.
+- **Engram solo con `mcp`.** Esta forma expone herramientas, pero **no** da identidad de sesión,
+  ciclo de vida ni hooks, y MDD no promete que algo se recuerde después. Para el Engram completo
+  (plugins de sesión) usá su instalación oficial; MDD no la reemplaza.
+- **Lo externo se preserva.** Una entrada ya presente (global, de proyecto o de otro gestor) se
+  reutiliza o se informa como conflicto o bloqueo; MDD no la reescribe, no la desactiva y no la
+  adopta. Un ejecutable ya instalado en el PATH puede registrarse sin que MDD asuma su propiedad.
+  Si la configuración global tiene un formato que MDD no puede editar con seguridad (ver el aviso
+  en la revisión), no se escribe.
+- **Inicialización explícita de CodeGraph.** `init` es una acción aparte y nunca se hace sola:
+  se ejecuta solo en la raíz exacta de un checkout Git (no en un subdirectorio, ni en el HOME o la
+  raíz del sistema), y se rechaza si ya existe un `.codegraph*`, si hay `CODEGRAPH_DIR` o
+  `CODEGRAPH_NO_WATCH`, o en WSL bajo `/mnt/`. Puede tardar y crear hooks; se informan los
+  artefactos parciales y nunca se limpian ni se reintentan. El índice queda “creado (no
+  verificado)”.
+- **Comprobación opcional.** El diagnóstico normal es sin conexión. La comprobación de conexión
+  es opt-in y avisa antes: puede iniciar el servicio de OpenCode y conectar a servidores remotos.
+  Para CodeGraph, la evidencia es solo la presencia del índice de ese checkout; no se abre la base
+  ni se usa `codegraph_status`.
+- **Reinicio.** Un cambio solo de configuración no obliga por sí mismo a reiniciar el servicio.
+  Tras **actualizar un binario**, los procesos MCP que ya corrían siguen con la versión anterior
+  hasta que OpenCode los reconecte o lo reinicies con `opencode service restart`, cuando no haya
+  trabajo en curso.
+- **Quitar o revertir.** MDD no desinstala. Para quitar una integración, borrá su entrada MCP de
+  tu `opencode.json(c)`; para volver a una versión anterior, restaurá el `command` anterior. Los
+  directorios `mdd/integrations/…`, la memoria de Engram y `.codegraph` quedan hasta que los
+  borres a mano.
+- **Judgment Day no cambia.** Los jueces siguen leyendo solo con `mdd_jd_inspect`; las
+  integraciones no amplían ningún permiso.

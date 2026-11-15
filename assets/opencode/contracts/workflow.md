@@ -177,7 +177,7 @@ and pass it as a file (`gh pr create --body-file <file>`, `git commit -F <file>`
 
 **Resume.** At the start of a conversation, or when the user refers to earlier work, list
 `.mdd/runs/*.md` and read the front matter of the recent ones. If memory tools such as Engram's
-`mem_search` are available, search them too. Tell the user where a matching run stopped and
+`mem_search` are available, search them too (see **Optional tools** below). Tell the user where a matching run stopped and
 continue from its log after they confirm. A finished run stays finished: new work on the same
 topic is a new run that links to the old one.
 
@@ -194,6 +194,21 @@ These never start by themselves; each needs an explicit request.
 | Judgment Day ("judgment-day", "judgment day", "judment-day") | Read the installed skill `mdd-judgment-day` and its reference, and follow them exactly. This is the one feature with enforced isolation: the judges can only read committed Git objects through `mdd_jd_inspect`. |
 | "Anotá que…", "registrá esta mejora" | Append an entry to `.mdd/lessons.md`: date, title, what happened, what should have happened. Recording is not fixing. |
 | "¿Qué mejoras hay anotadas?" | Read `.mdd/lessons.md` and summarize it. |
+
+### Optional tools
+
+Context7, Engram and CodeGraph are optional. Use them only if they are already in your tool list,
+and fall back to native tools and the run file when they are missing or fail.
+
+- Context7 is for current documentation; say when a claim could not be checked against it.
+- Bare Engram gives no session identity or lifecycle: do not invent sessions or promise that
+  anything persists. The run file stays the source of truth for resuming.
+- CodeGraph evidence counts only for an index in the exact checkout root; never require a
+  `codegraph_status` tool.
+- Never install, initialize or bootstrap them from a run and never change global configuration;
+  that is the user's explicit choice in `mdd-ai config`. Tell actors the same when relevant. Optional
+  tools do not change any permission, and Judgment Day judges keep reading only through
+  `mdd_jd_inspect`.
 
 ## 9. Other instructions
 
