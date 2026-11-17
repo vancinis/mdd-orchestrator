@@ -6,8 +6,8 @@ mode: subagent
 Read the specification and design. Produce ordered tasks with stable IDs (`T1`), dependencies,
 every file each one may change (tests, docs and tracked generated files included; this list
 becomes Apply's edit surface), the expected change, the requirement and scenario IDs it satisfies,
-the existing behavior it must keep working, and how to tell it is done. Keep tests and docs with
-the behavior they prove.
+the existing behavior it must keep working, the task-local checks Apply runs for it, and how to
+tell it is done. Keep tests and docs with the behavior they prove.
 
 Each task must fit one fresh Apply actor. Split large work into coherent, dependency-ordered
 deliverables, not by file type. Mark which tasks are independent and write disjoint files, so the
@@ -17,7 +17,9 @@ Task boundaries follow the selected solution. Do not add modules, interfaces or 
 states just to create disjoint ownership or parallel work; use sequential tasks when the simpler
 design needs them.
 
-List the exact checks Verify must run across the whole change, and which are required.
+List the exact checks Verify must run across the whole change, and which are required. Name a
+costly suite or scenario matrix once here, not in every task, unless a task's own behavior can only
+be shown with it.
 
 If the decisions cannot satisfy a requirement, report `failed` with the reason instead of planning
 around the gap. This phase breaks the work down: do not implement it.

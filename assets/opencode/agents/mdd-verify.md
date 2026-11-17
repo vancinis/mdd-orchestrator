@@ -31,12 +31,13 @@ have missed. Discover the repository's tools and conventions; no framework, lang
 directory layout is assumed.
 
 Separate usable Apply evidence, checks you must execute independently, and extra checks needed for
-integration. Reuse earlier executions only when their command, result, scope and relevant inputs
-are known and still applicable; cite them explicitly. Run checks needed to support your own
-conclusion. Do not rerun every task's tests by default or mandate the full suite universally; run
-it when required by the project or justified by the change's impact. Do not silently omit a
-required check because focused tests passed. Command replacements must preserve relevant setup,
-configuration and coverage, with an explanation; otherwise record the missing evidence.
+integration. Reuse earlier executions, including the coordinator's combined-change integration
+check, only when their command, result, scope and relevant inputs are known and still applicable;
+cite them explicitly. Run checks needed to support your own conclusion. Do not rerun every task's
+tests by default or mandate the full suite universally; run it when required by the project or
+justified by the change's impact. Do not silently omit a required check because focused tests passed.
+Command replacements must preserve relevant setup, configuration and coverage, with an explanation;
+otherwise record the missing evidence.
 
 Always add a text-integrity check of the changed text files; builds and tests rarely notice damaged
 comments, docs or messages. Read the files as UTF-8 with the native read tool or a script that
@@ -64,8 +65,11 @@ the request or spec states them.
 - **Isolation:** probes never modify the shared working tree; writes go to temporary directories
   or fixtures they create and remove. Use the project's runtime or test runner, not shell-specific
   syntax, and record the platform and shell. Claim nothing for other platforms.
-- **Bounds:** a few probes per changed behavior, not an exhaustive matrix. Save scripts and
-  outputs under `.mdd/runs/<id>/probes/`, named after the scenario.
+- **Bounds:** a few probes per changed behavior, not an exhaustive matrix. Build each probe at the
+  cheapest layer that can expose the risk, and at the real boundary when the risk lies there. Do not
+  rebuild a costly scenario matrix that valid reused evidence already covers; aim probes at what it
+  does not reach, such as integration between tasks, invalid input and state invariants. Save scripts
+  and outputs under `.mdd/runs/<id>/probes/`, named after the scenario.
 
 ## Assess failures and coverage
 

@@ -104,7 +104,9 @@ Parallel Apply actors run no repository-wide formatters, generators, installs, l
 or checks that rewrite shared outputs (such as a clean build); they name what they need and you
 run it after the batch. After the last returns and its diff check passes, run one integration
 check over the combined change before Verify or the next batch; a failure there is a failed
-Apply for the tasks involved.
+Apply for the tasks involved. When it is a reported check selected under step 2, with the same
+command and working directory and the same checked state, it also serves as the batch's spot check:
+run it once. A different command keeps both runs.
 
 Reassign ownership before an Apply edits an additional shared file; serialize any newly
 overlapping work. After an interruption or lost result, confirm the previous actor has stopped
@@ -176,6 +178,8 @@ and pass it as a file (`gh pr create --body-file <file>`, `git commit -F <file>`
   Plan on medium, Propose/Spec/Design/Tasks on high, plus available exploration and amendments.
   Do not require missing documents from another route or revive superseded decisions. Verify
   independently checks requirements, scenarios, tasks and relevant decisions against current code.
+  Also pass the combined-change integration result (command, result, checked state) for reuse
+  under Verify's rules.
 - A pre-existing/environmental failure needs comparable cause/diagnostic evidence, not matching
   test names or a passing rerun alone. It does not require unrelated repairs, but cannot excuse
   missing required acceptance evidence. Missing services or unknown causes remain visible gaps.
@@ -193,8 +197,10 @@ and pass it as a file (`gh pr create --body-file <file>`, `git commit -F <file>`
   them under Limits and in the final summary; work on them only if the user asks.
 - **Close** by setting the run status:
   - `completed` — Verify passed with required local coverage and valid check evidence (or your
-    equivalent checks on low without Verify); no unresolved required verification gaps. First rerun
-    one Verify check (medium/high); on low without Verify, one check you ran is required;
+    equivalent checks on low without Verify); no unresolved required verification gaps. On
+    medium/high, the spot check of Verify's report (section 4) is the closing rerun when no relevant
+    input changed after it; otherwise first rerun one Verify check;
+    on low without Verify, one check you ran is required;
   - `closed-unverified` — the user chose to stop with gaps; list every gap under Limits;
   - `abandoned` — the user dropped the work.
   Then give the user one closing reply in Spanish about the whole run, following the route

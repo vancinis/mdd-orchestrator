@@ -200,6 +200,28 @@ test('installed coordinator and Apply keep Apply inside its edit surface', t => 
   }
 });
 
+// Checks delivery of the guidance into installed agents only, not agent compliance or speed.
+test('installed guidance builds tests at the cheapest faithful layer and reuses unchanged evidence', t => {
+  const root = fixture(t);
+  initProject(root);
+  const expected = {
+    'mdd-design': ['cheapest faithful test layer', 'where the guarantee depends on that boundary'],
+    'mdd-apply': ['at the cheapest faithful layer', 'when timing logic is the subject', 'a lower-level test does not replace them',
+      'a variant that depends on that boundary still needs a real test', 'do not repeat a full end-to-end flow for each variant or requirement',
+      'task-local checks the plan or tasks assign', 'without sharing mutable state between tests'],
+    'mdd-plan': ['task-local checks Apply runs', 'not in every task'],
+    'mdd-tasks': ['task-local checks Apply runs', 'not in every task'],
+    'mdd-verify': ['combined-change integration check', 'cheapest layer that can expose the risk',
+      'Do not rebuild a costly scenario matrix', 'Do not silently omit a required check'],
+    'mdd-orchestrator': ["also serves as the batch's spot check", 'combined-change integration result',
+      'is the closing rerun when no relevant input changed after it', 'on low without Verify, one check you ran is required'],
+  };
+  for (const [name, anchors] of Object.entries(expected)) {
+    const text = fs.readFileSync(join(root, `agents/${name}.md`), 'utf8').replace(/\s+/g, ' ');
+    for (const anchor of anchors) assert.ok(text.includes(anchor), `${name}: ${anchor}`);
+  }
+});
+
 test('installed coordinator and actors pass and load skills by path', t => {
   const root = fixture(t);
   initProject(root);

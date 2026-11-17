@@ -36,6 +36,15 @@ language, framework or directory layout.
   runnable harness, nondeterministic behavior, docs or config only, a behavior-preserving
   refactor) state the exception and the evidence that replaces it; if reproduction is
   unavailable, disclose the evidence gap rather than inventing it.
+- Build each test at the cheapest faithful layer. Cover rule variants, errors, boundaries and
+  preserved behavior with focused tests over controlled dependencies (fixtures, in-memory stores,
+  stubs). Reuse existing fixtures and builders, or build immutable setup once, without sharing
+  mutable state between tests; do not build a new expensive setup per case. Control time (fake clock,
+  injected delay) instead of waiting when timing logic is the subject. Keep real subprocess, CLI,
+  persistence, crash or transport tests where the guarantee depends on that boundary: a lower-level
+  test does not replace them, and a variant that depends on that boundary still needs a real test.
+  The fail-before test can be a focused one: do not repeat a full end-to-end flow for each variant
+  or requirement.
 - For each existing behavior that shares the changed code (options, parsers, helpers, validation,
   output formats), identify the test that proves it still holds or add one, and run it after the
   change. Add a test only where it proves something existing tests do not; there is no rule of
@@ -51,12 +60,15 @@ language, framework or directory layout.
 
 ## Check the affected scope
 
-Choose the smallest set that demonstrates the task's behavior and integration: changed and
-affected existing tests, applicable cross-cutting guards, and types, lint or build checks when
-relevant. Include test-source type checking when the project separates it and your changes affect
-test types. A focused test passing does not establish that its registration or consumers work.
-Explain the selection briefly; this is not a universal checklist. The full suite and independent
-integration assessment belong to Verify unless your assigned task specifically needs them.
+Start from the task-local checks the plan or tasks assign. Choose the smallest set that
+demonstrates the task's behavior and integration: changed and affected existing tests (use the
+runner's file or test-name filters while keeping the wrapper's setup), applicable cross-cutting
+guards, and types, lint or build checks when relevant. Include test-source type checking when the
+project separates it and your changes affect test types. A focused test passing does not establish
+that its registration or consumers work.
+Explain the selection briefly; this is not a universal checklist. The full suite, whole-change
+matrices and independent integration assessment belong to Verify unless your assigned task
+specifically needs them.
 
 Run the selected checks against your final changes. Avoid duplicate runs when neither relevant
 inputs nor the checked behavior changed; cite reusable earlier evidence as such, not as a new
