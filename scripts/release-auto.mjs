@@ -465,7 +465,8 @@ function pendingRelease(git, { tag, version, source, channel, previousStable, tr
  * Allocation and "already published" use only the tags the remote really carries (publishedTagNames); a local-only tag with
  * the planned name is reused when strictly the pending release of this source, else the publication fails visibly (see
  * pendingRelease). Each attempt: fetch tags (no force) -> same source/channel already tagged? -> allocate -> commit -> annotate -> verify
- * -> push -> ls-remote decides. A rejected push, an absent tag or a conflicting tag deletes the unpublished local tag and
+ * -> beforePush -> is the exact planned tag object already on the remote? (exists, nothing is pushed; a failed read refuses with
+ * `fetch` before any push) -> push -> ls-remote decides. A rejected push, an absent tag or a conflicting tag deletes the unpublished local tag and
  * recomputes; an unknown outcome re-verifies up to `maxAttempts` times and then fails closed.
  * Returns { status: 'published' | 'exists', tag, version, source, channel, commit?, object?, attempts }.
  */
@@ -495,6 +496,13 @@ export async function publishRelease(git, {
     const discard = () => { try { git(['tag', '--delete', plan.tag]); } catch { /* already gone */ } };
     try {
       if (beforePush) await beforePush({ attempt, tag: plan.tag, commit, version: plan.version });
+      let planned;
+      try {
+        planned = remoteTagState(git, remote, plan.tag, { object: git(['rev-parse', '--verify', `refs/tags/${plan.tag}`]).trim(), commit });
+      } catch (error) {
+        throw new PublishError(`No se pudo leer ${plan.tag} en el remoto antes de publicar (${error.message}). No se envió nada.`, 'fetch');
+      }
+      if (planned.state === 'published') return { status: 'exists', tag: plan.tag, version: plan.version, source, channel, attempts: attempt };
       let result = publishTag(git, { remote, tag: plan.tag });
       for (let check = 1; result.status === 'unknown' && check < maxAttempts; check += 1) {
         try { result = { ...result, ...verifyState(git, remote, plan.tag, result.local.object, result.local.commit) }; } catch { /* still unknown */ }
