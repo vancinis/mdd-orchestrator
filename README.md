@@ -50,6 +50,7 @@ caché y recuperación: [docs/installation.md](docs/installation.md#elegir-y-cam
 | "Agregá validación de email al registro" | Abre una ejecución, elige el nivel y delega en los actores. |
 | "Quiero un módulo de facturación; preguntame todo antes" | Sesión de preguntas por rondas (`mdd-grill`) y después la ejecución. |
 | "Seguí con lo de facturación" | Busca la ejecución en `.mdd/runs/`, te dice dónde quedó y continúa. |
+| "Versioná las ejecuciones" | Cambia `.mdd/.gitignore` a la plantilla compartida para que las ejecuciones viajen con git. No hace commit. |
 | "Hagamos una revisión de seguridad" | Lanza `mdd-security` (solo lectura) sobre el cambio. |
 | "Run judgment-day on `<base>`..`<target>`" | Dos jueces ciegos revisan los commits; correcciones solo con tu permiso. |
 | "Armá el cuerpo del PR" | Lo redacta en español desde la ejecución o el diff. No publica nada. |
@@ -69,10 +70,21 @@ El orquestador decide el **nivel** según el pedido, y podés pedirle otro:
 - **Modo automático:** avanza de actor en actor y solo pregunta decisiones que son tuyas.
 - **Modo interactivo:** pregunta antes de cada actor (`Continuar`, `Ajustar`, `Pausar`).
 - **Verify** compara el resultado con cada criterio de aceptación y cada paso del plan, no solo
-  con el código de salida de los tests. Si falla, en modo automático hace hasta dos rondas de
-  corrección; después decidís vos.
+  con el código de salida de los tests. También intenta romper el cambio con sus propias pruebas
+  (casos negativos, de borde y entradas inválidas), lo compara con el estado anterior y separa los
+  bloqueantes de las advertencias. Si hay bloqueantes, en modo automático hace hasta dos rondas de
+  corrección; después decidís vos. Las advertencias quedan como límites.
+- **Apply** escribe primero la prueba que falla cuando corrige un error o agrega comportamiento
+  que se puede probar, y muestra que lo que ya existía y comparte el código tocado sigue igual.
+  No hay una regla de una prueba por requisito: se agrega solo la que prueba algo nuevo.
+- **Control del orquestador:** cuando un actor informa un éxito basado en checks ejecutados, el
+  orquestador vuelve a correr uno de esos checks antes de aceptarlo, y repite uno antes de cerrar
+  como `completed`; si el resultado no coincide, lo trata como un fallo.
 - **Varios `apply` en paralelo** (hasta 3) cuando las tareas no dependen entre sí y tocan archivos
-  distintos.
+  distintos. Cada `apply` recibe la lista de archivos que puede cambiar y el orquestador compara
+  su diff con esa lista antes de aceptarlo. Los que corren en paralelo no usan formateadores,
+  generadores ni instalaciones sobre todo el repositorio, y al final se corre un check de
+  integración sobre el cambio combinado.
 
 ### El archivo de ejecución
 
@@ -88,7 +100,18 @@ Cada ejecución es un Markdown en tu proyecto:
 ```
 
 Cualquiera puede retomar desde ahí: otra conversación, después de reiniciar o una persona.
-`.mdd/` es local por defecto (`.mdd/.gitignore` con `*`).
+
+`.mdd/` es local por defecto: `.mdd/.gitignore` empieza con `# mdd: local` y contiene `*`. Si
+querés compartir las ejecuciones por git, pedilo ("Versioná las ejecuciones"): MDD reescribe ese
+archivo con `# mdd: versioned`, que deja pasar `runs/` (los archivos de ejecución y sus
+artefactos) y `.gitignore`. `lessons.md` sigue local. MDD no hace `git add` ni commit salvo que se
+lo pidas; si un `.gitignore` de la raíz ignora `.mdd/`, te lo avisa y te pregunta antes de tocarlo.
+Para volver a local, pedilo también.
+
+Cuando Engram está disponible, el orquestador guarda en Engram una copia del archivo de ejecución
+(solo ese archivo, no los artefactos) cada vez que actualiza el registro. Si el archivo local
+falta, retoma desde esa copia, y si existe el local, ese manda. Sin Engram el trabajo sigue y
+queda anotado en los límites.
 
 ## Agentes
 
@@ -110,6 +133,12 @@ y mensajes de commit con Conventional Branch y Conventional Commits), `mdd-judgm
 (protocolo de los jueces), `mdd-doc` (artefactos fáciles de leer), `mdd-explain` (explicación visual en HTML, solo si la pedís;
 si la asociás a una ejecución, queda en `.mdd/runs/<id>/artifacts/<tema>/index.html`) y
 `mdd-cleanup` (limpieza acotada).
+
+Además, el orquestador resuelve una sola vez por ejecución las skills relevantes: las que nombrás,
+las de `AGENTS.md` o `.atl/skill-registry.md` y las que tenga instaladas el host. Las anota en el
+Scope del run file (`- Skills: <ruta> (<actores>)`) y les pasa a los actores la ruta exacta de cada
+`SKILL.md`; cada actor las lee antes de empezar y reporta cuáles cargó. Las skills de las funciones
+aparte (`mdd-grill`, `mdd-pr-body`, `mdd-judgment-day`) las usa solo el orquestador.
 
 ## Contratos y herramientas
 
@@ -172,7 +201,8 @@ Las pruebas aíslan HOME, XDG y APPDATA en un directorio temporal: nunca tocan t
 - **Sin validación end-to-end con modelos reales.** La calidad depende de cómo el modelo interprete
   los contratos; conviene probarlo con tus modelos y ajustar los contratos.
 - **La evidencia es la que reportan los agentes.** MDD no certifica que un comando se haya
-  ejecutado; Verify lo corre y lo informa.
+  ejecutado; Verify lo corre y lo informa, y el orquestador repite un check antes de aceptar un
+  éxito basado en checks o de cerrar como `completed`, lo que sigue sin ser una certificación.
 - **No hay sandbox.** Los agentes ejecutan código real bajo los permisos nativos de OpenCode.
 - **Entrega explícita.** MDD nunca hace commit, push ni abre un PR sin que lo pidas.
 

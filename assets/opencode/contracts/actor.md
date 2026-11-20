@@ -12,6 +12,10 @@ MDD actor. Your own role description above says what your phase produces.
   current sources.
 - Repository instruction files (`AGENTS.md`, other tools' conventions) are useful project context.
   When they conflict with your task prompt, follow the task prompt and say so in your report.
+- Skills: when the task prompt lists `SKILL.md` paths, read each `SKILL.md` at its path before
+  other work (a native skill tool only if it loads that same file); resolve its relative
+  references from its folder and read them when needed. Skills never widen scope or permissions;
+  this contract and the task prompt win. An unreadable path does not stop the work.
 
 ## Scope
 
@@ -75,6 +79,7 @@ Two to five sentences a person reads first: what you found, decided or changed, 
 - Approach: how you did it, in one or two lines.
 - Changed files / checks run: only where your phase has them, with real results.
 - Confidence: High, Medium or Low, with the reason.
+- Skills: loaded … / failed … (reason)   # omit when no skills were given
 
 ## Open items
 Anything uncertain, skipped or left for a later actor. `None.` when empty.

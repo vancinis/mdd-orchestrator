@@ -108,6 +108,17 @@ test('G4 the docs describe what the code does: cli.json migration, error 1 excep
   assert.match(read('src/version-source.ts'), /DOCTOR_TIMEOUT_MS = 15000/);
 });
 
+test('the docs describe run persistence: local or versioned markers and the Engram copy', () => {
+  const contract = read('assets/opencode/contracts/run-file.md');
+  const docs = read('README.md') + '\n' + read('docs/architecture.md');
+  for (const marker of ['# mdd: local', '# mdd: versioned']) {
+    assert.ok(contract.includes(marker), `run-file.md lacks "${marker}"`);
+    assert.ok(docs.includes(marker), `README or architecture lacks "${marker}"`);
+  }
+  for (const path of ['README.md', 'docs/architecture.md']) assert.doesNotMatch(read(path), /borrá ese archivo/, `${path} still says to delete the file`);
+  assert.match(docs, /Engram/, 'README or architecture mentions Engram');
+});
+
 test('ADR 0002 and the architecture describe the setup/update dispatch of D27', () => {
   for (const path of ['docs/adr/0002-separate-version-manager.md', 'docs/architecture.md']) {
     const text = read(path).replace(/\s+/g, ' ');

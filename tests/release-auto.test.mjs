@@ -71,6 +71,8 @@ const localState = context => ({
   status: sh(context.root, 'status', '--porcelain=v1', '--untracked-files=all'), pkg: readFileSync(join(context.root, 'package.json'), 'utf8'),
 });
 const wrap = (git, intercept) => (args, options) => intercept(args, options, git);
+// Pins every Git author/committer/tagger date so two publishers with equal inputs build byte-identical objects.
+const pinClock = (git, epoch) => (args, options = {}) => git(args, { ...options, env: { ...options.env, GIT_AUTHOR_DATE: `${epoch} +0000`, GIT_COMMITTER_DATE: `${epoch} +0000` } });
 
 test('bump level: breaking > feat > patch fallback, exact numeric arithmetic', () => {
   const c = (type, breaking = false) => ({ type, breaking });
@@ -240,16 +242,78 @@ test('pre-push race with the same source and channel: the existing tag is recogn
   const source = commit(context.root, 'fix: shared');
   sh(context.root, 'push', '-q', 'origin', 'main');
   const rival = clone(context, 'rival');
-  let theirTag;
-  const result = await publishRelease(context.git, {
-    source, channel: 'stable',
-    beforePush: async info => { if (info.attempt === 1) theirTag = await publishRelease(rival.git, { source, channel: 'stable' }); },
+  const clock = 1_800_000_000;
+  const date = '2026-11-13';
+  let pushes = 0;
+  const mineGit = wrap(pinClock(context.git, clock), (args, options, git) => { if (args[0] === 'push') pushes += 1; return git(args, options); });
+  let theirTag; let mine;
+  const result = await publishRelease(mineGit, {
+    source, channel: 'stable', date,
+    beforePush: async info => {
+      if (info.attempt !== 1) return;
+      mine = sh(context.root, 'rev-parse', 'refs/tags/v0.3.3');
+      theirTag = await publishRelease(pinClock(rival.git, clock), { source, channel: 'stable', date });
+    },
   });
+  assert.equal(mine, theirTag.object, 'precondition: both publishers built the identical tag object');
   assert.equal(result.status, 'exists');
   assert.equal(result.tag, 'v0.3.3');
+  assert.equal(result.attempts, 1);
+  assert.equal(pushes, 0);
   assert.deepEqual(remoteTags(context), ['v0.3.2', 'v0.3.3']);
   assert.equal(sh(context.origin, 'rev-parse', 'refs/tags/v0.3.3'), theirTag.object);
+  assert.equal(sh(context.origin, 'rev-parse', 'refs/tags/v0.3.3^{commit}'), theirTag.commit);
   assert.equal(sh(context.root, 'rev-parse', 'refs/tags/v0.3.3'), theirTag.object);
+});
+
+test('pre-push race with the same source and channel and a different tag object: the rival tag is preserved and recognized', async t => {
+  const context = fixture(t);
+  const source = commit(context.root, 'fix: shared');
+  sh(context.root, 'push', '-q', 'origin', 'main');
+  const rival = clone(context, 'rival');
+  const clock = 1_800_000_000;
+  const date = '2026-11-13';
+  let theirTag; let mine; let mineCommit;
+  const result = await publishRelease(pinClock(context.git, clock), {
+    source, channel: 'stable', date, trailers: { workflowRun: '1' },
+    beforePush: async info => {
+      if (info.attempt !== 1) return;
+      mine = sh(context.root, 'rev-parse', 'refs/tags/v0.3.3');
+      mineCommit = sh(context.root, 'rev-parse', 'refs/tags/v0.3.3^{commit}');
+      theirTag = await publishRelease(pinClock(rival.git, clock), { source, channel: 'stable', date, trailers: { workflowRun: '2' } });
+    },
+  });
+  assert.notEqual(mine, theirTag.object, 'precondition: the tag objects differ');
+  assert.equal(mineCommit, theirTag.commit, 'precondition: the release commit is the same');
+  assert.equal(result.status, 'exists');
+  assert.equal(result.tag, 'v0.3.3');
+  assert.equal(result.attempts, 2);
+  assert.equal(sh(context.origin, 'rev-parse', 'refs/tags/v0.3.3'), theirTag.object);
+  assert.equal(sh(context.root, 'rev-parse', 'refs/tags/v0.3.3'), theirTag.object);
+  assert.deepEqual(remoteTags(context), ['v0.3.2', 'v0.3.3']);
+});
+
+test('pre-push remote read failure: the publication refuses before any push and a later healthy call publishes', async t => {
+  const context = fixture(t);
+  const source = commit(context.root, 'fix: shared');
+  sh(context.root, 'push', '-q', 'origin', 'main');
+  let armed = false; let pushes = 0;
+  const failing = wrap(context.git, (args, options, git) => {
+    if (args[0] === 'push') pushes += 1;
+    if (armed && args[0] === 'ls-remote') throw new Error('git ls-remote: network down');
+    return git(args, options);
+  });
+  const error = await publishRelease(failing, { source, channel: 'stable', beforePush: async () => { armed = true; } }).then(() => undefined, e => e);
+  assert.ok(error instanceof PublishError);
+  assert.equal(error.reason, 'fetch');
+  assert.equal(pushes, 0);
+  assert.equal(sh(context.root, 'tag', '--list', 'v0.3.3'), '');
+  assert.deepEqual(remoteTags(context), ['v0.3.2']);
+  const retry = await publishRelease(context.git, { source, channel: 'stable' });
+  assert.equal(retry.status, 'published');
+  assert.equal(retry.tag, 'v0.3.3');
+  assert.equal(retry.attempts, 1);
+  assert.deepEqual(remoteTags(context), ['v0.3.2', 'v0.3.3']);
 });
 
 test('a differing lightweight tag on the remote is never overwritten; retries are bounded', async t => {

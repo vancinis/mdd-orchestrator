@@ -206,7 +206,7 @@ que pasa con cada dato de 0.1:
 | Entrada de la barra lateral en `cli.json` | `mdd-ai use` no la toca. La instalación o reparación ordinaria del paquete instalado quita solo esa entrada y deja el resto de `cli.json` igual; si sigue ahí, quitala a mano. |
 | Claves `engram`, `telemetry`, `workers`, `knowledge`, `guards`, `verify` en la configuración | Se aceptan y se ignoran. Se descartan la próxima vez que guardes con `mdd-ai config`. |
 | Respuestas `certainty`, `artifactStore`, `complexity` | Igual: se aceptan y se ignoran. |
-| Datos en `.mdd/` de tus proyectos (checkpoints, `tasks/`, telemetría, lecciones) | No se tocan ni se leen. Podés borrarlos cuando quieras. Las ejecuciones viejas no se retoman. |
+| Datos en `.mdd/` de tus proyectos (checkpoints, `tasks/`, telemetría, lecciones) | No se tocan ni se leen. Podés borrarlos cuando quieras. Las ejecuciones viejas no se retoman. Un `.mdd/` sin `.gitignore` recibe la plantilla local en la próxima escritura; un `.gitignore` que MDD no reconoce no se toca. |
 | `mdd/memory/` y el binario de Engram en `mdd/bin/` | No se tocan. Si no los usás, podés borrarlos a mano. |
 
 ## Diagnóstico
