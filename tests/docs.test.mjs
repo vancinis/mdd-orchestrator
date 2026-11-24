@@ -127,6 +127,29 @@ test('ADR 0002 and the architecture describe the setup/update dispatch of D27', 
   }
 });
 
+test('README and architecture document run state, context recovery and the read-only audit', () => {
+  for (const path of ['README.md', 'docs/architecture.md']) {
+    const text = read(path).replace(/\s+/g, ' ');
+    for (const marker of ['`## Now`', '`## Record`', 'evidence/', 'history.md', 'node scripts/context-audit.mjs']) {
+      assert.ok(text.includes(marker), `${path}: missing ${marker}`);
+    }
+    assert.match(text, /aviso de contexto[^.]*70%/i, `${path}: context threshold`);
+    assert.match(text, /reescribe `## Now`/, `${path}: rewrite after compaction`);
+    assert.doesNotMatch(text, /(?:resumen|marca)[^.]*\b(?:conserva|mantiene|restablece) la asociación/i);
+  }
+});
+
+test('context settings and startup-only changes are documented', () => {
+  const installation = fs.readFileSync(new URL('../docs/installation.md', import.meta.url), 'utf8');
+  for (const key of ['noticeThreshold', 'context.notice', 'context.checkpoint']) assert.ok(installation.includes(key), key);
+  assert.match(installation, /reinici[áa]r OpenCode|Reiniciá OpenCode/i);
+  for (const filename of ['README.md', 'docs/architecture.md']) {
+    const text = fs.readFileSync(new URL(`../${filename}`, import.meta.url), 'utf8');
+    assert.match(text, /aviso de contexto[^.\n]*70%/i);
+    assert.match(text, /`mdd-ai config`.*\*\*Contexto\*\*/);
+  }
+});
+
 test('automatic release docs describe the real engine, the policy and the rollout state without claiming it is live', () => {
   const flat = path => read(path).replace(/\s+/g, ' ');
   const installation = flat('docs/installation.md');
