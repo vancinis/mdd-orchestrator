@@ -105,6 +105,35 @@ test('preferences accept exactly the documented values', () => {
   for (const summary of SUMMARIES) assert.equal(parseSettings({ ...defaultSettings(), profiles: { default: { answers: { summary } } } }).profiles.default.answers.summary, summary);
 });
 
+test('context defaults and valid settings round trip; invalid settings never write', async t => {
+  const { contextSettings, CONTEXT_DEFAULTS } = await import('../dist/settings.js');
+  const root = fixture(t);
+  const settings = defaultSettings();
+  const profile = activeProfile(settings);
+  const defaults = { notice: true, checkpoint: true, noticeThreshold: 70 };
+  for (const value of [undefined, profile]) assert.deepEqual(contextSettings(value), defaults);
+  assert.deepEqual(CONTEXT_DEFAULTS, defaults);
+  for (const noticeThreshold of [10, 95]) {
+    profile.context = { notice: false, checkpoint: false, noticeThreshold };
+    saveSettings(root, settings);
+    assert.deepEqual(loadSettings(root), settings);
+  }
+  const file = join(root, 'mdd.config.json');
+  const before = fs.readFileSync(file);
+  const thresholdError = /context\.noticeThreshold must be an integer from 10 to 95\./;
+  for (const [context, error] of [
+    ...[9, 96, 70.5, '70', null].map(noticeThreshold => [{ noticeThreshold }, thresholdError]),
+    [{ notice: 'yes' }, /context\.notice must be true or false\./],
+    [{ checkpoint: 0 }, /context\.checkpoint must be true or false\./],
+    [{ unknown: true }, /unknown.*context|context.*unknown/i],
+    [null, /context must be an object/i],
+  ]) {
+    profile.context = context;
+    assert.throws(() => saveSettings(root, settings), error);
+    assert.deepEqual(fs.readFileSync(file), before);
+  }
+});
+
 test('malformed JSON and invalid saves preserve the file bytes', t => {
   const root = fixture(t);
   const path = join(root, 'mdd.config.json');
@@ -152,11 +181,20 @@ test('fixed destinations and nonregular or hardlinked config cannot escape the r
   assert.equal(fs.readFileSync(target, 'utf8'), JSON.stringify(defaultSettings()));
 });
 
-test('the documented JSON schema matches the supported roles and preferences', () => {
+test('the documented JSON schema matches the supported roles, preferences and context defaults', async () => {
+  const { CONTEXT_DEFAULTS } = await import('../dist/settings.js');
   const schema = JSON.parse(fs.readFileSync(new URL('../docs/mdd-config.schema.json', import.meta.url), 'utf8'));
   assert.deepEqual(Object.keys(schema.$defs.profile.properties.models.properties), [...MODEL_ROLES]);
   assert.deepEqual(schema.$defs.profile.properties.answers.properties.mode.enum, [...MODES]);
   assert.deepEqual(schema.$defs.profile.properties.answers.properties.summary.enum, [...SUMMARIES]);
+  const context = schema.$defs.profile.properties.context;
+  assert.equal(context.type, 'object');
+  assert.equal(context.additionalProperties, false);
+  assert.deepEqual(context.properties, {
+    notice: { type: 'boolean', default: CONTEXT_DEFAULTS.notice },
+    checkpoint: { type: 'boolean', default: CONTEXT_DEFAULTS.checkpoint },
+    noticeThreshold: { type: 'integer', minimum: 10, maximum: 95, default: CONTEXT_DEFAULTS.noticeThreshold },
+  });
   assert.deepEqual(schema.required, ['version', 'activeProfile', 'profiles']);
 });
 
