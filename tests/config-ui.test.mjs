@@ -21,7 +21,7 @@ function scripted(lines, isTTY = true) {
   const output = [];
   return { prompts, output, io: { isTTY, write: text => output.push(text), read: async prompt => { prompts.push(prompt); return lines.shift(); } } };
 }
-// Existing shortcuts stay stable; 6 opens the optional native subagent models and 7 the optional integrations.
+// Existing shortcuts stay stable; 6 opens the optional native subagent models, 7 context and 8 the optional integrations.
 const SAVE = '4';
 const CANCEL = '5';
 // The models menu reads the user's installed catalog; tests inject it for determinism.
@@ -53,18 +53,46 @@ function invoke(root, ...args) {
   return result;
 }
 
-test('the main menu preserves 1-6, appends 7 for integrations and never inspects them until opened', async t => {
+test('the main menu preserves 1-7, appends 8 for integrations and never inspects them until opened', async t => {
   const root = fixture(t);
   const trap = new Proxy({}, { get: (_, name) => () => assert.fail(`integration engine ${String(name)} must not run on the main menu`) });
   const script = scripted([CANCEL]);
   assert.equal(await runConfigUI(root, script.io, { ...noCatalog, integrations: { engine: trap } }), 'cancelled');
   const text = script.output.join('');
-  for (const [index, label] of ['Perfiles', 'Modelos', 'Preferencias', 'Guardar y salir', 'Cancelar', 'Subagentes nativos', 'Integraciones'].entries()) {
+  for (const [index, label] of ['Perfiles', 'Modelos', 'Preferencias', 'Guardar y salir', 'Cancelar', 'Subagentes nativos', 'Contexto', 'Integraciones'].entries()) {
     assert.match(text, new RegExp(`^.\\s${index + 1}\\s{2}${label}`, 'm'), label);
   }
-  // Deliberately narrowed: the menu hint for entry 7 now names Engram; telemetry/workers/memory stay retired.
+  // Deliberately narrowed: the menu hint for entry 8 now names Engram; telemetry/workers/memory stay retired.
   assert.doesNotMatch(text, /Telemetr|Workers|memoria|certeza/i);
   assert.deepEqual(readdirSync(root), []);
+});
+
+test('context edits are sparse, validated and isolated to the selected profile', async t => {
+  const root = fixture(t);
+  const settings = changeProfile(defaultSettings(), 'create', 'other');
+  settings.activeProfile = 'default';
+  saveSettings(root, settings);
+  const run = async (lines, outcome = 'saved') => {
+    const script = scripted(lines);
+    assert.equal(await runConfigUI(root, script.io, noCatalog), outcome);
+    return script.output.join('');
+  };
+  const read = () => loadSettings(root).profiles.default.context;
+  const off = await run(['7', '2', '1', SAVE]);
+  assert.doesNotMatch(off, /Umbral del aviso \(%\)/);
+  assert.match(off, /Contexto.*aviso desactivado; punto de control activado/);
+  assert.deepEqual(read(), { notice: false });
+  const retry = await run(['7', '1', '5', '7', '1', '"70"', '7', '1', '80', '2', SAVE]);
+  assert.equal([...retry.matchAll(/! context\.noticeThreshold must be an integer from 10 to 95\./g)].length, 2);
+  assert.deepEqual(read(), { noticeThreshold: 80, checkpoint: false });
+  const file = join(root, 'mdd.config.json');
+  const before = readFileSync(file);
+  const cancelled = await run(['7', '1', '85', '1', CANCEL], 'cancelled');
+  assert.match(cancelled, /OpenCode compacta cerca del 85%/);
+  assert.deepEqual(readFileSync(file), before);
+  await run(['7', '1', '-', '1', SAVE]);
+  assert.equal(read(), undefined);
+  assert.deepEqual(loadSettings(root).profiles.other, settings.profiles.other);
 });
 
 test('scripted terminal creates profile, edits every model and both preferences, and saves', async t => {
@@ -358,8 +386,8 @@ test('command validation and help are deterministic and preserve exit semantics'
   assert.deepEqual(readdirSync(root), []);
 });
 
-// ---- Optional integrations (menu 7): in-memory queue, effects only after Save + review + Apply ----
-const INTEGRATIONS = '7';
+// ---- Optional integrations (menu 8): in-memory queue, effects only after Save + review + Apply ----
+const INTEGRATIONS = '8';
 const dim = (value, detail) => ({ value, detail });
 const toolStatus = (id, label, state, offers = [], extra = {}) => ({
   id, label, state, reason: `${id} ${state}`, offers, notices: [],
@@ -401,7 +429,7 @@ test('browsing, queueing and cancelling integrations has no effects, even at EOF
     const { engine, calls } = fakeEngine(root);
     const run = scripted([...script]);
     assert.equal(await runConfigUI(root, run.io, { ...noCatalog, integrations: { engine, deps: { cwd: root } } }), 'cancelled');
-    assert.equal(calls.inspect, 1, 'inspected lazily, once, only after opening menu 7');
+    assert.equal(calls.inspect, 1, 'inspected lazily, once, only after opening menu 8');
     assert.deepEqual([calls.apply, calls.lookup, calls.check, calls.probe, calls.review], [[], [], [], 0, []]);
     assert.match(run.output.join(''), /En cola: Instalar Engram 1\.2\.3/);
     assert.match(run.output.join(''), /Nada se escribió|No se escribió/);

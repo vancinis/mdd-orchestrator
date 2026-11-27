@@ -209,7 +209,7 @@ que pasa con cada dato de 0.1:
 | Entrada de la barra lateral en `cli.json` | `mdd-ai use` no la toca. La instalación o reparación ordinaria del paquete instalado quita solo esa entrada y deja el resto de `cli.json` igual; si sigue ahí, quitala a mano. |
 | Claves `engram`, `telemetry`, `workers`, `knowledge`, `guards`, `verify` en la configuración | Se aceptan y se ignoran. Se descartan la próxima vez que guardes con `mdd-ai config`. |
 | Respuestas `certainty`, `artifactStore`, `complexity` | Igual: se aceptan y se ignoran. |
-| Datos en `.mdd/` de tus proyectos (checkpoints, `tasks/`, telemetría, lecciones) | No se tocan ni se leen. Podés borrarlos cuando quieras. Las ejecuciones viejas no se retoman. |
+| Datos en `.mdd/` de tus proyectos (checkpoints, `tasks/`, telemetría, lecciones) | No se tocan ni se leen. Podés borrarlos cuando quieras. Las ejecuciones viejas no se retoman. Un `.mdd/` sin `.gitignore` recibe la plantilla local en la próxima escritura; un `.gitignore` que MDD no reconoce no se toca. |
 | `mdd/memory/` y el binario de Engram en `mdd/bin/` | No se tocan. Si no los usás, podés borrarlos a mano. |
 
 ## Diagnóstico
@@ -284,11 +284,12 @@ incluido en previews; un preview cubre el intervalo desde el preview o la establ
 ### Release manual tras releases automáticos (alternativa sin push)
 
 El release manual sigue siendo **interactivo y sin push** (`--dry-run`, `--yes` y `--bootstrap`
-conservan su significado). Si ya hubo releases automáticos, como estos solo existen como etiquetas,
-el release manual toma como base la **fuente registrada** de la etiqueta más alta (no el HEAD de la
-etiqueta) y parte del CHANGELOG **acumulativo** de la última etiqueta publicada, que aporta las
-entradas automáticas y está fuera de `main` (no asumas que ya están en `main`). Antes de usarlo, traé las
-etiquetas (`git fetch origin "refs/tags/v*:refs/tags/v*"`); sigue imprimiendo el `git push` que
+conservan su significado). Si ya hubo releases automáticos, el release manual toma como base la
+**fuente registrada** de la etiqueta más alta (no el HEAD de la etiqueta) y parte del CHANGELOG
+**acumulativo** de la última etiqueta publicada, que aporta las
+entradas automáticas y está fuera de `main`. Aunque `main` ya tenga una copia de esas entradas, no
+se toma su CHANGELOG como base en ese caso. Antes de usarlo, traé las etiquetas
+(`git fetch origin "refs/tags/v*:refs/tags/v*"`); el comando sigue imprimiendo el `git push` que
 decidís ejecutar.
 
 ## Releases automáticos (preview y stable)
@@ -323,7 +324,7 @@ elige estas etiquetas igual que las manuales.
 
 Cada release es una etiqueta **anotada** creada con Git de bajo nivel sobre un commit cuyo único
 padre es el commit fuente y que solo cambia `package.json`, `package-lock.json` y `CHANGELOG.md`.
-**No se hace push a ninguna rama**: solo se publica `refs/tags/v<versión>` (sin `--force` ni
+Para publicar la etiqueta se hace push solo a `refs/tags/v<versión>` (sin `--force` ni
 `--tags`) y luego se comprueba en el remoto que la etiqueta existe con el mismo objeto. Una etiqueta
 publicada nunca se mueve ni se borra; un reintento con la misma fuente y canal es idempotente, y si
 otra ejecución tomó la versión, se recalcula con un tope de intentos.
@@ -352,12 +353,40 @@ es `v0.4.0-preview.1`; mientras no exista la estable siguiente, `mdd-ai use prev
 ese. Tras una estable `X.Y.Z`, el alias `preview` puede seguir apuntando a un `X.Y.Z-preview.N`
 anterior hasta el próximo preview; es el comportamiento ya existente del instalador.
 
-### Metadatos solo en etiquetas
+### Comentario de preview en la PR
 
-El release automático **no crea commits en `main`**. Por eso `package.json` y `CHANGELOG.md` de
-`main` y la etiqueta de versión que muestra `dev` pueden quedar **desactualizados**: es un costo
-aceptado. La verdad de cada versión está en su etiqueta (versión, notas y procedencia). GitHub puede
-avisar que el commit de una etiqueta "no pertenece a ninguna rama".
+Después de la publicación, el job `comment` (`node scripts/release-comment.mjs`) usa
+`pull-requests: write` para dejar un comentario del bot en cada PR elegible, incluso si quedó fuera
+del lote de previews. Si cambia la información, actualiza ese mismo comentario en vez de publicar
+otro. No ejecuta código de la PR.
+
+El comentario distingue la última estable publicada de la versión de `package.json` en el commit
+que es base común de la PR y `main`. Para el head actual, muestra la etiqueta del preview con un
+enlace si ya se publicó, o el estado pendiente o fallido según la validación del intento actual.
+También muestra la estable estimada si se fusiona la PR, con su nivel (`major`, `minor` o `patch`).
+La versión real puede cambiar si antes se publican otras integraciones.
+
+<a name="metadatos-solo-en-etiquetas"></a>
+
+### Sincronización de metadatos en `main`
+
+Después de procesar las publicaciones, el job `publish` compara `package.json` en `main` con la
+última estable verificada en el remoto. Si `main` está por detrás, crea un commit separado
+`chore(release): v<versión>` sobre el último commit de `main` y lo sube directamente a esa rama,
+sin forzar el push. Actualiza `package.json` y `package-lock.json` e incorpora las secciones
+faltantes de `CHANGELOG.md` sin duplicar ni reemplazar las entradas que ya estaban. Así, la primera
+ejecución puede poner al día `main` incluso si no se publica una estable nueva. Nunca baja la
+versión de `main`; los previews no se sincronizan y `dev` no se modifica.
+
+La etiqueta sigue siendo la fuente de verdad de la versión publicada. GitHub puede avisar que
+el commit de la etiqueta «no pertenece a ninguna rama»: no es el mismo commit que sincroniza
+`main`. Si el push falla (por ejemplo, si un ruleset exige una PR para escribir en `main`), el job
+muestra un **Aviso** sin invalidar la publicación y vuelve a intentar la sincronización en la
+próxima ejecución. En una PR puede haber conflictos al editar el comienzo de `CHANGELOG.md`:
+actualizá la rama con `main` y conservá las entradas ya publicadas al resolverlos.
+
+El push con `GITHUB_TOKEN` no dispara otro workflow por `push`; no se agrega ningún disparador.
+El commit de metadatos tampoco cuenta como una integración para crear una estable nueva.
 
 ### Orden, fallos y marcadores de recuperación
 
@@ -402,9 +431,10 @@ node scripts/release-auto.mjs plan --repo <dueño>/<nombre>     # solo lectura; 
 ```
 
 `publish` (`node scripts/release-auto.mjs publish --repo <dueño>/<nombre> --run-id <n> --attempt <n>`)
-**escribe etiquetas en el origen real**: lo ejecuta el job `publish` de Release con los resultados de
-validación de esa ejecución. No lo uses para pruebas locales (las pruebas del repositorio usan
-orígenes `bare` desechables) ni como atajo: para recuperar, despachá el workflow.
+**escribe etiquetas y puede actualizar `main` en el origen real**: lo ejecuta el job `publish` de
+Release con los resultados de validación de esa ejecución. No lo uses para pruebas locales (las
+pruebas del repositorio usan orígenes `bare` desechables) ni como atajo: para recuperar, despachá el
+workflow.
 
 ### Seguridad: candidato de solo lectura y publicador sin código del candidato
 
@@ -437,6 +467,11 @@ hacia adelante.
   - Marcadores `release-skip/*`: los crea **únicamente el propietario**; **Actions nunca** puede
     crearlos; nadie los actualiza ni los borra (inmutables). El motor se apoya en este ruleset
     exclusivo del propietario, no en la identidad del autor de la etiqueta, que se puede falsificar.
+- Para esta actualización, verificá que las reglas de `main` y el permiso `contents: write`
+  del publicador permitan el push directo del commit de metadatos, y que el job de comentarios
+  pueda escribir con `pull-requests: write`. En GitHub, comprobá que el bot actualice un único
+  comentario en una PR elegible, que `main` refleje la última estable tras el push y que ese push
+  con `GITHUB_TOKEN` no inicie otra ejecución de Release.
 - Hasta entonces, el release manual descrito más arriba sigue siendo la vía vigente.
 
 ## Configuración
@@ -459,7 +494,8 @@ se escribe hasta **Guardar y salir**) o a mano. Esquema:
         "explore": "proveedor/modelo-exploracion",
         "general": "proveedor/modelo-general#high"
       },
-      "answers": { "mode": "automatic", "summary": "medium" }
+      "answers": { "mode": "automatic", "summary": "medium" },
+      "context": { "notice": true, "checkpoint": true, "noticeThreshold": 70 }
     }
   }
 }
@@ -471,12 +507,23 @@ se escribe hasta **Guardar y salir**) o a mano. Esquema:
 | `profiles.<nombre>.subagentModels.explore` / `.general` | `proveedor/modelo[#variante]`, solo para llamadas nuevas desde `mdd-orchestrator` | OpenCode resuelve el modelo de forma nativa |
 | `profiles.<nombre>.answers.mode` | `automatic` (avanza sin preguntar) o `interactive` (pregunta antes de cada actor) | El orquestador lo pregunta una vez por ejecución |
 | `profiles.<nombre>.answers.summary` | `low`, `medium` o `detailed` | `medium` |
+| `profiles.<nombre>.context.notice` | `true` o `false`: aviso al llegar al umbral | `true` |
+| `profiles.<nombre>.context.checkpoint` | `true` o `false`: punto de control al compactar | `true` |
+| `profiles.<nombre>.context.noticeThreshold` | Entero de 10 a 95: porcentaje del límite de contexto | `70` |
 
 **Roles con modelo configurable (14):** `orchestrator`, `mdd-explore`, `mdd-risk`, `mdd-plan`,
 `mdd-propose`, `mdd-spec`, `mdd-design`, `mdd-tasks`, `mdd-apply`, `mdd-verify`, `mdd-security`,
 `mdd-jd-judge-a`, `mdd-jd-judge-b` y `mdd-jd-fix`.
 
 Perfiles desde la terminal: `mdd-ai profile list | create <nombre> | use <nombre>`.
+
+### Aviso de contexto y punto de control
+
+En `mdd-ai config` → **Contexto**, podés cambiar el umbral del aviso o apagar cada función por
+separado para el perfil activo. Si apagás el aviso, el orquestador no recibe el mensaje al llegar
+al umbral. Si apagás el punto de control, MDD no agrega el ID ni el `## Now` al material del
+resumen. OpenCode compacta igual: con un umbral de 85% o más, el aviso puede llegar tarde.
+Guardá los cambios y reiniciá OpenCode para aplicarlos.
 
 ### Modelos de subagentes nativos
 
@@ -500,7 +547,7 @@ en el log de OpenCode; `mdd-ai doctor` dice qué corregir.
 
 Context7, Engram y CodeGraph son opcionales: MDD funciona igual sin ellos y los agentes recurren a
 sus herramientas nativas si faltan. Se gestionan desde `mdd-ai config`, opción **Integraciones**
-(la 7; las opciones 1 a 6 no cambian). Eligís acciones y quedan en una cola; no pasa nada hasta
+(la 8; las opciones 1 a 7 no cambian). Eligís acciones y quedan en una cola; no pasa nada hasta
 **Guardar**, la **revisión** de cada cambio (archivo, comando y efectos) y la confirmación final. Si
 cancelás, volvés atrás o se cierra la entrada, no se descarga, escribe ni ejecuta nada.
 

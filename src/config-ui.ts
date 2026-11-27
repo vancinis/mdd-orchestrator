@@ -1,4 +1,4 @@
-import { defaultSettings, MODEL_ROLES, NATIVE_SUBAGENTS, parseModel, parseSettings, profileName } from './settings.js';
+import { CONTEXT_DEFAULTS, contextSettings, defaultSettings, MODEL_ROLES, NATIVE_SUBAGENTS, parseContext, parseModel, parseSettings, profileName } from './settings.js';
 import type { ModelRole, NativeSubagent, Mode, Preferences, Summary } from './settings.js';
 import { loadGlobalSettings, saveGlobalSettings } from './global-settings.js';
 import { installationPaths } from './installation-paths.js';
@@ -32,6 +32,7 @@ const MENU: readonly Choice[] = [
   { value: 'guardar', label: 'Guardar y salir', hint: 'Escribe los cambios y cierra' },
   { value: 'cancelar', label: 'Cancelar', hint: 'Sale sin escribir nada' },
   { value: 'subagentes', label: 'Subagentes nativos', hint: 'Modelos de explore y general solo desde mdd-orchestrator' },
+  { value: 'contexto', label: 'Contexto', hint: 'Aviso de contexto y punto de control al compactar' },
   { value: 'integraciones', label: 'Integraciones', hint: 'Context7, Engram y CodeGraph opcionales; nada se aplica sin revisión' },
 ];
 const PROFILE_MENU: readonly Choice[] = [
@@ -45,6 +46,7 @@ const label = (choices: readonly Choice[], value: string | undefined) => choices
 function overview(draft: Settings): string {
   const profile = draft.profiles[draft.activeProfile]!;
   const models = MODEL_ROLES.filter(role => profile.models[role]).length;
+  const context = contextSettings(profile);
   return `${heading('MDD \u00b7 Configuración global')}${rows([
     ['Archivo', installationPaths().settingsPath],
     ['Perfil activo', `${draft.activeProfile}  (${Object.keys(draft.profiles).length} en total)`],
@@ -52,6 +54,7 @@ function overview(draft: Settings): string {
     ['Subagentes nativos', NATIVE_SUBAGENTS.map(agent => `${agent}: ${profile.subagentModels?.[agent] ?? 'sin fijar'}`).join('; ')],
     ['Modo', label(MODE_CHOICES, profile.answers.mode)],
     ['Detalle', label(SUMMARY_CHOICES, profile.answers.summary)],
+    ['Contexto', `aviso ${context.notice ? `activado al ${context.noticeThreshold}%` : 'desactivado'}; punto de control ${context.checkpoint ? 'activado' : 'desactivado'}`],
   ])}${note('Nada se escribe hasta elegir «Guardar y salir».')}`;
 }
 
@@ -140,9 +143,38 @@ async function editPreferences(io: ConfigIO, profile: Settings['profiles'][strin
   profile.answers = answers;
 }
 
+async function editContext(io: ConfigIO, profile: Settings['profiles'][string]): Promise<void> {
+  const context = { ...profile.context };
+  const current = contextSettings(profile);
+  const fallback = CONTEXT_DEFAULTS.noticeThreshold;
+  const notice = await choose(io, 'Aviso de contexto  (1/3)', [
+    { value: 'on', label: 'Activado', hint: 'Avisa al orquestador al llegar al umbral (por defecto)' },
+    { value: 'off', label: 'Desactivado', hint: 'No envía el aviso; OpenCode compacta igual' },
+  ], { initial: current.notice ? 0 : 1 });
+  if (notice === 'off') context.notice = false;
+  else {
+    delete context.notice;
+    const input = await ask(io, 'Umbral del aviso (%)  (2/3)',
+      `actual: ${current.noticeThreshold}  ·  entero de 10 a 95  ·  Enter mantiene  ·  «-» vuelve a ${fallback}`);
+    if (input) {
+      const threshold = input === UNSET ? fallback : /^\d+$/.test(input) ? Number(input) : NaN;
+      parseContext({ noticeThreshold: threshold });
+      context.noticeThreshold = threshold;
+      if (threshold >= 85) io.write(note('OpenCode compacta cerca del 85%: un umbral de 85 o más puede llegar tarde.'));
+    }
+  }
+  const checkpoint = await choose(io, 'Punto de control al compactar  (3/3)', [
+    { value: 'on', label: 'Activado', hint: 'Agrega el ID y el `## Now` de la ejecución activa al resumen (por defecto)' },
+    { value: 'off', label: 'Desactivado', hint: 'No agrega nada al resumen de OpenCode' },
+  ], { initial: current.checkpoint ? 0 : 1 });
+  if (checkpoint === 'on') delete context.checkpoint; else context.checkpoint = false;
+  if (context.noticeThreshold === fallback) delete context.noticeThreshold;
+  if (Object.keys(context).length) profile.context = context; else delete profile.context;
+}
+
 /** Injected line input and catalog allow deterministic tests; all edits remain drafts until Save. */
 export async function runConfigUI(root: string, io: ConfigIO, dependencies: { models?: () => ModelCatalog; variants?: (provider: string) => VariantCatalog; integrations?: IntegrationsOptions } = {}): Promise<'saved' | 'cancelled'> {
-  // Integrations stay a lazy, in-memory queue: the engine is loaded only when menu 7 is opened.
+  // Integrations stay a lazy, in-memory queue: the engine is loaded only when menu 8 is opened.
   const integrations = createIntegrationsSession(dependencies.integrations);
   // The catalog and its variants are read lazily, only when the models menu is opened.
   const catalog = dependencies.models ?? (() => listModels());
@@ -174,6 +206,7 @@ export async function runConfigUI(root: string, io: ConfigIO, dependencies: { mo
         } else if (action === 'modelos') await editModels(io, profile, catalog, variantsOf);
         else if (action === 'subagentes') await editModels(io, profile, catalog, variantsOf, true);
         else if (action === 'preferencias') await editPreferences(io, profile);
+        else if (action === 'contexto') await editContext(io, profile);
         else if (action === 'integraciones') await integrations.browse(io);
         else if (action === 'guardar') {
           if (integrations.pending() && await integrations.review(io) === 'back') continue;

@@ -67,6 +67,15 @@
           },
           "additionalProperties": false
         },
+        "context": {
+          "type": "object",
+          "properties": {
+            "notice": { "type": "boolean", "default": true },
+            "checkpoint": { "type": "boolean", "default": true },
+            "noticeThreshold": { "type": "integer", "minimum": 10, "maximum": 95, "default": 70 }
+          },
+          "additionalProperties": false
+        },
         "answers": {
           "type": "object",
           "description": "Orchestrator preferences. Unset mode is asked once per run; unset summary means medium.",

@@ -50,6 +50,7 @@ caché y recuperación: [docs/installation.md](docs/installation.md#elegir-y-cam
 | "Agregá validación de email al registro" | Abre una ejecución, elige el nivel y delega en los actores. |
 | "Quiero un módulo de facturación; preguntame todo antes" | Sesión de preguntas por rondas (`mdd-grill`) y después la ejecución. |
 | "Seguí con lo de facturación" | Busca la ejecución en `.mdd/runs/`, te dice dónde quedó y continúa. |
+| "Versioná las ejecuciones" | Cambia `.mdd/.gitignore` a la plantilla compartida para que las ejecuciones viajen con git. No hace commit. |
 | "Hagamos una revisión de seguridad" | Lanza `mdd-security` (solo lectura) sobre el cambio. |
 | "Run judgment-day on `<base>`..`<target>`" | Dos jueces ciegos revisan los commits; correcciones solo con tu permiso. |
 | "Armá el cuerpo del PR" | Lo redacta en español desde la ejecución o el diff. No publica nada. |
@@ -69,26 +70,75 @@ El orquestador decide el **nivel** según el pedido, y podés pedirle otro:
 - **Modo automático:** avanza de actor en actor y solo pregunta decisiones que son tuyas.
 - **Modo interactivo:** pregunta antes de cada actor (`Continuar`, `Ajustar`, `Pausar`).
 - **Verify** compara el resultado con cada criterio de aceptación y cada paso del plan, no solo
-  con el código de salida de los tests. Si falla, en modo automático hace hasta dos rondas de
-  corrección; después decidís vos.
+  con el código de salida de los tests. También intenta romper el cambio con sus propias pruebas
+  (casos negativos, de borde y entradas inválidas), lo compara con el estado anterior y separa los
+  bloqueantes de las advertencias. Si hay bloqueantes, en modo automático hace hasta dos rondas de
+  corrección; después decidís vos. Las advertencias quedan como límites.
+- **Apply** escribe primero la prueba que falla cuando corrige un error o agrega comportamiento
+  que se puede probar, y muestra que lo que ya existía y comparte el código tocado sigue igual.
+  No hay una regla de una prueba por requisito: se agrega solo la que prueba algo nuevo.
+- **Control del orquestador:** cuando un actor informa un éxito basado en checks ejecutados, el
+  orquestador vuelve a correr uno de esos checks antes de aceptarlo, y repite uno antes de cerrar
+  como `completed`; si el resultado no coincide, lo trata como un fallo.
 - **Varios `apply` en paralelo** (hasta 3) cuando las tareas no dependen entre sí y tocan archivos
-  distintos.
+  distintos. Cada `apply` recibe la lista de archivos que puede cambiar y el orquestador compara
+  su diff con esa lista antes de aceptarlo. Los que corren en paralelo no usan formateadores,
+  generadores ni instalaciones sobre todo el repositorio, y al final se corre un check de
+  integración sobre el cambio combinado.
 
 ### El archivo de ejecución
 
 Cada ejecución es un Markdown en tu proyecto:
 
 ```text
-.mdd/runs/20261102-email-validation.md      pedido, aceptación, alcance, decisiones, plan, registro, verificación
+.mdd/runs/20261102-email-validation.md      estado actual, pedido, aceptación, decisiones, plan y verificación
 .mdd/runs/20261102-email-validation/
 ├── 01-explore.md                           artefacto completo de cada actor
 ├── 02-plan.md
 ├── 03-apply-T1.md
-└── 04-verify.md
+├── 04-verify.md
+├── i2-adjust-email/                        artefactos de la segunda iteración (i2-<slug>/)
+├── evidence/                              logs de comandos, pruebas exploratorias y capturas
+└── history.md                             registro de iteraciones cerradas
 ```
 
-Cualquiera puede retomar desde ahí: otra conversación, después de reiniciar o una persona.
-`.mdd/` es local por defecto (`.mdd/.gitignore` con `*`).
+Para retomar, el orquestador lee el encabezado del archivo y `## Now`: fase, iteración, próximo
+paso, bloqueos y último estado verificado. Si aprobás un cambio de la misma funcionalidad después
+de llegar a Verify en una ejecución activa, abre la siguiente iteración; las correcciones de la
+aceptación vigente quedan en la misma y una capacidad nueva va a una ejecución vinculada. Los
+actores devuelven un `## Record` con lo que hay que registrar y verificar, sin que el orquestador
+tenga que releer cada artefacto. Las ejecuciones anteriores sin `## Now` se retoman sin migrarlas.
+
+`.mdd/` es local por defecto: `.mdd/.gitignore` empieza con `# mdd: local` y contiene `*`. Si
+querés compartir las ejecuciones por git, pedilo ("Versioná las ejecuciones"): MDD reescribe ese
+archivo con `# mdd: versioned`, que deja pasar `runs/` (los archivos de ejecución y sus
+artefactos) y `.gitignore`. `lessons.md` sigue local. MDD no hace `git add` ni commit salvo que se
+lo pidas; si un `.gitignore` de la raíz ignora `.mdd/`, te lo avisa y te pregunta antes de tocarlo.
+Para volver a local, pedilo también.
+
+Cuando Engram está disponible, el orquestador guarda en Engram una copia del archivo de ejecución
+(solo ese archivo, no los artefactos) en cada hito: después de cada actor, al cerrar una iteración
+o la ejecución, y antes de proponer una conversación nueva. Si el archivo local falta, retoma
+desde esa copia; si existe el local, ese manda. Sin Engram el trabajo sigue y queda anotado en
+los límites.
+
+### Aviso de contexto y compactación
+
+El plugin le envía al orquestador un aviso de contexto al llegar al umbral configurado (por defecto, **70%**) del límite informado
+por OpenCode. El orquestador termina el paso actual, actualiza `## Now`, intenta guardar la copia
+en Engram y te propone abrir otra conversación: `Seguí con la ejecución <id>: <próximo paso>`.
+Si no hay una ejecución activa, te propone retomar con un resumen breve y el próximo paso.
+
+Si OpenCode compacta y el plugin puede identificar la ejecución activa, agrega su ID y el
+`## Now` leído del disco al material para el resumen. La reconoce solo por las escrituras del
+orquestador en su archivo que siguen visibles en esa compactación: lo que repite un resumen
+anterior no cuenta, y sin escrituras visibles no agrega nada. Si no puede leerlo o supera el
+límite de seguridad, indica que hay que releer el archivo en vez de incluir un fragmento. El
+resumen depende del modelo: después de compactar, el orquestador vuelve al archivo en disco y
+reescribe `## Now`, lo que permite reconocer la ejecución en la próxima compactación.
+
+Podés apagar el aviso o el punto de control, o cambiar el umbral (10–95 %), en `mdd-ai config` → **Contexto**;
+se aplica al reiniciar OpenCode.
 
 ## Agentes
 
@@ -111,10 +161,17 @@ y mensajes de commit con Conventional Branch y Conventional Commits), `mdd-judgm
 si la asociás a una ejecución, queda en `.mdd/runs/<id>/artifacts/<tema>/index.html`) y
 `mdd-cleanup` (limpieza acotada).
 
+Además, el orquestador resuelve una sola vez por ejecución las skills relevantes: las que nombrás,
+las de `AGENTS.md` o `.atl/skill-registry.md` y las que tenga instaladas el host. Las anota en el
+Scope del run file (`- Skills: <ruta> (<actores>)`) y les pasa a los actores la ruta exacta de cada
+`SKILL.md`; cada actor las lee antes de empezar y reporta cuáles cargó. Las skills de las funciones
+aparte (`mdd-grill`, `mdd-pr-body`, `mdd-judgment-day`) las usa solo el orquestador.
+
 ## Contratos y herramientas
 
 MDD tiene **una sola herramienta**, `mdd_jd_inspect`, y existe porque garantiza algo que una guía
-no puede: que los jueces de Judgment Day solo vean objetos Git comprometidos. Todo lo demás son
+no puede: que los jueces de Judgment Day solo vean objetos Git comprometidos. El aviso de contexto
+y el punto de control se integran al plugin sin agregar herramientas. El flujo se guía por
 contratos en [`assets/opencode/contracts/`](assets/opencode/contracts):
 
 | Contrato | Lo lee | Define |
@@ -139,7 +196,7 @@ Referencia completa: [docs/installation.md](docs/installation.md#configuración)
 | `mdd-ai use stable \| preview \| dev \| <versión> [--checkout <ruta>] [--yes]` | Cambia de versión con respaldo previo |
 | `mdd-ai link` | Agrega `mdd-ai` al PATH de tu usuario |
 | `mdd-ai doctor` | Diagnóstico de solo lectura |
-| `mdd-ai config` | Editor de perfiles, modelos y preferencias; la opción **Integraciones** (7) agrega Context7, Engram o CodeGraph tras una revisión explícita |
+| `mdd-ai config` | Editor de perfiles, modelos y preferencias; la opción **Integraciones** (8) agrega Context7, Engram o CodeGraph tras una revisión explícita |
 | `mdd-ai profile list \| create <n> \| use <n>` | Perfiles |
 
 ## Estructura del repositorio
@@ -167,12 +224,19 @@ npm test                  # limpia dist/, compila y corre tests/*.test.mjs
 
 Las pruebas aíslan HOME, XDG y APPDATA en un directorio temporal: nunca tocan tu instalación real.
 
+Para auditar el volumen registrado por OpenCode, ejecutá `node scripts/context-audit.mjs --view all`.
+Es de solo lectura y emite agregados JSON en unidades de código UTF-16, no tokens ni ocupación
+actual del contexto.
+
 ## Limitaciones
 
 - **Sin validación end-to-end con modelos reales.** La calidad depende de cómo el modelo interprete
   los contratos; conviene probarlo con tus modelos y ajustar los contratos.
+- **El aviso depende de OpenCode.** Sin datos de uso válidos y un límite informado para el modelo,
+  MDD no estima el porcentaje. El aviso no evita la compactación ni demuestra un ahorro de tokens.
 - **La evidencia es la que reportan los agentes.** MDD no certifica que un comando se haya
-  ejecutado; Verify lo corre y lo informa.
+  ejecutado; Verify lo corre y lo informa, y el orquestador repite un check antes de aceptar un
+  éxito basado en checks o de cerrar como `completed`, lo que sigue sin ser una certificación.
 - **No hay sandbox.** Los agentes ejecutan código real bajo los permisos nativos de OpenCode.
 - **Integraciones opcionales.** Context7, Engram y CodeGraph nunca se instalan solos; los agentes
   usan herramientas nativas si faltan. Ver [Integraciones opcionales](docs/installation.md#integraciones-opcionales).

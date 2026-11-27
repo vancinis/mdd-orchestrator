@@ -210,6 +210,17 @@ test('merged actor contract preserves optional tools, UTF-8 rules and substantiv
   assert.match(damageScanText(workflowPath, workflow.replace('not a pipe', 'not a \uFFFD pipe')), DAMAGED_TEXT, 'altered workflow examples are not exempted');
 });
 
+test('the docs describe run persistence: local or versioned markers and the Engram copy', () => {
+  const contract = read('assets/opencode/contracts/run-file.md');
+  const docs = read('README.md') + '\n' + read('docs/architecture.md');
+  for (const marker of ['# mdd: local', '# mdd: versioned']) {
+    assert.ok(contract.includes(marker), `run-file.md lacks "${marker}"`);
+    assert.ok(docs.includes(marker), `README or architecture lacks "${marker}"`);
+  }
+  for (const path of ['README.md', 'docs/architecture.md']) assert.doesNotMatch(read(path), /borrá ese archivo/, `${path} still says to delete the file`);
+  assert.match(docs, /Engram/, 'README or architecture mentions Engram');
+});
+
 test('ADR 0002 and the architecture describe the setup/update dispatch of D27', () => {
   for (const path of ['docs/adr/0002-separate-version-manager.md', 'docs/architecture.md']) {
     const text = read(path).replace(/\s+/g, ' ');
@@ -218,10 +229,34 @@ test('ADR 0002 and the architecture describe the setup/update dispatch of D27', 
   }
 });
 
+test('README and architecture document run state, context recovery and the read-only audit', () => {
+  for (const path of ['README.md', 'docs/architecture.md']) {
+    const text = read(path).replace(/\s+/g, ' ');
+    for (const marker of ['`## Now`', '`## Record`', 'evidence/', 'history.md', 'node scripts/context-audit.mjs']) {
+      assert.ok(text.includes(marker), `${path}: missing ${marker}`);
+    }
+    assert.match(text, /aviso de contexto[^.]*70%/i, `${path}: context threshold`);
+    assert.match(text, /reescribe `## Now`/, `${path}: rewrite after compaction`);
+    assert.doesNotMatch(text, /(?:resumen|marca)[^.]*\b(?:conserva|mantiene|restablece) la asociación/i);
+  }
+});
+
+test('context settings and startup-only changes are documented', () => {
+  const installation = fs.readFileSync(new URL('../docs/installation.md', import.meta.url), 'utf8');
+  for (const key of ['noticeThreshold', 'context.notice', 'context.checkpoint']) assert.ok(installation.includes(key), key);
+  assert.match(installation, /reinici[áa]r OpenCode|Reiniciá OpenCode/i);
+  for (const filename of ['README.md', 'docs/architecture.md']) {
+    const text = fs.readFileSync(new URL(`../${filename}`, import.meta.url), 'utf8');
+    assert.match(text, /aviso de contexto[^.\n]*70%/i);
+    assert.match(text, /`mdd-ai config`.*\*\*Contexto\*\*/);
+  }
+});
+
 test('automatic release docs describe the real engine, the policy and the rollout state without claiming it is live', () => {
   const flat = path => read(path).replace(/\s+/g, ' ');
   const installation = flat('docs/installation.md');
   const adr = flat('docs/adr/0004-automatic-releases.md');
+  const architecture = flat('docs/architecture.md');
   const auto = read('scripts/release-auto.mjs');
 
   // The documented CLI is the real one: plan and publish, no invented subcommand.
@@ -234,17 +269,26 @@ test('automatic release docs describe the real engine, the policy and the rollou
   const publishMentions = read('docs/installation.md').match(/release-auto\.mjs publish/g) ?? [];
   assert.equal(publishMentions.length, 1, 'publish is shown exactly once');
   assert.doesNotMatch(read('docs/installation.md'), /```[^`]*release-auto\.mjs publish[^`]*```/);
+  const commentMentions = read('docs/installation.md').match(/node scripts\/release-comment\.mjs/g) ?? [];
+  assert.equal(commentMentions.length, 1, 'comment is shown exactly once');
+  assert.doesNotMatch(read('docs/installation.md'), /```[^`]*node scripts\/release-comment\.mjs[^`]*```/);
   assert.match(installation, /workflow_dispatch/);
   assert.match(installation, /No lo uses para pruebas locales/);
 
   // Policy and behavior.
   for (const text of [
     'lista para revisión', 'mismo repositorio', 'reabrirla', 'base `main`', 'major', 'minor', 'patch', 'docs', 'chore',
-    'merge commit o squash', 'rebase deshabilitada', 'anotada', 'inmutables', 'nunca se mueve ni se borra', 'No se hace push a ninguna rama', 'orden de fuente',
+    'merge commit o squash', 'rebase deshabilitada', 'anotada', 'inmutables', 'nunca se mueve ni se borra', 'orden de fuente',
     'cierran en falso', 'release-skip/<sha-completo>', 'Solo el propietario', 'git tag -n', 'git for-each-ref', 'mdd-ai use v0.5.0',
-    'global', 'v0.4.0-preview.1', 'desactualizados', 'solo lectura', 'no ejecuta nada del candidato', 'stable** y para **preview',
+    'global', 'v0.4.0-preview.1', 'pull-requests: write', 'base común', 'estable estimada', 'solo lectura', 'no ejecuta nada del candidato', 'stable** y para **preview',
     'La primera PR que agrega la automatización no tiene preview', 'externa y posterior',
   ]) assert.ok(installation.includes(text), `installation.md lacks "${text}"`);
+  for (const [name, text] of [['installation.md', installation], ['ADR 0004', adr], ['architecture.md', architecture]]) {
+    assert.match(text, /`chore\(release\): v<versión>`/, `${name}: metadata sync commit`);
+    assert.match(text, /actualiza ese mismo comentario/, `${name}: sticky PR comment`);
+  }
+  assert.match(installation, /con `GITHUB_TOKEN` no dispara otro workflow por `push`/);
+  assert.match(installation, /conflictos al editar el comienzo de `CHANGELOG\.md`/);
   // The manual fallback keeps its documented no-push flags.
   for (const text of ['Nunca hace push', '--dry-run', '--yes', '--bootstrap', 'acumulativo']) assert.ok(installation.includes(text), `installation.md lacks "${text}"`);
 
@@ -298,7 +342,7 @@ test('automatic release docs describe the real engine, the policy and the rollou
   assert.match(flat('docs/architecture.md'), /Se activa únicamente tras fusionarlo/);
 
   // ADR 0004 and the pointer from ADR 0001.
-  for (const text of ['**Contexto.**', '**Decisión.**', '**Por qué.**', 'etiquetas anotadas', 'no hace push a ninguna rama', 'solo lectura', 'release-skip/<sha>', 'no afirma que ya esté desplegado']) {
+  for (const text of ['**Contexto.**', '**Decisión.**', '**Por qué.**', 'Enmienda (2026-11-24)', 'etiquetas anotadas', 'refs/heads/main', 'solo lectura', 'release-skip/<sha>', 'no afirma que ya esté desplegado']) {
     assert.ok(adr.includes(text), `ADR 0004 lacks "${text}"`);
   }
   assert.ok(read('docs/adr/0001-git-tags-and-owned-clone.md').includes('(0004-automatic-releases.md)'), 'ADR 0001 lacks the pointer to ADR 0004');

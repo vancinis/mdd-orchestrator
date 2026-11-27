@@ -21,8 +21,13 @@ seam or constraint is unknown, name the gap instead of inventing an interface.
 
 Choose the smallest maintainable solution, not the fewest lines or modules: preserve required
 security, data integrity, compatibility and recovery behavior. Select test seams for those
-observable guarantees, not incidental code shape. Keep this reasoning in the design, not a new
-report or mandatory scoring checklist.
+observable guarantees, not incidental code shape. For each guarantee, name the cheapest faithful
+test layer: focused tests over controlled dependencies (in-memory stores, stub transports, a
+controllable clock when timing logic is the subject) for rule variants, errors, boundaries and
+preserved behavior, and a real subprocess, CLI, persistence, crash or transport test where the
+guarantee depends on that boundary, including any variant only that boundary can show. Prefer seams
+the code already has. Keep this reasoning in the design, not a new report or mandatory scoring
+checklist.
 
 Check every requirement against the design. If no design within the scope can satisfy one, report
 `failed` with the requirement and the reason, so the user can revise it before implementation.

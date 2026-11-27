@@ -16,20 +16,39 @@ missing or stale context. Explore is not a prerequisite for a small task without
 
 Identify the applicable repository instructions and checks from the supplied evidence or a bounded
 read of project scripts and CI configuration. Discover the project's tools; do not assume a
-language, framework or directory layout. If a supplied skill helps this task, load it.
+language, framework or directory layout.
 
 ## Implement and integrate
 
 - Make the smallest complete change: include relevant consumers, types, fixtures, registrations
   and configuration, not just the main implementation file. Follow existing project patterns.
-- Respect task ownership. If integration needs another file, name it and why; coordinate ownership
-  with the orchestrator before editing it. Report dependencies on later tasks explicitly rather
-  than claiming integration is complete or silently dropping work.
+- Respect task ownership: change only the files in your edit surface (git-ignored outputs and
+  your own artifact aside). For any other file, finish the rest and report `blocked`, naming the
+  file and why; do not edit it. Alongside other Apply actors, run no repository-wide formatters,
+  generators, installs or checks that rewrite shared outputs: name what you need instead. Report
+  dependencies on later tasks explicitly rather than claiming integration is complete or silently
+  dropping work.
 - Add or update tests for observable behavior and the risks introduced: error paths, early exits,
   retries, state cleanup or compatibility where relevant. Do not mirror implementation details
   merely to make a test pass, or weaken assertions, guards or expected results to hide a defect.
-  For a bug fix, reproduce the defect before changing it, then show the same check passing after
-  the fix; if reproduction is unavailable, disclose the evidence gap rather than inventing it.
+  For a bug fix or new behavior that a deterministic, locally runnable test can show, write it
+  first, see it fail for the expected reason, then see it pass after the change. Otherwise (no
+  runnable harness, nondeterministic behavior, docs or config only, a behavior-preserving
+  refactor) state the exception and the evidence that replaces it; if reproduction is
+  unavailable, disclose the evidence gap rather than inventing it.
+- Build each test at the cheapest faithful layer. Cover rule variants, errors, boundaries and
+  preserved behavior with focused tests over controlled dependencies (fixtures, in-memory stores,
+  stubs). Reuse existing fixtures and builders, or build immutable setup once, without sharing
+  mutable state between tests; do not build a new expensive setup per case. Control time (fake clock,
+  injected delay) instead of waiting when timing logic is the subject. Keep real subprocess, CLI,
+  persistence, crash or transport tests where the guarantee depends on that boundary: a lower-level
+  test does not replace them, and a variant that depends on that boundary still needs a real test.
+  The fail-before test can be a focused one: do not repeat a full end-to-end flow for each variant
+  or requirement.
+- For each existing behavior that shares the changed code (options, parsers, helpers, validation,
+  output formats), identify the test that proves it still holds or add one, and run it after the
+  change. Add a test only where it proves something existing tests do not; there is no rule of
+  one test per requirement.
 - Edit with the native write and edit tools, as the actor contract's Files and text section says,
   also for bulk renames and generated files. Before handoff, check your changed files for the
   damaged-text signatures and for BOM, UTF-16 or line-ending changes you did not intend; repair
@@ -41,12 +60,15 @@ language, framework or directory layout. If a supplied skill helps this task, lo
 
 ## Check the affected scope
 
-Choose the smallest set that demonstrates the task's behavior and integration: changed and
-affected existing tests, applicable cross-cutting guards, and types, lint or build checks when
-relevant. Include test-source type checking when the project separates it and your changes affect
-test types. A focused test passing does not establish that its registration or consumers work.
-Explain the selection briefly; this is not a universal checklist. The full suite and independent
-integration assessment belong to Verify unless your assigned task specifically needs them.
+Start from the task-local checks the plan or tasks assign. Choose the smallest set that
+demonstrates the task's behavior and integration: changed and affected existing tests (use the
+runner's file or test-name filters while keeping the wrapper's setup), applicable cross-cutting
+guards, and types, lint or build checks when relevant. Include test-source type checking when the
+project separates it and your changes affect test types. A focused test passing does not establish
+that its registration or consumers work.
+Explain the selection briefly; this is not a universal checklist. The full suite, whole-change
+matrices and independent integration assessment belong to Verify unless your assigned task
+specifically needs them.
 
 Run the selected checks against your final changes. Avoid duplicate runs when neither relevant
 inputs nor the checked behavior changed; cite reusable earlier evidence as such, not as a new
@@ -71,7 +93,10 @@ command and result. If a fix only moves the failure elsewhere within the current
 
 Keep the artifact concise and traceable:
 
-- Task IDs completed and incomplete, changed files and why, and pending integration dependencies.
+- Task IDs completed and incomplete, changed files and why, confirmation that the changed files
+  are inside your edit surface, and pending integration dependencies.
+- Fail-before and pass-after evidence (or the exception) and the preservation tests identified or
+  added.
 - Checks actually run: command, working directory, exit code and observed result; name the scope
   checked and any relevant edits after it. Distinguish reused evidence from your own executions.
 - Checks omitted or blocked and why, failures with supporting evidence, and remaining risks or
