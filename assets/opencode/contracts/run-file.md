@@ -177,7 +177,11 @@ updated: 2026-11-02
   Show where it stopped; after the user confirms, write it with the native write tool, log
   "restored from Engram (observation <id>)" and list missing artifacts under Limits. If no copy
   exists, offer a new run.
-- Work continues when the memory tools are unavailable or any memory call fails
-  (save, search or fetch): one line under Limits, tell the user once, retry at the next mirror
-  point, and update or remove that Limits line when a later save succeeds. Never install or
-  start Engram.
+- **Finding the memory tools.** Hosts may expose Engram directly (`mem_save`, `engram_mem_save`)
+  or only through Code Mode: then call `execute` with `search('engram mem_save')` and use the
+  returned path (such as `tools.engram.mem_save`). Look once per conversation, before the first
+  mirror or restore; a missing name in your direct tool list does not mean Engram is unavailable.
+- Work continues when the memory tools are unavailable (not found by the lookup above) or any
+  memory call fails (save, search or fetch): one line under Limits, tell the user once, retry at
+  the next mirror point, and update or remove that Limits line when a later save succeeds. Never
+  install or start Engram.
