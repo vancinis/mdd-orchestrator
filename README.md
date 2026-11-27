@@ -50,6 +50,7 @@ caché y recuperación: [docs/installation.md](docs/installation.md#elegir-y-cam
 | "Agregá validación de email al registro" | Abre una ejecución, elige el nivel y delega en los actores. |
 | "Quiero un módulo de facturación; preguntame todo antes" | Sesión de preguntas por rondas (`mdd-grill`) y después la ejecución. |
 | "Seguí con lo de facturación" | Busca la ejecución en `.mdd/runs/`, te dice dónde quedó y continúa. |
+| `/ship` | Publica solo el cambio actual: prepara la rama y los commits, hace push, abre o actualiza el PR y atiende los fallos de checks causados por el cambio. No abre una ejecución ni hace merge. |
 | "Versioná las ejecuciones" | Cambia `.mdd/.gitignore` a la plantilla compartida para que las ejecuciones viajen con git. No hace commit. |
 | "Hagamos una revisión de seguridad" | Lanza `mdd-security` (solo lectura) sobre el cambio. |
 | "Run judgment-day on `<base>`..`<target>`" | Dos jueces ciegos revisan los commits; correcciones solo con tu permiso. |
@@ -158,14 +159,18 @@ se aplica al reiniciar OpenCode.
 Skills: `mdd-grill` (sesión de preguntas), `mdd-pr-body` (cuerpo y título del PR, nombres de rama
 y mensajes de commit con Conventional Branch y Conventional Commits), `mdd-judgment-day`
 (protocolo de los jueces), `mdd-doc` (artefactos fáciles de leer), `mdd-explain` (explicación visual en HTML, solo si la pedís;
-si la asociás a una ejecución, queda en `.mdd/runs/<id>/artifacts/<tema>/index.html`) y
-`mdd-cleanup` (limpieza acotada).
+si la asociás a una ejecución, queda en `.mdd/runs/<id>/artifacts/<tema>/index.html`),
+`mdd-cleanup` (limpieza acotada) y `mdd-ship` (publicación del cambio).
+
+En OpenCode, el comando `/ship` (`commands/ship.md`) es la entrada que solo carga `mdd-ship`;
+la skill contiene el procedimiento, está oculta para el modelo y se usa solo si la pedís.
+`/ship` autoriza publicar ese cambio; pedir un borrador con `mdd-pr-body` no.
 
 Además, el orquestador resuelve una sola vez por ejecución las skills relevantes: las que nombrás,
 las de `AGENTS.md` o `.atl/skill-registry.md` y las que tenga instaladas el host. Las anota en el
 Scope del run file (`- Skills: <ruta> (<actores>)`) y les pasa a los actores la ruta exacta de cada
 `SKILL.md`; cada actor las lee antes de empezar y reporta cuáles cargó. Las skills de las funciones
-aparte (`mdd-grill`, `mdd-pr-body`, `mdd-judgment-day`) las usa solo el orquestador.
+aparte (`mdd-grill`, `mdd-pr-body`, `mdd-judgment-day`, `mdd-ship`) las usa solo el orquestador.
 
 ## Contratos y herramientas
 
@@ -206,7 +211,9 @@ Referencia completa: [docs/installation.md](docs/installation.md#configuración)
 ├── assets/opencode/
 │   ├── contracts/        guías que se insertan en los agentes
 │   ├── agents/           los 14 agentes
-│   └── skills/           mdd-grill, mdd-pr-body, mdd-judgment-day, mdd-doc, mdd-explain, mdd-cleanup
+│   ├── commands/
+│   │   └── ship.md       /ship
+│   └── skills/           mdd-grill, mdd-pr-body, mdd-judgment-day, mdd-doc, mdd-explain, mdd-cleanup, mdd-ship
 ├── src/                  plugin, instalador y CLI (TypeScript)
 ├── tests/                pruebas con node:test sobre dist/
 ├── scripts/setup.mjs     prepara el checkout y abre el asistente

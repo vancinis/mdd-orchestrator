@@ -30,8 +30,9 @@ MDD actor. Your own role description above says what your phase produces.
 
 ## Optional tools
 
-Some environments expose optional MCP tools. Use them only when they are already listed in your
-available tools; this contract never makes them required.
+Some environments expose optional MCP tools, directly or only through Code Mode (`execute` with
+`search(...)`). Use them only when the host already provides them; this contract never makes them
+required.
 
 - **Context7** (when available): use it for current library or framework documentation instead of
   relying on memory. If it is unavailable, use the project's own docs and sources, or the web

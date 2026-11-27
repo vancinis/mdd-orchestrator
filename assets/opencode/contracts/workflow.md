@@ -14,7 +14,7 @@ Nothing here can block the user's work. The host's native permission prompts are
 | Change that benefits from planning, tracking or verification, or the user asks for MDD | Start a run (section 3). |
 | "Continue", "sigue", an issue or feature already worked on | Resume or classify follow-up work (section 7). |
 | Commit, push, open a PR for finished work | Do exactly what was asked with git/gh. Not a new run. |
-| Security review, Judgment Day, PR body, explanation artifact, "anotá que…" | See section 8. |
+| Security review, Judgment Day, PR body, `/ship`, explanation artifact, "anotá que…" | See section 8. |
 
 ## 2. Choose the level
 
@@ -67,7 +67,7 @@ the request, the files and the actor's phase, and resolve them once per run, bef
 dispatch. Record them under Scope as `- Skills: <path> (<actors>)`, or `- Skills: none`; resolve
 again only when the scope changes or a recorded path is missing. Pass exact `SKILL.md` paths, not
 bare names (a bare name can resolve to another tool's skill), usually zero to three per actor.
-`mdd-grill`, `mdd-pr-body` and `mdd-judgment-day` stay with you (section 8).
+`mdd-grill`, `mdd-pr-body`, `mdd-judgment-day` and `mdd-ship` stay with you (section 8).
 
 Reuse existing exploration and task handoffs: pass their paths to Apply with known integration
 dependencies and relevant checks. Do not request another repository survey when that evidence
@@ -255,6 +255,7 @@ These never start by themselves; each needs an explicit request.
 | Question session before a run ("preguntame todo antes") | Read the installed skill `mdd-grill` and follow it. |
 | Explicit request for an explanation artifact ("generá un artefacto que explique…", "explicámelo en HTML") | Read the installed skill `mdd-explain` and follow it. It delegates to native `general`, writes one offline HTML file under `.mdd/artifacts/` or the named run's `artifacts/`, and starts no run. Ordinary questions and explanations stay as in section 1. |
 | PR body, PR title, branch name or commit message | Read the installed skill `mdd-pr-body` and follow it (Conventional Commits and Conventional Branch naming). Drafting does not authorize creating branches, committing or publishing. |
+| `/ship`, or an explicit request to ship a change (branch, commits, push, PR, green checks) | Read the installed skill `mdd-ship` and follow it. That request is the explicit authorization to commit, push and open or update the PR for that change only; it starts no run. Drafting alone (`mdd-pr-body`) still authorizes nothing. |
 | Security review ("revisión de seguridad", "usa mdd-security") | Dispatch `mdd-security` with the base and target refs (default: merge-base with the main branch to `HEAD`, plus uncommitted changes) and the scope. Present findings as given; "no findings" does not mean secure. Fixes need separate consent. |
 | Judgment Day ("judgment-day", "judgment day", "judment-day") | Read the installed skill `mdd-judgment-day` and its reference, and follow them exactly. This is the one feature with enforced isolation: the judges can only read committed Git objects through `mdd_jd_inspect`. |
 | "Versioná las ejecuciones de MDD", "volvé a dejarlas locales" | Follow Persistence in the run-file contract. Never stage or commit unless asked. |
@@ -263,8 +264,9 @@ These never start by themselves; each needs an explicit request.
 
 ### Optional tools
 
-Context7, Engram and CodeGraph are optional. Use them only if they are already in your tool list,
-and fall back to native tools and the run file when they are missing or fail.
+Context7, Engram and CodeGraph are optional. Use them only if the host already provides them,
+directly or through Code Mode (find Engram as the run-file Persistence lookup says), and fall back
+to native tools and the run file when they are missing or fail.
 
 - Context7 is for current documentation; say when a claim could not be checked against it.
 - Bare Engram gives no session identity or lifecycle: do not invent sessions or promise that

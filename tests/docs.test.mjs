@@ -221,6 +221,13 @@ test('the docs describe run persistence: local or versioned markers and the Engr
   assert.match(docs, /Engram/, 'README or architecture mentions Engram');
 });
 
+test('the run-file contract looks for Engram behind Code Mode before declaring it unavailable', () => {
+  const contract = read('assets/opencode/contracts/run-file.md').replace(/\s+/g, ' ');
+  assert.match(contract, /only through Code Mode: then call `execute` with `search\('engram mem_save'\)`/);
+  assert.match(contract, /a missing name in your direct tool list does not mean Engram is unavailable/);
+  assert.match(contract, /memory tools are unavailable \(not found by the lookup above\)/);
+});
+
 test('ADR 0002 and the architecture describe the setup/update dispatch of D27', () => {
   for (const path of ['docs/adr/0002-separate-version-manager.md', 'docs/architecture.md']) {
     const text = read(path).replace(/\s+/g, ' ');
@@ -364,4 +371,14 @@ test('user docs and AGENTS.md describe explicit mdd-explain usage and its artifa
   assert.match(architecture, /no abre una ejecución/);
   assert.match(architecture, /no la fuente de verdad/);
   assert.match(read('AGENTS.md'), /ordinary explanations stay in chat/);
+});
+
+test('user docs and AGENTS.md distinguish the /ship command from the mdd-ship skill', () => {
+  for (const path of ['README.md', 'docs/installation.md', 'docs/architecture.md', 'AGENTS.md']) {
+    assert.ok(read(path).includes('`mdd-ship`'), `${path} lacks the skill`);
+  }
+  for (const path of ['README.md', 'docs/architecture.md']) {
+    assert.ok(read(path).includes('`/ship`'), `${path} lacks the OpenCode command`);
+  }
+  assert.ok(read('docs/installation.md').includes('`commands/ship.md`'), 'installation lacks the installed path');
 });

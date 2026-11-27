@@ -126,7 +126,7 @@ function walkFiles(dir, prefix = '') {
 /** What a switch may change, minus volatile fields (timestamps, backup names, tarball digests). */
 function view(h) {
   const files = {};
-  for (const dir of ['agents', 'skills', 'plugins']) for (const [rel, digest] of Object.entries(walkFiles(join(h.root, dir)))) files[`${dir}/${rel}`] = digest;
+  for (const dir of ['agents', 'skills', 'plugins', 'commands']) for (const [rel, digest] of Object.entries(walkFiles(join(h.root, dir)))) files[`${dir}/${rel}`] = digest;
   const read = path => (existsSync(path) ? sha(readFileSync(path)) : 'absent');
   const { active } = readState(h.vp);
   return {
