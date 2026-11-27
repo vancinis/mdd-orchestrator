@@ -4,6 +4,13 @@ Las versiones de MDD se publican como etiquetas Git `v<versión>`. Las entradas 
 `npm run release -- <versión>` a partir de Conventional Commits; no las edites a mano dentro de un
 commit de release. Más información en [docs/installation.md](docs/installation.md#versiones-y-releases-mantenimiento).
 
+## [0.9.0] - 2026-11-27
+
+Estable · cambios desde `v0.8.0` (intervalo `v0.8.0..7616120`, 1 commits).
+
+### Funcionalidades
+- **skills:** add mdd-ship skill and /ship command (`a4d95a6`)
+
 ## [0.8.0] - 2026-11-27
 
 Estable · cambios desde `v0.7.0` (intervalo `v0.7.0..6854b6c`, 3 commits).
