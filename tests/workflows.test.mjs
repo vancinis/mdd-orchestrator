@@ -139,14 +139,14 @@ test('both workflows deny all permissions at the top level and grant them per jo
   }
   assert.deepEqual(ci.jobs.validate.permissions, { contents: 'read' });
   const { jobs } = release;
-  // actions: read is read-only and only lets plan fetch this run's own record (run_number) for the fair preview window.
   assert.deepEqual(jobs.prepare.permissions, { contents: 'read', 'pull-requests': 'read', actions: 'read' });
   assert.deepEqual(jobs.validate.permissions, { contents: 'read' });
   assert.deepEqual(jobs.publish.permissions, { contents: 'write', actions: 'read', 'pull-requests': 'read' });
+  assert.deepEqual(jobs.comment?.permissions, { contents: 'read', 'pull-requests': 'write', actions: 'read' });
   assert.deepEqual(jobs.smoke.permissions, { contents: 'read' });
   assert.deepEqual(jobs.continue.permissions, { actions: 'write' });
   const writers = Object.entries(jobs).filter(([, job]) => Object.values(job.permissions).includes('write')).map(([name]) => name);
-  assert.deepEqual(writers, ['publish', 'continue'], 'only publish (contents) and continue (actions) can write');
+  assert.deepEqual(writers, ['publish', 'comment', 'continue'], 'only publish (contents), comment (pull requests) and continue (actions) can write');
 });
 
 test('CI gives PR feedback for every relevant event, drafts included, and publishes nothing', () => {
@@ -182,11 +182,14 @@ test('Release wakes on push to main, finished CI, dispatch and an hourly schedul
 
 test('job graph, identities and the trusted branch and repository guard', () => {
   const { jobs } = release;
-  assert.deepEqual(Object.keys(jobs), ['prepare', 'validate', 'publish', 'smoke', 'continue']);
+  assert.deepEqual(Object.keys(jobs), ['prepare', 'validate', 'publish', 'comment', 'smoke', 'continue']);
   assert.equal(compact(jobs.prepare.if), REPOSITORY_GUARD);
   assert.equal(jobs.prepare.needs, undefined);
   assert.deepEqual(jobs.validate.needs, ['prepare']);
   assert.deepEqual(jobs.publish.needs, ['prepare', 'validate']);
+  assert.deepEqual(jobs.comment.needs, ['prepare', 'publish']);
+  assert.equal(jobs.comment.name, 'comment');
+  assert.equal(jobs.comment['timeout-minutes'], 10);
   assert.deepEqual(jobs.smoke.needs, ['prepare', 'publish']);
   assert.deepEqual(jobs.continue.needs, ['prepare', 'publish']);
   // The authorization name is exactly `validate <40-hex sha>` per leg, and each leg is isolated.
@@ -229,11 +232,11 @@ test('plan and publish derive the preview window from the runner-provided run id
   assert.doesNotMatch(releaseText, /run_number|RUN_ID:|RUN_ATTEMPT:|RUN_NUMBER/, 'no workflow expression can feed the rotation');
   // Read access to Actions is the only extra the planner gets; it cannot write or dispatch anything.
   const readers = Object.entries(jobs).filter(([, job]) => job.permissions.actions === 'read').map(([name]) => name);
-  assert.deepEqual(readers, ['prepare', 'publish']);
+  assert.deepEqual(readers, ['prepare', 'publish', 'comment']);
   assert.ok(!Object.values(jobs.prepare.permissions).includes('write'));
 });
 
-test('conditional status paths: empty matrices skip, publish runs after any validate result, smoke follows publication', () => {
+test('conditional status paths: empty matrices skip; publish, comment and smoke tolerate upstream failure', () => {
   const { jobs } = release;
   // validate: only with work from a successful prepare, so an empty matrix is never evaluated.
   const validate = (prepareOk, hasWork) => evaluate(jobs.validate.if, { "needs.prepare.result == 'success'": prepareOk, "needs.prepare.outputs.has_work == 'true'": hasWork });
@@ -247,6 +250,13 @@ test('conditional status paths: empty matrices skip, publish runs after any vali
   assert.equal(publish(false, true), true);
   assert.equal(publish(true, true), false);
   assert.equal(publish(false, false), false);
+  // A partial publish failure still allows reconciliation; no publish status or outputs gate it.
+  assert.equal(compact(jobs.comment?.if), "${{ !cancelled() && needs.prepare.result == 'success' }}");
+  const comment = (cancelled, prepareOk) => evaluate(jobs.comment.if, { 'cancelled()': cancelled, "needs.prepare.result == 'success'": prepareOk });
+  assert.equal(comment(false, true), true);
+  assert.equal(comment(true, true), false);
+  assert.equal(comment(false, false), false);
+  assert.equal(jobs.comment['continue-on-error'], true, 'even a global comment failure does not fail Release');
   // smoke: runs even when publish exits 1, as long as tags were already published; empty or missing counts skip.
   assert.doesNotMatch(String(jobs.smoke.if), /needs\.publish\.result/);
   const smoke = (cancelled, count) => evaluate(jobs.smoke.if, {
@@ -280,7 +290,7 @@ test('conditional status paths: empty matrices skip, publish runs after any vali
 
 test('trusted scripts come from one immutable default-branch revision, never from PR source', () => {
   const { jobs } = release;
-  for (const name of ['prepare', 'publish', 'smoke']) {
+  for (const name of ['prepare', 'publish', 'comment', 'smoke']) {
     const [checkout, ...others] = checkouts(jobs[name]);
     assert.equal(others.length, 0, `${name} checks out once`);
     assert.equal(checkout.with.ref, TRUSTED_REF, `${name} uses the single trusted revision`);
@@ -293,19 +303,26 @@ test('trusted scripts come from one immutable default-branch revision, never fro
   const [candidate] = checkouts(jobs.validate);
   assert.equal(candidate.with.ref, '${{ matrix.source }}');
   assert.equal(candidate.with['persist-credentials'], false);
-  for (const name of ['prepare', 'smoke']) assert.equal(checkouts(jobs[name])[0].with['persist-credentials'], false, name);
+  for (const name of ['prepare', 'comment', 'smoke']) assert.equal(checkouts(jobs[name])[0].with['persist-credentials'], false, name);
   // Only publish keeps a credential, and only after checking out the trusted revision it then runs.
   assert.equal(checkouts(jobs.publish)[0].with['persist-credentials'], true);
   assert.equal(jobs.continue.steps.filter(step => step.uses).length, 0, 'continue checks out nothing');
 });
 
-test('publish is data-only: no npm, no candidate code, no artifacts, no secrets beyond the job token', () => {
-  const publish = release.jobs.publish;
-  assert.deepEqual(runs(publish), ['node scripts/release-auto.mjs publish']);
-  const serialized = JSON.stringify(publish).replaceAll('package-manager-cache', '');
-  assert.doesNotMatch(serialized, /npm|npx|yarn|pnpm|artifact|cache|\$\{\{ matrix|secrets\./);
-  assert.deepEqual(uses(publish).map(step => step.uses.split('@')[0]), ['actions/checkout', 'actions/setup-node']);
-  assert.equal(publish.steps.find(step => step.uses.startsWith('actions/setup-node')).with['package-manager-cache'], false);
+test('publish and comment are data-only: no npm, candidate code, artifacts or secrets beyond the job token', () => {
+  for (const [name, command] of [['publish', 'node scripts/release-auto.mjs publish'], ['comment', 'node scripts/release-comment.mjs']]) {
+    const job = release.jobs[name];
+    assert.ok(job, `${name} job exists`);
+    assert.deepEqual(runs(job), [command]);
+    const serialized = JSON.stringify(job).replaceAll('package-manager-cache', '');
+    assert.doesNotMatch(serialized, /npm|npx|yarn|pnpm|artifact|cache|\$\{\{ matrix|secrets\./);
+    assert.deepEqual(uses(job).map(step => step.uses.split('@')[0]), ['actions/checkout', 'actions/setup-node']);
+    assert.equal(job.steps.find(step => step.uses.startsWith('actions/setup-node')).with['package-manager-cache'], false);
+  }
+  const { comment } = release.jobs;
+  assert.equal(comment.env, undefined);
+  assert.doesNotMatch(JSON.stringify(comment), /needs\.\w+\.outputs/);
+  assert.deepEqual(comment.steps.map(step => step.env), [undefined, undefined, { GITHUB_TOKEN: '${{ github.token }}' }]);
   // Same for prepare and continue: no install step can run package scripts with a token.
   for (const name of ['prepare', 'continue']) assert.doesNotMatch(runs(release.jobs[name]).join('\n'), /\bnpm\b|\bnpx\b/);
 });
@@ -345,7 +362,7 @@ test('continue only redispatches Release on main and never writes contents', () 
   assert.doesNotMatch(String(release.jobs.continue.if), /schedule|workflow_run|github\.event/);
 });
 
-test('trust boundary: no pull_request_target, cache, artifacts, secrets, self-hosted runners or branch writes', () => {
+test('trust boundary: no pull_request_target, cache, artifacts, secrets, self-hosted runners or inline write commands', () => {
   for (const [text, workflow] of [[ciText, ci], [releaseText, release]]) {
     assert.doesNotMatch(text, /pull_request_target/);
     assert.doesNotMatch(text, /actions\/cache|actions\/(upload|download)-artifact|(^|\s)cache:|cache-dependency-path|restore-keys/m);
@@ -362,8 +379,10 @@ test('trust boundary: no pull_request_target, cache, artifacts, secrets, self-ho
   for (const workflow of [ci, release]) {
     for (const step of allSteps(workflow).filter(item => typeof item.run === 'string')) assert.doesNotMatch(step.run, /\$\{\{/, step.run);
   }
-  // Only the trusted Release scripts perform Git writes, and only through the engine.
-  assert.equal(Object.values(release.jobs).flatMap(runs).filter(run => /release-auto\.mjs/.test(run)).length, 2);
+  // Git writes (including main metadata sync) stay in the release engine; PR comments use a separate CLI.
+  const commands = Object.values(release.jobs).flatMap(runs);
+  assert.equal(commands.filter(run => /release-auto\.mjs/.test(run)).length, 2);
+  assert.equal(commands.filter(run => /release-comment\.mjs/.test(run)).length, 1);
 });
 
 test('every action is pinned to a full verified upstream commit SHA', () => {
