@@ -216,10 +216,10 @@ function assetPathOk(path: string): string {
   return path;
 }
 
-/** Managed removals are limited to the names MDD ever installs; anything else in a ledger fails closed. */
+/** Managed removals fail closed outside this allow-list; the only managed command is commands/ship.md. */
 function managedPath(path: string): boolean {
   return /^agents\/mdd-[A-Za-z0-9._-]+\.md$/.test(path) || /^skills\/mdd-[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)+$/.test(path)
-    || path === 'plugins/mdd.ts' || path === 'mdd/.gitignore';
+    || path === 'plugins/mdd.ts' || path === 'mdd/.gitignore' || path === 'commands/ship.md';
 }
 
 // ---------------------------------------------------------------- types

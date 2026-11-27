@@ -22,6 +22,8 @@ test('R06: pack failures report bounded subprocess metadata', () => {
   });
 });
 
+const SHIP = ['skills/mdd-ship/SKILL.md', 'commands/ship.md'];
+
 test('package dry-run includes runnable build and exact owned assets without private runtime data', () => {
   const started = performance.now();
   const output = spawnSync(process.platform === 'win32' ? 'cmd.exe' : 'npm', process.platform === 'win32' ? ['/d', '/s', '/c', 'npm pack --dry-run --json --ignore-scripts'] : ['pack', '--dry-run', '--json', '--ignore-scripts'], {
@@ -40,6 +42,10 @@ test('package dry-run includes runnable build and exact owned assets without pri
   }
   for (const suffix of ['SKILL.md', 'assets/template.html', 'references/authoring.md']) {
     const file = `assets/opencode/skills/mdd-explain/${suffix}`;
+    assert.ok(MDD_ASSETS.includes(file), file); assert.ok(files.includes(file), file);
+  }
+  for (const name of SHIP) {
+    const file = `assets/opencode/${name}`;
     assert.ok(MDD_ASSETS.includes(file), file); assert.ok(files.includes(file), file);
   }
   const setupScripts = ['scripts/setup.mjs'];
@@ -77,6 +83,7 @@ test('probe contract: assets and packaged operations expose the managed set from
   const expected = MDD_ASSETS.map(name => installedName(name));
   assert.deepEqual(assets.slice(0, expected.length).map(file => file.path), expected);
   assert.deepEqual(assets.slice(expected.length).map(file => file.path), [LOADER_PATH, PRIVATE_IGNORE_PATH]);
+  for (const name of SHIP) assert.ok(assets.some(file => file.path === name), name);
   for (const name of MDD_ASSETS) assert.equal(assets.find(file => file.path === installedName(name)).content, installedAsset(root, name).content);
   assert.ok(assets.every(file => typeof file.content === 'string') && !assets.some(file => file.path === 'cli.json'));
   assert.doesNotMatch(assets.find(file => file.path.startsWith('agents/')).content, /mdd:include/);

@@ -38,13 +38,14 @@ function patched(text, from, to) {
 }
 
 /** The repository's compiled probe-contract modules and real assets, as plain files (the shared fixture's own copy is overwritten). */
-function realFiles(version, { dropCleanup = false, extraSkill = false, acceptX = false, manager = 0, agent = true } = {}) {
+function realFiles(version, { dropCleanup = false, dropShip = false, extraSkill = false, acceptX = false, manager = 0, agent = true } = {}) {
   const files = { '.gitignore': '/dist\n/node_modules\n' };
   for (const name of ['project-assets', 'settings', 'setup', 'safe-paths', 'local-files', 'validation']) files[`vendor/dist/${name}.js`] = read('dist', `${name}.js`);
   for (const [rel, text] of Object.entries(walkText(join(REPO_ROOT, 'assets', 'opencode')))) files[`assets/opencode/${rel}`] = text;
   if (agent) files['assets/opencode/agents/mdd-apply.md'] = `# apply ${version}\n`;
   let list = files['vendor/dist/project-assets.js'];
   if (dropCleanup) list = patched(list, "'assets/opencode/skills/mdd-cleanup/SKILL.md', ", '');
+  if (dropShip) list = patched(list, "'assets/opencode/commands/ship.md',", '');
   if (extraSkill) {
     list = patched(list, "'assets/opencode/skills/mdd-grill/NOTICE',", "'assets/opencode/skills/mdd-grill/NOTICE', 'assets/opencode/skills/mdd-extra/SKILL.md',");
     files['assets/opencode/skills/mdd-extra/SKILL.md'] = `# extra ${version}\n`;
@@ -60,7 +61,7 @@ function realFiles(version, { dropCleanup = false, extraSkill = false, acceptX =
 
 const SPECS = {
   v020: { version: '0.2.0', files: realFiles('0.2.0') },
-  v030: { version: '0.3.0', files: realFiles('0.3.0', { dropCleanup: true }) },
+  v030: { version: '0.3.0', files: realFiles('0.3.0', { dropCleanup: true, dropShip: true }) },
   v040: { version: '0.4.0-preview.1', files: realFiles('0.4.0-preview.1', { dropCleanup: true, extraSkill: true, acceptX: true, manager: 2 }) },
 };
 
@@ -170,7 +171,7 @@ function walkFiles(dir, prefix = '') {
 /** Everything a switch may touch: managed assets, unrelated files next to them, config, ledger, package, active identity. */
 function snap(ctx) {
   const out = {};
-  for (const dir of ['agents', 'skills', 'plugins']) for (const [rel, digest] of Object.entries(walkFiles(join(ctx.root, dir)))) out[`${dir}/${rel}`] = digest;
+  for (const dir of ['agents', 'skills', 'plugins', 'commands']) for (const [rel, digest] of Object.entries(walkFiles(join(ctx.root, dir)))) out[`${dir}/${rel}`] = digest;
   for (const name of ['mdd.config.json', 'setup-assets.json', 'package.json', 'package-lock.json', '.gitignore']) {
     const path = join(ctx.paths.ownedRoot, name);
     out[`mdd/${name}`] = !existsSync(path) ? 'absent' : statSync(path).isDirectory() ? 'dir' : sha(readFileSync(path));
@@ -211,6 +212,10 @@ test('S1/S2/S3/S35: switch backs up before the first change, replaces edited and
   const outcome0 = await doSwitch(ctx, 'v020');
   assert.equal(outcome0.status, 'switched');
   assertInstalled(ctx, 'v020');
+  const ship = join(ctx.root, 'commands', 'ship.md');
+  const mine = join(ctx.root, 'commands', 'mine.md');
+  assert.ok(existsSync(ship), 'ship command installed by v020');
+  writeFileSync(mine, 'my command\n');
 
   // Hand edits: one replaced agent, one removed skill file, one unrelated file.
   const edited = join(ctx.root, 'agents', 'mdd-apply.md');
@@ -240,6 +245,8 @@ test('S1/S2/S3/S35: switch backs up before the first change, replaces edited and
   assert.equal(seen.configBytes, BASE_CONFIG);
   assert.equal(seen.editedBytes, 'hand edited agent\n');
   assertInstalled(ctx, 'v030');
+  assert.ok(!existsSync(ship), 'ship command removed by v030');
+  assert.equal(readFileSync(mine, 'utf8'), 'my command\n');
   assert.equal(readFileSync(join(ctx.root, 'agents', 'custom.md'), 'utf8'), 'mine\n');
   assert.ok(!existsSync(join(ctx.root, 'skills', 'mdd-cleanup')), 'removed skill and its empty directory are gone');
   assert.equal(readFileSync(join(ctx.paths.ownedRoot, 'mdd.config.json'), 'utf8'), BASE_CONFIG, 'compatible config untouched');
@@ -258,6 +265,22 @@ test('S1/S2/S3/S35: switch backs up before the first change, replaces edited and
   assert.ok(text.includes(RESTART_COMMAND));
   assert.equal(RESTART_COMMAND, 'opencode service restart');
   assert.ok(existsSync(join(ctx.paths.ownedRoot, 'bin')), 'launcher routing re-asserted');
+});
+
+test('switch refuses a ledger removal for an unrelated command without changing the installation', async t => {
+  const ctx = newInstall(t);
+  await doSwitch(ctx, 'v020');
+  const other = 'commands/other.md';
+  const content = 'foreign command\n';
+  writeFileSync(join(ctx.root, other), content);
+  const ledgerPath = join(ctx.paths.ownedRoot, 'setup-assets.json');
+  const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+  ledger[other] = sha(content);
+  writeFileSync(ledgerPath, JSON.stringify(ledger));
+  const before = snap(ctx);
+  await throwsSwitch(() => doSwitch(ctx, 'v030'), 'unsafe');
+  assert.deepEqual(snap(ctx), before);
+  assert.equal(readJournal(ctx.vp), undefined);
 });
 
 test('S32: an already installed exact version changes nothing; an adopted 0.2.0 is reinstalled with backups', async t => {
