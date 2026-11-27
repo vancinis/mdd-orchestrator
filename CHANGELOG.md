@@ -4,9 +4,32 @@ Las versiones de MDD se publican como etiquetas Git `v<versión>`. Las entradas 
 `npm run release -- <versión>` a partir de Conventional Commits; no las edites a mano dentro de un
 commit de release. Más información en [docs/installation.md](docs/installation.md#versiones-y-releases-mantenimiento).
 
-## [0.4.0-preview.1] - 2026-11-07
+## [0.8.0-preview.1] - 2026-11-27
 
-Preview · cambios desde `v0.3.0` (intervalo `v0.3.0..8e66bc8`, 7 commits).
+Preview · cambios desde `v0.7.0` (intervalo `v0.7.0..0757037`, 3 commits).
+
+### Funcionalidades
+- **release:** sync main with the published stable metadata (`e605d2c`)
+- **release:** add a sticky version comment to preview PRs (`83b9ab3`)
+
+### Otros cambios
+- **release:** document the PR comment and main version sync (`0757037`)
+
+## [0.7.0] - 2026-11-27
+
+Estable · cambios desde `v0.6.0` (intervalo `v0.6.0..9baf20c`, 4 commits).
+
+### Funcionalidades
+- **contracts:** keep runs as current state with iterations and records (`fe74cd6`)
+- **scripts:** add a read-only context audit for orchestrator sessions (`4ff0cb3`)
+- **plugin:** warn on high context and checkpoint the run at compaction (`7c40f5f`)
+
+### Otros cambios
+- explain run resume, iterations and context settings (`607bd49`)
+
+## [0.6.0] - 2026-11-20
+
+Estable · cambios desde `v0.5.0` (intervalo `v0.5.0..072516a`, 10 commits).
 
 ### Funcionalidades
 - **verify:** probe edge cases and classify findings by severity (`4092bed`)
@@ -16,12 +39,27 @@ Preview · cambios desde `v0.3.0` (intervalo `v0.3.0..8e66bc8`, 7 commits).
 - **workflow:** keep apply inside an explicit edit surface (`a2a0299`)
 - **skills:** resolve skills once per run and pass them by path (`a78df8c`)
 
-## [0.3.3-preview.1] - 2026-11-12
+### Correcciones
+- **contracts:** prefer focused tests and reuse valid evidence (`f63bf9c`)
+- **release:** recognize identical tags before pushing (`4dfb250`)
 
-Preview · cambios desde `v0.3.2` (intervalo `v0.3.2..1f049a1`, 1 commits).
+## [0.5.0] - 2026-11-14
+
+Estable · cambios desde `v0.4.0` (intervalo `v0.4.0..7675ce0`, 1 commits).
 
 ### Funcionalidades
 - **reporting:** explain actor results and run outcomes (`1f049a1`)
+
+## [0.4.0] - 2026-11-14
+
+Estable · cambios desde `v0.3.2` (intervalo `v0.3.2..210cfe6`, 3 commits).
+
+### Funcionalidades
+- **release:** add verified tag-only release automation (`69bb96e`)
+- **ci:** wire automated preview and stable release workflows (`2bd09b6`)
+
+### Otros cambios
+- **release:** track source-aware manual release metadata (`d1c709f`)
 
 ## [0.3.2] - 2026-11-11
 
