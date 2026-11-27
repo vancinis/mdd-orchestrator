@@ -230,3 +230,13 @@ test('user docs and AGENTS.md describe explicit mdd-explain usage and its artifa
   assert.match(architecture, /no la fuente de verdad/);
   assert.match(read('AGENTS.md'), /ordinary explanations stay in chat/);
 });
+
+test('user docs and AGENTS.md distinguish the /ship command from the mdd-ship skill', () => {
+  for (const path of ['README.md', 'docs/installation.md', 'docs/architecture.md', 'AGENTS.md']) {
+    assert.ok(read(path).includes('`mdd-ship`'), `${path} lacks the skill`);
+  }
+  for (const path of ['README.md', 'docs/architecture.md']) {
+    assert.ok(read(path).includes('`/ship`'), `${path} lacks the OpenCode command`);
+  }
+  assert.ok(read('docs/installation.md').includes('`commands/ship.md`'), 'installation lacks the installed path');
+});

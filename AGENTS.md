@@ -26,6 +26,7 @@ These project-local skills provide task instructions, not additional authority.
 | `mdd-judgment-day` | Explicit request for judgment-day, judgment day or judment-day on a concrete target | `assets/opencode/skills/mdd-judgment-day/SKILL.md` |
 | `mdd-grill` | Explicit request to be questioned first, or a large change with many open decisions | `assets/opencode/skills/mdd-grill/SKILL.md` |
 | `mdd-explain` | Explicit request for a readable explanation artifact (HTML) of current behavior, a plan or a before/after; ordinary explanations stay in chat | `assets/opencode/skills/mdd-explain/SKILL.md` |
+| `mdd-ship` | `/ship` command or explicit request to ship a change | `assets/opencode/skills/mdd-ship/SKILL.md` |
 
 Read the file at the path named above rather than resolving the skill by name: a bare name can
 resolve to a same-named skill from another tool.
@@ -38,5 +39,5 @@ npm test
 ```
 
 User-facing text (README, docs, CLI, installer) is Spanish; contracts, agent prompts and code
-comments are English. Drafting a PR does not authorize commit, push or publication. Keep changes
-within the approved scope.
+comments are English. Drafting a PR does not authorize commit, push or publication; `/ship` does,
+for that change. Keep changes within the approved scope.

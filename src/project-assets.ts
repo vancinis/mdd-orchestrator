@@ -24,6 +24,7 @@ export const MDD_ASSETS = Object.freeze([
   'assets/opencode/skills/mdd-grill/SKILL.md', 'assets/opencode/skills/mdd-grill/NOTICE',
   'assets/opencode/skills/mdd-explain/SKILL.md', 'assets/opencode/skills/mdd-explain/assets/template.html',
   'assets/opencode/skills/mdd-explain/references/authoring.md',
+  'assets/opencode/skills/mdd-ship/SKILL.md', 'assets/opencode/commands/ship.md',
 ]);
 
 export const MDD_PACKAGED_ASSETS = Object.freeze([...MDD_ASSETS, ...MDD_CONTRACTS]);

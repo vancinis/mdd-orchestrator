@@ -37,8 +37,8 @@ export async function doctor(cwd: string): Promise<{ ready: boolean; scope: 'glo
   }, 'La dependencia fijada del plugin resuelve.', 'Instalá las dependencias fijadas del paquete; no copies solo dist sin sus dependencias.');
   check('agents-and-skills', () => {
     for (const name of MDD_ASSETS) if (assetText(root, installedName(name)).digest !== installedAsset(installation, name).digest) throw new Error();
-  }, 'Todos los agentes y skills de MDD coinciden con el paquete instalado.',
-  'Ejecutá mdd-ai update. Si editaste a mano algún agente o skill de MDD, reconcilialo antes.');
+  }, 'Todos los agentes, skills y comandos de MDD coinciden con el paquete instalado.',
+  'Ejecutá mdd-ai update. Si editaste a mano algún agente, skill o comando de MDD, reconcilialo antes.');
   check('loader', () => { if (assetText(root, LOADER_PATH).content !== LOADER_TEXT) throw new Error(); },
     'El cargador global del plugin está presente.', 'Ejecutá mdd-ai setup para instalar el cargador global.');
   try {

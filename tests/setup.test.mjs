@@ -230,7 +230,20 @@ test('installed coordinator and actors pass and load skills by path', t => {
   assert.match(coordinator, /`-\s+Skills:\s+<path>\s+\(<actors>\)`/);
   assert.match(coordinator, /exact\s+`SKILL\.md`\s+paths/);
   assert.match(coordinator, /not\s+bare\s+names/);
-  assert.match(coordinator, /`mdd-grill`,\s+`mdd-pr-body`\s+and\s+`mdd-judgment-day`\s+stay\s+with\s+you/);
+  const sections = coordinator.split(/^## /m);
+  const standalone = sections.find(section => section.startsWith('8. Standalone features'));
+  assert.ok(standalone);
+  const ship = standalone.split('\n').find(row => row.startsWith('| `/ship`,'));
+  assert.ok(ship, 'section 8 routes explicit /ship requests');
+  assert.match(ship, /Read the installed skill `mdd-ship`/);
+  assert.match(ship, /explicit authorization to commit, push and open or update the PR for that change only/);
+  assert.match(ship, /starts no run/);
+  assert.match(ship, /Drafting alone \(`mdd-pr-body`\) still authorizes nothing/);
+  assert.match(coordinator, /`mdd-grill`,\s+`mdd-pr-body`,\s+`mdd-judgment-day`\s+and\s+`mdd-ship`\s+stay\s+with\s+you/);
+  assert.ok(sections.find(section => section.startsWith('7.'))?.includes(
+    '- Closing never authorizes commit, push, PR, a security review or Judgment Day. Those need their\n  own explicit request.',
+  ));
+  assert.ok(coordinator.includes('| Commit, push, open a PR for finished work | Do exactly what was asked with git/gh. Not a new run. |'));
   const plan = fs.readFileSync(join(root, 'agents/mdd-plan.md'), 'utf8');
   assert.match(plan, /read\s+each\s+`SKILL\.md`\s+at\s+its\s+path\s+before\s+other\s+work/);
   assert.match(plan, /never\s+widen\s+scope\s+or\s+permissions/);
@@ -572,6 +585,72 @@ for (const file of EXPLAIN) {
     assert.deepEqual(snapshot(root), before);
   });
 }
+
+const SHIP = ['skills/mdd-ship/SKILL.md', 'commands/ship.md'];
+
+function assertShipInstalled(root) {
+  const ledger = fs.readFileSync(join(root, 'mdd/setup-assets.json'));
+  const manifest = JSON.parse(ledger);
+  for (const name of SHIP) {
+    const source = `assets/opencode/${name}`;
+    assert.deepEqual(fs.readFileSync(join(root, name)), fs.readFileSync(source), name);
+    assert.equal(manifest[name], assetText(PACKAGE_ROOT, source).digest, name);
+  }
+  assert.ok(ledger.length < 16384, 'the ledger stays inside its read bound');
+}
+
+test('init installs the mdd-ship skill and command verbatim and records both once', t => {
+  const root = fixture(t);
+  initProject(root);
+  assertShipInstalled(root);
+  const before = snapshot(root);
+  assert.equal(initProject(root).created, 0);
+  assert.deepEqual(snapshot(root), before);
+});
+
+for (const name of SHIP) {
+  test(`init refuses a foreign ${name} without partially installing assets`, t => {
+    const root = fixture(t);
+    const path = join(root, name);
+    fs.mkdirSync(join(path, '..'), { recursive: true });
+    fs.writeFileSync(path, 'foreign content');
+    const before = snapshot(root);
+    assert.throws(() => initProject(root), error => error.message.startsWith(`MDD init refuses to overwrite different content: ${name}.`));
+    assert.deepEqual(snapshot(root), before);
+  });
+}
+
+test('update adds both ship assets missing from the ledger and preserves an unrelated command', t => {
+  const root = fixture(t);
+  initProject(root);
+  const ledger = join(root, 'mdd/setup-assets.json');
+  const manifest = JSON.parse(fs.readFileSync(ledger));
+  for (const name of SHIP) { fs.rmSync(join(root, name)); delete manifest[name]; }
+  fs.writeFileSync(ledger, JSON.stringify(manifest));
+  const other = join(root, 'commands/other.md');
+  fs.writeFileSync(other, 'foreign command');
+  assert.equal(initProject(root, true).created, SHIP.length);
+  assertShipInstalled(root);
+  assert.equal(fs.readFileSync(other, 'utf8'), 'foreign command');
+});
+
+test('doctor flags an edited ship command and clears the action after restoration', async t => {
+  const root = fixture(t);
+  initProject(root);
+  const command = join(root, 'commands/ship.md');
+  const original = fs.readFileSync(command);
+  const check = async () => (await doctor(root)).checks.find(item => item.check === 'agents-and-skills');
+  fs.appendFileSync(command, '\nuser edit\n');
+  const before = snapshot(root);
+  const edited = await check();
+  assert.equal(edited.status, 'action');
+  assert.match(edited.message, /agente, skill o comando/);
+  assert.deepEqual(snapshot(root), before);
+  fs.writeFileSync(command, original);
+  const restored = await check();
+  assert.equal(restored.status, 'ok');
+  assert.match(restored.message, /agentes, skills y comandos/);
+});
 
 test('init refuses linked target directories without writing outside the target', t => {
   const root = fixture(t); const outside = fixture(t, false);
