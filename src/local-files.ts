@@ -6,8 +6,8 @@ export class LocalFileError extends Error {
   constructor() { super('Local storage unavailable or unsafe. Check permissions and file types.'); }
 }
 
-/** The only files MDD writes through this class: the global settings and the install ledger. */
-export const LOCAL_NAMES = Object.freeze(['mdd.config.json', 'mdd/setup-assets.json'] as const);
+/** The only files MDD writes through this class: the global settings, the install ledger and the integrations manifest. */
+export const LOCAL_NAMES = Object.freeze(['mdd.config.json', 'mdd/setup-assets.json', 'mdd/integrations/manifest.json'] as const);
 export type LocalName = typeof LOCAL_NAMES[number];
 
 /**

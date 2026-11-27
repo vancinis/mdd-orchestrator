@@ -201,7 +201,7 @@ Referencia completa: [docs/installation.md](docs/installation.md#configuración)
 | `mdd-ai use stable \| preview \| dev \| <versión> [--checkout <ruta>] [--yes]` | Cambia de versión con respaldo previo |
 | `mdd-ai link` | Agrega `mdd-ai` al PATH de tu usuario |
 | `mdd-ai doctor` | Diagnóstico de solo lectura |
-| `mdd-ai config` | Editor de perfiles, modelos y preferencias |
+| `mdd-ai config` | Editor de perfiles, modelos y preferencias; la opción **Integraciones** (8) agrega Context7, Engram o CodeGraph tras una revisión explícita |
 | `mdd-ai profile list \| create <n> \| use <n>` | Perfiles |
 
 ## Estructura del repositorio
@@ -245,6 +245,8 @@ actual del contexto.
   ejecutado; Verify lo corre y lo informa, y el orquestador repite un check antes de aceptar un
   éxito basado en checks o de cerrar como `completed`, lo que sigue sin ser una certificación.
 - **No hay sandbox.** Los agentes ejecutan código real bajo los permisos nativos de OpenCode.
+- **Integraciones opcionales.** Context7, Engram y CodeGraph nunca se instalan solos; los agentes
+  usan herramientas nativas si faltan. Ver [Integraciones opcionales](docs/installation.md#integraciones-opcionales).
 - **Entrega explícita.** MDD nunca hace commit, push ni abre un PR sin que lo pidas.
 
 ## Documentación

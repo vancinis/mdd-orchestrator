@@ -64,7 +64,7 @@ const noInstall = {
 test('installer sources, packaged assets and setup docs are normalized UTF-8', () => {
   const sources = fs.readdirSync('src').filter(name => name.endsWith('.ts')).map(name => `src/${name}`);
   assert.ok(sources.includes('src/setup-ui.ts'));
-  for (const name of [...MDD_PACKAGED_ASSETS, 'README.md', 'docs/installation.md', 'AGENTS.md', 'package.json',
+  for (const name of [...MDD_PACKAGED_ASSETS, 'README.md', 'docs/installation.md', 'docs/architecture.md', 'AGENTS.md', 'package.json',
     ...sources, 'scripts/setup.mjs', 'tests/setup-ui.test.mjs']) {
     const bytes = fs.readFileSync(name); const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
     assert.notEqual(bytes.subarray(0, 3).toString('hex'), 'efbbbf', name);

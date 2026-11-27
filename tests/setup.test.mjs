@@ -28,6 +28,8 @@ function fixture(t, installed = true) {
     const scope = join(root, 'mdd/node_modules/@opencode'); fs.mkdirSync(scope, { recursive: true });
     link(resolve('node_modules/@opencode/plugin'), join(scope, 'plugin'));
     link(resolve('node_modules/zod'), join(root, 'mdd/node_modules/zod'));
+    // The optional integrations engine declares jsonc-parser; the installed package resolves it too.
+    link(resolve('node_modules/jsonc-parser'), join(root, 'mdd/node_modules/jsonc-parser'));
   }
   return root;
 }
@@ -700,12 +702,45 @@ test('doctor is ready after install, runs only the retained checks and changes n
   const before = snapshot(root); const report = await doctor(root);
   assert.equal(report.ready, true, JSON.stringify(report, null, 2));
   assert.deepEqual(report.checks.map(check => check.check),
-    ['workspace', 'node', 'installed-package', 'build', 'dependencies', 'agents-and-skills', 'loader', 'package-freshness', 'settings']);
+    // Deliberately extended: one offline, informational optional-integrations check is appended last.
+    ['workspace', 'node', 'installed-package', 'build', 'dependencies', 'agents-and-skills', 'loader', 'package-freshness', 'settings', 'integrations']);
   assert.ok(report.checks.every(check => check.status !== 'action'));
+  assert.equal(report.checks.find(check => check.check === 'integrations').status, 'info');
   assert.equal(report.checks.find(check => check.check === 'package-freshness').status, 'ok');
   assert.match(report.checks.find(check => check.check === 'settings').message, /Perfil activo .default./);
-  assert.doesNotMatch(JSON.stringify(report), /engram|preflight|telemetr|storage/i);
+  // Engram is now an optional integration named only inside that one info check; retired subsystems stay absent.
+  assert.doesNotMatch(JSON.stringify(report.checks.filter(check => check.check !== 'integrations')), /engram|preflight|telemetr|storage/i);
+  assert.doesNotMatch(JSON.stringify(report), /preflight|telemetr|storage/i);
   assert.deepEqual(snapshot(root), before);
+});
+
+test('optional integrations never change readiness: absent, broken, conflicting or unreadable states stay informational and offline', async t => {
+  const root = fixture(t); initProject(root);
+  const trap = { fetch: () => assert.fail('doctor must not use the network'), run: () => assert.fail('doctor must not start a subprocess') };
+  t.mock.method(globalThis, 'fetch', () => assert.fail('doctor must not use the network'));
+  const baseline = await doctor(root, trap);
+  assert.equal(baseline.ready, true, JSON.stringify(baseline, null, 2));
+  const coreOnly = report => JSON.stringify(report.checks.filter(check => check.check !== 'integrations'));
+  const states = [
+    '{ broken',
+    JSON.stringify({ mcp: { servers: { engram: { type: 'local', command: ['/somewhere/else/engram', 'mcp'] }, context7: { type: 'local', command: ['x'] } } } }),
+    JSON.stringify({ mcp: { servers: { codegraph: { enabled: false } } } }),
+  ];
+  for (const text of states) {
+    fs.writeFileSync(join(root, 'opencode.json'), text);
+    const before = snapshot(root); const report = await doctor(root, trap);
+    const info = report.checks.find(check => check.check === 'integrations');
+    assert.equal(info.status, 'info');
+    assert.match(info.message, /Integraciones opcionales/);
+    assert.equal(report.ready, true, JSON.stringify(report, null, 2));
+    assert.equal(coreOnly(report), coreOnly(baseline));
+    assert.deepEqual(snapshot(root), before, 'doctor changes nothing');
+  }
+  // A genuine core problem still decides readiness, independently of the optional check.
+  fs.rmSync(join(root, LOADER_PATH));
+  const broken = await doctor(root, trap);
+  assert.equal(broken.ready, false);
+  assert.equal(broken.checks.find(check => check.check === 'integrations').status, 'info');
 });
 
 test('doctor points an installed package that differs from the running one at mdd-ai use, not at the retired in-place update', async t => {

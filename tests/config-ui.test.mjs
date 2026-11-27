@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readdirSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -21,7 +21,7 @@ function scripted(lines, isTTY = true) {
   const output = [];
   return { prompts, output, io: { isTTY, write: text => output.push(text), read: async prompt => { prompts.push(prompt); return lines.shift(); } } };
 }
-// Existing shortcuts stay stable; 6 opens the optional native subagent models.
+// Existing shortcuts stay stable; 6 opens the optional native subagent models, 7 context and 8 the optional integrations.
 const SAVE = '4';
 const CANCEL = '5';
 // The models menu reads the user's installed catalog; tests inject it for determinism.
@@ -53,15 +53,17 @@ function invoke(root, ...args) {
   return result;
 }
 
-test('the main menu preserves existing shortcuts and offers optional native subagent models', async t => {
+test('the main menu preserves 1-7, appends 8 for integrations and never inspects them until opened', async t => {
   const root = fixture(t);
+  const trap = new Proxy({}, { get: (_, name) => () => assert.fail(`integration engine ${String(name)} must not run on the main menu`) });
   const script = scripted([CANCEL]);
-  assert.equal(await runConfigUI(root, script.io, noCatalog), 'cancelled');
+  assert.equal(await runConfigUI(root, script.io, { ...noCatalog, integrations: { engine: trap } }), 'cancelled');
   const text = script.output.join('');
-  for (const [index, label] of ['Perfiles', 'Modelos', 'Preferencias', 'Guardar y salir', 'Cancelar', 'Subagentes nativos', 'Contexto'].entries()) {
+  for (const [index, label] of ['Perfiles', 'Modelos', 'Preferencias', 'Guardar y salir', 'Cancelar', 'Subagentes nativos', 'Contexto', 'Integraciones'].entries()) {
     assert.match(text, new RegExp(`^.\\s${index + 1}\\s{2}${label}`, 'm'), label);
   }
-  assert.doesNotMatch(text, /Engram|Telemetr|Workers|memoria|certeza/i);
+  // Deliberately narrowed: the menu hint for entry 8 now names Engram; telemetry/workers/memory stay retired.
+  assert.doesNotMatch(text, /Telemetr|Workers|memoria|certeza/i);
   assert.deepEqual(readdirSync(root), []);
 });
 
@@ -382,4 +384,166 @@ test('command validation and help are deterministic and preserve exit semantics'
   assert.match(first.stdout, /Códigos de salida: 0/);
   assert.doesNotMatch(first.stdout, /telemetry|workers|init|lessons|retro/);
   assert.deepEqual(readdirSync(root), []);
+});
+
+// ---- Optional integrations (menu 8): in-memory queue, effects only after Save + review + Apply ----
+const INTEGRATIONS = '8';
+const dim = (value, detail) => ({ value, detail });
+const toolStatus = (id, label, state, offers = [], extra = {}) => ({
+  id, label, state, reason: `${id} ${state}`, offers, notices: [],
+  installed: dim('no', 'x'), configured: dim('no', 'x'), connected: dim('not-tested', 'x'), usable: dim('unknown', 'x'), ...extra,
+});
+const installEngram = { kind: 'install', tool: 'engram', release: { version: '1.2.3' }, digests: {} };
+const configureContext7 = { kind: 'configure', tool: 'context7', digests: {} };
+
+/** Fake engine that records every call and every observable effect ordering. */
+function fakeEngine(root, { managed = false, applyImpl } = {}) {
+  const calls = { inspect: 0, lookup: [], probe: 0, review: [], apply: [], check: [], queued: [] };
+  const engine = {
+    inspect: () => {
+      calls.inspect++;
+      return { tools: [
+        toolStatus('context7', 'Context7', 'absent', [configureContext7]),
+        toolStatus('engram', 'Engram', managed ? 'managed' : 'absent', managed ? [] : [installEngram], managed ? { version: '1.0.0' } : {}),
+        toolStatus('codegraph', 'CodeGraph', 'absent'),
+      ], platform: 'win32-x64', blockers: [], notes: [], limits: 'Límites del test.', digests: {} };
+    },
+    lookupOffer: async (tool, deps) => { calls.lookup.push([tool, deps.cwd]); return { offer: { kind: 'update', tool, release: { version: '2.0.0' }, digests: {} } }; },
+    reviewOf: action => { calls.review.push(action.kind); return { tool: action.tool, kind: action.kind, version: action.release?.version, destination: action.target?.root, notes: ['nota de revisión'] }; },
+    apply: async actions => {
+      calls.apply.push({ actions, settingsExistedAtApply: existsSync(join(root, 'mdd.config.json')) });
+      if (applyImpl) return applyImpl(actions);
+      return { results: actions.map(a => ({ tool: a.tool, kind: a.kind, outcome: 'completed', reason: '', effects: [], residual: [], restart: true })), restartNote: 'NOTA-REINICIO' };
+    },
+    probe: async () => { calls.probe++; return { disclosure: 'x', opencode: { ran: true, detail: 'opencode respondió' },
+      tools: Object.fromEntries(['context7', 'engram', 'codegraph'].map(id => [id, { version: dim('unknown', 'v'), connected: dim('yes', 'c'), usable: dim('unknown', 'u') }])) }; },
+    checkInitTarget: (path, _deps, queued) => { calls.check.push(path); calls.queued.push(queued); return path.endsWith('sub') ? { refused: 'RECHAZO-SUBDIRECTORIO' } : { ok: { root: path, top: path, dotGit: 'dir', entries: [], hooks: [] } }; },
+  };
+  return { engine, calls };
+}
+const settingsWritten = root => readdirSync(root).includes('mdd.config.json');
+
+test('browsing, queueing and cancelling integrations has no effects, even at EOF', async t => {
+  for (const script of [[INTEGRATIONS, 'o1', 'volver', CANCEL], [INTEGRATIONS, 'o1', 'volver'], [INTEGRATIONS, 'o1']]) {
+    const root = fixture(t);
+    const { engine, calls } = fakeEngine(root);
+    const run = scripted([...script]);
+    assert.equal(await runConfigUI(root, run.io, { ...noCatalog, integrations: { engine, deps: { cwd: root } } }), 'cancelled');
+    assert.equal(calls.inspect, 1, 'inspected lazily, once, only after opening menu 8');
+    assert.deepEqual([calls.apply, calls.lookup, calls.check, calls.probe, calls.review], [[], [], [], 0, []]);
+    assert.match(run.output.join(''), /En cola: Instalar Engram 1\.2\.3/);
+    assert.match(run.output.join(''), /Nada se escribió|No se escribió/);
+    assert.deepEqual(readdirSync(root), []);
+  }
+});
+
+test('Save with a queue requires review: Back writes nothing and applies nothing; EOF at review also cancels', async t => {
+  const root = fixture(t);
+  const { engine, calls } = fakeEngine(root);
+  const deps = { ...noCatalog, integrations: { engine, deps: { cwd: root } } };
+  const back = scripted([INTEGRATIONS, 'o0', 'o1', 'volver', SAVE, '1', CANCEL]);
+  assert.equal(await runConfigUI(root, back.io, deps), 'cancelled');
+  assert.deepEqual([calls.apply, settingsWritten(root)], [[], false]);
+  assert.deepEqual(calls.review, ['configure', 'install']);
+  assert.match(back.output.join(''), /Revisión final de integraciones/);
+  assert.match(back.output.join(''), /nota de revisión/);
+  const eof = scripted([INTEGRATIONS, 'o1', 'volver', SAVE]);
+  assert.equal(await runConfigUI(root, eof.io, deps), 'cancelled');
+  assert.deepEqual([calls.apply, settingsWritten(root)], [[], false]);
+});
+
+test('Apply saves the profile first, then runs the queue once; both outcomes are reported separately', async t => {
+  const root = fixture(t);
+  const { engine, calls } = fakeEngine(root);
+  const script = scripted(['3', '1', '2', INTEGRATIONS, 'o1', 'volver', SAVE, '2']);
+  assert.equal(await runConfigUI(root, script.io, { ...noCatalog, integrations: { engine, deps: { cwd: root } } }), 'saved');
+  assert.equal(calls.apply.length, 1);
+  assert.deepEqual(calls.apply[0].actions, [installEngram]);
+  assert.equal(calls.apply[0].settingsExistedAtApply, true, 'profile persisted before integrations run');
+  assert.deepEqual(loadSettings(root).profiles.default.answers, { mode: 'automatic', summary: 'medium' });
+  const text = script.output.join('');
+  assert.ok(text.indexOf('configuración global guardada') < text.indexOf('Resultado de las integraciones'));
+  assert.match(text, /Engram · Instalar: completado/);
+  assert.match(text, /NOTA-REINICIO/);
+});
+
+test('partial and failed integration results are shown honestly and never undo the saved profile', async t => {
+  const root = fixture(t);
+  const failing = fakeEngine(root, { applyImpl: actions => ({ results: actions.map(a => ({ tool: a.tool, kind: a.kind, outcome: 'failed',
+    reason: 'REGISTRO-FALLÓ', effects: ['binario instalado'], residual: ['instalada y sin usar'], restart: false })) }) });
+  const script = scripted([INTEGRATIONS, 'o1', 'volver', SAVE, '2']);
+  assert.equal(await runConfigUI(root, script.io, { ...noCatalog, integrations: { engine: failing.engine, deps: { cwd: root } } }), 'saved');
+  const text = script.output.join('');
+  assert.match(text, /Engram · Instalar: falló — REGISTRO-FALLÓ/);
+  assert.match(text, /efecto: binario instalado/);
+  assert.match(text, /residuo: instalada y sin usar/);
+  assert.equal(settingsWritten(root), true);
+
+  const root2 = fixture(t);
+  const throwing = fakeEngine(root2, { applyImpl: () => { throw new Error('BOOM'); } });
+  const again = scripted([INTEGRATIONS, 'o1', 'volver', SAVE, '2']);
+  assert.equal(await runConfigUI(root2, again.io, { ...noCatalog, integrations: { engine: throwing.engine, deps: { cwd: root2 } } }), 'saved');
+  assert.match(again.output.join(''), /error inesperado: BOOM/);
+  assert.equal(settingsWritten(root2), true);
+});
+
+test('a profile-only Save with an empty queue keeps its old behavior: no review, no apply', async t => {
+  const root = fixture(t);
+  const { engine, calls } = fakeEngine(root);
+  const script = scripted([INTEGRATIONS, 'o1', 'o1', 'volver', '3', '1', '2', SAVE]);
+  assert.equal(await runConfigUI(root, script.io, { ...noCatalog, integrations: { engine, deps: { cwd: root } } }), 'saved');
+  assert.deepEqual([calls.apply, calls.review], [[], []], 'toggling twice leaves an empty queue');
+  assert.doesNotMatch(script.output.join(''), /Resultado de las integraciones|Revisión final/);
+  assert.equal(loadSettings(root).profiles.default.answers.mode, 'automatic');
+});
+
+test('metadata lookup and connection probe are explicit, disclosed and declined by default', async t => {
+  const root = fixture(t);
+  const { engine, calls } = fakeEngine(root, { managed: true });
+  const deps = { ...noCatalog, integrations: { engine, deps: { cwd: root } } };
+  const declined = scripted([INTEGRATIONS, 'buscar', '1', '1', 'probar', '1', 'volver', CANCEL]);
+  await runConfigUI(root, declined.io, deps);
+  assert.deepEqual([calls.lookup, calls.probe], [[], 0]);
+  assert.match(declined.output.join(''), /solicitud HTTPS de solo lectura a los metadatos de versiones de GitHub/);
+  assert.match(declined.output.join(''), /puede iniciar el servicio de OpenCode/);
+  const confirmed = scripted([INTEGRATIONS, 'buscar', '1', '2', 'probar', '2', 'volver', CANCEL]);
+  assert.equal(await runConfigUI(root, confirmed.io, deps), 'cancelled');
+  assert.deepEqual([calls.lookup, calls.probe], [[['engram', root]], 1]);
+  assert.match(confirmed.output.join(''), /Disponible: Actualizar Engram 2\.0\.0 \(aún no está en la cola\)/);
+  assert.match(confirmed.output.join(''), /opencode respondió/);
+  assert.deepEqual(calls.apply, []);
+  assert.deepEqual(readdirSync(root), []);
+});
+
+test('CodeGraph init is a separate exact-root selection, refused targets are not queued, and it is reviewed with install', async t => {
+  const root = fixture(t);
+  const { engine, calls } = fakeEngine(root);
+  const script = scripted([INTEGRATIONS, 'o1', 'init', 'sub', 'init', '', 'volver', SAVE, '2']);
+  assert.equal(await runConfigUI(root, script.io, { ...noCatalog, integrations: { engine, deps: { cwd: root } } }), 'saved');
+  assert.deepEqual(calls.check, [join(root, 'sub'), root], 'targets are resolved against the working directory');
+  assert.match(script.output.join(''), /Rechazado: RECHAZO-SUBDIRECTORIO/);
+  assert.deepEqual(calls.apply[0].actions.map(a => a.kind), ['install', 'init']);
+  assert.equal(calls.apply[0].actions[1].target.root, root);
+  assert.deepEqual(calls.review, ['install', 'init']);
+});
+
+test('init is reviewed against the explicitly queued CodeGraph install, and changing that selection drops it', async t => {
+  const root = fixture(t);
+  const { engine, calls } = fakeEngine(root);
+  const installCodegraph = { kind: 'install', tool: 'codegraph', release: { version: '9.9.9' }, digests: {} };
+  const inspect = engine.inspect;
+  engine.inspect = () => { const snapshot = inspect(); snapshot.tools[2].offers = [installCodegraph]; return snapshot; };
+  const script = scripted([INTEGRATIONS, 'o2', 'init', '', 'o2', 'volver', CANCEL]);
+  assert.equal(await runConfigUI(root, script.io, { ...noCatalog, integrations: { engine, deps: { cwd: root } } }), 'cancelled');
+  assert.equal(calls.queued[0], installCodegraph, 'the exact queued dependency is passed, never an implicit selection');
+  assert.match(script.output.join(''), /Se quit. la inicializaci.n en cola/);
+  assert.deepEqual(calls.apply, []);
+});
+
+test('queueing an install alone never adds an init action', async t => {
+  const root = fixture(t);
+  const { engine, calls } = fakeEngine(root);
+  await runConfigUI(root, scripted([INTEGRATIONS, 'o1', 'volver', SAVE, '2']).io, { ...noCatalog, integrations: { engine, deps: { cwd: root } } });
+  assert.deepEqual(calls.apply[0].actions.map(a => a.kind), ['install']);
+  assert.deepEqual(calls.check, []);
 });

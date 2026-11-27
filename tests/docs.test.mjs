@@ -108,6 +108,108 @@ test('G4 the docs describe what the code does: cli.json migration, error 1 excep
   assert.match(read('src/version-source.ts'), /DOCTOR_TIMEOUT_MS = 15000/);
 });
 
+test('contracts describe optional tools with fallback and no setup, identity or status dependency', () => {
+  const normalize = text => text.replace(/\s+/g, ' ');
+  const actor = normalize(read('assets/opencode/contracts/actor.md'));
+  const workflow = normalize(read('assets/opencode/contracts/workflow.md'));
+  for (const [name, text] of [['actor.md', actor], ['workflow.md', workflow]]) {
+    for (const tool of ['Context7', 'Engram', 'CodeGraph']) assert.ok(text.includes(tool), `${name} lacks ${tool}`);
+    assert.match(text, /fall ?back|continue with the native/i, `${name} lacks the graceful fallback`);
+    assert.match(text, /exact checkout/, `${name} lacks the exact-checkout index evidence`);
+    assert.match(text, /never require a `codegraph_status`|Do not depend on a `codegraph_status`/, `${name} must not depend on codegraph_status`);
+    assert.match(text, /invent/, `${name} lacks the no-invented-identity caveat`);
+    assert.match(text, /permission/i, `${name} lacks the no-permission-expansion statement`);
+  }
+  assert.match(actor, /Never install, download, configure, initialize or bootstrap/);
+  assert.match(workflow, /Never install, initialize or bootstrap/);
+  // The guidance never tells an agent to run an installer or an init command.
+  for (const text of [actor, workflow]) assert.doesNotMatch(text, /(?:run|execute|use) `?(?:codegraph|engram|npx|npm|opencode mcp)[^.]*\b(?:install|init|setup|add)\b/i);
+});
+
+test('judge agents keep their isolation: no actor contract and no optional-tool access', () => {
+  for (const name of ['mdd-jd-judge-a', 'mdd-jd-judge-b']) {
+    const text = read(`assets/opencode/agents/${name}.md`);
+    assert.doesNotMatch(text, /mdd:include contracts\/actor\.md/, `${name} must not include the actor contract`);
+    assert.doesNotMatch(text, /context7|engram|codegraph|mem_/i, `${name} must not mention optional tools`);
+    assert.match(text, /mdd_jd_inspect: allow/, `${name} keeps the inspection tool`);
+  }
+});
+
+test('Spanish docs describe optional integrations as the implementation behaves', () => {
+  const installation = read('docs/installation.md');
+  const section = installation.slice(installation.indexOf('## Integraciones opcionales'));
+  assert.ok(section.length > 100, 'installation.md lacks the integrations section');
+  const text = section.replace(/\s+/g, ' ');
+  for (const phrase of [
+    'cola', 'revisión', 'Guardar', 'remota', 'mcp --tools=agent', 'solo lo gestionado', 'Puerta de formato',
+    'No hay reversión de datos', 'identidad de sesión', 'Lo externo se preserva', 'Inicialización explícita',
+    'nunca se hace sola', 'opt-in', 'sin conexión', 'no se abre la base', 'codegraph_status', 'no toman el bloqueo',
+    '`mdd-ai use` nunca instala', 'actualizar un binario', 'opencode service restart', 'Quitar o revertir', 'Judgment Day no cambia',
+  ]) assert.ok(text.includes(phrase), `installation.md lacks "${phrase}"`);
+  // A config-only change must not be documented as requiring a restart.
+  assert.match(text, /Un cambio solo de configuración no obliga/);
+  // The old absolute claim is qualified.
+  assert.doesNotMatch(installation, /El instalador no modifica `opencode\.json\(c\)`/);
+  assert.match(installation, /única excepción es la\s+opción opcional \*\*Integraciones\*\*/);
+  assert.match(read('docs/architecture.md'), /integraciones\]\(installation\.md#integraciones-opcionales\)/);
+  assert.match(read('README.md'), /docs\/installation\.md#integraciones-opcionales/);
+  // The documented pins and Engram command are the ones the catalog uses.
+  const catalog = read('src/integration-install.ts');
+  for (const pin of ['3.7.2', '1.6.2']) assert.ok(catalog.includes(`version: '${pin}'`) && installation.includes(pin), `pin ${pin} is out of sync`);
+  assert.ok(catalog.includes("mcpArgs: ['mcp', '--tools=agent']"));
+  assert.ok(catalog.includes("mcpArgs: ['serve', '--mcp']"));
+  assert.doesNotMatch(read('src/integrations.ts') + catalog + read('src/integration-config.ts'), /codegraph_status/);
+});
+
+const DAMAGED_TEXT = /\uFFFD|Ã[\u00a0-\u00bf]|â€|├[│íí]|ÔÇö/;
+// These exact upstream teaching examples intentionally contain damaged-text signatures.
+// Exempt only the complete passage in its own file, never a whole contract or section.
+const ACTOR_DAMAGE_EXAMPLES = [
+  '- Damaged-text signatures: `U+FFFD` (`\uFFFD`); UTF-8 read as ANSI, such as `Ã³`, `Ã©`, `Â¿`, `â€”`;',
+  '  UTF-8 read as code page 850, such as `├│`, `├í`, `ÔÇö`. Compare with the file\'s base version',
+  '  before attributing them to a change.',
+].join('\n');
+const WORKFLOW_DAMAGE_EXAMPLES = [
+  'Before publishing a PR body or commit message, check its file for `\uFFFD`, `Ã³`, `â€”`, `├│` or `ÔÇö`,',
+  'and pass it as a file (`gh pr create --body-file <file>`, `git commit -F <file>`), not a pipe.',
+].join('\n');
+const DOCUMENTED_DAMAGE_EXAMPLES = {
+  'assets/opencode/contracts/actor.md': ACTOR_DAMAGE_EXAMPLES,
+  'assets/opencode/contracts/workflow.md': WORKFLOW_DAMAGE_EXAMPLES,
+};
+const damageScanText = (path, text) => DOCUMENTED_DAMAGE_EXAMPLES[path]
+  ? text.replace(DOCUMENTED_DAMAGE_EXAMPLES[path], '') : text;
+
+test('changed contracts and docs are UTF-8, LF and BOM-free without damaged text', () => {
+  for (const path of ['assets/opencode/contracts/actor.md', 'assets/opencode/contracts/workflow.md', 'docs/installation.md', 'docs/architecture.md', 'README.md']) {
+    const bytes = fs.readFileSync(new URL(`../${path}`, import.meta.url));
+    const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    assert.notEqual(bytes.subarray(0, 3).toString('hex'), 'efbbbf', `${path}: BOM`);
+    assert.equal(text.includes('\r'), false, `${path}: CR`);
+    assert.ok(text.endsWith('\n'), `${path}: final newline`);
+    if (DOCUMENTED_DAMAGE_EXAMPLES[path]) assert.equal(text.split(DOCUMENTED_DAMAGE_EXAMPLES[path]).length, 2, `${path}: exactly one documented example passage`);
+    assert.doesNotMatch(damageScanText(path, text), DAMAGED_TEXT, `${path}: damaged text`);
+  }
+});
+
+test('merged actor contract preserves optional tools, UTF-8 rules and substantive reports without hiding damaged prose', () => {
+  const path = 'assets/opencode/contracts/actor.md';
+  const actor = read(path);
+  for (const heading of ['## Optional tools', '## Files and text', '## Report']) assert.ok(actor.includes(heading), `actor contract lacks ${heading}`);
+  assert.match(actor, /The orchestrator explains your result to the user/);
+  assert.doesNotMatch(actor, /^(?:<<<<<<< |=======|>>>>>>> )/m);
+  for (const damage of ['\uFFFD', 'Ã³', 'â€”', '├│', 'ÔÇö']) {
+    assert.match(damageScanText(path, `${actor}\nUnexpected ${damage} prose.\n`), DAMAGED_TEXT, 'damage outside the exact teaching paragraph is rejected');
+  }
+  assert.match(damageScanText(path, actor.replace('before attributing', 'before \uFFFD attributing')), DAMAGED_TEXT, 'an altered teaching paragraph is not silently exempted');
+  assert.match(damageScanText('README.md', ACTOR_DAMAGE_EXAMPLES), DAMAGED_TEXT, 'other files have no example exemption');
+  const workflowPath = 'assets/opencode/contracts/workflow.md';
+  const workflow = read(workflowPath);
+  assert.doesNotMatch(damageScanText(workflowPath, workflow), DAMAGED_TEXT);
+  assert.match(damageScanText(workflowPath, `${workflow}\nUnexpected \uFFFD prose.\n`), DAMAGED_TEXT, 'workflow prose is still scanned');
+  assert.match(damageScanText(workflowPath, workflow.replace('not a pipe', 'not a \uFFFD pipe')), DAMAGED_TEXT, 'altered workflow examples are not exempted');
+});
+
 test('the docs describe run persistence: local or versioned markers and the Engram copy', () => {
   const contract = read('assets/opencode/contracts/run-file.md');
   const docs = read('README.md') + '\n' + read('docs/architecture.md');

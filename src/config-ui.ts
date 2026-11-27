@@ -8,6 +8,8 @@ import { ask, Cancelled, choose, createTerminalIO, heading, note, rows } from '.
 import type { Choice, ConfigIO } from './tui.js';
 import { listModels, listVariants, providersOf } from './model-catalog.js';
 import type { ModelCatalog, VariantCatalog } from './model-catalog.js';
+import { createIntegrationsSession } from './integrations-ui.js';
+import type { IntegrationsOptions } from './integrations-ui.js';
 
 export type { Choice, ConfigIO } from './tui.js';
 
@@ -31,6 +33,7 @@ const MENU: readonly Choice[] = [
   { value: 'cancelar', label: 'Cancelar', hint: 'Sale sin escribir nada' },
   { value: 'subagentes', label: 'Subagentes nativos', hint: 'Modelos de explore y general solo desde mdd-orchestrator' },
   { value: 'contexto', label: 'Contexto', hint: 'Aviso de contexto y punto de control al compactar' },
+  { value: 'integraciones', label: 'Integraciones', hint: 'Context7, Engram y CodeGraph opcionales; nada se aplica sin revisión' },
 ];
 const PROFILE_MENU: readonly Choice[] = [
   { value: 'crear', label: 'Crear perfil', hint: 'Empieza desde los valores por defecto' },
@@ -170,7 +173,9 @@ async function editContext(io: ConfigIO, profile: Settings['profiles'][string]):
 }
 
 /** Injected line input and catalog allow deterministic tests; all edits remain drafts until Save. */
-export async function runConfigUI(root: string, io: ConfigIO, dependencies: { models?: () => ModelCatalog; variants?: (provider: string) => VariantCatalog } = {}): Promise<'saved' | 'cancelled'> {
+export async function runConfigUI(root: string, io: ConfigIO, dependencies: { models?: () => ModelCatalog; variants?: (provider: string) => VariantCatalog; integrations?: IntegrationsOptions } = {}): Promise<'saved' | 'cancelled'> {
+  // Integrations stay a lazy, in-memory queue: the engine is loaded only when menu 8 is opened.
+  const integrations = createIntegrationsSession(dependencies.integrations);
   // The catalog and its variants are read lazily, only when the models menu is opened.
   const catalog = dependencies.models ?? (() => listModels());
   const variantsOf = dependencies.variants ?? ((provider: string) => listVariants(provider));
@@ -202,9 +207,13 @@ export async function runConfigUI(root: string, io: ConfigIO, dependencies: { mo
         else if (action === 'subagentes') await editModels(io, profile, catalog, variantsOf, true);
         else if (action === 'preferencias') await editPreferences(io, profile);
         else if (action === 'contexto') await editContext(io, profile);
+        else if (action === 'integraciones') await integrations.browse(io);
         else if (action === 'guardar') {
+          if (integrations.pending() && await integrations.review(io) === 'back') continue;
           saveGlobalSettings(draft);
           io.write('\n  Listo: configuración global guardada.\n  Reiniciá OpenCode para cargar el perfil en cualquier proyecto.\n');
+          // Profile persistence is already final here; integration outcomes are reported separately.
+          if (integrations.pending()) await integrations.apply(io);
           return 'saved';
         }
       } catch (error) {

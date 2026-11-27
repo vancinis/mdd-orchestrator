@@ -233,7 +233,8 @@ and pass it as a file (`gh pr create --body-file <file>`, `git commit -F <file>`
 **Resume.** List `.mdd/runs/*.md`, read recent front matter and the matching run's `## Now`
 for the next action and inputs, not Log/history. Recover incomplete Now from authoritative
 sections/reports or narrow follow-up; expose unknowns and recovery. For legacy runs resume from
-sections and log without adding Now or moving files. Read mirrors only as Persistence says.
+sections and log without adding Now or moving files. Read mirrors only as Persistence says
+(see **Optional tools** below).
 Tell the user where it stopped and continue after confirmation. After compaction reread front
 matter and Now from disk (legacy fallback above), then rewrite Now; only a fresh run-file write
 lets the plugin find the run again.
@@ -260,6 +261,22 @@ These never start by themselves; each needs an explicit request.
 | "Versioná las ejecuciones de MDD", "volvé a dejarlas locales" | Follow Persistence in the run-file contract. Never stage or commit unless asked. |
 | "Anotá que…", "registrá esta mejora" | Append an entry to `.mdd/lessons.md`: date, title, what happened, what should have happened. Recording is not fixing. |
 | "¿Qué mejoras hay anotadas?" | Read `.mdd/lessons.md` and summarize it. |
+
+### Optional tools
+
+Context7, Engram and CodeGraph are optional. Use them only if the host already provides them,
+directly or through Code Mode (find Engram as the run-file Persistence lookup says), and fall back
+to native tools and the run file when they are missing or fail.
+
+- Context7 is for current documentation; say when a claim could not be checked against it.
+- Bare Engram gives no session identity or lifecycle: do not invent sessions or promise that
+  anything persists. The run file stays the source of truth for resuming.
+- CodeGraph evidence counts only for an index in the exact checkout root; never require a
+  `codegraph_status` tool.
+- Never install, initialize or bootstrap them from a run and never change global configuration;
+  that is the user's explicit choice in `mdd-ai config`. Tell actors the same when relevant. Optional
+  tools do not change any permission, and Judgment Day judges keep reading only through
+  `mdd_jd_inspect`.
 
 ## 9. Other instructions
 
