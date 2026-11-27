@@ -81,6 +81,15 @@ Two to five sentences a person reads first: what you found, decided or changed, 
 - Confidence: High, Medium or Low, with the reason.
 - Skills: loaded … / failed … (reason)   # omit when no skills were given
 
+## Record
+- Phase: <actor> · Iteration: I<n> · Assigned IDs: <tasks/corrections or none> · Outcome: <outcome>
+- Artifact: `<path>`
+- Acceptance and decisions: <changed R/S/D IDs and supersession; distinguish proposals, assumptions and decisions> | none
+- Tasks: <ID | Action | Exact files | Dependencies | Status | Scenarios | Local checks> | none
+- Checks: `<command>` · `<cwd>` · exit <n> · <observed result/counts and scope> · <checked revision/local edits and subsequent edits> · <disposition and reason/source>
+- Gaps: <ID · blocker/advisory · cause → next owner/action and prerequisites> | none
+- Next: <concrete next step and inputs>
+
 ## Open items
 Anything uncertain, skipped or left for a later actor. `None.` when empty.
 
@@ -88,6 +97,25 @@ Anything uncertain, skipped or left for a later actor. `None.` when empty.
 Only decisions the user alone can make, each with why it matters and two to four concrete
 options. Omit the section when there are none. Never ask for approval to continue.
 ```
+
+Include `## Record` in the report for every run-route result, not for standalone security or
+Judgment Day. If known, give your session ID; otherwise the orchestrator keeps the dispatch
+identity. Record deltas, not the artifact; reference unchanged IDs and don't repeat row lists
+in prose. Use `none`, `not run` or `unknown` with reasons rather than omit fields. Distinguish
+executed, reused, replacement, blocked, omitted, environmental and inapplicable evidence;
+don't invent exits for unrun checks. Non-command probes give setup, action and expected/observed results.
+
+| Phase | Record-ready additions |
+|---|---|
+| Explore | Route-changing findings with sources, observation vs inference, unknowns and next action |
+| Risk | Complexity, impact, recommended level, evidence and uncertainty |
+| Propose | Proposed scope/exclusions, assumptions, risks and open decisions |
+| Plan | Changed R/S/D IDs and task rows, scenario mapping and whole-change checks |
+| Spec | Acceptance deltas, invariants/exclusions, open decisions and scenario-matrix link |
+| Design | Requirement-linked decisions, interfaces, compatibility/rollout, spike evidence and open decisions |
+| Tasks | Changed task rows, checks, scenario mapping and disjoint batches |
+| Apply | Task/gap dispositions, actual files/surface exceptions, pending integration, fail-before/pass-after or exception, checked-state limits |
+| Verify | Checked state, required-check dispositions, R/S/T/D coverage, external limits and gap cause (`implementation`, `design`, `requirements` or `verification`) |
 
 The orchestrator explains your result to the user from this report, usually without opening the
 artifact. Make the Summary state the substantive result of your phase (what you found, proposed,

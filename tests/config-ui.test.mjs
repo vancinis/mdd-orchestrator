@@ -58,11 +58,39 @@ test('the main menu preserves existing shortcuts and offers optional native suba
   const script = scripted([CANCEL]);
   assert.equal(await runConfigUI(root, script.io, noCatalog), 'cancelled');
   const text = script.output.join('');
-  for (const [index, label] of ['Perfiles', 'Modelos', 'Preferencias', 'Guardar y salir', 'Cancelar', 'Subagentes nativos'].entries()) {
+  for (const [index, label] of ['Perfiles', 'Modelos', 'Preferencias', 'Guardar y salir', 'Cancelar', 'Subagentes nativos', 'Contexto'].entries()) {
     assert.match(text, new RegExp(`^.\\s${index + 1}\\s{2}${label}`, 'm'), label);
   }
   assert.doesNotMatch(text, /Engram|Telemetr|Workers|memoria|certeza/i);
   assert.deepEqual(readdirSync(root), []);
+});
+
+test('context edits are sparse, validated and isolated to the selected profile', async t => {
+  const root = fixture(t);
+  const settings = changeProfile(defaultSettings(), 'create', 'other');
+  settings.activeProfile = 'default';
+  saveSettings(root, settings);
+  const run = async (lines, outcome = 'saved') => {
+    const script = scripted(lines);
+    assert.equal(await runConfigUI(root, script.io, noCatalog), outcome);
+    return script.output.join('');
+  };
+  const read = () => loadSettings(root).profiles.default.context;
+  const off = await run(['7', '2', '1', SAVE]);
+  assert.doesNotMatch(off, /Umbral del aviso \(%\)/);
+  assert.match(off, /Contexto.*aviso desactivado; punto de control activado/);
+  assert.deepEqual(read(), { notice: false });
+  const retry = await run(['7', '1', '5', '7', '1', '"70"', '7', '1', '80', '2', SAVE]);
+  assert.equal([...retry.matchAll(/! context\.noticeThreshold must be an integer from 10 to 95\./g)].length, 2);
+  assert.deepEqual(read(), { noticeThreshold: 80, checkpoint: false });
+  const file = join(root, 'mdd.config.json');
+  const before = readFileSync(file);
+  const cancelled = await run(['7', '1', '85', '1', CANCEL], 'cancelled');
+  assert.match(cancelled, /OpenCode compacta cerca del 85%/);
+  assert.deepEqual(readFileSync(file), before);
+  await run(['7', '1', '-', '1', SAVE]);
+  assert.equal(read(), undefined);
+  assert.deepEqual(loadSettings(root).profiles.other, settings.profiles.other);
 });
 
 test('scripted terminal creates profile, edits every model and both preferences, and saves', async t => {

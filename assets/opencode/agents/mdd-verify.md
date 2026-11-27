@@ -69,7 +69,8 @@ the request or spec states them.
   cheapest layer that can expose the risk, and at the real boundary when the risk lies there. Do not
   rebuild a costly scenario matrix that valid reused evidence already covers; aim probes at what it
   does not reach, such as integration between tasks, invalid input and state invariants. Save scripts
-  and outputs under `.mdd/runs/<id>/probes/`, named after the scenario.
+  and outputs under `.mdd/runs/<id>/evidence/` (use the iteration's subfolder after I1),
+  named after the scenario.
 
 ## Assess failures and coverage
 

@@ -17,10 +17,13 @@ export const SUMMARIES = Object.freeze(['low', 'medium', 'detailed'] as const);
 export type Mode = typeof MODES[number];
 export type Summary = typeof SUMMARIES[number];
 export type Preferences = { mode?: Mode; summary?: Summary };
+export type ContextSettings = { notice?: boolean; checkpoint?: boolean; noticeThreshold?: number };
+export const CONTEXT_DEFAULTS = Object.freeze({ notice: true, checkpoint: true, noticeThreshold: 70 });
 export type NamedProfile = {
   models: Partial<Record<ModelRole, string>>;
   answers: Preferences;
   subagentModels?: Partial<Record<NativeSubagent, string>>;
+  context?: ContextSettings;
 };
 export type Settings = { version: 1; activeProfile: string; profiles: Record<string, NamedProfile> };
 
@@ -62,6 +65,29 @@ export function parsePreferences(value: unknown): Preferences {
   return result;
 }
 
+export function parseContext(value: unknown): ContextSettings {
+  const input = objectWithKeys(value, 'context', ['notice', 'checkpoint', 'noticeThreshold']);
+  const result: ContextSettings = {};
+  for (const key of ['notice', 'checkpoint'] as const) {
+    const enabled = input[key];
+    if (enabled === undefined) continue;
+    if (typeof enabled !== 'boolean') throw new ValidationError(`context.${key} must be true or false.`);
+    result[key] = enabled;
+  }
+  const threshold = input.noticeThreshold;
+  if (threshold !== undefined) {
+    if (typeof threshold !== 'number' || !Number.isInteger(threshold) || threshold < 10 || threshold > 95) {
+      throw new ValidationError('context.noticeThreshold must be an integer from 10 to 95.');
+    }
+    result.noticeThreshold = threshold;
+  }
+  return result;
+}
+
+export function contextSettings(profile?: NamedProfile): Required<ContextSettings> {
+  return { ...CONTEXT_DEFAULTS, ...profile?.context };
+}
+
 export function defaultSettings(): Settings {
   return { version: 1, activeProfile: 'default', profiles: { default: { models: {}, answers: {} } } };
 }
@@ -75,7 +101,7 @@ export function parseSettings(value: unknown): Settings {
   const profiles = objectWithKeys(input.profiles, 'profiles', names);
   const result: Settings = { version: 1, activeProfile: profileName(input.activeProfile), profiles: {} };
   for (const name of names) {
-    const profile = objectWithKeys(profiles[name], 'profile', ['models', 'answers', 'subagentModels']);
+    const profile = objectWithKeys(profiles[name], 'profile', ['models', 'answers', 'subagentModels', 'context']);
     const models = objectWithKeys(profile.models ?? {}, 'models', MODEL_ROLES);
     const parsed: NamedProfile = { models: {}, answers: parsePreferences(profile.answers ?? {}) };
     for (const role of MODEL_ROLES) if (Object.hasOwn(models, role)) parsed.models[role] = parseModel(models[role]);
@@ -85,6 +111,7 @@ export function parseSettings(value: unknown): Settings {
       for (const agent of NATIVE_SUBAGENTS)
         if (Object.hasOwn(subagents, agent)) parsed.subagentModels[agent] = parseModel(subagents[agent]);
     }
+    if (profile.context !== undefined) parsed.context = parseContext(profile.context);
     result.profiles[name] = parsed;
   }
   if (!Object.hasOwn(result.profiles, result.activeProfile)) throw new ValidationError('Active profile does not exist.');

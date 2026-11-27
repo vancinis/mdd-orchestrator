@@ -12,7 +12,7 @@ Nothing here can block the user's work. The host's native permission prompts are
 | Question, explanation, investigation | Answer directly. Investigate yourself or dispatch `mdd-explore`. No run. |
 | Small, clear change the user just wants done | Do it directly. No run. Offer a run only if the change turns out bigger than it looked. |
 | Change that benefits from planning, tracking or verification, or the user asks for MDD | Start a run (section 3). |
-| "Continue", "sigue", an issue or feature already worked on | Resume (section 7). Never start a fresh run for recorded work. |
+| "Continue", "sigue", an issue or feature already worked on | Resume or classify follow-up work (section 7). |
 | Commit, push, open a PR for finished work | Do exactly what was asked with git/gh. Not a new run. |
 | Security review, Judgment Day, PR body, explanation artifact, "anotá que…" | See section 8. |
 
@@ -48,15 +48,13 @@ Pick the lightest level that still gives a trustworthy result. Record it in the 
 
 ## 4. Dispatch an actor
 
-Call the native subagent tool in the foreground with the actor's name, a short description and a
-prompt that contains:
+Call the native subagent tool in the foreground with the actor, short description and:
 
-- the run file path, and the paths of the earlier artifacts the actor needs;
+- the run file path, current iteration, and paths of the earlier artifacts the actor needs;
 - what this actor must produce, and for Apply the exact task IDs, its edit surface (every file
   the tasks may change, tests, docs, tracked generated files and new files included; a glob only
   for unknowable names) and whether other Apply actors run alongside;
-- the artifact path where it writes its full output: `.mdd/runs/<id>/NN-<actor>.md`, where `NN`
-  is the next two-digit sequence number (`01-explore.md`, `02-plan.md`, ...);
+- the reserved artifact path (run-file Layout), with distinct numbers before parallel dispatch;
 - anything the user said that changes the plan;
 - the exact `SKILL.md` paths this actor loads (omitted when none).
 
@@ -78,22 +76,23 @@ is not a new prerequisite for direct or small changes.
 
 After each actor:
 
-1. Read its report. If the outcome is `failed` or `blocked`, decide: give it what it was missing
-   and dispatch again (at most twice for the same reason), escalate the level, ask the user, or do
-   the work directly and note it in the log.
-2. Spot check Apply or Verify `passed` that rests on executed checks (others only if they claim
-   executed results): rerun the cheapest reported check exercising the claim, same command and
-   working directory (after parallel Apply, one rerun covers the batch), and record it under
+1. Read its report and `## Record`. Ask the same actor session (dispatch `sessionID`) only for
+   missing fields or to restore missing evidence. If unavailable, record the gap and recovery,
+   not an inferred pass. For `failed`/`blocked`, supply what's missing and retry (at most twice
+   for the same reason), escalate, ask the user, or work directly and log it.
+2. Spot check Apply/Verify passes based on executions (other actors only if they claim executions):
+   rerun the cheapest reported check in Record that tests the claim, using the
+   same command and working directory (one rerun per parallel batch). Record it under
    Verification. On a mismatch in exit code, result or counts, handle the report as `failed`:
    record both, then redispatch Apply (step 1) or route the Verify gap (section 7); do not swap
    in another check until the difference is explained. If you cannot run it, record "not run" and
    why; that is no match.
-3. Update the run file: log line, plan status, decisions, open questions.
-4. Explain the result to the user (section 6), then continue in the same turn: in automatic mode
-   with the next applicable action (actor, check or closure), in interactive mode with the usual
-   question before the next actor (section 5). The explanation never waits for acknowledgement.
-   When the result leads to closure with no other actor in between, skip this step: the closing
-   reply covers it (section 7).
+3. Apply Record deltas (tasks, acceptance, decisions, checks and gaps), refresh `## Now`, and add
+   one log line. Do not open artifacts to record, summarize or spot-check.
+4. Mirror the recorded result at the run-file Persistence milestone.
+5. Explain the result (section 6) and continue the same turn without waiting for acknowledgement:
+   take the next action or ask the interactive question (section 5). If closing without another
+   actor, use only the closing reply (section 7).
 
 **Parallel Apply.** You may dispatch up to three `mdd-apply` actors in one message when their
 tasks have no dependencies between them and write disjoint files. Otherwise run them in sequence.
@@ -110,7 +109,8 @@ run it once. A different command keeps both runs.
 
 Reassign ownership before an Apply edits an additional shared file; serialize any newly
 overlapping work. After an interruption or lost result, confirm the previous actor has stopped
-and inspect its artifact and working-tree changes before redispatching. A missing response is
+and inspect working-tree changes before redispatching. Read its artifact if needed for ownership
+recovery and label that purpose in the log. A missing response is
 not evidence that it stopped. If its state is unknown, pause overlapping edits until resolved.
 Do not use stash, reset or branch switches on the shared tree to isolate one actor's checks;
 coordinate an isolated baseline when needed, preserving all ongoing work.
@@ -128,6 +128,8 @@ the surface unless another active Apply owns it (then serialize), and continue.
 
 **Checks.** You may run tests, builds and linters yourself at any point. Record the command and
 its result in the run file. A command you did not run is not evidence.
+Small in-run adjustments are your call: prefer native `general` for trivial ones and `mdd-apply`
+otherwise. Check and record direct or delegated work alike.
 
 **Files and text.** Files you write yourself (direct changes, the run file, PR bodies, commit
 messages) follow the actors' rule: use the native write and edit tools, or a script that writes the
@@ -166,8 +168,8 @@ and pass it as a file (`gh pr create --body-file <file>`, `git commit -F <file>`
   - Apply: what actually changed and the checks it ran, with their real results.
   - Verify: what was checked, the real result and any gaps.
   - `failed` or `blocked`: what is wrong or missing, and what happens next.
-- Build the explanation from the actor's report and the run file. Open an artifact only when the
-  report lacks something the user needs; do not reread full artifacts just to summarize.
+- Explain from reports and the run file; do not reread full artifacts just to summarize.
+  Ask the reporting actor for missing details the user needs.
 - Length follows the substance (decisions, changes, results, limits), not the artifact's length.
   Stay concise; do not repeat what the user already saw.
 - Never present an unrun check as passed or a failure as success. Keep limits visible.
@@ -187,6 +189,21 @@ and pass it as a file (`gh pr create --body-file <file>`, `git commit -F <file>`
   prerequisites/access or arrange the check, then re-verify. Design/requirements conflicts need
   revised decisions before implementation. Keep the run active while blocked unless the user
   chooses to stop with explicit limits.
+- **Follow-ups** (closed runs stay closed, even if a late result adds evidence or gaps):
+
+  | Input | Route |
+  |---|---|
+  | New capability or any new work after closure | Propose a new run linking this one |
+  | Bug, Verify gap or unmet current acceptance | Correct in this iteration; add Plan row `I<n>-C<k>` with gaps and affected IDs; no new Plan or reset of round limits |
+  | Change before Verify | Amend the current iteration; resolve material conflicts first |
+  | Approved same-feature change after reaching Verify | Close the current iteration if open; open the next |
+  | Unclear | Ask only the scope question |
+
+- **Only external/user-owned checks left:** List owner, where/how to check and whether each gates
+  acceptance. A missing local prerequisite is not external. Ask once, recommend closing with
+  checks pending under Limits (`closed-unverified` if required; `completed` only if agreed
+  non-gating and completion rules hold). Until chosen, stay active/waiting; don't ask again
+  unless materially new pending checks appear.
 - **Failed Verify, automatic mode:** dispatch `mdd-apply` for blockers and unmet requirements with
   an implementation cause, with Verify's artifact, then `mdd-verify` on the corrections and
   affected integration checks. At most two correction rounds; a second one only if the first made
@@ -202,30 +219,31 @@ and pass it as a file (`gh pr create --body-file <file>`, `git commit -F <file>`
     input changed after it; otherwise first rerun one Verify check;
     on low without Verify, one check you ran is required;
   - `closed-unverified` — the user chose to stop with gaps; list every gap under Limits;
-  - `abandoned` — the user dropped the work.
-  Then give the user one closing reply in Spanish about the whole run, following the route
-  actually taken: what was delivered, the approach and key decisions with their reason, what was
-  actually verified (Verify's result, or on low without Verify your own checks, saying no
-  independent Verify ran) and what remains. Use the reports and run file you already have. When
-  the last actor's result leads to closure with no other actor in between (Verify passed, or a
-  low Apply followed only by your checks), close in the same turn with this one reply instead of
-  a separate progress explanation and final summary, covering that actor's result.
-  `closed-unverified` and `abandoned` replies say what was and was not done and never read as
-  success. A blocked or failed Verify is not itself closure: explain it and continue as above,
-  unless the user chooses `closed-unverified`.
-- Preserve the checked revision/local-change context and external limits in the run. After later
-  edits or merges, recheck affected behavior and integration before presenting earlier results
-  as evidence for the new state. Retain still-valid evidence for unaffected scope; do not rerun
-  everything automatically. Closing with gaps requires the user's choice, not inferred consent.
+   - `abandoned` — the user dropped the work.
+   Close and archive any open iteration per the run-file rules before finalizing status.
+   Close in the same turn with one Spanish reply for the route actually taken: delivery, approach,
+   key decisions/reasons, actual checks (say if no independent Verify ran), last actor's result
+   and limits. Don't present `closed-unverified` or `abandoned` as success. Failed or blocked
+   Verify alone is not closure. Closing with gaps requires the user's choice, not inferred consent.
+- Retain valid evidence and recheck affected behavior/integration after edits or merges per the
+  run-file rules; do not rerun everything automatically.
 - Closing never authorizes commit, push, PR, a security review or Judgment Day. Those need their
   own explicit request.
 
-**Resume.** At the start of a conversation, or when the user refers to earlier work, list
-`.mdd/runs/*.md` and read the front matter of the recent ones. Read the mirrored copy only
-when the local file is missing or the user says the local copy is stale, as Persistence says.
-Tell the user where a matching run stopped
-and continue from its log after they confirm. A finished run stays finished: new work on the
-same topic is a new run that links to the old one.
+**Resume.** List `.mdd/runs/*.md`, read recent front matter and the matching run's `## Now`
+for the next action and inputs, not Log/history. Recover incomplete Now from authoritative
+sections/reports or narrow follow-up; expose unknowns and recovery. For legacy runs resume from
+sections and log without adding Now or moving files. Read mirrors only as Persistence says.
+Tell the user where it stopped and continue after confirmation. After compaction reread front
+matter and Now from disk (legacy fallback above), then rewrite Now; only a fresh run-file write
+lets the plugin find the run again.
+
+**Context notice.** On `MDD context notice`, finish the bounded step; record in-flight
+actor session/state without cancelling or duplicating work. Refresh Now, attempt the mirror and
+propose a new conversation: `Seguí con la ejecución <id>: <next step>`. Without an active run,
+propose it with a two-line work/next-step summary. Don't propose switching for other reasons unless
+asked. When changing runs in this conversation, refresh the continuing run's Now first and make
+it the last run file you write; this helps association but does not guarantee it.
 
 ## 8. Standalone features
 
