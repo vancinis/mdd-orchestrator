@@ -455,7 +455,8 @@ se escribe hasta **Guardar y salir**) o a mano. Esquema:
         "explore": "proveedor/modelo-exploracion",
         "general": "proveedor/modelo-general#high"
       },
-      "answers": { "mode": "automatic", "summary": "medium" }
+      "answers": { "mode": "automatic", "summary": "medium" },
+      "context": { "notice": true, "checkpoint": true, "noticeThreshold": 70 }
     }
   }
 }
@@ -467,12 +468,23 @@ se escribe hasta **Guardar y salir**) o a mano. Esquema:
 | `profiles.<nombre>.subagentModels.explore` / `.general` | `proveedor/modelo[#variante]`, solo para llamadas nuevas desde `mdd-orchestrator` | OpenCode resuelve el modelo de forma nativa |
 | `profiles.<nombre>.answers.mode` | `automatic` (avanza sin preguntar) o `interactive` (pregunta antes de cada actor) | El orquestador lo pregunta una vez por ejecución |
 | `profiles.<nombre>.answers.summary` | `low`, `medium` o `detailed` | `medium` |
+| `profiles.<nombre>.context.notice` | `true` o `false`: aviso al llegar al umbral | `true` |
+| `profiles.<nombre>.context.checkpoint` | `true` o `false`: punto de control al compactar | `true` |
+| `profiles.<nombre>.context.noticeThreshold` | Entero de 10 a 95: porcentaje del límite de contexto | `70` |
 
 **Roles con modelo configurable (14):** `orchestrator`, `mdd-explore`, `mdd-risk`, `mdd-plan`,
 `mdd-propose`, `mdd-spec`, `mdd-design`, `mdd-tasks`, `mdd-apply`, `mdd-verify`, `mdd-security`,
 `mdd-jd-judge-a`, `mdd-jd-judge-b` y `mdd-jd-fix`.
 
 Perfiles desde la terminal: `mdd-ai profile list | create <nombre> | use <nombre>`.
+
+### Aviso de contexto y punto de control
+
+En `mdd-ai config` → **Contexto**, podés cambiar el umbral del aviso o apagar cada función por
+separado para el perfil activo. Si apagás el aviso, el orquestador no recibe el mensaje al llegar
+al umbral. Si apagás el punto de control, MDD no agrega el ID ni el `## Now` al material del
+resumen. OpenCode compacta igual: con un umbral de 85% o más, el aviso puede llegar tarde.
+Guardá los cambios y reiniciá OpenCode para aplicarlos.
 
 ### Modelos de subagentes nativos
 

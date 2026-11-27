@@ -97,6 +97,22 @@ test('regression: installed coordinator keeps Spanish user prose and English art
 });
 
 // These checks protect installed guidance, not an LLM's compliance with that guidance.
+test('installed run guidance carries checkpoints, iteration layout and record-ready reports', t => {
+  const root = fixture(t);
+  initProject(root);
+  const readAgent = name => fs.readFileSync(join(root, `agents/${name}.md`), 'utf8');
+  const orchestrator = readAgent('mdd-orchestrator');
+  for (const anchor of [
+    '## Now', 'history.md', 'i<n>-<slug>/', 'evidence/', 'MDD context notice',
+    'same actor session', 'at milestones', 'without adding Now', 'last run file you write', 'then rewrite Now',
+  ]) assert.ok(orchestrator.includes(anchor), anchor);
+  for (const name of ['explore', 'risk', 'propose', 'plan', 'spec', 'design', 'tasks', 'apply', 'verify']) {
+    assert.match(readAgent(`mdd-${name}`), /^## Record$/m, name);
+  }
+  assert.match(readAgent('mdd-verify'), /runs\/<id>\/evidence\//);
+  assert.doesNotMatch(readAgent('mdd-verify'), /runs\/<id>\/probes\//);
+});
+
 test('installed Apply preserves bounded integration and evidence guidance', t => {
   const root = fixture(t);
   initProject(root);
@@ -296,14 +312,15 @@ test('installed reporting guidance explains results, continues without pausing a
   const has = (text, anchor, id) => assert.ok(text.includes(anchor), `${id}: ${anchor}`);
   const orchestrator = flat('agents/mdd-orchestrator.md');
   const anchors = {
-    A1: 'continue in the same turn', A2: 'never waits for acknowledgement',
+    A1: 'continue the same turn', A2: 'without waiting for acknowledgement',
     A3: 'not just the actor name, outcome or artifact link', A4: 'what it proposes or decides and why',
     A5: 'what actually changed', A6: 'what was checked, the real result',
     A7: '`failed` or `blocked`: what is wrong or missing', A8: 'do not reread full artifacts just to summarize',
     A9: 'Every level states the substantive result', A10: 'Length follows the substance',
-    A11: 'route actually taken', A12: 'no independent Verify ran', A13: 'close in the same turn',
-    A14: 'instead of a separate progress explanation and final summary', A15: 'never read as success',
-    A16: 'A blocked or failed Verify is not itself closure', A16b: 'unless the user chooses `closed-unverified`',
+    A11: 'route actually taken', A12: 'no independent Verify ran', A13: 'Close in the same turn',
+    A14: 'If closing without another actor, use only the closing reply',
+    A15: "Don't present `closed-unverified` or `abandoned` as success",
+    A16: 'Failed or blocked Verify alone is not closure',
     P1: '**Automatic:** continue from actor to actor without asking',
     P2: 'Ask only decisions the user alone can make',
     P3: '(`Continuar`, `Ajustar`, `Pausar`)',

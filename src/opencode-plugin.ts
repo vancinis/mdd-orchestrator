@@ -1,9 +1,12 @@
 import { Model, Plugin } from '@opencode/plugin';
+import { resolve } from 'node:path';
 import { z } from 'zod';
 import { loadGlobalSettings } from './global-settings.js';
-import { activeProfile, agentFor, MODEL_ROLES } from './settings.js';
+import { activeProfile, agentFor, contextSettings, MODEL_ROLES } from './settings.js';
 import type { Preferences, Settings } from './settings.js';
 import { JD_INSPECT, inspectJudgmentTarget, isJudge } from './judgment-day.js';
+import { createContextWatch } from './context-notice.js';
+import { checkpointText, readRun, resolveActiveRun, runCandidates } from './run-checkpoint.js';
 
 export const COORDINATOR = 'mdd-orchestrator';
 
@@ -68,11 +71,21 @@ const inspectInput = z.object({
   path: z.string().optional(),
 }).strict();
 
+function locationKey(directory: string): string {
+  const path = resolve(directory);
+  return process.platform === 'win32' ? path.toLowerCase() : path;
+}
+
+const modelKey = (model: { providerID: string; id: string }) => JSON.stringify([model.providerID, model.id]);
+const validLimit = (limit: number) => Number.isSafeInteger(limit) && limit > 0;
+
 export default Plugin.define({
   id: 'mdd',
   setup: async ctx => {
     const worktree = ctx.location.project.directory;
+    const { directory } = ctx.location;
     const { settings, problem } = startupSettings();
+    const context = contextSettings(settings && activeProfile(settings));
     if (problem) console.error(`MDD: la configuración global no es válida y se usan los valores por defecto: ${problem}`);
 
     await ctx.tool.hook('execute.before', event => applySubagentModelPolicy(event, settings));
@@ -107,10 +120,73 @@ export default Plugin.define({
       for (const name of Object.keys(event.tools)) if (name !== JD_INSPECT) delete event.tools[name];
     });
 
+    const location = locationKey(directory);
+    const sessionInLocation = async (sessionID: string) => {
+      const session = await ctx.session.get({ sessionID });
+      return locationKey(session.location.directory) === location;
+    };
+    const sessionLocations = new Map<string, Promise<boolean>>();
+    const limits = new Map<string, number>();
+    let catalogLoaded = false;
+    const refreshLimits = async () => {
+      const { data } = await ctx.model.list({ location: { directory } });
+      limits.clear();
+      for (const model of data) {
+        const { context, input = context } = model.limit;
+        if (validLimit(context) && validLimit(input)) limits.set(modelKey(model), Math.min(context, input));
+      }
+      catalogLoaded = true;
+    };
+    const watch = context.notice ? createContextWatch({
+      coordinator: COORDINATOR,
+      directory,
+      thresholdPercent: context.noticeThreshold,
+      async limitFor(model) {
+        if (!catalogLoaded) await refreshLimits();
+        const key = modelKey(model);
+        if (!limits.has(key)) await refreshLimits();
+        return limits.get(key);
+      },
+      async inLocation(sessionID) {
+        const lookup = sessionLocations.get(sessionID) ?? sessionInLocation(sessionID);
+        sessionLocations.set(sessionID, lookup);
+        try {
+          const matches = await lookup;
+          return matches && sessionLocations.get(sessionID) === lookup;
+        } catch (error) {
+          if (sessionLocations.get(sessionID) === lookup) sessionLocations.delete(sessionID);
+          throw error;
+        }
+      },
+      async notify(sessionID, text) {
+        await ctx.session.synthetic({
+          sessionID, text, description: 'MDD context notice',
+          metadata: { source: 'mdd', notice: 'context' }, delivery: 'steer', resume: false,
+        });
+      },
+      warn: message => console.error(message),
+    }) : undefined;
+
+    if (context.checkpoint) await ctx.session.hook('compaction', async event => {
+      if (event.agent !== COORDINATOR || event.result !== undefined) return;
+      try {
+        const candidates = runCandidates(event.messages, directory);
+        if (!candidates.length || !await sessionInLocation(event.sessionID)) return;
+        const runs = candidates.map(candidate => ({ ...candidate, ...readRun(directory, candidate.id) }));
+        const resolution = resolveActiveRun(runs);
+        const text = checkpointText(resolution, resolution.kind === 'run' ? runs.find(run => run.id === resolution.id) : undefined);
+        if (text !== undefined) event.system.push({ type: 'text', text });
+      } catch (error) {
+        console.error('MDD: could not prepare the run checkpoint:', error);
+      }
+    });
+
     const controller = new AbortController();
     const stream = (async () => {
       try {
         for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+          if (event.type === 'session.deleted' || event.type === 'session.moved') sessionLocations.delete(event.data.sessionID);
+          watch?.observe(event);
           if (event.type === 'agent.updated') await reapply();
         }
       } catch (error) { if (!controller.signal.aborted) console.error('MDD: el flujo de eventos terminó:', error); }
@@ -119,6 +195,7 @@ export default Plugin.define({
     return async () => {
       controller.abort();
       await stream;
+      await watch?.settle();
       await registration.dispose();
     };
   },

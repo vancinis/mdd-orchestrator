@@ -92,15 +92,23 @@ El orquestador decide el **nivel** según el pedido, y podés pedirle otro:
 Cada ejecución es un Markdown en tu proyecto:
 
 ```text
-.mdd/runs/20261102-email-validation.md      pedido, aceptación, alcance, decisiones, plan, registro, verificación
+.mdd/runs/20261102-email-validation.md      estado actual, pedido, aceptación, decisiones, plan y verificación
 .mdd/runs/20261102-email-validation/
 ├── 01-explore.md                           artefacto completo de cada actor
 ├── 02-plan.md
 ├── 03-apply-T1.md
-└── 04-verify.md
+├── 04-verify.md
+├── i2-adjust-email/                        artefactos de la segunda iteración (i2-<slug>/)
+├── evidence/                              logs de comandos, pruebas exploratorias y capturas
+└── history.md                             registro de iteraciones cerradas
 ```
 
-Cualquiera puede retomar desde ahí: otra conversación, después de reiniciar o una persona.
+Para retomar, el orquestador lee el encabezado del archivo y `## Now`: fase, iteración, próximo
+paso, bloqueos y último estado verificado. Si aprobás un cambio de la misma funcionalidad después
+de llegar a Verify en una ejecución activa, abre la siguiente iteración; las correcciones de la
+aceptación vigente quedan en la misma y una capacidad nueva va a una ejecución vinculada. Los
+actores devuelven un `## Record` con lo que hay que registrar y verificar, sin que el orquestador
+tenga que releer cada artefacto. Las ejecuciones anteriores sin `## Now` se retoman sin migrarlas.
 
 `.mdd/` es local por defecto: `.mdd/.gitignore` empieza con `# mdd: local` y contiene `*`. Si
 querés compartir las ejecuciones por git, pedilo ("Versioná las ejecuciones"): MDD reescribe ese
@@ -110,9 +118,28 @@ lo pidas; si un `.gitignore` de la raíz ignora `.mdd/`, te lo avisa y te pregun
 Para volver a local, pedilo también.
 
 Cuando Engram está disponible, el orquestador guarda en Engram una copia del archivo de ejecución
-(solo ese archivo, no los artefactos) cada vez que actualiza el registro. Si el archivo local
-falta, retoma desde esa copia, y si existe el local, ese manda. Sin Engram el trabajo sigue y
-queda anotado en los límites.
+(solo ese archivo, no los artefactos) en cada hito: después de cada actor, al cerrar una iteración
+o la ejecución, y antes de proponer una conversación nueva. Si el archivo local falta, retoma
+desde esa copia; si existe el local, ese manda. Sin Engram el trabajo sigue y queda anotado en
+los límites.
+
+### Aviso de contexto y compactación
+
+El plugin le envía al orquestador un aviso de contexto al llegar al umbral configurado (por defecto, **70%**) del límite informado
+por OpenCode. El orquestador termina el paso actual, actualiza `## Now`, intenta guardar la copia
+en Engram y te propone abrir otra conversación: `Seguí con la ejecución <id>: <próximo paso>`.
+Si no hay una ejecución activa, te propone retomar con un resumen breve y el próximo paso.
+
+Si OpenCode compacta y el plugin puede identificar la ejecución activa, agrega su ID y el
+`## Now` leído del disco al material para el resumen. La reconoce solo por las escrituras del
+orquestador en su archivo que siguen visibles en esa compactación: lo que repite un resumen
+anterior no cuenta, y sin escrituras visibles no agrega nada. Si no puede leerlo o supera el
+límite de seguridad, indica que hay que releer el archivo en vez de incluir un fragmento. El
+resumen depende del modelo: después de compactar, el orquestador vuelve al archivo en disco y
+reescribe `## Now`, lo que permite reconocer la ejecución en la próxima compactación.
+
+Podés apagar el aviso o el punto de control, o cambiar el umbral (10–95 %), en `mdd-ai config` → **Contexto**;
+se aplica al reiniciar OpenCode.
 
 ## Agentes
 
@@ -148,7 +175,8 @@ aparte (`mdd-grill`, `mdd-pr-body`, `mdd-judgment-day`, `mdd-ship`) las usa solo
 ## Contratos y herramientas
 
 MDD tiene **una sola herramienta**, `mdd_jd_inspect`, y existe porque garantiza algo que una guía
-no puede: que los jueces de Judgment Day solo vean objetos Git comprometidos. Todo lo demás son
+no puede: que los jueces de Judgment Day solo vean objetos Git comprometidos. El aviso de contexto
+y el punto de control se integran al plugin sin agregar herramientas. El flujo se guía por
 contratos en [`assets/opencode/contracts/`](assets/opencode/contracts):
 
 | Contrato | Lo lee | Define |
@@ -203,10 +231,16 @@ npm test                  # limpia dist/, compila y corre tests/*.test.mjs
 
 Las pruebas aíslan HOME, XDG y APPDATA en un directorio temporal: nunca tocan tu instalación real.
 
+Para auditar el volumen registrado por OpenCode, ejecutá `node scripts/context-audit.mjs --view all`.
+Es de solo lectura y emite agregados JSON en unidades de código UTF-16, no tokens ni ocupación
+actual del contexto.
+
 ## Limitaciones
 
 - **Sin validación end-to-end con modelos reales.** La calidad depende de cómo el modelo interprete
   los contratos; conviene probarlo con tus modelos y ajustar los contratos.
+- **El aviso depende de OpenCode.** Sin datos de uso válidos y un límite informado para el modelo,
+  MDD no estima el porcentaje. El aviso no evita la compactación ni demuestra un ahorro de tokens.
 - **La evidencia es la que reportan los agentes.** MDD no certifica que un comando se haya
   ejecutado; Verify lo corre y lo informa, y el orquestador repite un check antes de aceptar un
   éxito basado en checks o de cerrar como `completed`, lo que sigue sin ser una certificación.

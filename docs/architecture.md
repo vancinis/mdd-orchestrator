@@ -2,8 +2,8 @@
 
 MDD 0.2 es un conjunto de **agentes de OpenCode guiados por contratos en Markdown**, más un
 plugin mínimo y un instalador. El orquestador lee los contratos y decide; ninguna herramienta
-valida ni rechaza su trabajo. Lo único que se aplica por código es el aislamiento de los jueces de
-Judgment Day.
+valida ni rechaza su trabajo. El plugin aplica el aislamiento de los jueces de Judgment Day y
+asiste al orquestador con un aviso de contexto y un punto de control para la compactación.
 
 ## Componentes
 
@@ -13,7 +13,7 @@ Judgment Day.
 | Agentes | `assets/opencode/agents/` | Un archivo por actor con su rol. Al instalarse, cada marcador `<!-- mdd:include contracts/… -->` se reemplaza por el texto del contrato, así que cada agente instalado se lee completo por sí solo. |
 | Skills | `assets/opencode/skills/` | Procedimientos que se cargan solo cuando se piden: `mdd-grill`, `mdd-pr-body`, `mdd-judgment-day`, `mdd-doc`, `mdd-explain`, `mdd-cleanup` y `mdd-ship`. Las skills relevantes del proyecto o del host se resuelven una vez por ejecución, se anotan en el Scope del run file y se pasan a los actores por la ruta exacta de su `SKILL.md`. |
 | Comandos | `assets/opencode/commands/` | `/ship` corre en la sesión actual de OpenCode y carga `mdd-ship`. Es el pedido explícito de publicar solo ese cambio, sin abrir una ejecución; la skill define el procedimiento. |
-| Plugin | `src/opencode-plugin.ts` | Asigna modelos a los agentes MDD y valores por defecto a llamadas nuevas a `explore`/`general` desde el orquestador, agrega las preferencias (`mode`, `summary`) y registra la única herramienta: `mdd_jd_inspect`, solo para los jueces. |
+| Plugin | `src/opencode-plugin.ts` | Asigna modelos a los agentes MDD y valores por defecto a llamadas nuevas a `explore`/`general` desde el orquestador, agrega las preferencias (`mode`, `summary`), integra el aviso de contexto y el punto de control, y registra la única herramienta: `mdd_jd_inspect`, solo para los jueces. |
 | Instalador y CLI | `src/cli.ts`, `src/setup*.ts`, `src/config-ui.ts`, `src/doctor.ts` | `mdd-ai setup`, `update`, `link`, `doctor`, `config` y `profile` de la versión activa. |
 | Gestor de versiones | `src/version-*.ts`, `src/versions.ts` | `mdd-ai use` y `versions`, el asistente de versiones, el clon propio del origen, respaldos, caché y recuperación. Vive en `mdd/manager`, fuera del paquete instalado, y atiende `link`; `setup` y `update` abren primero el asistente y solo delegan en la versión activa si se conserva la actual; delega el resto sin cambios a la versión activa. Decisiones: [ADR 0001](adr/0001-git-tags-and-owned-clone.md), [0002](adr/0002-separate-version-manager.md), [0003](adr/0003-backup-and-replace-on-switch.md). |
 
@@ -24,10 +24,10 @@ flowchart LR
   O -->|"crea y actualiza"| R[(".mdd/runs/&lt;id&gt;.md")]
   O -->|"subagente"| A["Actores<br/>explore · risk · plan · propose<br/>spec · design · tasks · apply · verify"]
   A -->|"escriben su artefacto"| D[(".mdd/runs/&lt;id&gt;/NN-actor.md")]
-  A -->|"reporte corto"| O
+  A -->|"reporte corto con Record"| O
   O -->|"Judgment Day"| J["Jueces A y B"]
   J -->|"mdd_jd_inspect<br/>única herramienta"| G[("Objetos Git<br/>comprometidos")]
-  P["Plugin"] -.->|"modelos, preferencias,<br/>aislamiento de jueces"| O
+  P["Plugin"] -.->|"modelos, preferencias,<br/>aviso de contexto y punto de control"| O
   P -.-> J
 ```
 
@@ -91,9 +91,22 @@ están en [configuración](installation.md#modelos-de-subagentes-nativos).
 | Regla | Cómo se aplica |
 |---|---|
 | Los jueces de Judgment Day solo leen objetos Git comprometidos | **Código.** El plugin les niega todos los permisos salvo `mdd_jd_inspect` y quita cualquier otra herramienta de su contexto. La herramienta rechaza cualquier otro agente. |
+| Aviso de contexto al alcanzar el umbral (70% por defecto) | **Código.** El plugin compara el uso de la sesión del orquestador con el límite que OpenCode informa para ese modelo. Sin datos válidos y compatibles no estima el porcentaje. Se puede apagar o cambiar de umbral por perfil; apagar el aviso no afecta al punto de control. |
+| Punto de control al compactar | **Código.** Reconoce la ejecución activa solo por las escrituras de esa sesión en su archivo que siguen visibles en la solicitud de compactación, nunca por marcas repetidas en un resumen; sin ninguna, no agrega nada. Si la identifica, agrega su ID y el `## Now` completo leído del disco al material para el resumen. Si la lectura falla o supera los límites de seguridad, agrega el ID conocido y una indicación de releer, sin recortar la sección. Si el archivo no tiene `## Now`, indica retomar desde sus secciones y su registro. Si la asociación es ambigua, no incluye `## Now` de ninguna candidata. Se puede apagar por perfil sin afectar al aviso. |
 | `mdd-security` no modifica nada | **Permisos del agente** (frontmatter): lectura y unos pocos comandos `git` de solo lectura. |
 | `mdd-jd-fix` pide permiso para editar y ejecutar | **Permisos del agente**: `edit: ask`, `bash: ask`. |
-| Todo lo demás (niveles, orden de actores, formato de reportes, verificación, cierre) | **Guía.** Está en los contratos y el orquestador lo interpreta. |
+| Flujo de trabajo (niveles, orden de actores, formato de reportes, verificación, cierre) | **Guía.** Está en los contratos y el orquestador lo interpreta. |
+
+El plugin lee estas opciones al iniciar. Para cambiarlas, usá `mdd-ai config` → **Contexto** y
+reiniciá OpenCode.
+
+El aviso no pausa la sesión ni abre otra. El contrato le indica al orquestador terminar el paso,
+actualizar `## Now`, intentar la copia en Engram y proponerte que retomes en una conversación nueva.
+Sin ejecución activa, la propuesta lleva un resumen breve y el próximo paso. El modelo que
+resume puede omitir el punto de control: después de la compactación, el orquestador relee el
+encabezado y `## Now` desde el disco y reescribe `## Now`, lo que restablece la asociación.
+La entrega del aviso y el límite efectivo todavía necesitan validación en uso real; no hay
+garantía de evitar compactaciones ni de ahorrar tokens.
 
 ## Flujo de una ejecución
 
@@ -133,6 +146,22 @@ decisiones, plan, registro, verificación y límites. El orquestador es el únic
 actor escribe solo su propio artefacto. Formato completo en
 [`contracts/run-file.md`](../assets/opencode/contracts/run-file.md).
 
+`## Now` se reescribe en cada paso con la fase, iteración, próximo paso, bloqueos y último estado
+verificado. Para retomar, empezá por el encabezado y esa sección, no por el historial. Si la
+ejecución es anterior y no tiene `## Now`, siguen sirviendo sus secciones y su registro, sin migrar
+el archivo ni mover artefactos.
+
+| Qué se guarda | Dónde |
+|---|---|
+| Artefactos de la primera iteración (`I1`) | En la raíz de `.mdd/runs/<id>/`. |
+| Artefactos de iteraciones siguientes | En `i<n>-<slug>/`, por ejemplo `i2-<slug>/`. |
+| Evidencia de ejecución (logs de comandos, pruebas exploratorias, capturas) | En `evidence/`; los perfiles de navegador y otros datos pesados van fuera de `.mdd/runs/`. |
+| Registro de una iteración cerrada | En `history.md`, con una línea de resumen enlazada desde el archivo de ejecución. |
+
+Un cambio aprobado de la misma funcionalidad, después de llegar a Verify en una ejecución
+activa, abre la siguiente iteración. Una corrección de la aceptación vigente queda en la actual;
+una capacidad nueva o trabajo nuevo después del cierre va a una ejecución vinculada.
+
 Una explicación en HTML pedida explícitamente con `mdd-explain` no abre una ejecución. Sin
 ejecución se guarda en `.mdd/artifacts/<tema>/index.html`; si se asocia a una existente, en
 `.mdd/runs/<id>/artifacts/<tema>/index.html`. Es material de lectura, no la fuente de verdad: esa
@@ -142,8 +171,9 @@ Ventajas frente a un estado interno:
 
 - **Se reanuda desde cualquier lado:** otra conversación, después de reiniciar, o una persona
   leyendo el archivo.
-- **Ahorra contexto:** los actores leen los archivos ellos mismos y devuelven un reporte corto; el
-  artefacto completo queda en disco.
+- **Evita releer artefactos:** los actores devuelven un `## Record` con los cambios al plan, checks
+  y brechas que correspondan. El orquestador lo usa para actualizar el archivo y elegir qué check
+  repetir; si falta un dato, se lo pide al mismo actor.
 - **Es auditable:** el registro y la verificación quedan escritos en texto plano.
 
 `.mdd/.gitignore` es el interruptor y su primera línea es la marca. Por defecto es local
@@ -154,9 +184,17 @@ un `.gitignore` de la raíz sigue ignorando `.mdd/`, MDD pregunta antes de edita
 `git add` ni commit salvo que se lo pidas. Que falte el archivo nunca significa "versionado".
 
 Cuando Engram está disponible, el orquestador guarda además una copia del archivo de ejecución
-(solo ese, no los artefactos) en cada actualización del registro. Si el archivo local falta,
+(solo ese, no los artefactos) en cada hito: después de cada actor, al cerrar una iteración o la
+ejecución, y antes de proponer una conversación nueva. Si el archivo local falta,
 retoma desde la copia de Engram de este proyecto; si existe, el local manda. Sin Engram el trabajo
 continúa y la brecha queda en los límites.
+
+## Auditoría de contexto
+
+Desde el checkout, ejecutá `node scripts/context-audit.mjs --view all` para obtener agregados
+JSON de la base de OpenCode. El script es de solo lectura y mide el volumen registrado en
+unidades de código UTF-16, no bytes, tokens ni ocupación actual del contexto. No mide el ahorro
+de tokens del aviso ni del punto de control.
 
 ## Cómo extender MDD
 

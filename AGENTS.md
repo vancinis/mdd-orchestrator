@@ -10,8 +10,11 @@ agent file under `assets/opencode/agents/`.
   contracts; the only runtime tool is `mdd_jd_inspect` (Judgment Day judges).
 - Behavior lives in `assets/opencode/contracts/*.md` and `assets/opencode/agents/*.md`. Most
   improvements are edits to those files, not code.
-- `src/` holds only the plugin (`opencode-plugin.ts`, `judgment-day.ts`) and the installer/CLI.
-  Do not add a tool unless it guarantees something a contract cannot; say why in the PR.
+- `src/` holds the plugin (`opencode-plugin.ts`, `judgment-day.ts`, `context-notice.ts`,
+  `run-checkpoint.ts`) and the installer/CLI. Do not add a tool unless it guarantees something
+  a contract cannot; say why in the PR.
+- `node scripts/context-audit.mjs --view all` is a read-only maintainer tool. It reports
+  OpenCode DB aggregates in UTF-16 code units, not context occupancy or token savings.
 - `docs/history/` is historical. Do not update it to describe current behavior.
 
 ## Project skills
