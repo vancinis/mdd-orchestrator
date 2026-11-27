@@ -131,6 +131,7 @@ test('automatic release docs describe the real engine, the policy and the rollou
   const flat = path => read(path).replace(/\s+/g, ' ');
   const installation = flat('docs/installation.md');
   const adr = flat('docs/adr/0004-automatic-releases.md');
+  const architecture = flat('docs/architecture.md');
   const auto = read('scripts/release-auto.mjs');
 
   // The documented CLI is the real one: plan and publish, no invented subcommand.
@@ -143,17 +144,26 @@ test('automatic release docs describe the real engine, the policy and the rollou
   const publishMentions = read('docs/installation.md').match(/release-auto\.mjs publish/g) ?? [];
   assert.equal(publishMentions.length, 1, 'publish is shown exactly once');
   assert.doesNotMatch(read('docs/installation.md'), /```[^`]*release-auto\.mjs publish[^`]*```/);
+  const commentMentions = read('docs/installation.md').match(/node scripts\/release-comment\.mjs/g) ?? [];
+  assert.equal(commentMentions.length, 1, 'comment is shown exactly once');
+  assert.doesNotMatch(read('docs/installation.md'), /```[^`]*node scripts\/release-comment\.mjs[^`]*```/);
   assert.match(installation, /workflow_dispatch/);
   assert.match(installation, /No lo uses para pruebas locales/);
 
   // Policy and behavior.
   for (const text of [
     'lista para revisión', 'mismo repositorio', 'reabrirla', 'base `main`', 'major', 'minor', 'patch', 'docs', 'chore',
-    'merge commit o squash', 'rebase deshabilitada', 'anotada', 'inmutables', 'nunca se mueve ni se borra', 'No se hace push a ninguna rama', 'orden de fuente',
+    'merge commit o squash', 'rebase deshabilitada', 'anotada', 'inmutables', 'nunca se mueve ni se borra', 'orden de fuente',
     'cierran en falso', 'release-skip/<sha-completo>', 'Solo el propietario', 'git tag -n', 'git for-each-ref', 'mdd-ai use v0.5.0',
-    'global', 'v0.4.0-preview.1', 'desactualizados', 'solo lectura', 'no ejecuta nada del candidato', 'stable** y para **preview',
+    'global', 'v0.4.0-preview.1', 'pull-requests: write', 'base común', 'estable estimada', 'solo lectura', 'no ejecuta nada del candidato', 'stable** y para **preview',
     'La primera PR que agrega la automatización no tiene preview', 'externa y posterior',
   ]) assert.ok(installation.includes(text), `installation.md lacks "${text}"`);
+  for (const [name, text] of [['installation.md', installation], ['ADR 0004', adr], ['architecture.md', architecture]]) {
+    assert.match(text, /`chore\(release\): v<versión>`/, `${name}: metadata sync commit`);
+    assert.match(text, /actualiza ese mismo comentario/, `${name}: sticky PR comment`);
+  }
+  assert.match(installation, /con `GITHUB_TOKEN` no dispara otro workflow por `push`/);
+  assert.match(installation, /conflictos al editar el comienzo de `CHANGELOG\.md`/);
   // The manual fallback keeps its documented no-push flags.
   for (const text of ['Nunca hace push', '--dry-run', '--yes', '--bootstrap', 'acumulativo']) assert.ok(installation.includes(text), `installation.md lacks "${text}"`);
 
@@ -207,7 +217,7 @@ test('automatic release docs describe the real engine, the policy and the rollou
   assert.match(flat('docs/architecture.md'), /Se activa únicamente tras fusionarlo/);
 
   // ADR 0004 and the pointer from ADR 0001.
-  for (const text of ['**Contexto.**', '**Decisión.**', '**Por qué.**', 'etiquetas anotadas', 'no hace push a ninguna rama', 'solo lectura', 'release-skip/<sha>', 'no afirma que ya esté desplegado']) {
+  for (const text of ['**Contexto.**', '**Decisión.**', '**Por qué.**', 'Enmienda (2026-11-24)', 'etiquetas anotadas', 'refs/heads/main', 'solo lectura', 'release-skip/<sha>', 'no afirma que ya esté desplegado']) {
     assert.ok(adr.includes(text), `ADR 0004 lacks "${text}"`);
   }
   assert.ok(read('docs/adr/0001-git-tags-and-owned-clone.md').includes('(0004-automatic-releases.md)'), 'ADR 0001 lacks the pointer to ADR 0004');

@@ -46,8 +46,11 @@ Las etiquetas pueden crearse también desde un workflow (`scripts/release-auto.m
 `scripts/release-smoke.mjs`, `.github/workflows/`). Una etapa de validación ejecuta el código del
 candidato con permisos de solo lectura; una etapa de publicación con permiso de escritura solo
 ejecuta la definición de `main`, no el código del candidato, y publica etiquetas anotadas
-inmutables sin hacer push a ninguna rama. Se activa únicamente tras fusionarlo y verificar ajustes y
-permisos; hasta entonces el release manual sin push es la vía vigente. Detalle en
+inmutables. Después sincroniza los metadatos de la última estable con un commit separado
+`chore(release): v<versión>` y un push directo a `main` en avance rápido. Un job separado crea un
+comentario de estado del preview por PR elegible y actualiza ese mismo comentario sin ejecutar
+código de la PR. Se activa únicamente tras fusionarlo y verificar ajustes y permisos; hasta
+entonces el release manual sin push es la vía vigente. Detalle en
 [instalación](installation.md#releases-automáticos-preview-y-stable) y
 [ADR 0004](adr/0004-automatic-releases.md).
 
