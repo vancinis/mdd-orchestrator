@@ -10,7 +10,7 @@ import { RELEASE_FILES, releaseSource } from '../scripts/release.mjs';
 import {
   ApiError, PublishError, annotate, bumpLevel, bumpVersion, createAutoGit, createGitHubClient, createReleaseCommit, findPublished, hasSkipMarker,
   highestStable, isMetadataRelease, main, nextPreview, nextStable, parseTagMessage, planVersion, previewIneligibility, publishRelease, publishTag,
-  previewWork, publishedTagNames, readTagProvenance, remoteTagState, renderTagMessage, runPlan, runPublish, stableWork, syncReleaseTags,
+  previewWork, publishedTagNames, readTagProvenance, remoteTagState, renderTagMessage, runPlan, runPublish, stableWork, syncMain, syncReleaseTags,
   validationVerdict, verifyReleaseCommit,
 } from '../scripts/release-auto.mjs';
 
@@ -764,6 +764,62 @@ test('GitHub client: pagination, auth, fail-closed responses and no token leak t
   assert.throws(() => createGitHubClient({ repo: REPO, token: '' }), /token/);
 });
 
+test('GitHub issue comments: paged GET and single JSON POST/PATCH', async () => {
+  const apiUrl = 'https://git.example/api/v3';
+  const commentsUrl = `${apiUrl}/repos/${REPO}/issues/7/comments`;
+  const page = `${commentsUrl}?per_page=100`;
+  const foreign = 'https://git.example.other/api/v3/comments';
+  const marker = '<!-- mdd-release-preview -->';
+  const requests = [];
+  let nextPage = `${page}&page=2`;
+  const client = createGitHubClient({ repo: REPO, token: 'secret', apiUrl, fetch: async (url, init) => {
+    requests.push({ url, ...init });
+    const data = url === page ? [{ id: 1 }] : url === `${page}&page=2` ? [{ id: 2, body: marker }] : { id: 3 };
+    const next = url === page ? nextPage : init.method === 'GET' ? undefined : foreign;
+    return { ok: true, headers: new Headers(next ? { link: `<${next}>; rel="next"` } : {}), json: async () => data };
+  } });
+
+  assert.deepEqual(await client.listIssueComments(7), [{ id: 1 }, { id: 2, body: marker }]);
+  assert.deepEqual(await client.createIssueComment(7, marker), { id: 3 });
+  assert.deepEqual(await client.updateIssueComment(3, 'Actualización'), { id: 3 });
+  assert.deepEqual(requests.map(({ url, method, body, headers }) => [
+    url, method, body === undefined ? undefined : JSON.parse(body), headers['Content-Type'], headers.Authorization,
+  ]), [
+    [page, 'GET', undefined, undefined, 'Bearer secret'],
+    [`${page}&page=2`, 'GET', undefined, undefined, 'Bearer secret'],
+    [commentsUrl, 'POST', { body: marker }, 'application/json', 'Bearer secret'],
+    [`${apiUrl}/repos/${REPO}/issues/comments/3`, 'PATCH', { body: 'Actualización' }, 'application/json', 'Bearer secret'],
+  ]);
+
+  nextPage = foreign;
+  await assert.rejects(client.listIssueComments(7), error => error instanceof ApiError && /fuera de la API/.test(error.message));
+  assert.deepEqual(requests.slice(4).map(({ url }) => url), [page]);
+});
+
+test('GitHub issue comment POST and PATCH never follow a redirect to a foreign API origin', async t => {
+  const listen = handler => new Promise(resolve => {
+    const server = createServer(handler);
+    t.after(() => server.close());
+    server.listen(0, '127.0.0.1', () => resolve(`http://127.0.0.1:${server.address().port}`));
+  });
+  const leaked = [];
+  const foreign = await listen((request, response) => {
+    leaked.push(request.method);
+    response.end('{}');
+  });
+  const writes = [];
+  const apiUrl = await listen((request, response) => {
+    writes.push(request.method);
+    response.writeHead(307, { location: `${foreign}/comments` }).end();
+  });
+  const client = createGitHubClient({ repo: REPO, token: 'secret', apiUrl });
+  for (const write of [() => client.createIssueComment(7, 'secret body'), () => client.updateIssueComment(3, 'secret body')]) {
+    await assert.rejects(write, error => error instanceof ApiError && error.status === 0);
+  }
+  assert.deepEqual(writes, ['POST', 'PATCH']);
+  assert.deepEqual(leaked, []);
+});
+
 test('validation verdict trusts only one completed job with the exact name in this run and attempt', () => {
   const sha = 'a'.repeat(40);
   const other = 'b'.repeat(40);
@@ -944,6 +1000,133 @@ test('forged outputs, other SHAs, other attempts and other runs authorize nothin
   assert.deepEqual(outputs, {
     published: '["v0.3.3"]', published_count: '1', smoke_matrix: '{"include":[{"tag":"v0.3.3"}]}', backlog: '0', progress: 'true', blocked: 'false', continue: 'false', exit_code: '0',
   });
+  const synced = sh(c.origin, 'rev-parse', 'main');
+  assert.notEqual(synced, m1);
+  assert.equal(sh(c.origin, 'rev-parse', 'main^'), m1);
+  assert.equal(sh(c.origin, 'log', '-1', '--format=%s', 'main'), 'chore(release): v0.3.3');
+  assert.deepEqual(sh(c.origin, 'diff', '--name-only', 'main^', 'main').split('\n').sort(), [...RELEASE_FILES].sort());
+  for (const file of RELEASE_FILES.filter(file => file.endsWith('.json'))) {
+    assert.equal(JSON.parse(sh(c.origin, 'show', `main:${file}`)).version, '0.3.3');
+  }
+  assert.equal(sh(c.origin, 'show', 'main:CHANGELOG.md').match(/^## \[0\.3\.3\]/gm)?.length, 1);
+  assert.equal(isMetadataRelease(createAutoGit(c.origin), synced), true);
+  assert.match(readFileSync(summary, 'utf8'), /main sincronizado con `v0\.3\.3`/);
+  const after = await runPlan(ci.git, real, settings);
+  assert.deepEqual(after.stables, []);
+  assert.equal(stableWork(ci.git, synced).cursor, m1);
+  const next = clone(c, 'next');
+  const feat = commit(next.root, 'feat: next integration');
+  sh(next.root, 'push', 'origin', 'main');
+  assert.deepEqual((await runPlan(ci.git, real, settings)).stables, [feat]);
+  const released = await runPublish(ci.git, fakeApi({ jobs: green([feat]) }), publishSettings());
+  assert.deepEqual(released.published.map(item => item.tag), ['v0.4.0']);
+  assert.deepEqual(sh(c.origin, 'diff', '--name-only', feat, 'v0.4.0^{commit}').split('\n').sort(), [...RELEASE_FILES].sort());
+});
+
+test('main sync retries a real non-fast-forward and backfills missing changelog sections without replacing local text', async t => {
+  const c = fixture(t);
+  const first = integrate(c, 'squash', 'fix: first');
+  const second = integrate(c, 'squash', 'fix: second');
+  const ci = clone(c, 'ci');
+  const done = await runPublish(ci.git, fakeApi({ jobs: green([first, second]) }), publishSettings());
+  assert.deepEqual(done.published.map(item => item.tag), ['v0.3.3', 'v0.3.4']);
+  const local = '# Main notes\r\n\r\n## [0.4.0-preview.1]\r\n\r\nLocal preview.\r\n';
+  let advanced;
+  const before = localState(ci);
+  const synced = await syncMain(ci.git, {
+    beforePush({ attempt }) {
+      if (attempt !== 1) return;
+      writeFileSync(join(c.root, 'CHANGELOG.md'), local);
+      sh(c.root, 'add', 'CHANGELOG.md');
+      sh(c.root, 'commit', '-m', 'docs: preserve preview notes');
+      advanced = sh(c.root, 'rev-parse', 'HEAD');
+      sh(c.root, 'push', 'origin', 'main');
+    },
+  });
+  assert.equal(synced.status, 'synced', synced.message);
+  assert.equal(sh(c.origin, 'rev-parse', 'main^'), advanced);
+  const log = createAutoGit(c.origin)(['cat-file', 'blob', 'main:CHANGELOG.md']);
+  assert.deepEqual(log.match(/^## \[[^\]]+\]/gm), ['## [0.3.4]', '## [0.3.3]', '## [0.4.0-preview.1]']);
+  assert.ok(log.startsWith('# Main notes\r\n\r\n'));
+  assert.ok(log.endsWith(local.slice(local.indexOf('## '))));
+  assert.ok(!log.replaceAll('\r\n', '').includes('\n'));
+  assert.deepEqual(localState(ci), before);
+});
+
+test('main sync CLI warns on rejected branch pushes and a later idle publish recovers', async t => {
+  const c = fixture(t);
+  const source = integrate(c, 'squash', 'fix: recover sync');
+  const ci = clone(c, 'ci');
+  const hook = join(c.origin, 'hooks', 'update');
+  writeFileSync(hook, '#!/bin/sh\nif [ "$1" = refs/heads/main ]; then\n  echo "branch rules rejected push" >&2\n  exit 1\nfi\n', { mode: 0o755 });
+  let pushes = 0;
+  const git = wrap(ci.git, (args, options, run) => {
+    if (args[0] === 'push' && args.at(-1).endsWith(':refs/heads/main')) pushes += 1;
+    return run(args, options);
+  });
+  const output = join(c.dir, 'publish.out');
+  const env = { GITHUB_REPOSITORY: REPO, GITHUB_RUN_ID: String(RUN), GITHUB_RUN_ATTEMPT: '1', GITHUB_OUTPUT: output };
+  let stdout = ''; let stderr = '';
+  const cliOptions = {
+    env, client: fakeApi({ jobs: green([source]) }),
+    stdout: text => { stdout = text; }, stderr: text => { stderr += text; },
+  };
+  assert.equal(await main(['publish'], { ...cliOptions, git }), 0);
+  assert.equal(pushes, 3);
+  assert.match(stdout, /\*\*Aviso\*\*: .*branch rules rejected push/);
+  assert.match(stderr, /Aviso: .*branch rules rejected push/);
+  assert.equal(sh(c.origin, 'rev-parse', 'main'), source);
+  assert.equal(readFileSync(output, 'utf8'), 'published=["v0.3.3"]\npublished_count=1\nsmoke_matrix={"include":[{"tag":"v0.3.3"}]}\nbacklog=0\nprogress=true\nblocked=false\ncontinue=false\nexit_code=0\n');
+  rmSync(hook);
+  // Apply the real push but lose its verification response. The next run must not push twice.
+  const unknown = wrap(ci.git, (args, options, run) => {
+    if (args[0] === 'ls-remote' && args.at(-1) === 'refs/heads/main') throw new Error('verification unavailable');
+    return run(args, options);
+  });
+  assert.equal(await main(['publish'], { ...cliOptions, git: unknown }), 0);
+  assert.match(stdout, /\*\*Aviso\*\*: .*verification unavailable/);
+  assert.match(stdout, /Nada publicado/);
+  const synced = sh(c.origin, 'rev-parse', 'main');
+  assert.notEqual(synced, source);
+  assert.equal(await main(['publish'], { ...cliOptions, git }), 0);
+  assert.equal(pushes, 3);
+  assert.match(stdout, /main ya refleja `v0\.3\.3`/);
+  assert.ok(readFileSync(output, 'utf8').endsWith('published=[]\npublished_count=0\nsmoke_matrix={"include":[]}\nbacklog=0\nprogress=false\nblocked=false\ncontinue=false\nexit_code=0\n'));
+  assert.equal(sh(c.origin, 'rev-parse', 'main'), synced);
+});
+
+test('main sync skips a newer preview version and allows a two-file sync for a legacy tag without notes', async t => {
+  const c = fixture(t);
+  const notes = '# Local notes\n\n## [0.3.1]\n\nDo not replace.\n';
+  const setVersions = (version, lockVersion = version) => {
+    writeFileSync(join(c.root, 'package.json'), json({ ...PACKAGE, version }));
+    writeFileSync(join(c.root, 'package-lock.json'), json({
+      ...LOCK, version: lockVersion, packages: { '': { ...LOCK.packages[''], version: lockVersion } },
+    }));
+    sh(c.root, 'add', '.');
+    sh(c.root, 'commit', '-qm', `test: metadata ${version}`);
+    sh(c.root, 'push', 'origin', 'main');
+    return sh(c.origin, 'rev-parse', 'main');
+  };
+  writeFileSync(join(c.root, 'CHANGELOG.md'), notes);
+  const ahead = setVersions('0.4.0-preview.1');
+  sh(c.root, 'tag', 'v0.4.0-preview.1', ahead);
+  sh(c.root, 'push', 'origin', 'v0.4.0-preview.1');
+  assert.deepEqual(await syncMain(c.git), { status: 'current', version: '0.3.2' });
+  assert.equal(sh(c.origin, 'rev-parse', 'main'), ahead);
+  const malformed = setVersions('0.3.1', '0.3.0');
+  const failed = await syncMain(c.git);
+  assert.equal(failed.status, 'failed');
+  assert.match(failed.message, /package-lock\.json no coincide/);
+  assert.equal(sh(c.origin, 'rev-parse', 'main'), malformed);
+  const behind = setVersions('0.3.1');
+  const synced = await syncMain(c.git);
+  assert.equal(synced.status, 'synced', synced.message);
+  assert.equal(sh(c.origin, 'rev-parse', 'main^'), behind);
+  assert.equal(isMetadataRelease(createAutoGit(c.origin), synced.commit), true);
+  assert.throws(() => verifyReleaseCommit(createAutoGit(c.origin), { commit: synced.commit, source: behind, version: '0.3.2' }), /debe cambiar exactamente/);
+  assert.deepEqual(sh(c.origin, 'diff', '--name-only', behind, 'main').split('\n'), ['package-lock.json', 'package.json']);
+  assert.equal(createAutoGit(c.origin)(['cat-file', 'blob', 'main:CHANGELOG.md']), notes);
 });
 
 test('blocked and failure exit 1, pending and no-op exit 0, and the summary is Spanish', async t => {

@@ -3,7 +3,8 @@ name: Release
 # Every run reconciles the release state from the repository itself. The triggering event only wakes it up and its
 # payload is never read. All jobs use ONE immutable revision of this workflow's default-branch checkout
 # (github.workflow_sha), so the trusted scripts cannot change between jobs. Pull request code runs only in the
-# read-only validate and smoke jobs; the publish job never executes anything from a candidate.
+# read-only validate and smoke jobs. The publish job publishes tags and fast-forwards main with release metadata;
+# the comment job writes PR comments. Neither executes candidate code.
 on:
   push:
     branches: [main]
@@ -125,6 +126,35 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: node scripts/release-auto.mjs publish
+
+  comment:
+    name: comment
+    needs: [prepare, publish]
+    if: ${{ !cancelled() && needs.prepare.result == 'success' }}
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+      actions: read
+    steps:
+      - name: Check out the trusted workflow revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Reconcile PR preview comments
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/release-comment.mjs
 
   smoke:
     name: smoke ${{ matrix.tag }}

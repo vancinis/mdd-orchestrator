@@ -279,11 +279,12 @@ incluido en previews; un preview cubre el intervalo desde el preview o la establ
 ### Release manual tras releases automáticos (alternativa sin push)
 
 El release manual sigue siendo **interactivo y sin push** (`--dry-run`, `--yes` y `--bootstrap`
-conservan su significado). Si ya hubo releases automáticos, como estos solo existen como etiquetas,
-el release manual toma como base la **fuente registrada** de la etiqueta más alta (no el HEAD de la
-etiqueta) y parte del CHANGELOG **acumulativo** de la última etiqueta publicada, que aporta las
-entradas automáticas y está fuera de `main` (no asumas que ya están en `main`). Antes de usarlo, traé las
-etiquetas (`git fetch origin "refs/tags/v*:refs/tags/v*"`); sigue imprimiendo el `git push` que
+conservan su significado). Si ya hubo releases automáticos, el release manual toma como base la
+**fuente registrada** de la etiqueta más alta (no el HEAD de la etiqueta) y parte del CHANGELOG
+**acumulativo** de la última etiqueta publicada, que aporta las
+entradas automáticas y está fuera de `main`. Aunque `main` ya tenga una copia de esas entradas, no
+se toma su CHANGELOG como base en ese caso. Antes de usarlo, traé las etiquetas
+(`git fetch origin "refs/tags/v*:refs/tags/v*"`); el comando sigue imprimiendo el `git push` que
 decidís ejecutar.
 
 ## Releases automáticos (preview y stable)
@@ -318,7 +319,7 @@ elige estas etiquetas igual que las manuales.
 
 Cada release es una etiqueta **anotada** creada con Git de bajo nivel sobre un commit cuyo único
 padre es el commit fuente y que solo cambia `package.json`, `package-lock.json` y `CHANGELOG.md`.
-**No se hace push a ninguna rama**: solo se publica `refs/tags/v<versión>` (sin `--force` ni
+Para publicar la etiqueta se hace push solo a `refs/tags/v<versión>` (sin `--force` ni
 `--tags`) y luego se comprueba en el remoto que la etiqueta existe con el mismo objeto. Una etiqueta
 publicada nunca se mueve ni se borra; un reintento con la misma fuente y canal es idempotente, y si
 otra ejecución tomó la versión, se recalcula con un tope de intentos.
@@ -347,12 +348,40 @@ es `v0.4.0-preview.1`; mientras no exista la estable siguiente, `mdd-ai use prev
 ese. Tras una estable `X.Y.Z`, el alias `preview` puede seguir apuntando a un `X.Y.Z-preview.N`
 anterior hasta el próximo preview; es el comportamiento ya existente del instalador.
 
-### Metadatos solo en etiquetas
+### Comentario de preview en la PR
 
-El release automático **no crea commits en `main`**. Por eso `package.json` y `CHANGELOG.md` de
-`main` y la etiqueta de versión que muestra `dev` pueden quedar **desactualizados**: es un costo
-aceptado. La verdad de cada versión está en su etiqueta (versión, notas y procedencia). GitHub puede
-avisar que el commit de una etiqueta "no pertenece a ninguna rama".
+Después de la publicación, el job `comment` (`node scripts/release-comment.mjs`) usa
+`pull-requests: write` para dejar un comentario del bot en cada PR elegible, incluso si quedó fuera
+del lote de previews. Si cambia la información, actualiza ese mismo comentario en vez de publicar
+otro. No ejecuta código de la PR.
+
+El comentario distingue la última estable publicada de la versión de `package.json` en el commit
+que es base común de la PR y `main`. Para el head actual, muestra la etiqueta del preview con un
+enlace si ya se publicó, o el estado pendiente o fallido según la validación del intento actual.
+También muestra la estable estimada si se fusiona la PR, con su nivel (`major`, `minor` o `patch`).
+La versión real puede cambiar si antes se publican otras integraciones.
+
+<a name="metadatos-solo-en-etiquetas"></a>
+
+### Sincronización de metadatos en `main`
+
+Después de procesar las publicaciones, el job `publish` compara `package.json` en `main` con la
+última estable verificada en el remoto. Si `main` está por detrás, crea un commit separado
+`chore(release): v<versión>` sobre el último commit de `main` y lo sube directamente a esa rama,
+sin forzar el push. Actualiza `package.json` y `package-lock.json` e incorpora las secciones
+faltantes de `CHANGELOG.md` sin duplicar ni reemplazar las entradas que ya estaban. Así, la primera
+ejecución puede poner al día `main` incluso si no se publica una estable nueva. Nunca baja la
+versión de `main`; los previews no se sincronizan y `dev` no se modifica.
+
+La etiqueta sigue siendo la fuente de verdad de la versión publicada. GitHub puede avisar que
+el commit de la etiqueta «no pertenece a ninguna rama»: no es el mismo commit que sincroniza
+`main`. Si el push falla (por ejemplo, si un ruleset exige una PR para escribir en `main`), el job
+muestra un **Aviso** sin invalidar la publicación y vuelve a intentar la sincronización en la
+próxima ejecución. En una PR puede haber conflictos al editar el comienzo de `CHANGELOG.md`:
+actualizá la rama con `main` y conservá las entradas ya publicadas al resolverlos.
+
+El push con `GITHUB_TOKEN` no dispara otro workflow por `push`; no se agrega ningún disparador.
+El commit de metadatos tampoco cuenta como una integración para crear una estable nueva.
 
 ### Orden, fallos y marcadores de recuperación
 
@@ -397,9 +426,10 @@ node scripts/release-auto.mjs plan --repo <dueño>/<nombre>     # solo lectura; 
 ```
 
 `publish` (`node scripts/release-auto.mjs publish --repo <dueño>/<nombre> --run-id <n> --attempt <n>`)
-**escribe etiquetas en el origen real**: lo ejecuta el job `publish` de Release con los resultados de
-validación de esa ejecución. No lo uses para pruebas locales (las pruebas del repositorio usan
-orígenes `bare` desechables) ni como atajo: para recuperar, despachá el workflow.
+**escribe etiquetas y puede actualizar `main` en el origen real**: lo ejecuta el job `publish` de
+Release con los resultados de validación de esa ejecución. No lo uses para pruebas locales (las
+pruebas del repositorio usan orígenes `bare` desechables) ni como atajo: para recuperar, despachá el
+workflow.
 
 ### Seguridad: candidato de solo lectura y publicador sin código del candidato
 
@@ -432,6 +462,11 @@ hacia adelante.
   - Marcadores `release-skip/*`: los crea **únicamente el propietario**; **Actions nunca** puede
     crearlos; nadie los actualiza ni los borra (inmutables). El motor se apoya en este ruleset
     exclusivo del propietario, no en la identidad del autor de la etiqueta, que se puede falsificar.
+- Para esta actualización, verificá que las reglas de `main` y el permiso `contents: write`
+  del publicador permitan el push directo del commit de metadatos, y que el job de comentarios
+  pueda escribir con `pull-requests: write`. En GitHub, comprobá que el bot actualice un único
+  comentario en una PR elegible, que `main` refleje la última estable tras el push y que ese push
+  con `GITHUB_TOKEN` no inicie otra ejecución de Release.
 - Hasta entonces, el release manual descrito más arriba sigue siendo la vía vigente.
 
 ## Configuración
