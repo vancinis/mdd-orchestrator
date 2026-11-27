@@ -119,6 +119,13 @@ test('the docs describe run persistence: local or versioned markers and the Engr
   assert.match(docs, /Engram/, 'README or architecture mentions Engram');
 });
 
+test('the run-file contract looks for Engram behind Code Mode before declaring it unavailable', () => {
+  const contract = read('assets/opencode/contracts/run-file.md').replace(/\s+/g, ' ');
+  assert.match(contract, /only through Code Mode: then call `execute` with `search\('engram mem_save'\)`/);
+  assert.match(contract, /a missing name in your direct tool list does not mean Engram is unavailable/);
+  assert.match(contract, /memory tools are unavailable \(not found by the lookup above\)/);
+});
+
 test('ADR 0002 and the architecture describe the setup/update dispatch of D27', () => {
   for (const path of ['docs/adr/0002-separate-version-manager.md', 'docs/architecture.md']) {
     const text = read(path).replace(/\s+/g, ' ');
