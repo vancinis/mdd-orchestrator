@@ -2,9 +2,9 @@
 // Foundation used by the release workflow: bump level, version allocation, strict tag provenance, a tag-only release
 // commit built with Git plumbing, and an immutable annotated-tag publication verified against the remote.
 //
-// Safety model: the engine never checks out, merges, rebases or resets anything and never writes a branch. The release
-// commit is built in a temporary index with `hash-object --no-filters`, so no candidate script, clean/smudge filter,
-// textconv, external diff or hook runs (hooks are disabled for every command through `core.hooksPath`).
+// Safety model: no checkout, merge, rebase or reset. The publish CLI can only fast-forward refs/heads/main with a
+// metadata commit. Both commits use a temporary index and `hash-object --no-filters`, so no candidate script,
+// clean/smudge filter, textconv, external diff or hook runs (hooks are disabled through `core.hooksPath`).
 import { execFileSync } from 'node:child_process';
 import { appendFileSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -343,22 +343,26 @@ export function createReleaseCommit(git, { source, version, channel, baseTag, co
   if (!FULL_SHA.test(source)) throw new Refusal(`El commit fuente debe ser un SHA completo: ${source}.`);
   if (git(['rev-parse', '--verify', `${source}^{commit}`]).trim() !== source) throw new Refusal(`El commit fuente ${source} no existe.`);
   const metadata = releaseMetadata(blob(git, source, 'package.json'), blob(git, source, 'package-lock.json'), version, { requireLower: false });
-  const modes = Object.fromEntries(RELEASE_FILES.map(path => [path, fileMode(git, source, path) ?? '100644']));
   let workingChangelog;
   if (fileMode(git, source, 'CHANGELOG.md')) workingChangelog = blob(git, source, 'CHANGELOG.md');
   const baseline = changelogBaseline(git, baseTag, source, workingChangelog);
   if (baseline !== undefined && headingCount(baseline, version) > 0) throw new Refusal(`CHANGELOG.md ya tiene una sección para ${version}.`);
   const entry = renderEntry({ version, date, channel, baseTag, headShort: source.slice(0, 7), commits });
   const changelog = insertEntry(baseline, entry);
-  const contents = { 'package.json': metadata.packageText, 'package-lock.json': metadata.lockText, 'CHANGELOG.md': changelog };
+  return writeMetadataCommit(git, { source, version, identity, metadata, changelog });
+}
 
+function writeMetadataCommit(git, { source, version, identity, metadata, changelog }) {
+  const contents = { 'package.json': metadata.packageText, 'package-lock.json': metadata.lockText, 'CHANGELOG.md': changelog };
   const scratch = mkdtempSync(join(tmpdir(), 'mdd-release-index-'));
   try {
     const env = { GIT_INDEX_FILE: join(scratch, 'index') };
     git(['read-tree', source], { env });
     for (const path of RELEASE_FILES) {
+      if (contents[path] === undefined) continue;
+      const mode = fileMode(git, source, path) ?? '100644';
       const object = git(['hash-object', '-w', '--stdin', '--no-filters'], { input: contents[path], env }).trim();
-      git(['update-index', '--add', '--cacheinfo', `${modes[path]},${object},${path}`], { env });
+      git(['update-index', '--add', '--cacheinfo', `${mode},${object},${path}`], { env });
     }
     const tree = git(['write-tree'], { env }).trim();
     return git(['commit-tree', tree, '-p', source, '-m', `chore(release): v${version}`], { env: { ...env, ...identityEnv(identity) } }).trim();
@@ -523,9 +527,8 @@ export async function publishRelease(git, {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// GitHub REST client (fetch-based, injectable). The workflow layer only needs these four calls:
-//   listOpenPulls() -> every open pull request (all pages); getPull(number); getRun(runId);
-//   listJobs(runId, attempt) -> every job of exactly that attempt (all pages).
+// GitHub REST client (fetch-based, injectable). Lists of open PRs, attempt jobs, and issue comments are paginated.
+// Individual PRs and workflow runs are read by ID; issue comments are created and updated with JSON writes.
 // ---------------------------------------------------------------------------------------------------------------------
 
 export class ApiError extends Error {
@@ -540,18 +543,23 @@ const nextLink = header => {
   return undefined;
 };
 
-/** `fetch` is injectable. A `next` link outside `apiUrl` is refused, so the token is never sent to another host. */
+/** `fetch` is injectable. Requests stay under `apiUrl` and do not follow HTTP redirects. */
 export function createGitHubClient({ repo, token, fetch: fetchImpl = globalThis.fetch, apiUrl = 'https://api.github.com', maxPages = 100 }) {
   if (!/^[\w.-]+\/[\w.-]+$/.test(repo ?? '')) throw new Refusal(`Repositorio inválido: ${repo}.`);
   if (!token) throw new Refusal('Falta el token de GitHub.');
   const root = apiUrl.replace(/\/+$/, '');
   const headers = { Accept: 'application/vnd.github+json', Authorization: `Bearer ${token}`, 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'mdd-release-auto' };
-  async function request(url) {
+  async function request(url, { method = 'GET', body } = {}) {
     if (url !== root && !url.startsWith(`${root}/`)) throw new ApiError(`URL fuera de la API de GitHub: ${url}`, 0);
+    const init = { method, headers, redirect: 'error' };
+    if (body !== undefined) {
+      init.headers = { ...headers, 'Content-Type': 'application/json' };
+      init.body = JSON.stringify(body);
+    }
     let response;
-    try { response = await fetchImpl(url, { headers }); } catch (error) { throw new ApiError(`GitHub API no respondió (${url}): ${error.message}`, 0); }
+    try { response = await fetchImpl(url, init); } catch (error) { throw new ApiError(`GitHub API no respondió (${url}): ${error.message}`, 0); }
     if (!response.ok) throw new ApiError(`GitHub API respondió ${response.status} en ${url}`, response.status);
-    return { data: await response.json(), next: nextLink(response.headers?.get?.('link')) };
+    return { data: await response.json(), next: method === 'GET' ? nextLink(response.headers?.get?.('link')) : undefined };
   }
   async function pages(path, pick) {
     const items = []; let total; let url = `${root}${path}`;
@@ -568,11 +576,15 @@ export function createGitHubClient({ repo, token, fetch: fetchImpl = globalThis.
     return items;
   }
   const base = `/repos/${repo}`;
+  const issueComments = number => `${base}/issues/${number}/comments`;
   return {
     listOpenPulls: () => pages(`${base}/pulls?state=open&per_page=100`, data => data),
     getPull: async number => (await request(`${root}${base}/pulls/${number}`)).data,
     getRun: async runId => (await request(`${root}${base}/actions/runs/${runId}`)).data,
     listJobs: (runId, attempt) => pages(`${base}/actions/runs/${runId}/attempts/${attempt}/jobs?per_page=100`, data => data?.jobs),
+    listIssueComments: number => pages(`${issueComments(number)}?per_page=100`, data => data),
+    createIssueComment: async (number, body) => (await request(`${root}${issueComments(number)}`, { method: 'POST', body: { body } })).data,
+    updateIssueComment: async (id, body) => (await request(`${root}${base}/issues/comments/${id}`, { method: 'PATCH', body: { body } })).data,
   };
 }
 
@@ -621,14 +633,73 @@ export function hasSkipMarker(git, sha) {
   } catch { return false; }
 }
 
-/** A pure metadata release commit: `chore(release): v…`, one parent and a diff of exactly RELEASE_FILES. Anything else is an integration. */
+/** A pure metadata release commit changes both package files and optionally CHANGELOG.md. */
 export function isMetadataRelease(git, sha) {
   try {
     if (!METADATA_SUBJECT.test(git(['log', '-1', '--format=%s', sha]).trim())) return false;
     if (git(['rev-list', '--parents', '-n', '1', sha]).trim().split(/\s+/).length !== 2) return false;
     const changed = git(['diff-tree', '--no-commit-id', '--no-renames', '--no-ext-diff', '--no-textconv', '--name-only', '-r', sha]).split(/\r?\n/).filter(Boolean).sort();
-    return JSON.stringify(changed) === JSON.stringify([...RELEASE_FILES].sort());
+    return changed.includes('package.json') && changed.includes('package-lock.json') && changed.every(path => RELEASE_FILES.includes(path));
   } catch { return false; }
+}
+
+function mergeChangelog(current, tagged) {
+  if (current === undefined || tagged === undefined) return current ?? tagged;
+  const sections = tagged.replace(/\r\n/g, '\n').split(/(?=^## \[)/m);
+  const missing = [];
+  const seen = new Set();
+  for (const section of sections) {
+    const heading = /^## \[([^\]\n]+)\]/.exec(section);
+    if (!heading) continue;
+    const [, version] = heading;
+    if (seen.has(version) || headingCount(current, version)) continue;
+    seen.add(version);
+    missing.push(section.replace(/\n*$/, '\n'));
+  }
+  return missing.length ? insertEntry(current, missing.join('\n')) : current;
+}
+
+/** Reconcile main with the highest remotely published stable, independently of this run's tag work. */
+export async function syncMain(git, { remote = 'origin', identity = BOT, maxAttempts = DEFAULT_ATTEMPTS, beforePush } = {}) {
+  const branch = 'refs/heads/main';
+  let version;
+  try {
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      version = highestStable(syncReleaseTags(git, remote));
+      if (!version) throw new Refusal('No hay una versión estable publicada.');
+      const tag = `v${version}`;
+      const tip = fetchMain(git, remote);
+      const pkg = blob(git, tip, 'package.json');
+      const current = JSON.parse(pkg)?.version;
+      if (typeof current !== 'string' || !IDENTIFIERS.test(current)) throw new Refusal('package.json no contiene una versión soportada.');
+      if (compareVersions(parseVersion(current), parseVersion(version)) >= 0) return { status: 'current', version };
+      const source = releaseSource(git, tag);
+      if (!isAncestor(git, source, tip)) throw new Refusal(`El origen de ${tag} no es ancestro de main.`);
+      const metadata = releaseMetadata(pkg, blob(git, tip, 'package-lock.json'), version, { requireLower: false });
+      const readChangelog = ref => fileMode(git, ref, 'CHANGELOG.md') ? blob(git, ref, 'CHANGELOG.md') : undefined;
+      const tagged = readChangelog(`refs/tags/${tag}`);
+      const changelog = mergeChangelog(readChangelog(tip), tagged);
+      const commit = writeMetadataCommit(git, { source: tip, version, identity, metadata, changelog });
+      if (git(['rev-parse', `${commit}^`]).trim() !== tip || !isMetadataRelease(git, commit)) {
+        throw new Refusal('El commit de sincronización no contiene solo los cambios de release esperados.');
+      }
+      const written = releaseMetadata(blob(git, commit, 'package.json'), blob(git, commit, 'package-lock.json'), version, { requireLower: false });
+      if (written.current !== version || (tagged !== undefined && headingCount(blob(git, commit, 'CHANGELOG.md'), version) !== 1)) {
+        throw new Refusal(`Los metadatos de main no coinciden con ${tag}.`);
+      }
+      await beforePush?.({ attempt, remote, tip, commit, version });
+      let pushError;
+      try {
+        git(['push', '--no-verify', '--no-recurse-submodules', '--no-follow-tags', remote, `${commit}:${branch}`]);
+      } catch (error) { pushError = error; }
+      const remoteRef = git(['ls-remote', remote, branch]).trim();
+      if (remoteRef === `${commit}\t${branch}`) return { status: 'synced', version, commit };
+      if (attempt === maxAttempts) throw pushError ?? new Refusal('No se pudo confirmar el commit en main.');
+    }
+    throw new Refusal('No se intentó actualizar main.');
+  } catch (error) {
+    return { status: 'failed', version, message: String(error.message ?? error).replace(/\s+/g, ' ').trim() };
+  }
 }
 
 /**
@@ -760,7 +831,7 @@ export async function runPlan(git, client, { repo, author = DEFAULT_AUTHOR, remo
 class PreviewStale extends Error {}
 
 /** The run's trusted identity from the API: id (and attempt, when given) must match; `run_number` is a positive integer. */
-async function trustedRun(client, runId, attempt) {
+export async function trustedRun(client, runId, attempt) {
   const run = await client.getRun(runId);
   if (String(run?.id) !== String(runId) || (attempt !== undefined && Number(run?.run_attempt) !== Number(attempt))) {
     throw new Refusal(attempt === undefined
@@ -929,8 +1000,15 @@ export function publishSummary(result) {
   for (const item of result.pending) lines.push(`- Pendiente de validación: ${item.channel === 'stable' ? 'estable' : `preview #${item.number}`} \`${item.source}\`. Se espera sin reordenar.`);
   if (result.blocked) lines.push(`- **Estable bloqueado en \`${result.blocked.source}\`**: ${result.blocked.reason}. No se omite automáticamente; el propietario puede crear el marcador anotado \`release-skip/${result.blocked.source}\` o corregir hacia adelante.`);
   for (const item of result.failures) lines.push(`- **Fallo** (${item.channel}${item.source ? ` \`${item.source}\`` : ''}): ${item.message}`);
+  if (result.sync?.status === 'synced') lines.push(`- main sincronizado con \`v${result.sync.version}\` (\`${result.sync.commit.slice(0, 7)}\`).`);
+  if (result.sync?.status === 'current') lines.push(`- main ya refleja \`v${result.sync.version}\`.`);
+  if (result.sync?.status === 'failed') lines.push(`- ${syncWarning(result.sync, '**Aviso**')}`);
   lines.push('', `- Pendientes (backlog): ${result.backlog}`, `- Hubo avance: ${result.progress ? 'sí' : 'no'}`, `- Continuación: ${result.continue ? 'sí' : 'no'}`);
   return `${lines.join('\n')}\n`;
+}
+
+function syncWarning({ version, message }, label = 'Aviso') {
+  return `${label}: no se pudo sincronizar main${version ? ` con \`v${version}\`` : ''}: ${message}. Se reintenta en la próxima ejecución.`;
 }
 
 function parseArgs(argv) {
@@ -989,6 +1067,8 @@ export async function main(argv, {
       outputs = planOutputs(plan); summary = planSummary(plan);
     } else {
       const result = await runPublish(git, client, { ...settings, runId, attempt });
+      result.sync = await syncMain(git, settings);
+      if (result.sync.status === 'failed') stderr(`${syncWarning(result.sync)}\n`);
       outputs = publishOutputs(result); summary = publishSummary(result); exitCode = result.exitCode;
     }
     writeOutputs(env.GITHUB_OUTPUT, outputs);
